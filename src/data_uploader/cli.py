@@ -15,6 +15,7 @@ from . import __version__
 from .checks import DatasetValidator
 from .codebook import generate as generate_codebook
 from .model import DatasetConfig
+from .quality import QualityValidator
 from .uploader import upload as run_upload
 
 # ── command implementations ────────────────────────────────────────────
@@ -34,6 +35,12 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # validate the actual data on disk
     validator = DatasetValidator(cfg)
     report = validator.run_all()
+
+    # quality checks
+    quality = QualityValidator(cfg)
+    quality_report = quality.run()
+    report.quality_results = quality_report.quality_results
+
     report.print_summary()
     return 0 if report.passed else 1
 
@@ -50,6 +57,12 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
     validator = DatasetValidator(cfg)
     report = validator.run_all()
+
+    # quality checks
+    quality = QualityValidator(cfg)
+    quality_report = quality.run()
+    report.quality_results = quality_report.quality_results
+
     if not report.passed:
         report.print_summary()
         print("  ⚠  Fix errors before uploading.\n")
@@ -123,6 +136,23 @@ min_total_size_mb = 0.0
 # [[check]]
 # columns = "file.csv"
 # expected = ["col_a", "col_b", "col_c"]
+
+# Quality checks run automatically with sensible defaults.
+# Uncomment and customise to override severity or thresholds:
+# [[quality]]
+# check = "duplicates"
+# severity = "fail"
+#
+# [[quality]]
+# check = "null_profiling"
+# max_null_pct = 15.0
+# columns = ["age", "income"]
+#
+# [[quality]]
+# check = "value_range"
+# columns = ["age"]
+# min = 0
+# max = 120
 """
 
 

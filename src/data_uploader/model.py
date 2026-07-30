@@ -39,6 +39,61 @@ class FileEntry:
 
 
 @dataclass
+class QualityCheck:
+    """A single quality check configuration.
+
+    Attributes:
+        check:         Check name identifier (e.g. ``"duplicates"``).
+        severity:      ``"warn"`` or ``"fail"``. Overrides default.
+        columns:       Column subset this check applies to (``None`` = all).
+        max_null_pct:  Threshold for ``null_profiling`` (0.0-100.0).
+        min:           Minimum acceptable value for ``value_range``.
+        max:           Maximum acceptable value for ``value_range``.
+        min_unique:    Minimum distinct values for ``duplicates``.
+        ignore_values: Values to treat as non-missing during type inference.
+    """
+
+    check: str
+    severity: str = "warn"
+    columns: list[str] | None = None
+    max_null_pct: float | None = None
+    min: float | None = None
+    max: float | None = None
+    min_unique: int | None = None
+    ignore_values: list[str] | None = None
+
+
+@dataclass
+class QualityConfig:
+    """Configuration for all quality checks on a dataset.
+
+    Attributes:
+        checks:           Per-check overrides (empty = use all built-in defaults).
+        default_severity: Fallback severity when a check has no explicit severity.
+        max_sample:       Max rows to read per file for checks that sample.
+    """
+
+    checks: list[QualityCheck] = field(default_factory=list)
+    default_severity: str = "warn"
+    max_sample: int = 100_000
+
+
+@dataclass
+class QualityResult:
+    """A single quality check finding.
+
+    Attributes:
+        check:    Check name identifier (e.g. ``"duplicates"``).
+        severity: ``"warn"`` or ``"fail"``.
+        message:  Human-readable description of the finding.
+    """
+
+    check: str
+    severity: str
+    message: str
+
+
+@dataclass
 class ColumnCheck:
     """Describes an expected set of columns in a CSV file.
 
@@ -100,6 +155,9 @@ class DatasetConfig:
     codebook: str | None = None
     study_design: str | None = None
     recipe: str | None = None
+
+    # -- quality checks ----------------------------------------------------
+    quality: QualityConfig = field(default_factory=QualityConfig)
 
     # -- validation thresholds ---------------------------------------------
     min_files: int = 1
@@ -201,6 +259,38 @@ class DatasetConfig:
                     )
                 )
 
+        # -- quality checks ------------------------------------------------
+        quality_checks: list[QualityCheck] = []
+        valid_checks = {
+            "duplicates",
+            "empty_rows",
+            "empty_columns",
+            "null_profiling",
+            "format_consistency",
+            "corrupt_records",
+            "value_range",
+            "cross_file_types",
+            "encoding_validation",
+        }
+        for entry in data.get("quality", []):
+            check_name = entry.get("check", "")
+            if check_name not in valid_checks:
+                print(f"  ⚠  Unknown quality check: '{check_name}' — ignoring.")
+                continue
+            quality_checks.append(
+                QualityCheck(
+                    check=check_name,
+                    severity=entry.get("severity", "warn"),
+                    columns=entry.get("columns"),
+                    max_null_pct=entry.get("max_null_pct"),
+                    min=entry.get("min"),
+                    max=entry.get("max"),
+                    min_unique=entry.get("min_unique"),
+                    ignore_values=entry.get("ignore_values"),
+                )
+            )
+        quality_config = QualityConfig(checks=quality_checks)
+
         # -- thresholds ----------------------------------------------------
         min_files = 1
         min_total_size_mb = 0.0
@@ -230,6 +320,7 @@ class DatasetConfig:
             min_files=min_files,
             min_total_size_mb=min_total_size_mb,
             column_checks=column_checks,
+            quality=quality_config,
             language=meta.get("language", []),
             pretty_name=meta.get("pretty_name", ""),
             task_categories=meta.get("task_categories", []),
