@@ -14,7 +14,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from .model import DatasetConfig
+from .model import DatasetConfig, QualityResult
 
 
 class ValidationReport:
@@ -30,11 +30,16 @@ class ValidationReport:
         self.name = name
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        self.quality_results: list[QualityResult] = []
 
     @property
     def passed(self) -> bool:
-        """True when there are zero errors."""
-        return len(self.errors) == 0
+        """True when there are zero errors and zero fail-severity quality results."""
+        if self.errors:
+            return False
+        if any(r.severity == "fail" for r in self.quality_results):
+            return False
+        return True
 
     def print_summary(self) -> None:
         """Print a human-readable summary to stdout."""
@@ -46,8 +51,50 @@ class ValidationReport:
         print(f"  Warnings: {len(self.warnings)}")
         for w in self.warnings:
             print(f"    ⚠  {w}")
-        if self.passed:
+        if self.quality_results:
+            print(f"  {'─' * 30}")
+            q_errors = [r for r in self.quality_results if r.severity == "fail"]
+            q_warnings = [r for r in self.quality_results if r.severity == "warn"]
+            q_passed = _count_passed_quality(self.quality_results)
+            print("  Quality checks")
+            print(f"  Errors:   {len(q_errors)}")
+            for r in q_errors:
+                print(f"    ✗  {r.check}: {r.message}")
+            print(f"  Warnings: {len(q_warnings)}")
+            for r in q_warnings:
+                print(f"    ⚠  {r.check}: {r.message}")
+            q_summary = f"{q_passed} passed, {len(q_errors)} failed, {len(q_warnings)} warnings"
+            print(f"  ✓  Quality: {q_summary}")
+        if self.passed and not self.quality_results:
             print("  ✓  All checks passed.\n")
+        elif self.passed:
+            print()
+        else:
+            print()
+
+
+def _count_passed_quality(results: list[QualityResult]) -> int:
+    """Count how many check *types* have zero findings of any severity.
+
+    A check type (e.g. ``"duplicates"``) is considered "passed" when there
+    is no ``QualityResult`` with that check name.  We compute this by
+    subtracting unique check names that *did* produce results from the total
+    known check types.
+    """
+    # Known check types per the built-in defaults
+    all_check_types = {
+        "duplicates",
+        "empty_rows",
+        "empty_columns",
+        "null_profiling",
+        "format_consistency",
+        "corrupt_records",
+        "value_range",
+        "cross_file_types",
+        "encoding_validation",
+    }
+    found = {r.check for r in results}
+    return len(all_check_types - found)
 
 
 class DatasetValidator:
