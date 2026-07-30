@@ -65,10 +65,10 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
     if not report.passed:
         report.print_summary()
-        print("  ⚠  Fix errors before uploading.\n")
+        print("  \u26a0  Fix errors before uploading.\n")
         return 1
 
-    return run_upload(cfg)
+    return run_upload(cfg, keep_csv=args.keep_csv)
 
 
 def _cmd_codebook(args: argparse.Namespace) -> int:
@@ -218,6 +218,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     u.add_argument("config", help="Path to the .toml configuration file.")
+    u.add_argument(
+        "--keep-csv",
+        action="store_true",
+        help="Upload the original CSV alongside the converted Parquet",
+    )
     u.set_defaults(func=_cmd_upload)
 
     # ── codebook ──────────────────────────────────────────────────

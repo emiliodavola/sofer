@@ -12,12 +12,16 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import yaml
 
 from .codebook import infer_column_type
 from .model import DatasetConfig
 
 _SCHEMA_SAMPLE_SIZE = 10_000
+
+# Sentinel values treated as missing (same across CSV and Parquet paths).
+_NULL_SENTINELS = frozenset({"NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL", ""})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -202,28 +206,118 @@ def _read_csv_sample(
     return headers, rows
 
 
+def _map_parquet_type(pa_type: object) -> str:
+    """Map a pyarrow physical type to a ``ColumnSchema.dtype`` string.
+
+    See the parquet-conversion spec § 3.2 for the full mapping table.
+    """
+    import pyarrow as pa
+
+    # Integral types
+    if pa.types.is_integer(pa_type):
+        return "numeric"
+
+    # Floating point
+    if pa.types.is_floating(pa_type):
+        return "numeric"
+
+    # Decimal
+    if pa.types.is_decimal(pa_type):
+        return "numeric"
+
+    # Boolean
+    if pa.types.is_boolean(pa_type):
+        return "categorical/text"
+
+    # String / binary types
+    if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
+        return "categorical/text"
+    if pa.types.is_binary(pa_type) or pa.types.is_large_binary(pa_type):
+        return "categorical/text"
+    if pa.types.is_fixed_size_binary(pa_type):
+        return "categorical/text"
+
+    # Temporal types (stored as text in the model)
+    if pa.types.is_timestamp(pa_type) or pa.types.is_date(pa_type) or pa.types.is_time(pa_type):
+        return "categorical/text"
+
+    # Nested / complex
+    if pa.types.is_list(pa_type) or pa.types.is_map(pa_type) or pa.types.is_struct(pa_type):
+        return "unknown"
+
+    # Fallback for anything else
+    return "categorical/text"
+
+
+def _read_parquet_sample(
+    parquet_path: Path,
+) -> tuple[list[str], list[list[str]], pq.ParquetFile] | None:
+    """Read header, sample rows, and the ParquetFile handle from a Parquet file.
+
+    Returns ``(column_names, sample_rows, parquet_file)`` on success, or
+    ``None`` if the file cannot be read.
+
+    Iterates over pyarrow arrays directly — does not depend on pandas.
+    """
+    try:
+        pf = pq.ParquetFile(parquet_path)
+        column_names = pf.schema_arrow.names
+
+        # Read first row group for sampling
+        table = pf.read_row_groups([0])
+        num_rows = table.num_rows
+        limit = min(num_rows, _SCHEMA_SAMPLE_SIZE)
+
+        # Convert to list-of-lists for compatibility with CSV path
+        rows: list[list[str]] = []
+        for i in range(limit):
+            row: list[str] = []
+            for col in column_names:
+                col_array = table.column(col)
+                val = col_array[i].as_py() if i < len(col_array) else None
+                if val is None:
+                    row.append("")
+                else:
+                    row.append(str(val))
+            rows.append(row)
+
+        return column_names, rows, pf
+    except Exception:
+        return None
+
+
 def build_schema_report(
     cfg: DatasetConfig,
     csv_delimiter: str | None = None,
     csv_encoding: str = "utf-8-sig",
+    staging_dir: Path | None = None,
 ) -> list[ColumnSchema]:
-    """Analyse CSV files declared in *cfg* and produce a typed schema report.
+    """Analyse CSV / Parquet files declared in *cfg* and produce a typed schema report.
+
+    When *staging_dir* is provided and a matching ``.parquet`` file exists for a
+    CSV entry (and the entry is not marked ``upload_as_csv``), the function reads
+    column names and types from the Parquet schema instead of inferring from CSV
+    sample data.
 
     Args:
-        cfg:          Dataset configuration.
+        cfg:           Dataset configuration.
         csv_delimiter: Delimiter override (``None`` = use ``cfg.csv_delimiter``,
                        with Sniffer fallback).
         csv_encoding:  File encoding (default ``"utf-8-sig"``).
+        staging_dir:   Directory containing converted Parquet files.  When set,
+                       the function checks for a ``.parquet`` file for each CSV
+                       entry before falling back to CSV reading.
 
     Returns:
         A list of :class:`ColumnSchema` entries — one per column across all
-        CSV files.  Columns with the same name in different files are
-        disambiguated via a ``filename::`` prefix.
+        files.  Columns with the same name in different files are disambiguated
+        via a ``filename::`` prefix (``.parquet`` extension when read from
+        Parquet).
     """
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
     delimiter = csv_delimiter or cfg.csv_delimiter
     columns: list[ColumnSchema] = []
-    seen_names: dict[str, tuple[str, int]] = {}  # col_name → (filename, original_index_in_list)
+    seen_names: dict[str, tuple[str, int]] = {}
 
     for entry in cfg.files:
         remote = entry.remote.lower()
@@ -231,70 +325,151 @@ def build_schema_report(
             continue
 
         local = entry.resolve(base)
-        result = _read_csv_sample(local, delimiter=delimiter, encoding=csv_encoding)
-        if result is None:
-            continue  # skip missing / unreadable files gracefully
+        entry_stem = Path(entry.remote).stem
 
-        headers, rows = result
-        sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
+        # Determine if we can read from Parquet instead of CSV
+        use_parquet = False
+        parquet_path = None
+        origin_name = local.name  # used for disambiguation
 
-        for idx, col in enumerate(headers):
-            col_name = col
+        if staging_dir is not None and not entry.upload_as_csv:
+            candidate = staging_dir / f"{entry_stem}.parquet"
+            if candidate.exists():
+                use_parquet = True
+                parquet_path = candidate
+                origin_name = f"{entry_stem}.parquet"
 
-            # disambiguate duplicate column names across files
-            if col_name in seen_names:
-                prev_origin, prev_idx = seen_names[col_name]
-                if prev_origin != local.name:
-                    # First occurrence needs renaming too
-                    prev_col = columns[prev_idx]
-                    columns[prev_idx] = ColumnSchema(
-                        name=f"{prev_origin}::{col}",
-                        dtype=prev_col.dtype,
-                        nullable=prev_col.nullable,
-                        example=prev_col.example,
-                        unique=prev_col.unique,
-                        missing=prev_col.missing,
-                    )
-                    col_name = f"{local.name}::{col}"
-                    seen_names[col_name] = (local.name, len(columns))
-            else:
-                seen_names[col_name] = (local.name, len(columns))
+        parquet_result = None
+        if use_parquet and parquet_path is not None:
+            # ── Read from Parquet ────────────────────────────────────────
+            parquet_result = _read_parquet_sample(parquet_path)
+            if parquet_result is None:
+                # Fall back to CSV if Parquet read fails
+                use_parquet = False
 
-            col_values: list[str] = []
-            for row in sample:
-                v = row[idx] if idx < len(row) else ""
-                col_values.append(v)
+        if use_parquet:
+            assert parquet_result is not None
+            headers, rows, pf = parquet_result
+            sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
 
-            n_total = len(sample)
-            n_missing = sum(
-                1
-                for v in col_values
-                if not v.strip()
-                or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
-            )
-            pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
+            for idx, col in enumerate(headers):
+                col_name = col
 
-            dtype = infer_column_type(col_values)
+                # disambiguate duplicate column names across files
+                if col_name in seen_names:
+                    prev_origin, prev_idx = seen_names[col_name]
+                    if prev_origin != origin_name:
+                        prev_col = columns[prev_idx]
+                        columns[prev_idx] = ColumnSchema(
+                            name=f"{prev_origin}::{col}",
+                            dtype=prev_col.dtype,
+                            nullable=prev_col.nullable,
+                            example=prev_col.example,
+                            unique=prev_col.unique,
+                            missing=prev_col.missing,
+                        )
+                        col_name = f"{origin_name}::{col}"
+                        seen_names[col_name] = (origin_name, len(columns))
+                else:
+                    seen_names[col_name] = (origin_name, len(columns))
 
-            non_missing = [
-                v
-                for v in col_values
-                if v.strip()
-                and v.strip().upper() not in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL", "")
-            ]
-            example = non_missing[0] if non_missing else ""
-            n_unique = len(set(col_values))
+                # dtype from Parquet physical type
+                pa_field = pf.schema_arrow.field(idx)
+                dtype = _map_parquet_type(pa_field.type)
+                nullable = pa_field.nullable
 
-            columns.append(
-                ColumnSchema(
-                    name=col_name,
-                    dtype=dtype,
-                    nullable=n_missing > 0,
-                    example=example,
-                    unique=n_unique,
-                    missing=pct_missing,
+                col_values: list[str] = []
+                for row in sample:
+                    v = row[idx] if idx < len(row) else ""
+                    col_values.append(v)
+
+                n_total = len(sample)
+                n_missing = sum(
+                    1
+                    for v in col_values
+                    if not v.strip()
+                    or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
                 )
-            )
+                pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
+
+                non_missing = [
+                    v for v in col_values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+                ]
+                example = non_missing[0] if non_missing else ""
+                n_unique = len(set(col_values))
+
+                columns.append(
+                    ColumnSchema(
+                        name=col_name,
+                        dtype=dtype,
+                        nullable=nullable,
+                        example=example,
+                        unique=n_unique,
+                        missing=pct_missing,
+                    )
+                )
+        else:
+            # ── Read from CSV (original behaviour) ───────────────────────
+            result = _read_csv_sample(local, delimiter=delimiter, encoding=csv_encoding)
+            if result is None:
+                continue  # skip missing / unreadable files gracefully
+
+            headers, rows = result
+            sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
+
+            for idx, col in enumerate(headers):
+                col_name = col
+
+                # disambiguate duplicate column names across files
+                if col_name in seen_names:
+                    prev_origin, prev_idx = seen_names[col_name]
+                    if prev_origin != local.name:
+                        prev_col = columns[prev_idx]
+                        columns[prev_idx] = ColumnSchema(
+                            name=f"{prev_origin}::{col}",
+                            dtype=prev_col.dtype,
+                            nullable=prev_col.nullable,
+                            example=prev_col.example,
+                            unique=prev_col.unique,
+                            missing=prev_col.missing,
+                        )
+                        col_name = f"{local.name}::{col}"
+                        seen_names[col_name] = (local.name, len(columns))
+                else:
+                    seen_names[col_name] = (local.name, len(columns))
+
+                col_values = []
+                for row in sample:
+                    v = row[idx] if idx < len(row) else ""
+                    col_values.append(v)
+
+                n_total = len(sample)
+                n_missing = sum(
+                    1
+                    for v in col_values
+                    if not v.strip()
+                    or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
+                )
+                pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
+
+                dtype = infer_column_type(col_values)
+
+                non_missing = [
+                    v for v in col_values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+                ]
+                example = non_missing[0] if non_missing else ""
+                n_unique = len(set(col_values))
+
+                columns.append(
+                    ColumnSchema(
+                        name=col_name,
+                        dtype=dtype,
+                        nullable=n_missing > 0,
+                        example=example,
+                        unique=n_unique,
+                        missing=pct_missing,
+                    )
+                )
 
     return columns
 

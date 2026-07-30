@@ -105,7 +105,7 @@ continue to parse without error.
 repo_compliance.py
 ├── build_dataset_card(cfg, schema) -> str      # § 3.1
 ├── build_license_file(license_id) -> str       # § 3.2
-├── build_schema_report(cfg) -> list[ColumnSchema]  # § 3.3
+├── build_schema_report(cfg, *, staging_dir=None) -> list[ColumnSchema]  # § 3.3
 ├── ColumnSchema(dataclass)                     # § 3.3.1
 └── _LICENSE_TEMPLATES (module-level dict)      # § 3.2.1
 ```
@@ -344,7 +344,12 @@ class ColumnSchema:
 #### 3.3.2 Signature
 
 ```python
-def build_schema_report(cfg: DatasetConfig, csv_delimiter: str | None = None, csv_encoding: str = "utf-8-sig") -> list[ColumnSchema]
+def build_schema_report(
+    cfg: DatasetConfig,
+    csv_delimiter: str | None = None,
+    csv_encoding: str = "utf-8-sig",
+    staging_dir: Path | None = None,
+) -> list[ColumnSchema]:
 ```
 
 #### 3.3.3 Behaviour
@@ -352,17 +357,40 @@ def build_schema_report(cfg: DatasetConfig, csv_delimiter: str | None = None, cs
 1. Iterate over `cfg.files`.
 2. For each `FileEntry` whose `remote` path ends with `.csv` (case-insensitive),
    and that is NOT marked `recursive`:
-   - Resolve the local path via `entry.resolve(cfg._base_dir)`.
-   - Open the file with `encoding=csv_encoding` (default `"utf-8-sig"`) and `delimiter=csv_delimiter` (default `";"`).  When the header produces fewer than 2 columns with the default delimiter, fall back to `csv.Sniffer().sniff()` on a sample of rows as a heuristic auto-detection.
-   - Read the header row.
-   - Read up to 10 000 data rows (configurable via a module-level constant
-     `_SCHEMA_SAMPLE_SIZE`) for type inference.
-   - For each column, compute the fields described in `ColumnSchema` using the
-      same type-inference logic as `codebook.infer_column_type`.
+
+   a. **Parquet path** — used when `staging_dir` is provided AND the entry does
+      NOT have `upload_as_csv = True`:
+      - Look for `staging_dir / <stem>.parquet` (same stem as the CSV file).
+      - If the Parquet file exists:
+        - Open via `pyarrow.parquet.ParquetFile(parquet_path)`.
+        - Read column names from `schema_arrow.field(i).name`.
+        - Derive `dtype` from the Parquet physical type using the mapping in
+          § 3.3.5 (e.g. INT64 → `"numeric"`, BYTE_ARRAY → `"categorical/text"`).
+        - Read `nullable` from `schema_arrow.field(i).nullable`.
+        - Sample the first row group (up to `_SCHEMA_SAMPLE_SIZE` rows) to
+          compute `example`, `unique`, and `missing` — same heuristic logic
+          as the CSV path.
+        - Use the Parquet file stem with `.parquet` extension in disambiguation
+          prefixes (e.g. `"survey.parquet::age"`).
+      - If the Parquet file does not exist, fall back to the CSV path (step 2b).
+
+   b. **CSV fallback path** — used when no `staging_dir`, or `upload_as_csv = True`,
+      or the matching `.parquet` is missing:
+      - Resolve the local path via `entry.resolve(cfg._base_dir)`.
+      - Open the file with `encoding=csv_encoding` (default `"utf-8-sig"`) and
+        `delimiter=csv_delimiter` (default `";"`).  When the header produces
+        fewer than 2 columns with the default delimiter, fall back to
+        `csv.Sniffer().sniff()` on a sample of rows as heuristic auto-detection.
+      - Read the header row.
+      - Read up to 10 000 data rows (`_SCHEMA_SAMPLE_SIZE`) for type inference.
+      - For each column, compute `dtype` via `codebook.infer_column_type` and
+        `example`, `unique`, `missing` from the sample.
+
 3. Return the aggregated list of `ColumnSchema` objects — one per column across
-   ALL CSV files.  Include the source filename as a prefix in the column name
-   when the same column name appears in multiple files: `"file1.csv::col_A"`,
-   `"file2.csv::col_A"`.
+   ALL CSV (or Parquet) files.  Include the source filename as a prefix in the
+   column name when the same column name appears in multiple files:
+   `"file1.csv::col_A"`, `"file2.csv::col_A"`.  When read from Parquet, the
+   prefix uses the Parquet filename (e.g. `"survey.parquet::age"`).
 4. If no CSV files are found (or none are parseable), return an empty list.
 
 #### 3.3.4 Scenarios
@@ -419,6 +447,89 @@ THEN the function SHALL skip that file (no exception)
      that were successfully read
 ```
 
+#### 3.3.5 Parquet Physical-Type → `dtype` Mapping
+
+When reading from Parquet, the `dtype` field SHALL be derived from the Parquet
+physical type instead of `codebook.infer_column_type`:
+
+| Parquet physical type | `ColumnSchema.dtype` |
+|-----------------------|----------------------|
+| `INT{8,16,32,64}` | `"numeric"` |
+| `FLOAT`, `DOUBLE` | `"numeric"` |
+| `DECIMAL` | `"numeric"` |
+| `BOOLEAN` | `"categorical/text"` |
+| `BYTE_ARRAY` (string-like) | `"categorical/text"` |
+| `FIXED_LEN_BYTE_ARRAY` | `"categorical/text"` |
+| `STRING` | `"categorical/text"` |
+| `LARGE_STRING` | `"categorical/text"` |
+| `ENUM` | `"categorical/text"` |
+| `TIMESTAMP`, `DATE`, `TIME` | `"categorical/text"` |
+| `INT{32,64}` with `isAdjustedToUTC` / logical timestamp | `"categorical/text"` |
+| `LIST`, `MAP`, `STRUCT` | `"unknown"` |
+
+The exact Parquet physical type is not preserved in `ColumnSchema` in P0.
+The mapping is lossless because `ColumnSchema.dtype` is a simplified category
+for the Dataset Card's Codebook table.
+
+#### 3.3.6 Parquet-specific Scenarios
+
+**Schema from Parquet — happy path**
+
+```
+GIVEN a DatasetConfig with one CSV file entry "survey.csv"
+  AND upload(cfg) is called
+  AND conversion succeeds (survey.parquet is in staging_dir)
+WHEN build_schema_report(cfg, staging_dir=tmpdir) is called
+THEN the function SHALL read survey.parquet from staging_dir
+  AND the dtype for an INT64 column SHALL be "numeric"
+  AND the dtype for a BYTE_ARRAY column SHALL be "categorical/text"
+  AND the nullable field SHALL match parquet_schema.field(i).nullable
+  AND unique and missing fields SHALL be computed from a row-group sample
+```
+
+**Schema from CSV — no staging dir (backward compat)**
+
+```
+GIVEN a DatasetConfig with one CSV file entry
+  AND build_schema_report(cfg) is called (no staging_dir)
+THEN the function SHALL read the CSV file directly
+  AND use infer_column_type for dtype
+  AND behave identically to the parent spec's § 3.3
+```
+
+**Schema from CSV — upload_as_csv override**
+
+```
+GIVEN a DatasetConfig with upload_as_csv = true for a CSV entry
+  AND staging_dir=tmpdir is provided
+WHEN build_schema_report processes that entry
+THEN the function SHALL read the original CSV (not the Parquet)
+  AND use infer_column_type for dtype
+```
+
+**Schema from CSV — Parquet file missing from staging**
+
+```
+GIVEN a CSV entry that was NOT marked upload_as_csv
+  BUT the .parquet file is missing from staging_dir
+  (e.g., conversion failed silently)
+WHEN build_schema_report processes that entry
+THEN the function SHALL fall back to reading the original CSV
+  AND use infer_column_type for dtype
+```
+
+**Schema from Parquet — column name disambiguation**
+
+```
+GIVEN two CSV files: "a.csv" and "b.csv"
+  AND both have a column named "value"
+  AND both are converted to Parquet
+WHEN build_schema_report(cfg, staging_dir=tmpdir) is called
+THEN the returned list SHALL contain
+  "a.parquet::value" and "b.parquet::value"
+  (filename prefix uses the Parquet filename)
+```
+
 ---
 
 ## 4. Pipeline orchestration
@@ -427,19 +538,23 @@ THEN the function SHALL skip that file (no exception)
 
 The `upload()` function in `src/data_uploader/uploader.py` SHALL be modified to
 call the compliance module **after** validation passes and **before** pushing any
-files to Hugging Face Hub.
+files to Hugging Face Hub. When Parquet conversion is enabled, the conversion
+step SHALL run **before** compliance so `build_schema_report` reads the
+converted Parquet files.
 
 New sequence inside `upload()`:
 
 ```
 1. _ensure_repo(cfg)             # same as today
-2. compliance files generation:  # NEW
-   a. schema = build_schema_report(cfg)        # reads CSVs locally
+2. CONVERSION:                   # NEW — runs before compliance
+   convert CSVs to Parquet in staging_dir
+3. COMPLIANCE:                   # reads Parquet when available
+   a. schema = build_schema_report(cfg, staging_dir=staging_dir)
    b. readme  = build_dataset_card(cfg, schema)
    c. license = build_license_file(cfg.license)
-3. Write compliance files to a temporary staging area
-4. Upload compliance files first (README.md, LICENSE)
-5. Upload data files (same loop as today)
+4. Write compliance files to staging_dir
+5. Upload compliance files first (README.md, LICENSE)
+6. Upload data files (Parquet versions, unless upload_as_csv)
 ```
 
 #### 4.1.1 Staging strategy
@@ -460,17 +575,21 @@ moment the first file lands.
 
 #### 4.1.3 User feedback
 
-The `upload()` function SHALL print progress lines for each compliance step:
+The `upload()` function SHALL print progress lines for each compliance step.
+When Parquet conversion is active, the log SHALL report whether schema was
+read from Parquet or CSV per file:
 
 ```
   📄  Generating Dataset Card …
   📄  Generating LICENSE …
+  🔄  survey.csv → survey.parquet (converted)
+  📊  survey.parquet → schema (Parquet native types)
   ↑  README.md  →  README.md
   ✓  README.md
   ↑  LICENSE  →  LICENSE
   ✓  LICENSE
-  ↑  data.csv  →  data.csv
-  ✓  data.csv
+  ↑  survey.parquet  →  survey.parquet
+  ✓  survey.parquet
 ```
 
 #### 4.1.4 Scenarios
@@ -509,6 +628,16 @@ THEN build_license_file("") SHALL return a fallback message
   AND the upload SHALL proceed normally (no error)
 ```
 
+**Parquet conversion before compliance**
+
+```
+GIVEN a DatasetConfig with one CSV file entry
+WHEN upload(cfg) is called
+THEN conversion SHALL run BEFORE build_schema_report
+  AND build_schema_report SHALL receive staging_dir=tmpdir
+  AND the schema SHALL be read from the converted Parquet file
+```
+
 ---
 
 ## 5. Backward compatibility
@@ -537,6 +666,14 @@ Callers that construct `DatasetConfig(...)` directly (as the test suite does)
 SHALL NOT need to change.  All new fields have defaults that produce the same
 behaviour as before.
 
+### 5.4 Parquet-aware schema report
+
+Callers that invoke `build_schema_report(cfg)` without `staging_dir` SHALL
+receive identical behaviour to the previous spec (CSV-only path).  Callers
+that pass `staging_dir` SHALL get the new Parquet-reading behaviour.  The
+return type (`list[ColumnSchema]`) is unchanged.  `build_dataset_card` and
+`build_license_file` are unaffected — their inputs are unchanged.
+
 ---
 
 ## 6. Testing
@@ -550,6 +687,10 @@ A new file `tests/test_repo_compliance.py` SHALL be created with tests for:
 | `TestBuildDatasetCard` | Happy path with full meta; minimal config; empty schema; recipe inlined; recipe missing; all sections present. |
 | `TestBuildLicenseFile` | Known SPDX identifiers return correct text; non-SPDX returns descriptive fallback; empty/restricted returns generic fallback. |
 | `TestBuildSchemaReport` | Single CSV; multiple CSVs; missing values; no CSV files; column name collision; file not found skipped. |
+| `TestBuildSchemaReportParquet` | Happy path from Parquet; native type mapping for int, float, string, bool; nullable from schema; column name read from Parquet. |
+| `TestBuildSchemaReportParquetFallback` | No staging_dir → CSV; staging_dir but .parquet missing → CSV; upload_as_csv override → CSV. |
+| `TestBuildSchemaReportSampling` | Unique and missing computed from Parquet row-group sample; example from first non-null value. |
+| `TestBuildSchemaReportDisambiguationParquet` | Column name collision across Parquet files with `.parquet` filename prefix. |
 | `TestColumnSchema` | Dataclass default values; field types. |
 | `TestUploadCompliance` | (integration-level, mocked) Compliance called before upload; upload ordering; temp dir cleanup; exception propagation. |
 
@@ -560,6 +701,8 @@ Tests SHALL follow the project's existing patterns:
 - Use `tmp_path` for temporary files.
 - Pure-function tests need no mocking.
 - Upload-order tests MAY mock `build_schema_report`/`build_dataset_card`/`build_license_file` and verify call order via `unittest.mock.Mock` call tracking.
+- Parquet tests SHALL write small Parquet files programmatically with `pyarrow.Table.from_pydict()` and `pyarrow.parquet.write_table()`.
+- Existing CSV-based tests SHALL continue to pass unchanged.
 - No integration tests against the real Hugging Face Hub.
 
 ### 6.3 Coverage target
@@ -585,8 +728,10 @@ at least 80% coverage via mocked compliance calls.
 |------|--------|
 | `src/data_uploader/model.py` | Add new `[meta]` fields to `DatasetConfig` + update `from_toml()`. |
 | `src/data_uploader/codebook.py` | Rename `_infer_type` to public `infer_column_type` for cross-module reuse. |
-| `src/data_uploader/uploader.py` | Call compliance module before file push in `upload()`. |
+| `src/data_uploader/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic with type mapping. |
+| `src/data_uploader/uploader.py` | Add conversion loop before compliance; pass `staging_dir=tmpdir` to `build_schema_report`. |
 | `pyproject.toml` | Replace `tomli-w` dependency with `PyYAML`. |
+| `tests/test_repo_compliance.py` | Add Parquet-based schema tests (happy path, fallback, sampling, disambiguation). |
 
 ### 7.3 Files unchanged
 
@@ -595,6 +740,7 @@ at least 80% coverage via mocked compliance calls.
 | `src/data_uploader/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
 | `src/data_uploader/checks.py` | Compliance is not validation — separate concern. |
 | `src/data_uploader/__init__.py` | No public API changes for P0. |
+| `src/data_uploader/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
 
 ---
 
@@ -605,5 +751,3 @@ at least 80% coverage via mocked compliance calls.
   that.
 - **User-overridable Dataset Card body**: should be deferred to a later change
   where users supply a custom template.
-- **Parquet support** (`build_schema_report`): deferred — P0 reads only CSV.
-  Parquet will be supported when the P1 conversion capability is added.
