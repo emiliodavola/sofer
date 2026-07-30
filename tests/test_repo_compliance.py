@@ -470,14 +470,16 @@ class TestUploadCompliance:
         upload_args = [c for c in upload_cmds if len(c) > 1 and c[1] == "upload"]
         upload_targets = [c[4] for c in upload_args if len(c) > 4]
 
-        # README.md should appear before LICENSE before data.csv
+        # README.md should appear before LICENSE before data file
         readme_idx = next(i for i, t in enumerate(upload_targets) if t == "README.md")
         lic_idx = next(i for i, t in enumerate(upload_targets) if t == "LICENSE")
-        data_idx = next(i for i, t in enumerate(upload_targets) if t == "data.csv")
+        data_idx = next(
+            i for i, t in enumerate(upload_targets) if t.endswith(".parquet") or t.endswith(".csv")
+        )
 
         assert readme_idx < lic_idx < data_idx, (
             f"Upload order wrong: README.md at {readme_idx}, LICENSE at {lic_idx},"
-            f" data.csv at {data_idx}"
+            f" data at {data_idx} ({upload_targets[data_idx]})"
         )
 
     def test_tempdir_cleanup_on_success(self, tmp_path, monkeypatch):
@@ -565,3 +567,290 @@ class TestUploadCompliance:
             uploader.upload(cfg)
 
         assert not td.exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Parquet-aware schema report tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildSchemaReportParquet:
+    """build_schema_report reading from Parquet — native types, nullable, column names."""
+
+    def _write_parquet(self, tmp_path, name, data, schema=None):
+        """Helper: write a small Parquet file and return its path."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        path = tmp_path / name
+        if schema:
+            table = pa.Table.from_pydict(data, schema=schema)
+        else:
+            table = pa.Table.from_pydict(data)
+        pq.write_table(table, path)
+        return path
+
+    def test_parquet_happy_path(self, tmp_path):
+        """Schema from Parquet should return correct column names and types."""
+        _ = self._write_parquet(
+            tmp_path,
+            "survey.parquet",
+            {"age": [25, 30, 35], "name": ["Alice", "Bob", "Charlie"]},
+        )
+        csv_path = tmp_path / "survey.csv"
+        csv_path.write_text("age;name\n25;Alice\n30;Bob\n35;Charlie\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="survey.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        by_name = {s.name: s for s in schema}
+
+        assert "age" in by_name
+        assert "name" in by_name
+        assert by_name["age"].dtype == "numeric"
+        assert by_name["name"].dtype == "categorical/text"
+
+    def test_integer_column_type(self, tmp_path):
+        """Parquet INT64 column should map to numeric dtype."""
+        _ = self._write_parquet(
+            tmp_path,
+            "ints.parquet",
+            {"val": [1, 2, 3]},
+        )
+        csv_path = tmp_path / "ints.csv"
+        csv_path.write_text("val\n1\n2\n3\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="ints.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].dtype == "numeric"
+
+    def test_float_column_type(self, tmp_path):
+        """Parquet FLOAT/DOUBLE column should map to numeric dtype."""
+        _ = self._write_parquet(
+            tmp_path,
+            "floats.parquet",
+            {"val": [1.5, 2.5, 3.5]},
+        )
+        csv_path = tmp_path / "floats.csv"
+        csv_path.write_text("val\n1.5\n2.5\n3.5\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="floats.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].dtype == "numeric"
+
+    def test_boolean_column_type(self, tmp_path):
+        """Parquet BOOLEAN column should map to categorical/text dtype."""
+        _ = self._write_parquet(
+            tmp_path,
+            "bools.parquet",
+            {"flag": [True, False, True]},
+        )
+        csv_path = tmp_path / "bools.csv"
+        csv_path.write_text("flag\ntrue\nfalse\ntrue\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="bools.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].dtype == "categorical/text"
+
+    def test_nullable_from_parquet_schema(self, tmp_path):
+        """nullable should match Parquet schema's nullable attribute."""
+        import pyarrow as pa
+
+        schema = pa.schema([pa.field("val", pa.int64(), nullable=False)])
+        _ = self._write_parquet(
+            tmp_path,
+            "nonnull.parquet",
+            {"val": [1, 2, 3]},
+            schema=schema,
+        )
+        csv_path = tmp_path / "nonnull.csv"
+        csv_path.write_text("val\n1\n2\n3\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="nonnull.csv")],
+            _base_dir=tmp_path,
+        )
+
+        result = build_schema_report(cfg, staging_dir=tmp_path)
+        assert result[0].nullable is False
+
+
+class TestBuildSchemaReportParquetFallback:
+    """Fallback to CSV when Parquet not available or upload_as_csv=True."""
+
+    def test_no_staging_dir_falls_back_to_csv(self, tmp_path):
+        """build_schema_report without staging_dir should use CSV path."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        # No staging_dir → CSV path
+        schema = build_schema_report(cfg)
+        assert len(schema) == 1
+        assert schema[0].name == "x"
+        # CSV infer_column_type should say "numeric"
+        assert schema[0].dtype == "numeric"
+
+    def test_staging_dir_missing_parquet_falls_back(self, tmp_path):
+        """staging_dir provided but .parquet missing should fall back to CSV."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        # staging_dir exists but no .parquet in it
+        empty_staging = tmp_path / "empty"
+        empty_staging.mkdir()
+        schema = build_schema_report(cfg, staging_dir=empty_staging)
+        assert len(schema) == 1
+        assert schema[0].dtype == "numeric"
+
+    def test_upload_as_csv_override(self, tmp_path):
+        """upload_as_csv=True should skip Parquet reading, fall back to CSV."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Write both CSV and Parquet to staging
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+
+        # Parquet in same dir would normally be used
+        table = pa.table({"x": [10, 20]})
+        pq.write_table(table, tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_path, remote="data.csv", upload_as_csv=True),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        # staging_dir provided, Parquet exists, but upload_as_csv=True
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert len(schema) == 1
+        # Should read CSV, so x values are 1, 2 (not 10, 20)
+        assert schema[0].dtype == "numeric"
+
+
+class TestBuildSchemaReportSampling:
+    """Unique/missing/example computed from Parquet row-group sample."""
+
+    def test_unique_and_missing_from_parquet(self, tmp_path):
+        """Unique count and missing percentage should be computed from sample."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("val\n1\nNA\n3\n\n5\n", encoding="utf-8-sig")
+
+        # Write matching Parquet
+        table = pa.table({"val": [1, None, 3, None, 5]})
+        pq.write_table(table, tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert len(schema) == 1
+        assert schema[0].unique <= 5
+        # 2 out of 5 missing → 40.0%
+        assert schema[0].missing == 40.0
+
+    def test_example_from_first_non_null(self, tmp_path):
+        """Example should be the first non-null value from the sample."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("val\n\n\nAlice\nBob\n", encoding="utf-8-sig")
+
+        table = pa.table({"val": [None, None, "Alice", "Bob", None]})
+        pq.write_table(table, tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].example == "Alice"
+
+
+class TestBuildSchemaReportDisambiguationParquet:
+    """Column name collision across Parquet files."""
+
+    def test_disambiguation_uses_parquet_prefix(self, tmp_path):
+        """Disambiguated column names should use .parquet prefix."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # CSV files (original source)
+        csv_a = tmp_path / "a.csv"
+        csv_a.write_text("value\n1\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b.csv"
+        csv_b.write_text("value\n2\n", encoding="utf-8-sig")
+
+        # Parquet files in staging
+        table_a = pa.table({"value": [1]})
+        pq.write_table(table_a, tmp_path / "a.parquet")
+        table_b = pa.table({"value": [2]})
+        pq.write_table(table_b, tmp_path / "b.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="a.csv"),
+                FileEntry(local=csv_b, remote="b.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        names = [s.name for s in schema]
+        assert "a.parquet::value" in names
+        assert "b.parquet::value" in names

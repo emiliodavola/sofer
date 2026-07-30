@@ -26,6 +26,7 @@ class FileEntry:
     local: Path
     remote: str
     recursive: bool = False
+    upload_as_csv: bool = False
 
     def resolve(self, base_dir: Path) -> Path:
         """Return the absolute local path.
@@ -245,6 +246,7 @@ class DatasetConfig:
                     local=Path(entry["local"]),
                     remote=entry["remote"],
                     recursive=entry.get("recursive", False),
+                    upload_as_csv=entry.get("upload_as_csv", False),
                 )
             )
 
