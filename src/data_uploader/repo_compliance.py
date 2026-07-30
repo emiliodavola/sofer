@@ -23,6 +23,19 @@ _SCHEMA_SAMPLE_SIZE = 10_000
 # Sentinel values treated as missing (same across CSV and Parquet paths).
 _NULL_SENTINELS = frozenset({"NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL", ""})
 
+# Map our internal dtype strings to HF Dataset Feature types
+_HF_FEATURE_MAP: dict[str, str] = {
+    "numeric": "float64",
+    "categorical/text": "string",
+    "mixed (mostly numeric)": "string",
+    "unknown": "string",
+}
+
+
+def _hf_feature_type(dtype: str) -> str:
+    """Map internal dtype to HF Dataset Feature type string."""
+    return _HF_FEATURE_MAP.get(dtype, "string")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ColumnSchema
@@ -503,6 +516,9 @@ def build_dataset_card(
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
+    Follows the official Hugging Face Dataset Card template:
+    https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/templates/datasetcard_template.md
+
     Args:
         cfg:            Dataset configuration.
         schema:         Column schema list from :func:`build_schema_report`.
@@ -511,6 +527,8 @@ def build_dataset_card(
     Returns:
         Complete ``README.md`` content as a single string.
     """
+    _ns = "[Not specified]"
+
     # ── YAML frontmatter ───────────────────────────────────────────────────
     frontmatter: dict[str, object] = {}
 
@@ -525,105 +543,138 @@ def build_dataset_card(
         frontmatter["size_categories"] = cfg.size_categories
     if cfg.tags:
         frontmatter["tags"] = cfg.tags
+    if cfg.source:
+        frontmatter["source_datasets"] = [cfg.source]
+
+    # dataset_info with features (for Dataset Viewer)
+    if schema:
+        features = {s.name: _hf_feature_type(s.dtype) for s in schema}
+        frontmatter["dataset_info"] = {"features": features}
 
     yaml_block = yaml.safe_dump(frontmatter, default_flow_style=False, allow_unicode=True).strip()
     header = f"---\n{yaml_block}\n---\n"
 
-    # ── Helper ─────────────────────────────────────────────────────────────
-    _ns = "[Not specified]"
-
-    # ── Section: Dataset Description ────────────────────────────────────────
     desc = cfg.description.strip() if cfg.description else _ns
     source = cfg.source.strip() if cfg.source else _ns
-    dataset_description = f"""## Dataset Description
-
-- **Description:** {desc}
-- **Source:** {source}
-"""
-
-    # ── Section: Raw Data Provenance ────────────────────────────────────────
     collection = cfg.collection_method.strip() if cfg.collection_method else _ns
-    raw_provenance = f"""## Raw Data Provenance
+    citation = cfg.citation.strip() if cfg.citation else _ns
+    lic = cfg.license.strip() if cfg.license else _ns
 
-- **Collection method:** {collection}
-- **Source organisation:** {source}
-"""
+    # ── Title ──────────────────────────────────────────────────────────────
+    name = cfg.pretty_name or cfg.name
+    lines = [f"# Dataset Card for {name}", "", desc, ""]
 
-    # ── Section: Tidy Data Description ──────────────────────────────────────
+    # ── Dataset Details ────────────────────────────────────────────────────
+    lines.append("## Dataset Details")
+    lines.append("")
+    lines.append("### Dataset Description")
+    lines.append("")
+    lines.append(f"- **Curated by:** {source}")
+    lines.append(f"- **Language(s):** {', '.join(cfg.language) if cfg.language else _ns}")
+    lines.append(f"- **License:** {lic}")
+    lines.append("")
+
+    if collection:
+        lines.append(f"- **Collection method:** {collection}")
+        lines.append("")
+
+    lines.append("### Dataset Sources")
+    lines.append("")
+    lines.append("- **Repository:** " + _ns)
+    lines.append("")
+
+    # ── Uses ───────────────────────────────────────────────────────────────
+    lines.append("## Uses")
+    lines.append("")
+    lines.append("### Direct Use")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
+    lines.append("### Out-of-Scope Use")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
+
+    # ── Dataset Structure ──────────────────────────────────────────────────
+    lines.append("## Dataset Structure")
+    lines.append("")
+
     if cfg.files:
-        file_list = "\n".join(f"  - `{e.local}` → `{e.remote}`" for e in cfg.files)
-        tidy_desc = f"""## Tidy Data Description
-
-This dataset contains **{len(cfg.files)} file(s)**:
-
-{file_list}
-"""
+        file_list = "\n".join(f"  - `{e.local}` -> `{e.remote}`" for e in cfg.files)
+        lines.append(f"This dataset contains **{len(cfg.files)} file(s)**:")
+        lines.append("")
+        lines.append(file_list)
+        lines.append("")
     else:
-        tidy_desc = """## Tidy Data Description
+        lines.append("No data files declared.")
+        lines.append("")
 
-No data files declared.
-"""
-
-    # ── Section: Codebook ──────────────────────────────────────────────────
+    # Codebook table
     if schema:
-        rows = "\n".join(
-            f"| `{s.name}` | {s.dtype} | {'Yes' if s.nullable else 'No'} | "
-            f"`{s.example}` | {s.unique} | {s.missing}% |"
-            for s in schema
-        )
-        codebook = f"""## Codebook / Variable Reference
+        lines.append("### Data Fields")
+        lines.append("")
+        lines.append("| Column | Type | Nullable | Example | Unique (sample) | Missing (%) |")
+        lines.append("|--------|------|----------|---------|-----------------|-------------|")
+        for s in schema:
+            lines.append(
+                f"| `{s.name}` | {s.dtype} | {'Yes' if s.nullable else 'No'} | "
+                f"`{s.example}` | {s.unique} | {s.missing}% |"
+            )
+        lines.append("")
 
-| Column | Type | Nullable | Example | Unique (sample) | Missing (%) |
-|--------|------|----------|---------|-----------------|-------------|
-{rows}
-"""
-    else:
-        codebook = """## Codebook / Variable Reference
+    # ── Dataset Creation ───────────────────────────────────────────────────
+    lines.append("## Dataset Creation")
+    lines.append("")
+    lines.append("### Curation Rationale")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
 
-No schema information available.
-"""
+    if collection:
+        lines.append("### Source Data")
+        lines.append("")
+        lines.append("#### Data Collection and Processing")
+        lines.append("")
+        lines.append(collection)
+        lines.append("")
 
-    # ── Section: Processing Recipe ─────────────────────────────────────────
+    # Processing recipe
     if recipe_content is not None:
         recipe_lang = _infer_language(cfg.recipe) if cfg.recipe else ""
-        recipe = f"""## Processing Recipe
-
-```{recipe_lang}
-{recipe_content}
-```
-"""
+        lines.append("#### Processing Recipe")
+        lines.append("")
+        lines.append(f"```{recipe_lang}")
+        lines.append(recipe_content)
+        lines.append("```")
+        lines.append("")
     elif cfg.recipe:
-        recipe = f"""## Processing Recipe
+        lines.append(f"Recipe file declared but not found: {cfg.recipe}")
+        lines.append("")
 
-Recipe file declared but not found: {cfg.recipe}
-"""
-    else:
-        recipe = ""
+    # ── Bias, Risks, and Limitations ───────────────────────────────────────
+    lines.append("## Bias, Risks, and Limitations")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
 
-    # ── Section: Citation ──────────────────────────────────────────────────
-    citation = cfg.citation.strip() if cfg.citation else _ns
-    citation_section = f"""## Citation
+    # ── Citation ───────────────────────────────────────────────────────────
+    lines.append("## Citation")
+    lines.append("")
+    lines.append("**BibTeX:**")
+    lines.append("")
+    lines.append(f"{citation}")
+    lines.append("")
 
-{citation}
-"""
+    # ── License ────────────────────────────────────────────────────────────
+    lines.append("## License")
+    lines.append("")
+    lines.append(lic)
+    lines.append("")
 
-    # ── Section: License ───────────────────────────────────────────────────
-    lic = cfg.license.strip() if cfg.license else _ns
-    license_section = f"""## License
+    # ── Contact ────────────────────────────────────────────────────────────
+    lines.append("## Dataset Card Contact")
+    lines.append("")
+    lines.append(_ns)
+    lines.append("")
 
-{lic}
-"""
-
-    # ── Assemble ───────────────────────────────────────────────────────────
-    body_paragraphs = [
-        dataset_description,
-        raw_provenance,
-        tidy_desc,
-        codebook,
-        recipe,
-        citation_section,
-        license_section,
-    ]
-
-    body = "\n".join(p for p in body_paragraphs if p)
-    return header + body
+    return header + "\n".join(lines)

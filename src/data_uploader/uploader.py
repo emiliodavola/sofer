@@ -8,6 +8,7 @@ directly (not via the deprecated ``huggingface-cli``).
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -130,6 +131,10 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
     print(f"  File entries: {len(cfg.files)}")
     print(f"{'=' * 60}\n")
 
+    # Ensure UTF-8 output for Unicode characters on Windows
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     _ensure_repo(cfg)
 
     # ── Staging (wraps everything for cleanup) ───────────────────────────
@@ -157,10 +162,10 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
             if result is not None:
                 stem = Path(entry.remote).stem
                 converted[stem] = (result, local, entry.remote)
-                print(f"  \U0001f504  {local.name}  \u2192  {result.name}")
+                print(f"  [~] {local.name} -> {result.name}")
 
         # ── 2. Compliance generation (reads Parquet when available) ─────
-        print("  \U0001f4ca  Building schema report \u2026")
+        print("  [i] Building schema report \u2026")
         schema = build_schema_report(
             cfg,
             csv_delimiter=cfg.csv_delimiter,
@@ -174,9 +179,9 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
             if recipe_path.exists():
                 recipe_content = recipe_path.read_text(encoding="utf-8")
 
-        print("  \U0001f4c4  Generating Dataset Card \u2026")
+        print("  [i] Generating Dataset Card \u2026")
         card = build_dataset_card(cfg, schema, recipe_content=recipe_content)
-        print("  \U0001f4c4  Generating LICENSE \u2026")
+        print("  [i] Generating LICENSE \u2026")
         license_text = build_license_file(cfg.license)
 
         (tmpdir / "README.md").write_text(card, encoding="utf-8")

@@ -276,12 +276,13 @@ class TestBuildDatasetCard:
         assert "task_categories:" in result
         assert "size_categories:" in result
 
-        # Body sections
-        assert "## Dataset Description" in result
-        assert "## Raw Data Provenance" in result
-        assert "## Tidy Data Description" in result
-        assert "## Codebook / Variable Reference" in result
+        # Body sections (official HF template format)
+        assert "## Dataset Details" in result
+        assert "### Dataset Description" in result
+        assert "## Dataset Structure" in result
+        assert "### Data Fields" in result
         assert "## License" in result
+        assert "## Citation" in result
 
     def test_minimal_config_placeholders(self):
         """Minimal config should use [Not specified] placeholders."""
@@ -296,13 +297,13 @@ class TestBuildDatasetCard:
 
         assert "pretty_name: test" in result
         assert "[Not specified]" in result
-        assert "No schema information" in result
+        assert "dataset_info" not in result  # empty schema → no features block
 
     def test_empty_schema_no_codebook_table(self):
-        """Empty schema should show 'No schema information available.'"""
+        """Empty schema should not include a Data Fields section."""
         cfg = DatasetConfig(name="test", repo_id="user/test")
         result = build_dataset_card(cfg, schema=[])
-        assert "No schema information available" in result
+        assert "### Data Fields" not in result
 
     def test_recipe_inlined(self):
         """Recipe content should appear in a fenced code block."""
@@ -315,7 +316,7 @@ class TestBuildDatasetCard:
         recipe = "library(tidyverse)\ndata <- read.csv('input.csv')"
         result = build_dataset_card(cfg, schema, recipe_content=recipe)
 
-        assert "## Processing Recipe" in result
+        assert "#### Processing Recipe" in result
         assert "```r" in result
         assert "library(tidyverse)" in result
 
@@ -334,7 +335,7 @@ class TestBuildDatasetCard:
         """Config without recipe should not produce a Processing Recipe section."""
         cfg = DatasetConfig(name="test", repo_id="user/test")
         result = build_dataset_card(cfg, schema=[])
-        assert "## Processing Recipe" not in result
+        assert "#### Processing Recipe" not in result
 
     def test_no_files_tidy_desc(self):
         """Config with no files should say 'No data files declared.'"""
