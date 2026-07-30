@@ -2,7 +2,7 @@
 
 import csv
 
-from data_uploader.codebook import _infer_type, generate
+from data_uploader.codebook import _infer_type, generate, infer_column_type
 
 # ── _infer_type ───────────────────────────────────────────────────────────────
 
@@ -35,6 +35,26 @@ class TestInferType:
     def test_single_value(self):
         assert _infer_type(["42"]) == "numeric"
         assert _infer_type(["hello"]) == "categorical/text"
+
+
+class TestInferColumnType:
+    """Public ``infer_column_type`` — same logic as private ``_infer_type``."""
+
+    def test_public_api_exists(self):
+        """infer_column_type should be importable and callable."""
+        assert callable(infer_column_type)
+
+    def test_returns_same_as_private(self):
+        """infer_column_type should produce identical results to _infer_type."""
+        cases = [
+            (["1", "2", "3"], "numeric"),
+            (["red", "blue"], "categorical/text"),
+            (["1", "two", "3"], "mixed (mostly numeric)"),
+            (["NA", "", "MISSING"], "categorical/text"),
+        ]
+        for values, expected in cases:
+            assert infer_column_type(values) == expected
+            assert infer_column_type(values) == _infer_type(values)
 
 
 # ── generate ──────────────────────────────────────────────────────────────────

@@ -106,6 +106,16 @@ class DatasetConfig:
     min_total_size_mb: float = 0.0
     column_checks: list[ColumnCheck] = field(default_factory=list)
 
+    # -- HF Dataset Card metadata (optional) -------------------------------
+    language: list[str] = field(default_factory=list)
+    pretty_name: str = ""
+    task_categories: list[str] = field(default_factory=list)
+    size_categories: str = ""
+    citation: str = ""
+    collection_method: str = ""
+    csv_delimiter: str = ";"
+    csv_encoding: str = "utf-8-sig"
+
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
 
@@ -220,6 +230,14 @@ class DatasetConfig:
             min_files=min_files,
             min_total_size_mb=min_total_size_mb,
             column_checks=column_checks,
+            language=meta.get("language", []),
+            pretty_name=meta.get("pretty_name", ""),
+            task_categories=meta.get("task_categories", []),
+            size_categories=meta.get("size_categories", ""),
+            citation=meta.get("citation", ""),
+            collection_method=meta.get("collection_method", ""),
+            csv_delimiter=meta.get("csv_delimiter", ";"),
+            csv_encoding=meta.get("csv_encoding", "utf-8-sig"),
             _base_dir=base_dir,
         )
 
