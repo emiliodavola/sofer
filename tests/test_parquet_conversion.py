@@ -215,22 +215,6 @@ class TestConvertToParquetFallback:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class _MockPipe:
-    """Fake stderr/stdout pipe."""
-
-    @staticmethod
-    def read(*a):
-        return ""
-
-
-class _MockResult:
-    """A fake subprocess.CompletedProcess."""
-
-    def __init__(self, returncode=0, stderr=""):
-        self.returncode = returncode
-        self.stderr = stderr
-
-
 class TestConversionPipeline:
     """Conversion loop in upload() — called for CSVs, skipped for overrides and .parquet."""
 
@@ -248,26 +232,13 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        upload_cmds = []
+        upload_targets = []
 
-        class _TrackingPopen:
-            def __init__(self, cmd, *a, **kw):
-                self.cmd = cmd
-                self.returncode = 0
-                self.stderr = _MockPipe()
-                upload_cmds.append(cmd)
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append(path_in_repo)
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
-            def wait(self):
-                return 0
-
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _TrackingPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -276,9 +247,6 @@ class TestConversionPipeline:
         uploader.upload(cfg)
 
         # Verify that data.parquet was uploaded (not data.csv)
-        upload_targets = [
-            c[4] for c in upload_cmds if len(c) > 1 and c[1] == "upload" and len(c) > 4
-        ]
         assert "data.parquet" in upload_targets
         assert "data.csv" not in upload_targets
 
@@ -298,8 +266,8 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _MockPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -326,8 +294,8 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _MockPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -351,8 +319,8 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _MockPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -379,26 +347,13 @@ class TestKeepCsv:
             _base_dir=tmp_path,
         )
 
-        upload_cmds = []
+        upload_targets = []
 
-        class _TrackingPopen:
-            def __init__(self, cmd, *a, **kw):
-                self.cmd = cmd
-                self.returncode = 0
-                self.stderr = _MockPipe()
-                upload_cmds.append(cmd)
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append(path_in_repo)
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
-            def wait(self):
-                return 0
-
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _TrackingPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -406,10 +361,6 @@ class TestKeepCsv:
 
         uploader.upload(cfg)
 
-        # Get upload targets (remote paths from upload commands)
-        upload_targets = [
-            c[4] for c in upload_cmds if len(c) > 1 and c[1] == "upload" and len(c) > 4
-        ]
         # Should have README, LICENSE, and data.parquet (NOT data.csv)
         assert "data.parquet" in upload_targets
         assert "data.csv" not in upload_targets
@@ -428,26 +379,13 @@ class TestKeepCsv:
             _base_dir=tmp_path,
         )
 
-        upload_cmds = []
+        upload_targets = []
 
-        class _TrackingPopen:
-            def __init__(self, cmd, *a, **kw):
-                self.cmd = cmd
-                self.returncode = 0
-                self.stderr = _MockPipe()
-                upload_cmds.append(cmd)
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append(path_in_repo)
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
-            def wait(self):
-                return 0
-
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _TrackingPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -456,9 +394,6 @@ class TestKeepCsv:
         # Call with keep_csv=True
         uploader.upload(cfg, keep_csv=True)
 
-        upload_targets = [
-            c[4] for c in upload_cmds if len(c) > 1 and c[1] == "upload" and len(c) > 4
-        ]
         assert "data.parquet" in upload_targets
         assert "data.csv" in upload_targets
 
@@ -480,26 +415,13 @@ class TestUploadFileSelection:
             _base_dir=tmp_path,
         )
 
-        upload_cmds = []
+        upload_targets = []
 
-        class _TrackingPopen:
-            def __init__(self, cmd, *a, **kw):
-                self.cmd = cmd
-                self.returncode = 0
-                self.stderr = _MockPipe()
-                upload_cmds.append(cmd)
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append((str(path_or_fileobj), path_in_repo))
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
-            def wait(self):
-                return 0
-
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _TrackingPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -507,15 +429,13 @@ class TestUploadFileSelection:
 
         uploader.upload(cfg)
 
-        # Find data upload commands (not README/LICENSE)
+        # Find data uploads (not README/LICENSE)
         data_uploads = [
-            c
-            for c in upload_cmds
-            if len(c) > 1 and c[1] == "upload" and len(c) > 4 and c[4].endswith(".parquet")
+            (local, remote) for local, remote in upload_targets if remote.endswith(".parquet")
         ]
         assert len(data_uploads) > 0
-        # Local path (c[3]) should be inside staging dir
-        local_path = data_uploads[0][3]
+        # Local path should be inside staging dir
+        local_path = data_uploads[0][0]
         assert str(td) in local_path or td.name in local_path
 
     def test_converted_file_parquet_remote(self, tmp_path, monkeypatch):
@@ -532,26 +452,13 @@ class TestUploadFileSelection:
             _base_dir=tmp_path,
         )
 
-        upload_cmds = []
+        upload_targets = []
 
-        class _TrackingPopen:
-            def __init__(self, cmd, *a, **kw):
-                self.cmd = cmd
-                self.returncode = 0
-                self.stderr = _MockPipe()
-                upload_cmds.append(cmd)
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append((str(path_or_fileobj), path_in_repo))
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
-            def wait(self):
-                return 0
-
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _TrackingPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
 
         td = tmp_path / "_staging"
         td.mkdir()
@@ -559,42 +466,13 @@ class TestUploadFileSelection:
 
         uploader.upload(cfg)
 
-        # Find data upload commands for parquet files
+        # Find data uploads for parquet files
         data_uploads = [
-            c
-            for c in upload_cmds
-            if len(c) > 1 and c[1] == "upload" and len(c) > 4 and c[4].endswith(".parquet")
+            (local, remote) for local, remote in upload_targets if remote.endswith(".parquet")
         ]
         assert len(data_uploads) > 0
-        remote_path = data_uploads[0][4]
+        remote_path = data_uploads[0][1]
         assert remote_path == "data.parquet"
-
-
-class _MockPopen:
-    """A fake subprocess.Popen that works as a context manager."""
-
-    def __init__(self, cmd, *a, **kw):
-        self.cmd = cmd
-        self.returncode = 0
-        self.stderr = _MockPipe()
-        self.stdout = _MockPipe()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        pass
-
-    def wait(self):
-        return 0
-
-
-class _MockResult:
-    """A fake subprocess.CompletedProcess."""
-
-    def __init__(self, returncode=0, stderr=""):
-        self.returncode = returncode
-        self.stderr = stderr
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

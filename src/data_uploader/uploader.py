@@ -1,46 +1,41 @@
 """
 Upload engine.
 
-Delegates the actual upload to ``huggingface-cli``, which provides
-progress bars, resume support for large files, and recursive upload.
-This module stays thin — all validation happens in :mod:`checks`.
+Uploads files to Hugging Face Hub using the ``huggingface_hub`` Python API
+directly (not via the deprecated ``huggingface-cli``).
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 import pyarrow.csv as pc
 import pyarrow.parquet as pq
+from huggingface_hub import HfApi
 
 from .model import DatasetConfig
 from .repo_compliance import build_dataset_card, build_license_file, build_schema_report
 
+_api = HfApi()
+
 
 def _ensure_repo(cfg: DatasetConfig) -> None:
-    """Create the HF repository if it doesn't exist.
-
-    Errors are silently ignored when the repo already exists.
-    """
-    cmd = [
-        "huggingface-cli",
-        "repo",
-        "create",
-        cfg.repo_id,
-        "--type",
-        cfg.repo_type,
-        "--private" if cfg.private else "--public",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        if "already exists" in result.stderr.lower():
+    """Create the HF repository if it doesn't exist (idempotent)."""
+    try:
+        _api.create_repo(
+            repo_id=cfg.repo_id,
+            repo_type=cfg.repo_type,
+            private=cfg.private,
+            exist_ok=True,
+        )
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "already exists" in msg:
             print(f"  i  Repository already exists: {cfg.repo_id}")
         else:
-            print(f"  \u26a0  {result.stderr.strip()}")
+            print(f"  \u26a0  {exc}")
 
 
 def _hf_upload(
@@ -49,29 +44,23 @@ def _hf_upload(
     remote_path: str,
     repo_type: str,
 ) -> bool:
-    """Upload a single file to a Hugging Face Hub repository.
+    """Upload a single file to Hugging Face Hub.
 
-    Returns:
-        ``True`` on success, ``False`` on failure.
+    Uses ``HfApi.upload_file()``.
     """
-    cmd = [
-        "huggingface-cli",
-        "upload",
-        repo_id,
-        str(local_path),
-        remote_path,
-        "--repo-type",
-        repo_type,
-    ]
     label = Path(local_path).name
     print(f"  \u2191  {label}  \u2192  {remote_path}")
-    with subprocess.Popen(cmd, stdout=sys.stdout, stderr=subprocess.PIPE, text=True) as proc:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        proc.wait()
-        if proc.returncode == 0:
-            print(f"  \u2713  {label}")
-            return True
-        print(f"  \u2717  {stderr.strip()}")
+    try:
+        _api.upload_file(
+            path_or_fileobj=str(local_path),
+            path_in_repo=remote_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+        print(f"  \u2713  {label}")
+        return True
+    except Exception as exc:
+        print(f"  \u2717  {exc}")
         return False
 
 

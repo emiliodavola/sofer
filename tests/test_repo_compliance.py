@@ -356,43 +356,15 @@ class TestBuildDatasetCard:
 # ── TestUploadCompliance (mocked integration) ─────────────────────────────────
 
 
-class _MockPipe:
-    """Fake stderr/stdout pipe."""
-
-    @staticmethod
-    def read(*a):
-        return ""
-
-
-class _MockPopen:
-    """A fake subprocess.Popen that works as a context manager."""
-
-    def __init__(self, cmd, *a, **kw):
-        self.cmd = cmd
-        self.returncode = 0
-        self.stderr = _MockPipe()
-        self.stdout = _MockPipe()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        pass
-
-    def wait(self):
-        return 0
-
-
-class _MockResult:
-    """A fake subprocess.CompletedProcess."""
-
-    def __init__(self, returncode=0, stderr=""):
-        self.returncode = returncode
-        self.stderr = stderr
-
-
 class TestUploadCompliance:
     """Upload orchestration — compliance call order, tempdir cleanup, error prop."""
+
+    def _mock_hf_api(self, monkeypatch):
+        """Mock huggingface_hub API calls used by uploader."""
+        from data_uploader import uploader
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
 
     def test_compliance_called_before_upload(self, tmp_path, monkeypatch):
         """Compliance functions should be called — verify via mocked tracking."""
@@ -408,8 +380,7 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _MockPopen)
+        self._mock_hf_api(monkeypatch)
 
         import tempfile
 
@@ -436,26 +407,13 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
-        upload_cmds = []
+        upload_targets = []
 
-        class _TrackingPopen:
-            def __init__(self, cmd, *a, **kw):
-                self.cmd = cmd
-                self.returncode = 0
-                self.stderr = _MockPipe()
-                upload_cmds.append(cmd)
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append(path_in_repo)
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
-            def wait(self):
-                return 0
-
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _TrackingPopen)
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
 
         import tempfile
 
@@ -464,11 +422,6 @@ class TestUploadCompliance:
         monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
 
         uploader.upload(cfg)
-
-        # Find upload commands:
-        # [huggingface-cli, upload, repo_id, local_path, remote_path, --repo-type, repo_type]
-        upload_args = [c for c in upload_cmds if len(c) > 1 and c[1] == "upload"]
-        upload_targets = [c[4] for c in upload_args if len(c) > 4]
 
         # README.md should appear before LICENSE before data file
         readme_idx = next(i for i, t in enumerate(upload_targets) if t == "README.md")
@@ -496,8 +449,7 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
-        monkeypatch.setattr(uploader.subprocess, "Popen", _MockPopen)
+        self._mock_hf_api(monkeypatch)
 
         import tempfile
 
@@ -519,12 +471,13 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
+        self._mock_hf_api(monkeypatch)
+
         import tempfile
 
         td = tmp_path / "_staging"
         td.mkdir()
         monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
 
         # Make build_license_file raise (happens AFTER tempdir is created)
         def _raise_boom(_lic):
@@ -553,9 +506,8 @@ class TestUploadCompliance:
         def failing_schema(*a, **kw):
             raise ValueError("bad csv")
 
-        # Patch via uploader module (it imported the function by name)
         monkeypatch.setattr(uploader, "build_schema_report", failing_schema)
-        monkeypatch.setattr(uploader.subprocess, "run", lambda *a, **kw: _MockResult())
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
 
         import tempfile
 
