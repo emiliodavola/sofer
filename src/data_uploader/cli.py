@@ -102,6 +102,13 @@ recursive = true
 
 # Optional data-sharing documentation (recommended):
 # [meta]
+# language = ["en"]
+# pretty_name = "TODO: human-readable name"
+# task_categories = ["tabular-classification"]
+# size_categories = "1K<n<10K"
+# citation = "TODO: BibTeX or citation"
+# collection_method = "TODO: survey / admin / sensor / ..."
+# csv_delimiter = ";"
 # readme = "README.md"
 # codebook = "codebook.md"
 # study_design = "study_design.md"

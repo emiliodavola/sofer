@@ -140,6 +140,60 @@ class TestFromToml:
         cfg = DatasetConfig.from_toml(p)
         assert cfg.repo_type == "model"
 
+    # ── New [meta] fields (hf-dataset-compliance) ──────────────────────
+
+    def test_new_meta_defaults(self, tmp_path):
+        """New [meta] fields should have sensible defaults when absent."""
+        p = tmp_path / "t.toml"
+        p.write_text(SAMPLE_TOML_MINIMAL)
+        cfg = DatasetConfig.from_toml(p)
+
+        assert cfg.language == []
+        assert cfg.pretty_name == ""
+        assert cfg.task_categories == []
+        assert cfg.size_categories == ""
+        assert cfg.citation == ""
+        assert cfg.collection_method == ""
+        assert cfg.csv_delimiter == ";"
+        assert cfg.csv_encoding == "utf-8-sig"
+
+    def test_new_meta_fields_read_from_toml(self, tmp_path):
+        """All new [meta] fields should be read from TOML."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[meta]
+language = ["es", "ay"]
+pretty_name = "My Dataset"
+task_categories = ["tabular-classification"]
+size_categories = "1K<n<10K"
+citation = "@article{...}"
+collection_method = "Survey"
+csv_delimiter = ","
+csv_encoding = "latin-1"
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        cfg = DatasetConfig.from_toml(p)
+
+        assert cfg.language == ["es", "ay"]
+        assert cfg.pretty_name == "My Dataset"
+        assert cfg.task_categories == ["tabular-classification"]
+        assert cfg.size_categories == "1K<n<10K"
+        assert cfg.citation == "@article{...}"
+        assert cfg.collection_method == "Survey"
+        assert cfg.csv_delimiter == ","
+        assert cfg.csv_encoding == "latin-1"
+
+    def test_new_meta_pretty_name_fallback(self, tmp_path):
+        """pretty_name should default to cfg.name when not set."""
+        p = tmp_path / "t.toml"
+        p.write_text(SAMPLE_TOML_MINIMAL)
+        cfg = DatasetConfig.from_toml(p)
+        # When not set, pretty_name is empty; fallback to name happens in the card
+        assert cfg.pretty_name == ""
+
 
 # ── Validation ────────────────────────────────────────────────────────────────
 

@@ -17,11 +17,11 @@ import csv
 from pathlib import Path
 
 
-def _infer_type(values: list[str]) -> str:
+def infer_column_type(values: list[str]) -> str:
     """Guess the semantic type of a column from a sample of its values.
 
     Returns one of ``"numeric"``, ``"categorical/text"``,
-    or ``"mixed (mostly numeric)"``.
+    ``"mixed (mostly numeric)"``, or ``"unknown"``.
     """
     numeric_count = 0
     total = len(values)
@@ -50,6 +50,10 @@ def _infer_type(values: list[str]) -> str:
     if ratio > 0.5:
         return "mixed (mostly numeric)"
     return "categorical/text"
+
+
+# Backward-compat alias (will be removed in a future version)
+_infer_type = infer_column_type
 
 
 def generate(
@@ -105,7 +109,7 @@ def generate(
             if not v.strip() or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING")
         )
         pct_missing = round(n_missing / len(sample) * 100, 1) if sample else 0.0
-        col_type = _infer_type(col_values)
+        col_type = infer_column_type(col_values)
         example = next(
             (v for v in col_values if v.strip() and v.strip().upper() not in ("NA", "")),
             "",
