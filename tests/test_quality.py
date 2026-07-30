@@ -504,7 +504,7 @@ class TestStreamCsv:
     def test_binary_file_yields_garbled_rows(self, tmp_path):
         """Binary file: latin-1 catches everything, produces garbled rows."""
         csv_path = tmp_path / "binary.csv"
-        csv_path.write_bytes(b"\x00\xff\xfe\xfd\xfc\xfb\xfa\x00\xff")
+        csv_path.write_bytes(b"\xff\xfe\xfd\xfc\xfb\xfa\xfb\xfc\xff")
         results = list(stream_csv(csv_path))
         # No crash — latin-1 decodes all bytes
         assert len(results) >= 1

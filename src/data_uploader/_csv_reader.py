@@ -51,7 +51,7 @@ def stream_csv(
         try:
             yield from _read_csv(path, delimiter, enc, max_sample)
             return
-        except (UnicodeDecodeError, UnicodeError) as exc:
+        except (UnicodeDecodeError, UnicodeError, csv.Error) as exc:
             last_error = exc
             continue
 
