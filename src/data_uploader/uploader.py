@@ -12,6 +12,10 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .checks import ValidationReport
 
 import pyarrow as pa
 import pyarrow.csv as pc
@@ -592,6 +596,7 @@ def upload(
     force: bool = False,
     dry_run: bool = False,
     verify_load: bool = False,
+    quality_report: ValidationReport | None = None,
 ) -> int:
     """Upload all files declared in *cfg* to Hugging Face Hub.
 
@@ -600,21 +605,29 @@ def upload(
     fails.
 
     Args:
-        cfg:         Dataset configuration.
-        keep_csv:    When ``True`` and a CSV was converted to Parquet, also
-                     upload the original CSV as a secondary file.
-        force:       When ``True``, skip the README.md / LICENSE overwrite
-                     protection prompt and overwrite unconditionally.
-        dry_run:     When ``True``, show the repo diff and split report but
-                     do not upload any files.
-        verify_load: When ``True``, run ``datasets.load_dataset()`` against
-                     the staged files to verify end-to-end loadability.
-                     With ``--dry-run``, stages the files for verification
-                     and then cleans up.
+        cfg:            Dataset configuration.
+        keep_csv:       When ``True`` and a CSV was converted to Parquet, also
+                        upload the original CSV as a secondary file.
+        force:          When ``True``, skip the README.md / LICENSE overwrite
+                        protection prompt and overwrite unconditionally.
+        dry_run:        When ``True``, show the repo diff and split report but
+                        do not upload any files.
+        verify_load:    When ``True``, run ``datasets.load_dataset()`` against
+                        the staged files to verify end-to-end loadability.
+                        With ``--dry-run``, stages the files for verification
+                        and then cleans up.
+        quality_report: Optional pre-computed quality validation report.
+                        When provided and not passed, upload is gated (Issue #14).
 
     Returns:
         Exit code (0 = success, 1 = one or more uploads failed).
     """
+    # ── Quality gate: block upload if quality checks failed (Issue #14) ──
+    if quality_report is not None and not quality_report.passed:
+        print("\n  \u26a0  Quality checks failed — fix errors before uploading.\n")
+        quality_report.print_summary()
+        return 1
+
     print(f"\n{'=' * 60}")
     print(f"  Dataset:   {cfg.name}")
     print(f"  Target:    {cfg.repo_id}")

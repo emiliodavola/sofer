@@ -63,17 +63,13 @@ def _cmd_upload(args: argparse.Namespace) -> int:
     quality_report = quality.run()
     report.quality_results = quality_report.quality_results
 
-    if not report.passed:
-        report.print_summary()
-        print("  \u26a0  Fix errors before uploading.\n")
-        return 1
-
     return run_upload(
         cfg,
         keep_csv=args.keep_csv,
         force=args.force,
         dry_run=args.dry_run,
         verify_load=args.verify_load,
+        quality_report=report,
     )
 
 

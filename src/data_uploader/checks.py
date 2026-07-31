@@ -25,6 +25,8 @@ class ValidationReport:
         name:     Dataset name (for display).
         errors:   List of hard failures that should block upload.
         warnings: Advisory messages that don't block upload.
+        quality_results: Per-check quality findings.
+        ran_checks:      Set of check names that actually executed (Issue #14).
     """
 
     def __init__(self, name: str):
@@ -32,6 +34,7 @@ class ValidationReport:
         self.errors: list[str] = []
         self.warnings: list[str] = []
         self.quality_results: list[QualityResult] = []
+        self.ran_checks: set[str] = set()
 
     @property
     def passed(self) -> bool:
@@ -56,15 +59,21 @@ class ValidationReport:
             print(f"  {'─' * 30}")
             q_errors = [r for r in self.quality_results if r.severity == "fail"]
             q_warnings = [r for r in self.quality_results if r.severity == "warn"]
-            q_passed = _count_passed_quality(self.quality_results)
+            q_passed, q_skipped = _count_passed_quality(self.quality_results, self.ran_checks)
             print("  Quality checks")
             print(f"  Errors:   {len(q_errors)}")
             for r in q_errors:
                 print(f"    ✗  {r.check}: {r.message}")
             print(f"  Warnings: {len(q_warnings)}")
             for r in q_warnings:
-                print(f"    ⚠  {r.check}: {r.message}")
-            q_summary = f"{q_passed} passed, {len(q_errors)} failed, {len(q_warnings)} warnings"
+                partial_note = " (partial)" if r.partial else ""
+                print(f"    ⚠  {r.check}: {r.message}{partial_note}")
+            parts = [f"{q_passed} passed"]
+            if q_skipped > 0:
+                parts.append(f"{q_skipped} skipped")
+            parts.append(f"{len(q_errors)} failed")
+            parts.append(f"{len(q_warnings)} warnings")
+            q_summary = ", ".join(parts)
             print(f"  ✓  Quality: {q_summary}")
         if self.passed and not self.quality_results:
             print("  ✓  All checks passed.\n")
@@ -74,28 +83,37 @@ class ValidationReport:
             print()
 
 
-def _count_passed_quality(results: list[QualityResult]) -> int:
-    """Count how many check *types* have zero findings of any severity.
+def _count_passed_quality(
+    results: list[QualityResult],
+    ran_checks: set[str],
+) -> tuple[int, int]:
+    """Count how many checks passed vs were skipped.
 
-    A check type (e.g. ``"duplicates"``) is considered "passed" when there
-    is no ``QualityResult`` with that check name.  We compute this by
-    subtracting unique check names that *did* produce results from the total
-    known check types.
+    A check is "passed" when it actually ran and produced no findings.
+    A check is "skipped" when it was never executed (e.g., value_range
+    without config).
+
+    Returns:
+        (passed, skipped) tuple.
     """
-    # Known check types per the built-in defaults
-    all_check_types = {
-        "duplicates",
-        "empty_rows",
-        "empty_columns",
-        "null_profiling",
-        "format_consistency",
-        "corrupt_records",
-        "value_range",
-        "cross_file_types",
-        "encoding_validation",
-    }
     found = {r.check for r in results}
-    return len(all_check_types - found)
+    passed = len(ran_checks - found)
+    skipped = len(
+        {
+            "duplicates",
+            "empty_rows",
+            "empty_columns",
+            "null_profiling",
+            "format_consistency",
+            "corrupt_records",
+            "value_range",
+            "cross_file_types",
+            "encoding_validation",
+        }
+        - ran_checks
+        - found
+    )
+    return (passed, skipped)
 
 
 class DatasetValidator:

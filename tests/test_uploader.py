@@ -736,3 +736,58 @@ class TestAssertCrossFileSchema:
 
         errors = _assert_cross_file_schema(converted, cfg)
         assert errors == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Quality gate inside upload() — Issue #14
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestUploadQualityGate:
+    def test_upload_gates_on_failed_quality_report(self, tmp_path):
+        """upload() returns 1 before any upload when quality report has failures."""
+        from data_uploader.checks import ValidationReport
+        from data_uploader.quality import QualityResult
+        from data_uploader.uploader import upload
+
+        data = tmp_path / "data.csv"
+        data.write_text("a;b\n1;2\n", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=data, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        # Create a report with a fail finding
+        report = ValidationReport("test")
+        report.quality_results = [
+            QualityResult(check="corrupt_records", severity="fail", message="bad"),
+        ]
+
+        # upload should return 1 (failure) without doing any network calls
+        exit_code = upload(cfg, quality_report=report, dry_run=True)
+        assert exit_code == 1
+
+    def test_upload_proceeds_when_quality_report_passes(self, tmp_path):
+        """upload() proceeds normally when quality report has no failures."""
+        from data_uploader.checks import ValidationReport
+        from data_uploader.uploader import upload
+
+        data = tmp_path / "data.csv"
+        data.write_text("a;b\n1;2\n", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=data, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        # A clean report
+        report = ValidationReport("test")
+
+        # upload should proceed (dry_run returns 0 on success)
+        exit_code = upload(cfg, quality_report=report, dry_run=True)
+        assert exit_code == 0

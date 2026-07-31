@@ -8,6 +8,7 @@ accumulators simultaneously.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 from collections import defaultdict
 from pathlib import Path
@@ -138,6 +139,7 @@ class QualityValidator:
         self._check_value_range()
 
         self._report.quality_results = self._results
+        self._report.ran_checks = self._ran_checks
         return self._report
 
     # ------------------------------------------------------------------
@@ -171,6 +173,14 @@ class QualityValidator:
         # current file tracking
         self._current_file: str = ""
         self._current_header: list[str] = []
+        # partial scan tracking (Issue #14)
+        self._scan_is_partial: bool = False
+        # ran checks tracking (Issue #14)
+        self._ran_checks: set[str] = set()
+
+    def _has_fail_checks(self) -> bool:
+        """Return True when any active check has ``fail`` severity."""
+        return any(cfg.get("severity") == "fail" for cfg in self._checks.values())
 
     # ------------------------------------------------------------------
     #  File processing (single pass, interleaved)
@@ -182,24 +192,42 @@ class QualityValidator:
         self._current_file = fname
         self._file_row_count[fname] = 0
 
+        # Fail-severity checks always scan the full file (Issue #14)
+        effective_max_sample = self._max_sample
+        if self._has_fail_checks():
+            effective_max_sample = None
+        elif self._max_sample is not None:
+            self._scan_is_partial = True
+
         try:
             gen = stream_csv(
                 resolved,
                 delimiter=self.cfg.csv_delimiter,
                 encoding=self.cfg.csv_encoding,
-                max_sample=self._max_sample,
+                max_sample=effective_max_sample,
             )
             header, _ = next(gen)
-        except (ValueError, StopIteration):
-            # Encoding issue reported by _check_encoding_validation;
-            # StopIteration = completely empty file (no header).
+        except ValueError:
+            # Encoding issue — already reported by _check_encoding_validation
+            return
+        except StopIteration:
+            # Completely empty file (no header)
+            return
+        except (OSError, csv.Error) as exc:
+            # Unreadable or corrupt file — produce a fail finding (Issue #14)
+            self._add_result(
+                "corrupt_records",
+                "fail",
+                f"Cannot read '{fname}': {exc}",
+            )
             return
         self._current_header = header
         self._file_headers[fname] = header
 
         # Initialise per-column accumulators for this file's header
+        # Key includes fname to avoid cross-file collision (Issue #14)
         for col_name in header:
-            _ = self._col_nonempty[col_name]  # ensure entry exists
+            _ = self._col_nonempty[f"{fname}::{col_name}"]  # ensure entry exists
 
         row_number = 0
         for _header, row in gen:
@@ -236,8 +264,9 @@ class QualityValidator:
                 has_any_nonempty = True
 
             # empty_columns — track if we've seen any non-empty value
+            # Key with file prefix to isolate per-file (Issue #14)
             if not is_missing:
-                self._col_nonempty[col_name].add(value[:50])  # store sample snippet
+                self._col_nonempty[f"{self._current_file}::{col_name}"].add(value[:50])
 
             # null_profiling
             key_n = f"{self._current_file}:{col_name}"
@@ -287,11 +316,19 @@ class QualityValidator:
     # ------------------------------------------------------------------
 
     def _add_result(self, check: str, severity: str, message: str) -> None:
-        self._results.append(QualityResult(check=check, severity=severity, message=message))
+        partial = False
+        if severity == "warn" and self._scan_is_partial:
+            partial = True
+        self._results.append(
+            QualityResult(check=check, severity=severity, message=message, partial=partial)
+        )
+        # Track that this check actually ran (Issue #14)
+        self._ran_checks.add(check)
 
     def _check_duplicates(self) -> None:
         if "duplicates" not in self._checks:
             return
+        self._ran_checks.add("duplicates")
         if not self._dup_findings:
             return
         pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:10])
@@ -301,6 +338,7 @@ class QualityValidator:
     def _check_empty_rows(self) -> None:
         if "empty_rows" not in self._checks:
             return
+        self._ran_checks.add("empty_rows")
         if not self._empty_row_numbers:
             return
         sample = ", ".join(str(r) for r in self._empty_row_numbers[:10])
@@ -310,15 +348,28 @@ class QualityValidator:
     def _check_empty_columns(self) -> None:
         if "empty_columns" not in self._checks:
             return
-        empty_cols = [col for col, vals in self._col_nonempty.items() if not vals]
-        if not empty_cols:
+        self._ran_checks.add("empty_columns")
+        # Group empty columns per-file using the "fname::col" key format
+        per_file: dict[str, list[str]] = defaultdict(list)
+        for key, vals in self._col_nonempty.items():
+            if not vals:
+                if "::" in key:
+                    fname, col = key.split("::", 1)
+                    per_file[fname].append(col)
+        if not per_file:
             return
         sev = self._checks["empty_columns"]["severity"]
-        self._add_result("empty_columns", sev, f"Fully empty columns: {', '.join(empty_cols)}")
+        for fname, cols in per_file.items():
+            self._add_result(
+                "empty_columns",
+                sev,
+                f"Fully empty columns in '{fname}': {', '.join(cols)}",
+            )
 
     def _check_null_profiling(self) -> None:
         if "null_profiling" not in self._checks:
             return
+        self._ran_checks.add("null_profiling")
         threshold = self._checks["null_profiling"].get("max_null_pct", 50.0)
         over_limit: list[str] = []
         per_file: dict[str, dict[str, tuple[int, int]]] = defaultdict(dict)
@@ -351,6 +402,7 @@ class QualityValidator:
     def _check_format_consistency(self) -> None:
         if "format_consistency" not in self._checks:
             return
+        self._ran_checks.add("format_consistency")
         ignore = self._checks["format_consistency"].get("ignore_values", [])
         ignore_set = {v.upper() for v in ignore}
         mixed_cols: list[str] = []
@@ -372,6 +424,7 @@ class QualityValidator:
     def _check_corrupt_records(self) -> None:
         if "corrupt_records" not in self._checks:
             return
+        self._ran_checks.add("corrupt_records")
         if not self._corrupt_findings:
             return
         sev = self._checks["corrupt_records"]["severity"]
@@ -385,6 +438,7 @@ class QualityValidator:
     def _check_value_range(self) -> None:
         if "value_range" not in self._checks:
             return
+        self._ran_checks.add("value_range")
         cfg = self._checks["value_range"]
         sev = cfg["severity"]
         col_min = cfg.get("min")
@@ -407,6 +461,7 @@ class QualityValidator:
     def _check_cross_file_types(self) -> None:
         if "cross_file_types" not in self._checks:
             return
+        self._ran_checks.add("cross_file_types")
         sev = self._checks["cross_file_types"]["severity"]
         # Find shared column names across files
         all_cols: set[str] = set()
@@ -426,6 +481,7 @@ class QualityValidator:
     def _check_encoding_validation(self, resolved: Path) -> None:
         if "encoding_validation" not in self._checks:
             return
+        self._ran_checks.add("encoding_validation")
         sev = self._checks["encoding_validation"]["severity"]
         # Read first 8 KB and try each encoding
         try:
@@ -455,3 +511,70 @@ class QualityValidator:
                 self._file_col_types[fname][col_name] = infer_column_type(filtered)
             else:
                 self._file_col_types[fname][col_name] = "unknown"
+
+
+# ---------------------------------------------------------------------------
+#  Quality report file writer (Issue #14)
+# ---------------------------------------------------------------------------
+
+
+def write_quality_report(report: ValidationReport, path: Path) -> None:
+    """Write a ``quality-report.md`` file with findings grouped by severity.
+
+    Args:
+        report: The validation report from :meth:`QualityValidator.run`.
+        path:   Output file path for the Markdown report.
+    """
+    lines: list[str] = []
+    lines.append(f"# Quality Report — {report.name}")
+    lines.append("")
+
+    if not report.quality_results:
+        lines.append("✅ No quality issues found.")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+
+    # Group by severity, then by check
+    fail_findings = [r for r in report.quality_results if r.severity == "fail"]
+    warn_findings = [r for r in report.quality_results if r.severity == "warn"]
+
+    if fail_findings:
+        lines.append("## ❌ Failures")
+        lines.append("")
+        for r in fail_findings:
+            lines.append(f"- **{r.check}**: {r.message}")
+        lines.append("")
+
+    if warn_findings:
+        lines.append("## ⚠️ Warnings")
+        lines.append("")
+        for r in warn_findings:
+            partial_note = " *(partial — sample-based)*" if r.partial else ""
+            lines.append(f"- **{r.check}**: {r.message}{partial_note}")
+        lines.append("")
+
+    # Passed / skipped summary
+    found = {r.check for r in report.quality_results}
+    passed = len(report.ran_checks - found)
+    all_checks = {
+        "duplicates",
+        "empty_rows",
+        "empty_columns",
+        "null_profiling",
+        "format_consistency",
+        "corrupt_records",
+        "value_range",
+        "cross_file_types",
+        "encoding_validation",
+    }
+    skipped = len(all_checks - report.ran_checks - found)
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- {passed} check(s) passed with no findings")
+    if skipped:
+        lines.append(f"- {skipped} check(s) skipped (not configured)")
+    lines.append(f"- {len(fail_findings)} failure(s)")
+    lines.append(f"- {len(warn_findings)} warning(s)")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

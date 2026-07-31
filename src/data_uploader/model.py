@@ -87,11 +87,13 @@ class QualityResult:
         check:    Check name identifier (e.g. ``"duplicates"``).
         severity: ``"warn"`` or ``"fail"``.
         message:  Human-readable description of the finding.
+        partial:  ``True`` when the finding is based on a sample (not the full file).
     """
 
     check: str
     severity: str
     message: str
+    partial: bool = False
 
 
 @dataclass

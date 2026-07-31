@@ -24,7 +24,7 @@ def stream_csv(
     path: Path,
     delimiter: str = ";",
     encoding: str = "utf-8-sig",
-    max_sample: int = 100_000,
+    max_sample: int | None = 100_000,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Yield ``(header, row)`` tuples from a CSV file, one at a time.
 
@@ -39,6 +39,7 @@ def stream_csv(
         delimiter:  CSV field delimiter (default ``;``).
         encoding:   Initial encoding to try (default ``utf-8-sig``).
         max_sample: Maximum number of data rows to yield (default 100 000).
+                    Pass ``None`` to scan the entire file.
 
     Yields:
         ``(header, row)`` tuples. The first yield has ``row=None``.
@@ -77,7 +78,7 @@ def _read_csv(
     path: Path,
     delimiter: str,
     encoding: str,
-    max_sample: int,
+    max_sample: int | None,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Read a CSV with the given encoding and yield (header, row) tuples."""
     with open(path, newline="", encoding=encoding) as fh:
@@ -91,9 +92,12 @@ def _read_csv(
 
         yield header, None  # header-only yield
 
-        count = 0
-        for row in reader:
-            if count >= max_sample:
-                return
-            yield header, row
-            count += 1
+        if max_sample is None:
+            yield from ((header, row) for row in reader)
+        else:
+            count = 0
+            for row in reader:
+                if count >= max_sample:
+                    return
+                yield header, row
+                count += 1
