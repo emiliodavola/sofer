@@ -3,10 +3,15 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from data_uploader.model import DatasetConfig, FileEntry
 from data_uploader.repo_compliance import (
+    _SIZE_CATEGORIES,
     ColumnSchema,
+    _csv_values_look_like_bool,
+    _parquet_to_hf_dtype,
+    _validate_size_category,
     build_dataset_card,
     build_license_file,
     build_schema_report,
@@ -807,3 +812,815 @@ class TestBuildSchemaReportDisambiguationParquet:
         names = [s.name for s in schema]
         assert "a.parquet::value" in names
         assert "b.parquet::value" in names
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  NEW tests — GitHub issue #10: Dataset Card YAML compliance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+
+def _parse_frontmatter(result: str) -> dict:
+    """Parse YAML frontmatter from a Dataset Card string."""
+    assert result.startswith("---\n"), "Card must start with YAML frontmatter"
+    end = result.index("\n---\n", 4)
+    yaml_str = result[4:end]
+    return yaml.safe_load(yaml_str)
+
+
+# ── 1. dataset_info.features shape (list, not dict) ───────────────────────────
+
+
+class TestDatasetInfoFeatures:
+    """dataset_info.features must be a list of {name, dtype} dicts, not a col→type dict."""
+
+    def test_features_is_list_of_dicts(self):
+        """features should be a list of {name, dtype} objects."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            description="A dataset.",
+            license="mit",
+        )
+        schema = [
+            ColumnSchema(
+                name="age",
+                dtype="numeric",
+                nullable=False,
+                example="30",
+                unique=10,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+            ColumnSchema(
+                name="city",
+                dtype="categorical/text",
+                nullable=True,
+                example="NYC",
+                unique=5,
+                missing=2.0,
+                hf_dtype="string",
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        fm = _parse_frontmatter(result)
+
+        di = fm["dataset_info"]
+        features = di["features"]
+        assert isinstance(features, list), f"features should be a list, got {type(features)}"
+        assert len(features) == 2
+        assert features[0] == {"name": "age", "dtype": "int64"}
+        assert features[1] == {"name": "city", "dtype": "string"}
+
+    def test_features_fallback_when_no_hf_dtype(self):
+        """When hf_dtype is None, fall back to _HF_FEATURE_MAP from internal dtype."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+        )
+        schema = [
+            ColumnSchema(
+                name="score",
+                dtype="numeric",
+                nullable=False,
+                example="85",
+                unique=50,
+                missing=0.0,
+                hf_dtype=None,
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        fm = _parse_frontmatter(result)
+        features = fm["dataset_info"]["features"]
+        # Fallback: numeric → float64
+        assert features[0] == {"name": "score", "dtype": "float64"}
+
+    def test_dataset_info_has_config_name(self):
+        """dataset_info should include config_name."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+        )
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=1, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        fm = _parse_frontmatter(result)
+        assert "config_name" in fm["dataset_info"]
+
+    def test_dataset_info_has_splits_when_files_present(self):
+        """dataset_info should include splits when files are declared."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+        )
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        fm = _parse_frontmatter(result)
+        di = fm["dataset_info"]
+        assert "splits" in di
+        assert len(di["splits"]) >= 1
+        assert "name" in di["splits"][0]
+        assert "num_examples" in di["splits"][0]
+
+
+# ── 2. Dtype fidelity ────────────────────────────────────────────────────────
+
+
+class TestDtypeFidelity:
+    """Parquet-originated ColumnSchema must carry accurate HF dtypes."""
+
+    def test_int64_from_parquet(self):
+        """Parquet int64 → hf_dtype == 'int64'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.int64()) == "int64"
+
+    def test_int32_from_parquet(self):
+        """Parquet int32 → hf_dtype == 'int32'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.int32()) == "int32"
+
+    def test_float32_from_parquet(self):
+        """Parquet float32 → hf_dtype == 'float32'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.float32()) == "float32"
+
+    def test_float64_from_parquet(self):
+        """Parquet float64 → hf_dtype == 'float64'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.float64()) == "float64"
+
+    def test_bool_from_parquet(self):
+        """Parquet bool → hf_dtype == 'bool'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.bool_()) == "bool"
+
+    def test_string_from_parquet(self):
+        """Parquet string → hf_dtype == 'string'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.string()) == "string"
+
+    def test_date32_from_parquet(self):
+        """Parquet date32 → hf_dtype == 'date32'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.date32()) == "date32"
+
+    def test_timestamp_from_parquet(self):
+        """Parquet timestamp → hf_dtype == 'timestamp[s]'."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.timestamp("s")) == "timestamp[s]"
+
+    def test_null_returns_none(self):
+        """Parquet null → None (omit from features)."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.null()) is None
+
+    def test_binary_falls_back_to_string(self):
+        """Parquet binary → hf_dtype == 'string' (no native binary in HF)."""
+        import pyarrow as pa
+
+        assert _parquet_to_hf_dtype(pa.binary()) == "string"
+
+    def test_parquet_schema_populates_hf_dtype(self, tmp_path):
+        """build_schema_report from Parquet should populate hf_dtype on ColumnSchema."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("val\n1\n2\n3\n", encoding="utf-8-sig")
+
+        # Parquet with specific types
+        schema_pa = pa.schema(
+            [
+                ("id", pa.int32()),
+                ("score", pa.float64()),
+                ("flag", pa.bool_()),
+                ("label", pa.string()),
+            ]
+        )
+        table = pa.table(
+            {
+                "id": [1, 2, 3],
+                "score": [1.0, 2.0, 3.0],
+                "flag": [True, False, True],
+                "label": ["a", "b", "c"],
+            },
+            schema=schema_pa,
+        )
+        pq.write_table(table, tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        by_name = {s.name: s for s in schema}
+
+        assert by_name["id"].hf_dtype == "int32"
+        assert by_name["score"].hf_dtype == "float64"
+        assert by_name["flag"].hf_dtype == "bool"
+        assert by_name["label"].hf_dtype == "string"
+
+    def test_csv_bool_detection(self):
+        """_csv_values_look_like_bool should detect true/false values."""
+        assert _csv_values_look_like_bool(["True", "False", "True"])
+        assert _csv_values_look_like_bool(["0", "1", "1", "0"])
+        assert _csv_values_look_like_bool(["yes", "no", "yes"])
+        assert not _csv_values_look_like_bool(["hello", "world"])
+        assert not _csv_values_look_like_bool(["1", "2", "3"])
+        assert not _csv_values_look_like_bool([])
+
+
+# ── 3. configs YAML ──────────────────────────────────────────────────────────
+
+
+class TestConfigsYAML:
+    """configs block must be emitted with config_name, data_files, default."""
+
+    def test_configs_emitted_when_files_present(self):
+        """configs should appear in frontmatter when files are declared."""
+        cfg = DatasetConfig(
+            name="my-ds",
+            repo_id="user/my-ds",
+            license="mit",
+            files=[FileEntry(local=Path("data.csv"), remote="data/data.csv")],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "configs" in fm
+        configs = fm["configs"]
+        assert isinstance(configs, list)
+        assert len(configs) == 1
+        assert configs[0]["config_name"] == "my-ds"
+        assert configs[0]["default"] is True
+        assert "data_files" in configs[0]
+        assert configs[0]["data_files"][0]["split"] == "train"
+
+    def test_configs_uses_config_names_if_provided(self):
+        """config_name should use cfg.config_names[0] when available."""
+        cfg = DatasetConfig(
+            name="my-ds",
+            repo_id="user/my-ds",
+            license="mit",
+            config_names=["v1", "v2"],
+            files=[FileEntry(local=Path("data.csv"), remote="data/data.csv")],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["configs"][0]["config_name"] == "v1"
+
+    def test_no_configs_when_no_files(self):
+        """configs should NOT appear when no files are declared."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "configs" not in fm
+
+
+# ── 4. size_categories validation ────────────────────────────────────────────
+
+
+class TestSizeCategories:
+    """size_categories must be validated and emitted as a YAML list."""
+
+    def test_valid_category_passes(self):
+        """Known size categories should be accepted."""
+        for cat in _SIZE_CATEGORIES:
+            assert _validate_size_category(cat) == cat
+
+    def test_invalid_category_returns_none(self):
+        """Unknown size category should return None."""
+        assert _validate_size_category("invalid") is None
+        assert _validate_size_category("") is None
+
+    def test_size_categories_emitted_as_list(self):
+        """size_categories should always be a YAML list, not a scalar string."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            size_categories="1K<n<10K",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "size_categories" in fm
+        sc = fm["size_categories"]
+        assert isinstance(sc, list), f"Expected list, got {type(sc)}: {sc}"
+        assert sc == ["1K<n<10K"]
+
+    def test_multiple_size_categories(self):
+        """Comma-separated size_categories should all be emitted as a list."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            size_categories="1K<n<10K, n<1K",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["size_categories"] == ["1K<n<10K", "n<1K"]
+
+    def test_invalid_size_category_filtered(self):
+        """Invalid size categories should be silently filtered out."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            size_categories="1K<n<10K, bogus, 10K<n<100K",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        # bogus should be filtered
+        assert fm["size_categories"] == ["1K<n<10K", "10K<n<100K"]
+
+
+# ── 5. license: other flow ───────────────────────────────────────────────────
+
+
+class TestLicenseOther:
+    """Non-SPDX licenses should emit license_name, license_link, license_details."""
+
+    def test_other_license_emits_fields(self):
+        """Unknown license → 'other' + optional fields."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="made-up-1.0",
+            license_name="Made Up License",
+            license_link="https://example.com/license",
+            license_details="Custom terms apply.",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+
+        assert fm["license"] == "other"
+        assert fm["license_name"] == "Made Up License"
+        assert fm["license_link"] == "https://example.com/license"
+        assert fm["license_details"] == "Custom terms apply."
+
+    def test_other_license_defaults_license_link_to_license(self):
+        """When license_link is empty, default to 'LICENSE'."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="made-up-1.0",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+
+        assert fm["license"] == "other"
+        assert fm["license_link"] == "LICENSE"
+        assert fm["license_details"] == "made-up-1.0"
+
+    def test_known_spdx_not_other(self):
+        """Known SPDX license should NOT use the 'other' flow."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            license_name="Should not appear",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+
+        assert fm["license"] == "mit"
+        assert "license_name" not in fm
+
+    def test_build_license_file_other(self):
+        """build_license_file('other') should return a custom-terms template."""
+        result = build_license_file("other")
+        assert "custom terms" in result.lower()
+        assert "LICENSE file" in result
+
+
+# ── 6. Optional metadata keys ────────────────────────────────────────────────
+
+
+class TestOptionalMetadata:
+    """Optional HF Dataset Card metadata keys should appear when provided."""
+
+    def test_annotations_creators(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            annotations_creators=["expert-generated"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["annotations_creators"] == ["expert-generated"]
+
+    def test_language_creators(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            language_creators=["found"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["language_creators"] == ["found"]
+
+    def test_language_details(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            language_details=["en-US", "fr-FR"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["language_details"] == ["en-US", "fr-FR"]
+
+    def test_multilinguality(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            multilinguality="monolingual",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["multilinguality"] == "monolingual"
+
+    def test_task_ids(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            task_ids=["text-classification"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["task_ids"] == ["text-classification"]
+
+    def test_paperswithcode_id(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            paperswithcode_id="squad-1.1",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["paperswithcode_id"] == "squad-1.1"
+
+    def test_config_names_multi_config(self):
+        """config_names emitted in frontmatter only when >1 config."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            config_names=["v1", "v2", "v3"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert fm["config_names"] == ["v1", "v2", "v3"]
+
+    def test_config_names_single_not_emitted(self):
+        """Single config_name not emitted as config_names frontmatter key."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            config_names=["v1"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "config_names" not in fm
+
+    def test_metadata_not_emitted_when_empty(self):
+        """Empty metadata fields should not appear in frontmatter."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "annotations_creators" not in fm
+        assert "language_creators" not in fm
+        assert "language_details" not in fm
+        assert "multilinguality" not in fm
+        assert "task_ids" not in fm
+        assert "paperswithcode_id" not in fm
+
+
+# ── 7. Card body optional sections ───────────────────────────────────────────
+
+
+class TestCardBodySections:
+    """Optional card body sections: Funded by, Shared by, Paper, Demo, Authors."""
+
+    def test_funded_by_in_card_body(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            funded_by="National Science Foundation",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "- **Funded by:** National Science Foundation" in result
+
+    def test_shared_by_in_card_body(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            shared_by="ACME Corporation",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "- **Shared by:** ACME Corporation" in result
+
+    def test_paper_section(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            paper_url="https://arxiv.org/abs/1234.5678",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "## Paper" in result
+        assert "https://arxiv.org/abs/1234.5678" in result
+
+    def test_demo_section(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            demo_url="https://huggingface.co/spaces/user/demo",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "## Demo" in result
+        assert "https://huggingface.co/spaces/user/demo" in result
+
+    def test_dataset_card_authors(self):
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            dataset_card_authors="Jane Doe; John Smith",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "## Dataset Card Authors" in result
+        assert "Jane Doe; John Smith" in result
+
+    def test_optional_sections_not_emitted_when_empty(self):
+        """Optional sections should not appear when fields are empty."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+        assert "## Funded by" not in result
+        assert "## Shared by" not in result
+        assert "## Paper" not in result
+        assert "## Demo" not in result
+        assert "## Dataset Card Authors" not in result
+
+
+# ── 8. Tags (modality + library) ─────────────────────────────────────────────
+
+
+class TestTags:
+    """Always emit 'datasets' library tag and a modality tag."""
+
+    def test_datasets_tag_always_present(self):
+        """datasets library tag must always be emitted."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "datasets" in fm["tags"]
+
+    def test_tabular_modality_tag_default(self):
+        """tabular modality tag should be added by default."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "tabular" in fm["tags"]
+
+    def test_user_tags_preserved(self):
+        """User-provided tags should be preserved alongside auto-tags."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            tags=["survey", "demographics"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "survey" in fm["tags"]
+        assert "demographics" in fm["tags"]
+        assert "datasets" in fm["tags"]
+        assert "tabular" in fm["tags"]
+
+    def test_existing_modality_preserved(self):
+        """When the user already provides a modality tag, don't add 'tabular'."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            tags=["text", "sentiment"],
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "text" in fm["tags"]
+        assert "datasets" in fm["tags"]
+        # tabular should NOT be added since 'text' is already a modality
+        assert "tabular" not in fm["tags"]
+
+
+# ── 9. source_datasets ───────────────────────────────────────────────────────
+
+
+class TestSourceDatasets:
+    """source_datasets must be a dataset repo ID (with backward compat)."""
+
+    def test_source_emitted_as_list(self):
+        """source_datasets must always be a list."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            source="my-institution",
+        )
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "source_datasets" in fm
+        assert isinstance(fm["source_datasets"], list)
+        assert fm["source_datasets"] == ["my-institution"]
+
+    def test_source_not_emitted_when_empty(self):
+        """source_datasets should not appear when source is empty."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(result)
+        assert "source_datasets" not in fm
+
+
+# ── 10. Full card YAML validity ──────────────────────────────────────────────
+
+
+class TestFullCardYAMLValidity:
+    """The entire Dataset Card YAML frontmatter must be valid YAML."""
+
+    def test_full_frontmatter_parses_as_valid_yaml(self):
+        """Multi-feature card frontmatter must be valid YAML."""
+        cfg = DatasetConfig(
+            name="census-2010",
+            repo_id="org/census-2010",
+            description="2010 census data.",
+            license="cc0-1.0",
+            source="wikipedia",
+            language=["en"],
+            pretty_name="Census 2010",
+            task_categories=["tabular-classification"],
+            size_categories="10K<n<100K",
+            tags=["census"],
+            annotations_creators=["expert-generated"],
+            language_creators=["found"],
+            language_details=["en-US"],
+            multilinguality="monolingual",
+            task_ids=["text-classification"],
+            paperswithcode_id="census-2010",
+            config_names=["default", "v2"],
+            funded_by="NSF",
+            shared_by="Census Bureau",
+            paper_url="https://arxiv.org/abs/1234.5678",
+            demo_url="https://huggingface.co/spaces/demo",
+            dataset_card_authors="Jane Doe",
+            collection_method="Survey",
+            citation="@article{census2010}",
+            files=[
+                FileEntry(local=Path("data.csv"), remote="data/data.csv"),
+                FileEntry(local=Path("extra.csv"), remote="data/extra.csv"),
+            ],
+        )
+        schema = [
+            ColumnSchema(
+                name="age",
+                dtype="numeric",
+                nullable=False,
+                example="30",
+                unique=100,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+            ColumnSchema(
+                name="city",
+                dtype="categorical/text",
+                nullable=True,
+                example="NYC",
+                unique=500,
+                missing=2.5,
+                hf_dtype="string",
+            ),
+            ColumnSchema(
+                name="active",
+                dtype="categorical/text",
+                nullable=False,
+                example="True",
+                unique=2,
+                missing=0.0,
+                hf_dtype="bool",
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+
+        # Must start with YAML frontmatter
+        assert result.startswith("---\n")
+
+        # Parse it
+        fm = _parse_frontmatter(result)
+
+        # Verify all key fields
+        assert fm["pretty_name"] == "Census 2010"
+        assert fm["license"] == "cc0-1.0"
+        assert fm["task_categories"] == ["tabular-classification"]
+        assert fm["size_categories"] == ["10K<n<100K"]
+        assert fm["tags"] == ["census", "datasets", "tabular"]
+        assert fm["source_datasets"] == ["wikipedia"]
+        assert fm["language"] == ["en"]
+        assert fm["annotations_creators"] == ["expert-generated"]
+        assert fm["language_creators"] == ["found"]
+        assert fm["language_details"] == ["en-US"]
+        assert fm["multilinguality"] == "monolingual"
+        assert fm["task_ids"] == ["text-classification"]
+        assert fm["paperswithcode_id"] == "census-2010"
+        assert fm["config_names"] == ["default", "v2"]
+
+        # configs
+        assert "configs" in fm
+        assert fm["configs"][0]["config_name"] == "default"
+
+        # dataset_info
+        di = fm["dataset_info"]
+        features = di["features"]
+        assert len(features) == 3
+        assert features[0] == {"name": "age", "dtype": "int64"}
+        assert features[1] == {"name": "city", "dtype": "string"}
+        assert features[2] == {"name": "active", "dtype": "bool"}
+        assert "config_name" in di
+        assert "splits" in di
+
+        # Card body optional sections
+        assert "## Dataset Card Authors" in result
+        assert "## Paper" in result
+        assert "## Demo" in result
+        assert "Funded by:** NSF" in result
+        assert "Shared by:** Census Bureau" in result
+
+    def test_license_other_full_flow(self):
+        """Complete 'other' license flow with all optional fields."""
+        cfg = DatasetConfig(
+            name="custom-ds",
+            repo_id="org/custom-ds",
+            description="Custom licensed dataset.",
+            license="proprietary-v2",
+            license_name="Proprietary License v2",
+            license_link="https://example.com/license-v2",
+            license_details="Contact legal@example.com for terms.",
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+        )
+        schema = [
+            ColumnSchema(
+                name="val",
+                dtype="numeric",
+                nullable=False,
+                example="42",
+                unique=10,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        fm = _parse_frontmatter(result)
+
+        assert fm["license"] == "other"
+        assert fm["license_name"] == "Proprietary License v2"
+        assert fm["license_link"] == "https://example.com/license-v2"
+        assert fm["license_details"] == "Contact legal@example.com for terms."
+
+        # features still correct
+        features = fm["dataset_info"]["features"]
+        assert features[0] == {"name": "val", "dtype": "int64"}
+
+        # Card body should display the original license string
+        assert "proprietary-v2" in result

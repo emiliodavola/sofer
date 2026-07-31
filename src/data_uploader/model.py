@@ -174,6 +174,21 @@ class DatasetConfig:
     collection_method: str = ""
     csv_delimiter: str = ";"
     csv_encoding: str = "utf-8-sig"
+    annotations_creators: list[str] = field(default_factory=list)
+    language_creators: list[str] = field(default_factory=list)
+    language_details: list[str] = field(default_factory=list)
+    multilinguality: str = ""
+    task_ids: list[str] = field(default_factory=list)
+    paperswithcode_id: str = ""
+    config_names: list[str] = field(default_factory=list)
+    license_name: str = ""
+    license_link: str = ""
+    license_details: str = ""
+    funded_by: str = ""
+    shared_by: str = ""
+    paper_url: str = ""
+    demo_url: str = ""
+    dataset_card_authors: str = ""
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
@@ -331,6 +346,21 @@ class DatasetConfig:
             collection_method=meta.get("collection_method", ""),
             csv_delimiter=meta.get("csv_delimiter", ";"),
             csv_encoding=meta.get("csv_encoding", "utf-8-sig"),
+            annotations_creators=meta.get("annotations_creators", []),
+            language_creators=meta.get("language_creators", []),
+            language_details=meta.get("language_details", []),
+            multilinguality=meta.get("multilinguality", ""),
+            task_ids=meta.get("task_ids", []),
+            paperswithcode_id=meta.get("paperswithcode_id", ""),
+            config_names=meta.get("config_names", []),
+            license_name=meta.get("license_name", ""),
+            license_link=meta.get("license_link", ""),
+            license_details=meta.get("license_details", ""),
+            funded_by=meta.get("funded_by", ""),
+            shared_by=meta.get("shared_by", ""),
+            paper_url=meta.get("paper_url", ""),
+            demo_url=meta.get("demo_url", ""),
+            dataset_card_authors=meta.get("dataset_card_authors", ""),
             _base_dir=base_dir,
         )
 
