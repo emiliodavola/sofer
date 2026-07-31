@@ -18,6 +18,7 @@ from huggingface_hub import HfApi
 
 from .model import DatasetConfig
 from .repo_compliance import build_dataset_card, build_license_file, build_schema_report
+from .splits import detect_splits, validate_layout
 
 _api = HfApi()
 
@@ -108,7 +109,159 @@ def _convert_to_parquet(csv_path: Path, staging_dir: Path) -> Path | None:
         return None
 
 
-def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
+def _validate_remote_paths(cfg: DatasetConfig) -> list[str]:
+    """Validate that every ``FileEntry.remote`` is a file path, not a directory.
+
+    A remote path ending with ``/`` (or ``\\``) that is not declared as
+    ``recursive`` is considered invalid.
+
+    Returns:
+        A list of error messages (empty = all paths are valid).
+    """
+    errors: list[str] = []
+    for i, entry in enumerate(cfg.files):
+        stripped = entry.remote.rstrip("/").rstrip("\\")
+        # Directory path detected — trailing slash removed something
+        if stripped != entry.remote and not entry.recursive:
+            errors.append(
+                f"File entry {i + 1}: remote='{entry.remote}' looks like a "
+                f"directory path (trailing slash). Set recursive=true if this "
+                f"is a directory, or provide a valid file path."
+            )
+        # Empty path after stripping
+        if not stripped:
+            errors.append(f"File entry {i + 1}: remote='{entry.remote}' is not a valid file path.")
+    return errors
+
+
+def _inspect_repo(cfg: DatasetConfig) -> list[str]:
+    """Query the HF repo and return a list of existing remote file paths.
+
+    Returns an empty list when the repo does not exist yet, the network
+    is unavailable, or the call otherwise fails — the upload will create
+    whatever files are needed.
+    """
+    try:
+        existing = _api.list_repo_files(repo_id=cfg.repo_id, repo_type=cfg.repo_type)
+        return list(existing)
+    except Exception:
+        return []
+
+
+def _repo_diff_summary(
+    cfg: DatasetConfig,
+    existing_files: list[str],
+    keep_csv: bool,
+) -> str:
+    """Build a human-readable diff of what will be added vs modified.
+
+    Args:
+        cfg:            Dataset configuration.
+        existing_files: Files already in the repo (from :func:`_inspect_repo`).
+        keep_csv:       Whether original CSVs will be uploaded alongside Parquet.
+
+    Returns:
+        A multiline string suitable for printing.
+    """
+    existing_set = {f.lower() for f in existing_files}
+
+    # Build the list of planned uploads
+    planned: list[str] = []
+
+    # Compliance files
+    planned.append("README.md")
+    planned.append("LICENSE")
+
+    # Data files
+    for entry in cfg.files:
+        remote_lower = entry.remote.lower()
+        if entry.recursive:
+            planned.append(f"{entry.remote}*")  # directory — can't list contents
+        elif remote_lower.endswith(".csv") and not entry.upload_as_csv:
+            stem = Path(entry.remote).stem
+            planned.append(f"{stem}.parquet")
+            if keep_csv:
+                planned.append(entry.remote)
+        else:
+            planned.append(entry.remote)
+
+    new = [p for p in planned if p.lower() not in existing_set]
+    modified = [p for p in planned if p.lower() in existing_set]
+
+    lines: list[str] = []
+    lines.append("  Repo inspection:")
+    if not existing_files:
+        lines.append("    (repo is empty or does not exist yet)")
+    else:
+        lines.append(f"    {len(existing_files)} file(s) already in repo")
+
+    if new:
+        lines.append(f"    + {len(new)} file(s) will be ADDED:")
+        for f in new[:10]:
+            lines.append(f"      + {f}")
+        if len(new) > 10:
+            lines.append(f"      … and {len(new) - 10} more")
+
+    if modified:
+        lines.append(f"    ~ {len(modified)} file(s) will be OVERWRITTEN:")
+        for f in modified[:5]:
+            lines.append(f"      ~ {f}")
+        if len(modified) > 5:
+            lines.append(f"      … and {len(modified) - 5} more")
+
+    return "\n".join(lines)
+
+
+def _check_overwrite_protection(
+    existing_files: list[str],
+    force: bool,
+) -> set[str]:
+    """Check whether README.md / LICENSE already exist and gate overwrites.
+
+    When *force* is ``True``, skip the check entirely.
+
+    In interactive mode: warn and ask for confirmation per file.
+    In non-interactive mode: warn and skip the protected files.
+
+    Returns:
+        Set of filenames that SHOULD be skipped (protected).
+    """
+    if force:
+        return set()
+
+    protected: set[str] = set()
+    existing_set = {f.lower() for f in existing_files}
+    interactive = sys.stdin.isatty()
+
+    for filename in ("README.md", "LICENSE"):
+        if filename.lower() in existing_set:
+            if interactive:
+                try:
+                    answer = input(
+                        f"  ⚠  {filename} already exists in the repo. Overwrite? [y/N]: "
+                    )
+                    if answer.strip().lower() not in ("y", "yes"):
+                        print(f"  i  {filename}: skipped (protected by user)")
+                        protected.add(filename.lower())
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\n  i  {filename}: skipped (non-interactive input)")
+                    protected.add(filename.lower())
+            else:
+                print(
+                    f"  ⚠  {filename} already exists in the repo. "
+                    f"Skipping overwrite (non-interactive mode — use --force to override)."
+                )
+                protected.add(filename.lower())
+
+    return protected
+
+
+def upload(
+    cfg: DatasetConfig,
+    keep_csv: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+) -> int:
     """Upload all files declared in *cfg* to Hugging Face Hub.
 
     Converts CSV files to Parquet before compliance generation so the schema
@@ -119,6 +272,10 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
         cfg:      Dataset configuration.
         keep_csv: When ``True`` and a CSV was converted to Parquet, also
                   upload the original CSV as a secondary file.
+        force:    When ``True``, skip the README.md / LICENSE overwrite
+                  protection prompt and overwrite unconditionally.
+        dry_run:  When ``True``, show the repo diff and split report but
+                  do not upload any files.
 
     Returns:
         Exit code (0 = success, 1 = one or more uploads failed).
@@ -135,7 +292,48 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
     if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
+    # ── 0. Remote path validation (before any network calls) ────────────
+    path_errors = _validate_remote_paths(cfg)
+    if path_errors:
+        print("  \u2717  Remote path errors:")
+        for e in path_errors:
+            print(f"     {e}")
+        print()
+        return 1
+
     _ensure_repo(cfg)
+
+    # ── 0b. Pre-upload repo inspection ─────────────────────────────────
+    existing_files = _inspect_repo(cfg)
+    diff_summary = _repo_diff_summary(cfg, existing_files, keep_csv)
+    print(diff_summary)
+    print()
+
+    # ── 0c. Overwrite protection for README.md / LICENSE ───────────────
+    protected = _check_overwrite_protection(existing_files, force)
+
+    # ── 0d. Dry-run: stop here ─────────────────────────────────────────
+    if dry_run:
+        # Show split detection for dry-run
+        planned_remotes = []
+        for entry in cfg.files:
+            if entry.recursive:
+                planned_remotes.append(entry.remote.rstrip("/\\"))
+            elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
+                stem = Path(entry.remote).stem
+                planned_remotes.append(f"{stem}.parquet")
+                if keep_csv:
+                    planned_remotes.append(entry.remote)
+            else:
+                planned_remotes.append(entry.remote)
+        # Merge with existing to simulate post-upload layout
+        simulated = existing_files + planned_remotes
+        report = detect_splits(simulated)
+        _print_split_report(report)
+        print(f"\n{'=' * 60}")
+        print("  Dry-run complete — no files uploaded.")
+        print(f"{'=' * 60}\n")
+        return 0
 
     # ── Staging (wraps everything for cleanup) ───────────────────────────
     tmpdir = Path(tempfile.mkdtemp())
@@ -187,9 +385,11 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
         (tmpdir / "README.md").write_text(card, encoding="utf-8")
         (tmpdir / "LICENSE").write_text(license_text, encoding="utf-8")
 
-        # Upload compliance files first (order matters for HF recognition)
-        _hf_upload(cfg.repo_id, tmpdir / "README.md", "README.md", cfg.repo_type)
-        _hf_upload(cfg.repo_id, tmpdir / "LICENSE", "LICENSE", cfg.repo_type)
+        # Upload compliance files (respect overwrite protection)
+        if "readme.md" not in protected:
+            _hf_upload(cfg.repo_id, tmpdir / "README.md", "README.md", cfg.repo_type)
+        if "license" not in protected:
+            _hf_upload(cfg.repo_id, tmpdir / "LICENSE", "LICENSE", cfg.repo_type)
 
         # ── 3. Upload data files ────────────────────────────────────────
         ok = 0
@@ -234,7 +434,45 @@ def upload(cfg: DatasetConfig, keep_csv: bool = False) -> int:
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+    # ── 4. Post-upload split report ────────────────────────────────────
+    updated_files = _inspect_repo(cfg)
+    if updated_files:
+        report = detect_splits(updated_files)
+        _print_split_report(report)
+
     print(f"\n{'=' * 60}")
     print(f"  Result: {ok} uploaded, {fail} failed")
     print(f"{'=' * 60}\n")
     return 0 if fail == 0 else 1
+
+
+def _print_split_report(report: object) -> None:
+    """Print a human-readable split detection summary."""
+    from .splits import SplitReport
+
+    if not isinstance(report, SplitReport):
+        return
+
+    if not report.splits:
+        return
+
+    print("\n  Split detection:")
+    for s in report.splits:
+        print(f"    [{s.name}] {len(s.files)} file(s)")
+        for f in s.files[:5]:
+            print(f"      - {f}")
+        if len(s.files) > 5:
+            print(f"      … and {len(s.files) - 5} more")
+
+    if report.unclassified:
+        print(f"    [?] {len(report.unclassified)} file(s) unclassified")
+
+    for w in report.warnings:
+        print(f"    ⚠  {w}")
+
+    # Layout validation
+    layout_warnings = validate_layout(
+        [f for s in report.splits for f in s.files] + report.unclassified
+    )
+    for w in layout_warnings:
+        print(f"    ⚠  {w}")

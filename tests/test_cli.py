@@ -105,3 +105,34 @@ def test_main_help_prints(monkeypatch):
         cli.main()
     except SystemExit as e:
         assert e.code == 0
+
+
+# ── Force flag ─────────────────────────────────────────────────────────────────
+
+
+class TestUploadForceFlag:
+    def test_force_flag_defaults_to_false(self):
+        """--force should default to False when not passed."""
+        args = cli._build_parser().parse_args(["upload", "config.toml"])
+        assert args.force is False
+
+    def test_force_flag_explicit(self):
+        """--force should be True when passed."""
+        args = cli._build_parser().parse_args(["upload", "config.toml", "--force"])
+        assert args.force is True
+
+    def test_dry_run_flag_defaults_to_false(self):
+        """--dry-run should default to False when not passed."""
+        args = cli._build_parser().parse_args(["upload", "config.toml"])
+        assert args.dry_run is False
+
+    def test_dry_run_flag_explicit(self):
+        """--dry-run should be True when passed."""
+        args = cli._build_parser().parse_args(["upload", "config.toml", "--dry-run"])
+        assert args.dry_run is True
+
+    def test_force_and_keep_csv_together(self):
+        """--force and --keep-csv can be combined."""
+        args = cli._build_parser().parse_args(["upload", "config.toml", "--force", "--keep-csv"])
+        assert args.force is True
+        assert args.keep_csv is True
