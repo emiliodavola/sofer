@@ -15,13 +15,11 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import yaml
 
+from ._sentinels import MISSING_VALUE_SENTINELS
 from .codebook import infer_column_type
 from .model import DatasetConfig
 
 _SCHEMA_SAMPLE_SIZE = 10_000
-
-# Sentinel values treated as missing (same across CSV and Parquet paths).
-_NULL_SENTINELS = frozenset({"NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL", ""})
 
 
 def normalize_header(col_name: str) -> str:
@@ -152,7 +150,9 @@ def _csv_values_look_like_bool(values: list[str]) -> bool:
     """Check if all non-null CSV values look like boolean literals."""
     bool_vals = {"true", "false", "1", "0", "yes", "no"}
     non_null = [
-        v.strip().lower() for v in values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+        v.strip().lower()
+        for v in values
+        if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
     ]
     if not non_null:
         return False
@@ -527,13 +527,14 @@ def build_schema_report(
                 n_missing = sum(
                     1
                     for v in col_values
-                    if not v.strip()
-                    or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
+                    if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
                 )
                 pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
 
                 non_missing = [
-                    v for v in col_values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+                    v
+                    for v in col_values
+                    if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
                 n_unique = len(set(col_values))
@@ -584,8 +585,7 @@ def build_schema_report(
                 n_missing = sum(
                     1
                     for v in col_values
-                    if not v.strip()
-                    or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
+                    if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
                 )
                 pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
 
@@ -599,7 +599,9 @@ def build_schema_report(
                     hf_dtype = _HF_FEATURE_MAP["numeric"]  # "float64" — fallback
 
                 non_missing = [
-                    v for v in col_values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+                    v
+                    for v in col_values
+                    if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
                 n_unique = len(set(col_values))
@@ -645,6 +647,7 @@ def build_dataset_card(
     cfg: DatasetConfig,
     schema: list[ColumnSchema],
     recipe_content: str | None = None,
+    study_design_content: str | None = None,
     empty_columns: list[str] | None = None,
     duplicate_rows: dict[str, int] | None = None,
 ) -> str:
@@ -654,11 +657,12 @@ def build_dataset_card(
     https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/templates/datasetcard_template.md
 
     Args:
-        cfg:            Dataset configuration.
-        schema:         Column schema list from :func:`build_schema_report`.
-        recipe_content: Pre-loaded recipe content, or ``None``.
-        empty_columns:  Optional list of column names that are entirely empty.
-        duplicate_rows: Optional dict mapping filenames to duplicate row counts.
+        cfg:                   Dataset configuration.
+        schema:                Column schema list from :func:`build_schema_report`.
+        recipe_content:        Pre-loaded recipe content, or ``None``.
+        study_design_content:  Pre-loaded study design content, or ``None``.
+        empty_columns:         Optional list of column names that are entirely empty.
+        duplicate_rows:        Optional dict mapping filenames to duplicate row counts.
 
     Returns:
         Complete ``README.md`` content as a single string.
@@ -906,8 +910,13 @@ def build_dataset_card(
     lines.append("")
     lines.append("### Curation Rationale")
     lines.append("")
-    lines.append("[More Information Needed]")
-    lines.append("")
+
+    if study_design_content is not None:
+        lines.append(study_design_content.strip())
+        lines.append("")
+    else:
+        lines.append("[More Information Needed]")
+        lines.append("")
 
     if collection:
         lines.append("### Source Data")

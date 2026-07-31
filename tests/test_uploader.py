@@ -791,3 +791,296 @@ class TestUploadQualityGate:
         # upload should proceed (dry_run returns 0 on success)
         exit_code = upload(cfg, quality_report=report, dry_run=True)
         assert exit_code == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Reads override, codebook upload, schema assertion
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReadmeOverride:
+    """cfg.readme should replace the generated Dataset Card."""
+
+    def test_readme_file_used_when_set(self, tmp_path, monkeypatch):
+        """When cfg.readme points to a file, use it instead of generating."""
+        from data_uploader import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+
+        custom_readme = tmp_path / "CUSTOM_README.md"
+        custom_readme.write_text("# My Custom Dataset\n\nCustom content.", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            readme=str(custom_readme),
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+
+        # Track what gets written as the README.md upload
+        uploaded_readme_content: list[str] = []
+
+        def _track_upload(path_or_fileobj="", path_in_repo="", **kw):
+            if path_in_repo == "README.md":
+                uploaded_readme_content.append(
+                    Path(str(path_or_fileobj)).read_text(encoding="utf-8")
+                )
+
+        monkeypatch.setattr(uploader._api, "upload_file", _track_upload)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        assert len(uploaded_readme_content) >= 1
+        assert "My Custom Dataset" in uploaded_readme_content[0]
+        assert "Custom content" in uploaded_readme_content[0]
+        assert not td.exists()  # cleanup verified
+
+    def test_readme_fallback_when_file_missing(self, tmp_path, monkeypatch):
+        """When cfg.readme points to a missing file, fall back to generation."""
+        from data_uploader import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            readme="nonexistent.md",
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+
+        uploaded_readme_content: list[str] = []
+
+        def _track_upload(path_or_fileobj="", path_in_repo="", **kw):
+            if path_in_repo == "README.md":
+                uploaded_readme_content.append(
+                    Path(str(path_or_fileobj)).read_text(encoding="utf-8")
+                )
+
+        monkeypatch.setattr(uploader._api, "upload_file", _track_upload)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        assert len(uploaded_readme_content) >= 1
+        # Should be a generated card (not the missing file)
+        assert "Dataset Card for test" in uploaded_readme_content[0]
+        assert not td.exists()
+
+
+class TestCodebookUpload:
+    """cfg.codebook should upload the codebook alongside data files."""
+
+    def test_codebook_uploaded_to_codebook_subpath(self, tmp_path, monkeypatch):
+        """When cfg.codebook is set, upload to codebook/ path."""
+        from data_uploader import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+
+        cb = tmp_path / "my_codebook.md"
+        cb.write_text("# Codebook\nTest content.", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            codebook=str(cb),
+            _base_dir=tmp_path,
+        )
+
+        uploaded = []
+
+        def _track(path_or_fileobj="", path_in_repo="", **kw):
+            uploaded.append(path_in_repo)
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _track)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        # Should contain a codebook/ upload
+        codebook_uploads = [u for u in uploaded if "codebook/" in u]
+        assert len(codebook_uploads) >= 1
+        assert any("my_codebook.md" in u for u in codebook_uploads)
+
+        assert not td.exists()
+
+    def test_codebook_missing_file_warns(self, tmp_path, monkeypatch, capsys):
+        """When cfg.codebook points to a missing file, warn but don't fail."""
+        from data_uploader import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            codebook="nonexistent_codebook.md",
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+        captured = capsys.readouterr()
+        assert (
+            "codebook declared but not found" in captured.out
+            or "codebook declared but not found" in captured.err
+        )
+
+        assert not td.exists()
+
+
+class TestSchemaAssertion:
+    """_assert_card_dtypes_match_parquet should flag float64 vs int64 mismatches."""
+
+    def test_no_mismatch_when_dtypes_match(self, tmp_path):
+        """No warning when Parquet int64 → card int64."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from data_uploader.repo_compliance import ColumnSchema
+        from data_uploader.uploader import _assert_card_dtypes_match_parquet
+
+        parquet_path = tmp_path / "test.parquet"
+        table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
+        pq.write_table(table, parquet_path)
+
+        schema = [
+            ColumnSchema(
+                name="age",
+                dtype="numeric",
+                nullable=False,
+                example="25",
+                unique=3,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+        ]
+        converted = {"test": (parquet_path, Path("dummy.csv"), "test.csv")}
+
+        # Should not raise and should not print warnings about this column
+        import io
+        import sys
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            _assert_card_dtypes_match_parquet(schema, converted)
+            output = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+
+        assert "SCHEMA ASSERTION" not in output
+
+    def test_flags_float64_vs_int64_mismatch(self, tmp_path):
+        """Should warn when Parquet is int64 but card says float64."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from data_uploader.repo_compliance import ColumnSchema
+        from data_uploader.uploader import _assert_card_dtypes_match_parquet
+
+        parquet_path = tmp_path / "test.parquet"
+        table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
+        pq.write_table(table, parquet_path)
+
+        schema = [
+            ColumnSchema(
+                name="age",
+                dtype="numeric",
+                nullable=False,
+                example="25",
+                unique=3,
+                missing=0.0,
+                hf_dtype="float64",
+            ),
+        ]
+        converted = {"test": (parquet_path, Path("dummy.csv"), "test.csv")}
+
+        import io
+        import sys
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            _assert_card_dtypes_match_parquet(schema, converted)
+            output = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+
+        assert "SCHEMA ASSERTION" in output
+        assert "age" in output
+        assert "float64" in output
+        assert "int64" in output
+
+    def test_skips_disambiguated_columns(self, tmp_path):
+        """:: prefixed columns should not trigger schema assertion."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from data_uploader.repo_compliance import ColumnSchema
+        from data_uploader.uploader import _assert_card_dtypes_match_parquet
+
+        parquet_path = tmp_path / "test.parquet"
+        table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
+        pq.write_table(table, parquet_path)
+
+        schema = [
+            ColumnSchema(
+                name="a.parquet::age",
+                dtype="numeric",
+                nullable=False,
+                example="25",
+                unique=3,
+                missing=0.0,
+                hf_dtype="float64",
+            ),
+        ]
+        converted = {"test": (parquet_path, Path("dummy.csv"), "test.csv")}
+
+        import io
+        import sys
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            _assert_card_dtypes_match_parquet(schema, converted)
+            output = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+
+        assert "SCHEMA ASSERTION" not in output

@@ -16,6 +16,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from ._sentinels import MISSING_VALUE_SENTINELS
+
 
 def infer_column_type(values: list[str]) -> str:
     """Guess the semantic type of a column from a sample of its values.
@@ -27,13 +29,7 @@ def infer_column_type(values: list[str]) -> str:
     total = len(values)
     for v in values:
         cleaned = v.strip()
-        if not cleaned or cleaned.upper() in (
-            "NA",
-            "N/A",
-            "NOTAPPLICABLE",
-            "MISSING",
-            "NULL",
-        ):
+        if not cleaned or cleaned.upper() in MISSING_VALUE_SENTINELS:
             continue
         try:
             float(cleaned.replace(",", "."))
@@ -104,14 +100,16 @@ def generate(
         col_values = [row[idx - 1] if idx - 1 < len(row) else "" for row in sample]
         n_unique = len(set(col_values))
         n_missing = sum(
-            1
-            for v in col_values
-            if not v.strip() or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING")
+            1 for v in col_values if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
         )
         pct_missing = round(n_missing / len(sample) * 100, 1) if sample else 0.0
         col_type = infer_column_type(col_values)
         example = next(
-            (v for v in col_values if v.strip() and v.strip().upper() not in ("NA", "")),
+            (
+                v
+                for v in col_values
+                if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
+            ),
             "",
         )
         lines.append(

@@ -23,7 +23,12 @@ import pyarrow.parquet as pq
 from huggingface_hub import HfApi
 
 from .model import DatasetConfig
-from .repo_compliance import build_dataset_card, build_license_file, build_schema_report
+from .repo_compliance import (
+    ColumnSchema,
+    build_dataset_card,
+    build_license_file,
+    build_schema_report,
+)
 from .splits import detect_splits, validate_layout, validate_split_mapping
 from .verification import VerificationReport, _print_verification_report, verify_load_dataset
 
@@ -590,6 +595,115 @@ def _check_large_values(
     return warnings
 
 
+def _assert_card_dtypes_match_parquet(
+    schema: list[ColumnSchema],
+    converted: dict[str, tuple[Path, Path, str]],
+) -> None:
+    """Sanity-check that the schema report's hf_dtype matches the Parquet files.
+
+    At minimum: no ``float64`` in the card when the actual Parquet column
+    is ``int64`` (or any integral type).  This catches drift where the card
+    falls back to a loose ``float64`` default even though the Parquet
+    schema carries a precise integer type.
+
+    Args:
+        schema:    The schema report from :func:`build_schema_report`.
+        converted: Map ``stem → (parquet_path, csv_path, original_remote)``
+                   from the conversion step.
+    """
+    _integral_types = frozenset({"int8", "int16", "int32", "int64"})
+
+    # Build stem→parquet_path lookup
+    parquet_by_stem: dict[str, Path] = {stem: p for stem, (p, _c, _r) in converted.items()}
+
+    mismatches: list[str] = []
+
+    for col in schema:
+        if "::" in col.name:
+            continue  # skip disambiguated pseudo-columns
+        if col.hf_dtype is None or col.hf_dtype != "float64":
+            continue  # only flag suspect float64 entries
+
+        # Find which Parquet file this column belongs to by checking stems
+        for stem, parquet_path in parquet_by_stem.items():
+            try:
+                pf = pq.ParquetFile(parquet_path)
+                names = pf.schema_arrow.names
+                if col.name not in names:
+                    continue
+                field_idx = names.index(col.name)
+                pa_type = pf.schema_arrow.field(field_idx).type
+                actual = _parquet_to_hf_dtype_type(pa_type)
+                if actual is not None and actual in _integral_types:
+                    mismatches.append(
+                        f"Column '{col.name}' card dtype=float64 but "
+                        f"Parquet '{stem}.parquet' has {actual} — "
+                        f"mismatch may indicate schema-source drift."
+                    )
+                    break  # one mismatch per column is enough
+            except Exception:
+                continue
+
+    if mismatches:
+        for m in mismatches:
+            print(f"  \u26a0  SCHEMA ASSERTION: {m}")
+
+
+def _parquet_to_hf_dtype_type(pa_type: object) -> str | None:
+    """Map a pyarrow physical type to an HF Dataset feature type string.
+
+    Identical to ``repo_compliance._parquet_to_hf_dtype`` but kept local
+    to avoid a circular import.
+    """
+    # Integral types
+    if pa.types.is_int8(pa_type) or pa.types.is_int16(pa_type) or pa.types.is_int32(pa_type):
+        return "int32"
+    if pa.types.is_int64(pa_type):
+        return "int64"
+
+    # Floating point
+    if pa.types.is_float32(pa_type):
+        return "float32"
+    if pa.types.is_float64(pa_type):
+        return "float64"
+
+    # Boolean
+    if pa.types.is_boolean(pa_type):
+        return "bool"
+
+    # String types
+    if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
+        return "string"
+
+    # Binary types → string
+    if (
+        pa.types.is_binary(pa_type)
+        or pa.types.is_large_binary(pa_type)
+        or pa.types.is_fixed_size_binary(pa_type)
+    ):
+        return "string"
+
+    # Temporal types
+    if pa.types.is_date32(pa_type):
+        return "date32"
+    if pa.types.is_date64(pa_type):
+        return "timestamp[ms]"
+    if pa.types.is_timestamp(pa_type):
+        return "timestamp[s]"
+    if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
+        return "time64"
+
+    # Decimal
+    if pa.types.is_decimal(pa_type):
+        return "float64"
+
+    # Null — omit from features
+    if pa.types.is_null(pa_type):
+        return None
+
+    return "string"
+
+
 def upload(
     cfg: DatasetConfig,
     keep_csv: bool = False,
@@ -744,13 +858,55 @@ def upload(
             if recipe_path.exists():
                 recipe_content = recipe_path.read_text(encoding="utf-8")
 
-        print("  [i] Generating Dataset Card \u2026")
-        card = build_dataset_card(cfg, schema, recipe_content=recipe_content)
+        # Study design content (optional — included in Dataset Card body)
+        study_design_content: str | None = None
+        if cfg.study_design:
+            study_design_path = Path(cfg.study_design)
+            if study_design_path.exists():
+                study_design_content = study_design_path.read_text(encoding="utf-8")
+            else:
+                print(f"  \u26a0  study_design declared but not found: {cfg.study_design}")
+
+        # Readme override — if cfg.readme is set, use that file instead of generating
+        if cfg.readme:
+            readme_path = Path(cfg.readme)
+            if readme_path.exists():
+                print(f"  [i] Using custom README from: {cfg.readme}")
+                card = readme_path.read_text(encoding="utf-8")
+            else:
+                print(f"  \u26a0  readme declared but not found: {cfg.readme} — generating card")
+                card = build_dataset_card(
+                    cfg,
+                    schema,
+                    recipe_content=recipe_content,
+                    study_design_content=study_design_content,
+                )
+        else:
+            print("  [i] Generating Dataset Card \u2026")
+            card = build_dataset_card(
+                cfg,
+                schema,
+                recipe_content=recipe_content,
+                study_design_content=study_design_content,
+            )
+
+        # Codebook file (optional — uploaded alongside data files)
+        codebook_local: Path | None = None
+        if cfg.codebook:
+            cb_path = Path(cfg.codebook)
+            if cb_path.exists():
+                codebook_local = cb_path
+            else:
+                print(f"  \u26a0  codebook declared but not found: {cfg.codebook}")
+
         print("  [i] Generating LICENSE \u2026")
         license_text = build_license_file(cfg.license)
 
         (tmpdir / "README.md").write_text(card, encoding="utf-8")
         (tmpdir / "LICENSE").write_text(license_text, encoding="utf-8")
+
+        # ── 2a. Schema assertion: card dtypes vs Parquet on-disk dtypes ──
+        _assert_card_dtypes_match_parquet(schema, converted)
 
         # ── 2b. load_dataset() verification (optional) ────────────────────
         verification: VerificationReport | None = None
@@ -816,6 +972,14 @@ def upload(
                     ok += 1
                 else:
                     fail += 1
+
+        # ── 3b. Upload codebook file (optional) ─────────────────────────
+        if codebook_local is not None:
+            codebook_remote = f"codebook/{codebook_local.name}"
+            if _hf_upload(cfg.repo_id, codebook_local, codebook_remote, cfg.repo_type):
+                ok += 1
+            else:
+                fail += 1
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

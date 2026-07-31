@@ -1847,3 +1847,51 @@ class TestDataQualityNotes:
         # "ghost" should NOT appear in empty columns because it's ::-prefixed
         # x is not empty, so no Data Quality section at all
         assert "### Data Quality Notes" not in result
+
+
+# ── 10. Study design content in Dataset Card ──────────────────────────────────
+
+
+class TestStudyDesign:
+    """When ``cfg.study_design`` is set, its content should appear in the Dataset Card."""
+
+    def test_study_design_in_cuartion_rationale(self):
+        """study_design_content should replace '[More Information Needed]'."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+            study_design="design.md",
+        )
+        sd_content = "This dataset was collected via a stratified random sample."
+        result = build_dataset_card(cfg, schema=[], study_design_content=sd_content)
+
+        assert "### Curation Rationale" in result
+        assert "stratified random sample" in result
+        assert (
+            "[More Information Needed]"
+            not in result.split("### Curation Rationale")[1].split("###")[0]
+        )
+
+    def test_study_design_none_falls_back_to_placeholder(self):
+        """When study_design_content is None, show '[More Information Needed]'."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[])
+
+        assert "### Curation Rationale" in result
+        assert "[More Information Needed]" in result
+
+    def test_study_design_content_is_stripped(self):
+        """Trailing whitespace in study design content should be stripped."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+        )
+        sd_content = "\n\n  Survey methodology details.  \n\n"
+        result = build_dataset_card(cfg, schema=[], study_design_content=sd_content)
+
+        # Content should appear without leading/trailing whitespace
+        assert "Survey methodology details." in result
+        # The stripped content should not cause multiple blank lines
+        assert "\n\n\n" not in result

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ._csv_reader import ENCODING_FALLBACKS, stream_csv
+from ._sentinels import MISSING_VALUE_SENTINELS
 from .checks import ValidationReport
 from .codebook import infer_column_type
 from .model import DatasetConfig, QualityCheck, QualityResult
@@ -35,13 +36,11 @@ _BUILTIN_DEFAULTS: dict[str, dict[str, Any] | None] = {
     "value_range": None,  # skipped unless explicitly configured
 }
 
-_EMPTY_SENTINELS = frozenset({"", "NA", "N/A", "NULL", "NOTAPPLICABLE", "MISSING"})
-
 
 def _is_empty(value: str) -> bool:
     """Return True when *value* should be considered empty / missing."""
     cleaned = value.strip()
-    return not cleaned or cleaned.upper() in _EMPTY_SENTINELS
+    return not cleaned or cleaned.upper() in MISSING_VALUE_SENTINELS
 
 
 # ---------------------------------------------------------------------------
