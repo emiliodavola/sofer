@@ -3,6 +3,8 @@
 import csv
 from pathlib import Path
 
+import pytest
+
 from data_uploader._csv_reader import stream_csv
 from data_uploader.checks import ValidationReport
 from data_uploader.model import (
@@ -388,11 +390,12 @@ class TestCheckEncodingValidation:
         assert len(qr) == 0
 
     def test_fallback_latin1(self, tmp_path):
-        """Latin-1 file → succeeds via fallback, no error."""
+        """Latin-1 file → rejected by UTF-8 enforcement."""
         cfg, _ = _make_csv_cfg(tmp_path, ["a"], [["José"]], encoding="latin-1")
         report = _run_quality(cfg)
         qr = [r for r in report.quality_results if r.check == "encoding_validation"]
-        assert len(qr) == 0
+        assert len(qr) >= 1
+        assert qr[0].severity == "fail"
 
 
 # ── print_summary quality section ───────────────────────────────────────────────
@@ -480,16 +483,14 @@ class TestStreamCsv:
         assert results[-1][1] == ["99"]
 
     def test_encoding_fallback_latin1(self, tmp_path):
-        """Latin-1 file decoded via utf-8-sig → utf-8 → latin-1 fallback."""
+        """Latin-1 file → rejected by UTF-8 enforcement in stream_csv."""
         csv_path = _make_csv(
             tmp_path / "latin1.csv",
             [["name"], ["José"], ["François"]],
             encoding="latin-1",
         )
-        results = list(stream_csv(csv_path, encoding="utf-8-sig"))
-        assert len(results) == 3  # header + 2 data
-        assert results[1][1] == ["José"]
-        assert results[2][1] == ["François"]
+        with pytest.raises(ValueError, match="Cannot decode"):
+            list(stream_csv(csv_path, encoding="utf-8-sig"))
 
     def test_encoding_fallback_utf8_direct(self, tmp_path):
         """Plain UTF-8 file decoded without fallback."""
@@ -501,12 +502,9 @@ class TestStreamCsv:
         results = list(stream_csv(csv_path, encoding="utf-8"))
         assert len(results) == 3
 
-    def test_binary_file_yields_garbled_rows(self, tmp_path):
-        """Binary file: latin-1 catches everything, produces garbled rows."""
+    def test_binary_file_is_rejected(self, tmp_path):
+        """Binary file: UTF-8 enforcement rejects it."""
         csv_path = tmp_path / "binary.csv"
         csv_path.write_bytes(b"\xff\xfe\xfd\xfc\xfb\xfa\xfb\xfc\xff")
-        results = list(stream_csv(csv_path))
-        # No crash — latin-1 decodes all bytes
-        assert len(results) >= 1
-        _header, row = results[0]
-        assert row is None  # header yield
+        with pytest.raises(ValueError, match="Cannot decode"):
+            list(stream_csv(csv_path))

@@ -189,12 +189,11 @@ class QualityValidator:
                 encoding=self.cfg.csv_encoding,
                 max_sample=self._max_sample,
             )
-        except ValueError:
-            # Already reported by encoding_validation
+            header, _ = next(gen)
+        except (ValueError, StopIteration):
+            # Encoding issue reported by _check_encoding_validation;
+            # StopIteration = completely empty file (no header).
             return
-
-        # Header yield
-        header, _ = next(gen)
         self._current_header = header
         self._file_headers[fname] = header
 

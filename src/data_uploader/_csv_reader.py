@@ -3,7 +3,7 @@ Shared streaming CSV reader with encoding fallback.
 
 Provides :func:`stream_csv`, a generator that yields ``(header, row)`` tuples
 and handles encoding detection by trying a fallback chain:
-``utf-8-sig → utf-8 → latin-1 → cp1252``.
+``utf-8-sig → utf-8``.
 """
 
 from __future__ import annotations
@@ -12,8 +12,12 @@ import csv
 from collections.abc import Generator
 from pathlib import Path
 
-ENCODING_FALLBACKS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
-"""Ordered list of encodings tried when opening a CSV file."""
+ENCODING_FALLBACKS = ["utf-8-sig", "utf-8"]
+"""Ordered list of UTF-8 encodings tried when opening a CSV file.
+
+    Non-UTF-8 files are rejected — the quality gate enforces UTF-8 before
+    upload, so the reader should never encounter latin-1/cp1252 content.
+    """
 
 
 def stream_csv(
@@ -28,7 +32,7 @@ def stream_csv(
     Subsequent yields carry parsed data rows as ``list[str]``.
 
     Encoding fallback chain (tried in order):
-    ``utf-8-sig → utf-8 → latin-1 → cp1252``.
+    ``utf-8-sig → utf-8``.  Non-UTF-8 files raise ``ValueError``.
 
     Args:
         path:       Path to the CSV file.
