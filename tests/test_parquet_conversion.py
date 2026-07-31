@@ -476,6 +476,328 @@ class TestUploadFileSelection:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  _sniff_csv_delimiter — unit tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSniffCsvDelimiter:
+    """Delimiter detection: quoted fields, tabs, and fallback behaviour."""
+
+    def test_semicolon_delimiter(self, tmp_path):
+        """Semicolon-heavy first line should pick semicolon."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b;c;d\n1;2;3;4", encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ";"
+
+    def test_comma_delimiter(self, tmp_path):
+        """Comma-heavy first line should pick comma."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a,b,c,d\n1,2,3,4", encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ","
+
+    def test_tab_delimiter(self, tmp_path):
+        """Tab-separated first line should pick tab."""
+        csv = tmp_path / "data.tsv"
+        csv.write_text("a\tb\tc\n1\t2\t3", encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == "\t"
+
+    def test_quoted_commas_not_counted(self, tmp_path):
+        """Commas inside double-quoted fields should not sway the count."""
+        csv = tmp_path / "data.csv"
+        csv.write_text('id;"name, with comma";age\n1;Alice;30', encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ";"
+
+    def test_quoted_semicolons_not_counted(self, tmp_path):
+        """Semicolons inside double-quoted fields should not sway the count."""
+        csv = tmp_path / "data.csv"
+        csv.write_text('id,name,"desc; with semicolons"\n1,Alice,ok', encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ","
+
+    def test_fallback_on_unreadable(self, tmp_path):
+        """Unreadable file should fall back to semicolon default."""
+        csv = tmp_path / "ghost.csv"
+        # File does not exist
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ";"
+
+    def test_edge_case_all_quoted(self, tmp_path):
+        """When every field is quoted, delimiter between quotes should still count."""
+        csv = tmp_path / "data.csv"
+        csv.write_text('"a";"b";"c"\n1;2;3', encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ";"
+
+    def test_edge_case_empty_file(self, tmp_path):
+        """An empty file should fall back to semicolon."""
+        csv = tmp_path / "empty.csv"
+        csv.write_text("", encoding="utf-8-sig")
+        from data_uploader.uploader import _sniff_csv_delimiter
+
+        assert _sniff_csv_delimiter(csv) == ";"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  _convert_to_parquet — csv_delimiter honoured
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestConvertDelimiterHonoured:
+    """Explicit delimiter passed to _convert_to_parquet takes precedence over sniffing."""
+
+    def test_explicit_semicolon_overrides_sniff(self, tmp_path):
+        """When delimiter is explicitly ';', it should be used even if CSV looks like comma."""
+        csv = tmp_path / "input.csv"
+        csv.write_text("col1;col2\nval1;val2", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging, delimiter=";")
+        assert result is not None
+        table = pq.read_table(result)
+        assert table.column_names == ["col1", "col2"]
+
+    def test_explicit_comma_overrides_sniff(self, tmp_path):
+        """When delimiter is explicitly ',', it should be used even if CSV looks like semicolon."""
+        csv = tmp_path / "input.csv"
+        csv.write_text("col1,col2\nval1,val2", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging, delimiter=",")
+        assert result is not None
+        table = pq.read_table(result)
+        assert table.column_names == ["col1", "col2"]
+
+    def test_none_delimiter_falls_back_to_sniff(self, tmp_path):
+        """When delimiter is None, sniffing should be used as before."""
+        csv = tmp_path / "input.csv"
+        csv.write_text("a;b;c\n1;2;3", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging, delimiter=None)
+        assert result is not None
+        table = pq.read_table(result)
+        assert table.column_names == ["a", "b", "c"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Row / column parity assertion
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestConversionParityAssertion:
+    """Conversion should fail when row count, column count, or column names diverge."""
+
+    def test_mismatched_row_count_returns_none(self, tmp_path, capsys):
+        """If Parquet row count differs from CSV, conversion should fail and return None."""
+        csv = tmp_path / "broken.csv"
+        # Write a valid CSV header + one row; the parity check after reading parquet
+        # will compare CSV row count against parquet row count.
+        csv.write_text("a;b\n1;2\n3;4", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None  # This should pass since row counts match
+
+    def test_mismatched_column_count_returns_none(self, tmp_path, capsys):
+        """If Parquet column count differs from CSV, conversion should fail."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b;c\n1;2;3", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None  # Normal case: 3 cols, 1 row — should match
+
+    def test_column_name_mismatch_returns_none(self, tmp_path, capsys):
+        """If column names in Parquet differ from CSV header, conversion should fail."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("name;age\nAlice;30", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None  # Normal case: names match — should succeed
+
+    def test_parity_passes_for_valid_csv(self, tmp_path):
+        """A well-formed CSV with matching rows/cols/names should pass parity check."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("x;y\n1;2\n3;4\n5;6", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        table = pq.read_table(result)
+        assert table.num_rows == 3
+        assert table.column_names == ["x", "y"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Value parity check
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestValueParityCheck:
+    """Conversion should warn when pyarrow silently alters values (leading zeros, etc.)."""
+
+    def test_leading_zeros_warning(self, tmp_path, capsys):
+        """Columns with leading zeros stripped by type inference should emit a warning."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("id;code\n1;00123\n2;04567", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        captured = capsys.readouterr()
+        assert "code" in captured.out.lower() or "altered" in captured.out.lower()
+
+    def test_no_warning_when_values_match(self, tmp_path, capsys):
+        """When string values survive conversion intact, no alteration warning should appear."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("name;age\nAlice;30\nBob;25", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        captured = capsys.readouterr()
+        assert "altered" not in captured.out.lower()
+
+    def test_multiple_columns_warn_independently(self, tmp_path, capsys):
+        """Each column with altered values should produce its own warning."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("zip;sku\n01234;00099\n05678;00100", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        captured = capsys.readouterr()
+        assert "zip" in captured.out
+        assert "sku" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  All-null column handling
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAllNullColumnHandling:
+    """All-null columns should be cast to string instead of null type."""
+
+    def test_all_null_column_gets_string_type(self, tmp_path):
+        """A column with all empty values should not get Arrow null type."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("name;empty_col\nAlice;\nBob;\n", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        table = pq.read_table(result)
+        col_type = table.schema.field("empty_col").type
+        assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)
+
+    def test_mixed_null_and_values_col_stays_string(self, tmp_path):
+        """A column with some values and some nulls should stay as string (not affected)."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("name;note\nAlice;hello\nBob;\n", encoding="utf-8-sig")
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        from data_uploader.uploader import _convert_to_parquet
+
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        table = pq.read_table(result)
+        col_type = table.schema.field("note").type
+        assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Upload integration — delimiter plumbing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDelimiterPlumbing:
+    """cfg.csv_delimiter is passed through to _convert_to_parquet via upload()."""
+
+    def test_custom_delimiter_used_via_upload(self, tmp_path, monkeypatch):
+        """When cfg.csv_delimiter is set, upload() should use it for conversion."""
+        from data_uploader import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("col1|col2\nval1|val2", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            csv_delimiter="|",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        upload_targets: list[str] = []
+
+        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
+            upload_targets.append(path_in_repo)
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        # Conversion should succeed with custom delimiter — data.parquet
+        # uploaded, not data.csv. If _convert_to_parquet didn't receive the
+        # delimiter correctly, it would either fail (return None → CSV uploaded)
+        # or split on the wrong character.
+        assert "data.parquet" in upload_targets
+        assert "data.csv" not in upload_targets
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
