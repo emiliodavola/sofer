@@ -15,6 +15,7 @@ from data_uploader.repo_compliance import (
     build_dataset_card,
     build_license_file,
     build_schema_report,
+    normalize_header,
 )
 
 # ── ColumnSchema ──────────────────────────────────────────────────────────────
@@ -175,7 +176,7 @@ class TestBuildSchemaReport:
         assert schema == []
 
     def test_column_name_collision_across_files(self, tmp_path):
-        """Duplicate column names across files should be disambiguated with ::."""
+        """Duplicate column names across files should skip the second occurrence."""
         a = tmp_path / "file_a.csv"
         a.write_text("value\n1\n2\n", encoding="utf-8-sig")
         b = tmp_path / "file_b.csv"
@@ -191,8 +192,8 @@ class TestBuildSchemaReport:
         )
         schema = build_schema_report(cfg)
         names = [s.name for s in schema]
-        assert "file_a.csv::value" in names
-        assert "file_b.csv::value" in names
+        # Only first occurrence kept; second duplicate skipped
+        assert names == ["value"]
 
     def test_file_not_found_skipped_silently(self, tmp_path):
         """A missing CSV file should be skipped without raising."""
@@ -782,7 +783,7 @@ class TestBuildSchemaReportDisambiguationParquet:
     """Column name collision across Parquet files."""
 
     def test_disambiguation_uses_parquet_prefix(self, tmp_path):
-        """Disambiguated column names should use .parquet prefix."""
+        """Duplicate column names across Parquet files should skip second occurrence."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -810,8 +811,8 @@ class TestBuildSchemaReportDisambiguationParquet:
 
         schema = build_schema_report(cfg, staging_dir=tmp_path)
         names = [s.name for s in schema]
-        assert "a.parquet::value" in names
-        assert "b.parquet::value" in names
+        # Only first occurrence kept
+        assert names == ["value"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1624,3 +1625,225 @@ class TestFullCardYAMLValidity:
 
         # Card body should display the original license string
         assert "proprietary-v2" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GitHub issue #13 — Schema Validation & Features Fidelity
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestNormalizeHeader:
+    """normalize_header strips whitespace and preserves case."""
+
+    def test_strips_leading_trailing_whitespace(self):
+        assert normalize_header("  col  ") == "col"
+
+    def test_strips_tabs_and_newlines(self):
+        assert normalize_header("\tname\r\n") == "name"
+
+    def test_preserves_case(self):
+        assert normalize_header("COLUMN_NAME") == "COLUMN_NAME"
+
+    def test_leaves_clean_name_unchanged(self):
+        assert normalize_header("age") == "age"
+
+    def test_empty_string_returns_empty(self):
+        assert normalize_header("   ") == ""
+
+
+class TestNoColonPrefixedInCard:
+    """:: prefixed pseudo-columns must not appear in dataset_info or Data Fields."""
+
+    def test_colon_prefixed_filtered_from_features(self):
+        """Schema entries with :: in name should be excluded from dataset_info.features."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+        )
+        schema = [
+            ColumnSchema(
+                name="clean",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=1,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+            ColumnSchema(
+                name="a.parquet::value",
+                dtype="numeric",
+                nullable=False,
+                example="2",
+                unique=2,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+            ColumnSchema(
+                name="file.csv::value",
+                dtype="numeric",
+                nullable=False,
+                example="3",
+                unique=3,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        fm = _parse_frontmatter(result)
+
+        features = fm["dataset_info"]["features"]
+        feature_names = [f["name"] for f in features]
+        assert feature_names == ["clean"]
+        assert "a.parquet::value" not in feature_names
+        assert "file.csv::value" not in feature_names
+
+    def test_colon_prefixed_filtered_from_data_fields_table(self):
+        """:: prefixed columns should not appear in the Data Fields table."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+        )
+        schema = [
+            ColumnSchema(
+                name="good",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=1,
+                missing=0.0,
+                hf_dtype="int64",
+            ),
+            ColumnSchema(
+                name="x::bad",
+                dtype="numeric",
+                nullable=True,
+                example="2",
+                unique=2,
+                missing=5.0,
+                hf_dtype="float64",
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        # The Data Fields table should only show 'good'
+        assert "| `good` |" in result
+        assert "| `x::bad` |" not in result
+
+
+class TestSampleBasedFootnote:
+    """Data Fields table must include a sample-based-stats footnote."""
+
+    def test_footnote_present_when_schema_has_columns(self):
+        """Footnote should appear after the Data Fields table."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            license="mit",
+        )
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "Statistics (unique, missing%) based on a 10,000-row sample" in result
+
+    def test_no_footnote_when_schema_empty(self):
+        """When there is no schema, there is no Data Fields table → no footnote."""
+        cfg = DatasetConfig(name="test", repo_id="user/test")
+        result = build_dataset_card(cfg, schema=[])
+        assert "Statistics (unique, missing%) based on a 10,000-row sample" not in result
+
+
+class TestDataQualityNotes:
+    """Empty columns and duplicate rows should be documented in the card."""
+
+    def test_empty_columns_explicit(self):
+        """Explicitly passed empty_columns should appear in a Data Quality section."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema, empty_columns=["dead_col"])
+        assert "### Data Quality Notes" in result
+        assert "`dead_col`" in result
+
+    def test_empty_columns_auto_detected_from_schema(self):
+        """Columns with missing==100% should be auto-detected."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="full_col", dtype="numeric", nullable=True, example="1", unique=1, missing=0.0
+            ),
+            ColumnSchema(
+                name="dead_col", dtype="unknown", nullable=True, example="", unique=0, missing=100.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "### Data Quality Notes" in result
+        assert "`dead_col`" in result
+
+    def test_duplicate_rows_in_card(self):
+        """Duplicate row counts should appear in the Data Quality section."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, schema=[], duplicate_rows={"data.csv": 42})
+        assert "### Data Quality Notes" in result
+        assert "`data.csv`" in result
+        assert "42" in result
+
+    def test_no_section_when_nothing_to_report(self):
+        """No Data Quality Notes section when no empty columns or duplicate rows."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "### Data Quality Notes" not in result
+
+    def test_both_empty_and_dupes(self):
+        """Both empty columns and duplicate rows can be shown together."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="dead", dtype="unknown", nullable=True, example="", unique=0, missing=100.0
+            ),
+        ]
+        result = build_dataset_card(
+            cfg,
+            schema,
+            empty_columns=["extra_dead"],
+            duplicate_rows={"f1.csv": 3, "f2.csv": 7},
+        )
+        assert "### Data Quality Notes" in result
+        assert "`dead`" in result
+        assert "`extra_dead`" in result
+        assert "`f1.csv`" in result
+        assert "3" in result
+        assert "7" in result
+
+    def test_colon_prefixed_not_duplicated_in_empty_columns(self):
+        """:: prefixed columns should not be reported as empty even if at 100%."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+            ColumnSchema(
+                name="a.parquet::ghost",
+                dtype="unknown",
+                nullable=True,
+                example="",
+                unique=0,
+                missing=100.0,
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        # "ghost" should NOT appear in empty columns because it's ::-prefixed
+        # x is not empty, so no Data Quality section at all
+        assert "### Data Quality Notes" not in result

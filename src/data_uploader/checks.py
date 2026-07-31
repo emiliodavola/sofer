@@ -15,6 +15,7 @@ import csv
 from pathlib import Path
 
 from .model import DatasetConfig, QualityResult
+from .repo_compliance import normalize_header
 
 
 class ValidationReport:
@@ -167,7 +168,7 @@ class DatasetValidator:
             try:
                 with open(matched, newline="", encoding="utf-8-sig") as fh:
                     reader = csv.reader(fh, delimiter=";")
-                    headers = [h.strip().lower() for h in next(reader)]
+                    headers = [normalize_header(h).lower() for h in next(reader)]
             except Exception as exc:
                 self.report.warnings.append(f"Cannot read '{matched.name}': {exc}")
                 continue

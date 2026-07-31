@@ -23,6 +23,17 @@ _SCHEMA_SAMPLE_SIZE = 10_000
 # Sentinel values treated as missing (same across CSV and Parquet paths).
 _NULL_SENTINELS = frozenset({"NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL", ""})
 
+
+def normalize_header(col_name: str) -> str:
+    """Normalize a column name by stripping leading/trailing whitespace.
+
+    Column names are case-sensitive in HF datasets, so we preserve the
+    original casing and only remove surrounding whitespace inserted by
+    careless CSV exports.
+    """
+    return col_name.strip()
+
+
 # Map our internal dtype strings to HF Dataset Feature types (CSV fallback path)
 _HF_FEATURE_MAP: dict[str, str] = {
     "numeric": "float64",
@@ -492,20 +503,13 @@ def build_schema_report(
 
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
-                    prev_origin, prev_idx = seen_names[col_name]
-                    if prev_origin != origin_name:
-                        prev_col = columns[prev_idx]
-                        columns[prev_idx] = ColumnSchema(
-                            name=f"{prev_origin}::{col}",
-                            dtype=prev_col.dtype,
-                            nullable=prev_col.nullable,
-                            example=prev_col.example,
-                            unique=prev_col.unique,
-                            missing=prev_col.missing,
-                            hf_dtype=prev_col.hf_dtype,
-                        )
-                        col_name = f"{origin_name}::{col}"
-                        seen_names[col_name] = (origin_name, len(columns))
+                    prev_origin, _ = seen_names[col_name]
+                    print(
+                        f"  ⚠  Duplicate column '{col_name}' across files "
+                        f"({prev_origin}, {origin_name}); "
+                        f"using first occurrence."
+                    )
+                    continue
                 else:
                     seen_names[col_name] = (origin_name, len(columns))
 
@@ -552,6 +556,8 @@ def build_schema_report(
                 continue  # skip missing / unreadable files gracefully
 
             headers, rows = result
+            # Normalize headers: strip whitespace, preserve case
+            headers = [normalize_header(h) for h in headers]
             sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
 
             for idx, col in enumerate(headers):
@@ -559,20 +565,13 @@ def build_schema_report(
 
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
-                    prev_origin, prev_idx = seen_names[col_name]
-                    if prev_origin != local.name:
-                        prev_col = columns[prev_idx]
-                        columns[prev_idx] = ColumnSchema(
-                            name=f"{prev_origin}::{col}",
-                            dtype=prev_col.dtype,
-                            nullable=prev_col.nullable,
-                            example=prev_col.example,
-                            unique=prev_col.unique,
-                            missing=prev_col.missing,
-                            hf_dtype=prev_col.hf_dtype,
-                        )
-                        col_name = f"{local.name}::{col}"
-                        seen_names[col_name] = (local.name, len(columns))
+                    prev_origin, _ = seen_names[col_name]
+                    print(
+                        f"  ⚠  Duplicate column '{col_name}' across files "
+                        f"({prev_origin}, {local.name}); "
+                        f"using first occurrence."
+                    )
+                    continue
                 else:
                     seen_names[col_name] = (local.name, len(columns))
 
@@ -646,6 +645,8 @@ def build_dataset_card(
     cfg: DatasetConfig,
     schema: list[ColumnSchema],
     recipe_content: str | None = None,
+    empty_columns: list[str] | None = None,
+    duplicate_rows: dict[str, int] | None = None,
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
@@ -656,6 +657,8 @@ def build_dataset_card(
         cfg:            Dataset configuration.
         schema:         Column schema list from :func:`build_schema_report`.
         recipe_content: Pre-loaded recipe content, or ``None``.
+        empty_columns:  Optional list of column names that are entirely empty.
+        duplicate_rows: Optional dict mapping filenames to duplicate row counts.
 
     Returns:
         Complete ``README.md`` content as a single string.
@@ -725,8 +728,11 @@ def build_dataset_card(
     # -- dataset_info -------------------------------------------------------
     if schema:
         # features — now a LIST of {name, dtype} (not a dict)
+        # Skip ::-prefixed pseudo-columns from duplicate disambiguation
         features_list: list[dict[str, str]] = []
         for s in schema:
+            if "::" in s.name:
+                continue  # skip disambiguated pseudo-columns
             hf_dtype = s.hf_dtype if s.hf_dtype is not None else _hf_feature_type(s.dtype)
             features_list.append({"name": s.name, "dtype": hf_dtype})
 
@@ -861,11 +867,39 @@ def build_dataset_card(
         lines.append("| Column | Type | Nullable | Example | Unique (sample) | Missing (%) |")
         lines.append("|--------|------|----------|---------|-----------------|-------------|")
         for s in schema:
+            if "::" in s.name:
+                continue  # skip disambiguated pseudo-columns
             lines.append(
                 f"| `{s.name}` | {s.dtype} | {'Yes' if s.nullable else 'No'} | "
                 f"`{s.example}` | {s.unique} | {s.missing}% |"
             )
         lines.append("")
+        lines.append(
+            "*Statistics (unique, missing%) based on a 10,000-row sample."
+            " Exact counts may differ in the full dataset.*"
+        )
+        lines.append("")
+
+    # ── Data Quality Notes (empty columns, duplicate rows) ──────────────────
+    schema_empty = [s.name for s in schema if s.missing == 100.0 and "::" not in s.name]
+    all_empty = schema_empty
+    if empty_columns:
+        for col in empty_columns:
+            if col not in all_empty:
+                all_empty.append(col)
+
+    has_quality_notes = bool(all_empty) or (duplicate_rows is not None and bool(duplicate_rows))
+    if has_quality_notes:
+        lines.append("### Data Quality Notes")
+        lines.append("")
+        if all_empty:
+            lines.append(f"- **Empty columns:** {', '.join(f'`{c}`' for c in all_empty)}")
+            lines.append("")
+        if duplicate_rows:
+            for filename, count in duplicate_rows.items():
+                if count > 0:
+                    lines.append(f"- **Duplicate rows in `{filename}`:** {count}")
+            lines.append("")
 
     # ── Dataset Creation ───────────────────────────────────────────────────
     lines.append("## Dataset Creation")
