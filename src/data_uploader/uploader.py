@@ -18,7 +18,8 @@ from huggingface_hub import HfApi
 
 from .model import DatasetConfig
 from .repo_compliance import build_dataset_card, build_license_file, build_schema_report
-from .splits import detect_splits, validate_layout
+from .splits import detect_splits, validate_layout, validate_split_mapping
+from .verification import VerificationReport, _print_verification_report, verify_load_dataset
 
 _api = HfApi()
 
@@ -261,6 +262,7 @@ def upload(
     keep_csv: bool = False,
     force: bool = False,
     dry_run: bool = False,
+    verify_load: bool = False,
 ) -> int:
     """Upload all files declared in *cfg* to Hugging Face Hub.
 
@@ -269,13 +271,17 @@ def upload(
     fails.
 
     Args:
-        cfg:      Dataset configuration.
-        keep_csv: When ``True`` and a CSV was converted to Parquet, also
-                  upload the original CSV as a secondary file.
-        force:    When ``True``, skip the README.md / LICENSE overwrite
-                  protection prompt and overwrite unconditionally.
-        dry_run:  When ``True``, show the repo diff and split report but
-                  do not upload any files.
+        cfg:         Dataset configuration.
+        keep_csv:    When ``True`` and a CSV was converted to Parquet, also
+                     upload the original CSV as a secondary file.
+        force:       When ``True``, skip the README.md / LICENSE overwrite
+                     protection prompt and overwrite unconditionally.
+        dry_run:     When ``True``, show the repo diff and split report but
+                     do not upload any files.
+        verify_load: When ``True``, run ``datasets.load_dataset()`` against
+                     the staged files to verify end-to-end loadability.
+                     With ``--dry-run``, stages the files for verification
+                     and then cleans up.
 
     Returns:
         Exit code (0 = success, 1 = one or more uploads failed).
@@ -312,21 +318,25 @@ def upload(
     # ── 0c. Overwrite protection for README.md / LICENSE ───────────────
     protected = _check_overwrite_protection(existing_files, force)
 
-    # ── 0d. Dry-run: stop here ─────────────────────────────────────────
-    if dry_run:
-        # Show split detection for dry-run
-        planned_remotes = []
-        for entry in cfg.files:
-            if entry.recursive:
-                planned_remotes.append(entry.remote.rstrip("/\\"))
-            elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-                stem = Path(entry.remote).stem
-                planned_remotes.append(f"{stem}.parquet")
-                if keep_csv:
-                    planned_remotes.append(entry.remote)
-            else:
+    # ── 0d. Planned remotes (used by dry-run and verification) ──────────
+    planned_remotes: list[str] = []
+    for entry in cfg.files:
+        if entry.recursive:
+            planned_remotes.append(entry.remote.rstrip("/\\"))
+        elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
+            stem = Path(entry.remote).stem
+            planned_remotes.append(f"{stem}.parquet")
+            if keep_csv:
                 planned_remotes.append(entry.remote)
-        # Merge with existing to simulate post-upload layout
+        else:
+            planned_remotes.append(entry.remote)
+
+    # ── 0e. Split mapping validation (always run before upload) ─────────
+    _print_split_mapping_validation(planned_remotes)
+
+    # ── 0f. Dry-run: stop here UNLESS verify_load is requested ─────────
+    if dry_run and not verify_load:
+        # Show split detection for dry-run
         simulated = existing_files + planned_remotes
         report = detect_splits(simulated)
         _print_split_report(report)
@@ -385,6 +395,25 @@ def upload(
         (tmpdir / "README.md").write_text(card, encoding="utf-8")
         (tmpdir / "LICENSE").write_text(license_text, encoding="utf-8")
 
+        # ── 2b. load_dataset() verification (optional) ────────────────────
+        verification: VerificationReport | None = None
+        if verify_load:
+            verification = verify_load_dataset(tmpdir, cfg)
+            _print_verification_report(verification)
+
+        # ── If dry-run with verify_load: stop here ────────────────────────
+        if dry_run:
+            simulated = existing_files + planned_remotes
+            report = detect_splits(simulated)
+            _print_split_report(report)
+            print(f"\n{'=' * 60}")
+            print("  Dry-run complete — no files uploaded.")
+            if verify_load:
+                status = "passed" if verification and verification.passed else "failed"
+                print(f"  Verification: {status}")
+            print(f"{'=' * 60}\n")
+            return 0
+
         # Upload compliance files (respect overwrite protection)
         if "readme.md" not in protected:
             _hf_upload(cfg.repo_id, tmpdir / "README.md", "README.md", cfg.repo_type)
@@ -440,8 +469,14 @@ def upload(
         report = detect_splits(updated_files)
         _print_split_report(report)
 
+    # ── 4b. Upload summary with warnings ───────────────────────────────
     print(f"\n{'=' * 60}")
     print(f"  Result: {ok} uploaded, {fail} failed")
+
+    if verify_load and verification is not None:
+        status = "\u2713  PASSED" if verification.passed else "\u2717  FAILED"
+        print(f"  load_dataset() verification: {status}")
+
     print(f"{'=' * 60}\n")
     return 0 if fail == 0 else 1
 
@@ -476,3 +511,12 @@ def _print_split_report(report: object) -> None:
     )
     for w in layout_warnings:
         print(f"    ⚠  {w}")
+
+
+def _print_split_mapping_validation(remotes: list[str]) -> None:
+    """Print split mapping compatibility warnings for the planned upload."""
+    mapping_warnings = validate_split_mapping(remotes)
+    if mapping_warnings:
+        print("\n  Split mapping validation:")
+        for w in mapping_warnings:
+            print(f"    ⚠  {w}")

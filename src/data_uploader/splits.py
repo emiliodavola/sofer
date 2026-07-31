@@ -290,3 +290,72 @@ def validate_layout(files: list[str]) -> list[str]:
         )
 
     return warnings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Split mapping validation (load_dataset() compatibility)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def validate_split_mapping(remotes: list[str]) -> list[str]:
+    """Validate that remote file paths map correctly to HF split detection rules.
+
+    Checks:
+        - Split keywords must be delimited by non-word characters
+          (``detect_split_keyword`` already enforces this — files that pass
+          detection are valid).
+        - Files within a detected split must all contain the split keyword in
+          their filename or directory name.
+        - Single-split fallback: when *multiple* files all fall into ``train``
+          (no split keyword detected in any file), emit a warning about the
+          ``load_dataset()`` behaviour.
+
+    Args:
+        remotes: Remote file paths (existing or planned).
+
+    Returns:
+        A list of warning strings (empty = layout follows HF conventions).
+    """
+    warnings: list[str] = []
+    data_files = [f for f in remotes if f.lower() not in _EXCLUDED_FILES]
+
+    if not data_files:
+        return warnings
+
+    report = detect_splits(remotes)
+
+    # ── Default-load warning: multiple files, all in train fallback ───────
+    if len(data_files) > 1:
+        has_fallback = any("No splits detected" in w for w in report.warnings)
+        if has_fallback:
+            warnings.append(
+                f"Default-load warning: {len(data_files)} data files have no "
+                f"split keywords. When a user calls load_dataset() without "
+                f"data_files, ALL files will be loaded into a single 'train' split "
+                f"(which may be slow for large repos). Consider adding split "
+                f"keywords to filenames (e.g. 'train.csv', 'test.csv') or "
+                f"using directory-based splits (e.g. 'train/data.csv')."
+            )
+
+    # ── Per-split keyword consistency ─────────────────────────────────────
+    for s in report.splits:
+        for f in s.files:
+            basename = f.rsplit("/", 1)[-1] if "/" in f else f
+            kw = detect_split_keyword(basename)
+
+            # Check directory name as well (dir-based splits)
+            dir_kw: str | None = None
+            if "/" in f or "\\" in f:
+                import re as _re
+
+                first_dir = _re.split(r"[/\\]", f)[0].lower()
+                dir_kw = detect_split_keyword(first_dir)
+
+            if kw is None and dir_kw is None:
+                warnings.append(
+                    f"File '{f}' was assigned to split '{s.name}' but does "
+                    f"not contain a detectable split keyword. It may not be "
+                    f"loaded correctly by the HF dataset viewer."
+                )
+
+    return warnings

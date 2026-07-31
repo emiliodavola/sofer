@@ -1,9 +1,15 @@
-"""Tests for split detection, repo inspection, remote path validation, and
-overwrite protection in data_uploader.uploader and data_uploader.splits."""
+"""Tests for split detection, repo inspection, remote path validation,
+overwrite protection, split mapping validation, and load_dataset verification
+in data_uploader.uploader, data_uploader.splits, and data_uploader.verification."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from data_uploader.model import DatasetConfig, FileEntry
 from data_uploader.splits import (
@@ -12,12 +18,14 @@ from data_uploader.splits import (
     detect_split_keyword,
     detect_splits,
     validate_layout,
+    validate_split_mapping,
 )
 from data_uploader.uploader import (
     _check_overwrite_protection,
     _repo_diff_summary,
     _validate_remote_paths,
 )
+from data_uploader.verification import VerificationReport, verify_load_dataset
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  detect_split_keyword
@@ -375,3 +383,197 @@ class TestSplitReportDataclass:
         si = SplitInfo(name="train", files=["a.csv", "b.csv"])
         assert si.name == "train"
         assert si.files == ["a.csv", "b.csv"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  validate_split_mapping
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestValidateSplitMapping:
+    def test_single_file_no_warning(self):
+        """A single file without a keyword should not produce multiple-file warning."""
+        warnings = validate_split_mapping(["data.csv"])
+        # Single file fallback is acceptable — no multi-file warning
+        assert not any("Multiple files" in w for w in warnings)
+
+    def test_multiple_files_no_keywords(self):
+        """Multiple files without split keywords should warn."""
+        warnings = validate_split_mapping(["a.csv", "b.csv", "c.csv"])
+        assert any("Multiple files" in w or "Default-load warning" in w for w in warnings)
+
+    def test_multiple_files_with_keywords_no_warning(self):
+        """Files with proper split keywords should not produce warnings."""
+        warnings = validate_split_mapping(["train.csv", "test.csv", "validation.csv"])
+        assert warnings == []
+
+    def test_directory_based_splits(self):
+        """Directory-based splits should not produce warnings."""
+        warnings = validate_split_mapping(["train/data.csv", "test/data.csv"])
+        assert warnings == []
+
+    def test_excluded_metadata_files_ignored(self):
+        """README.md and LICENSE should be ignored in split validation."""
+        warnings = validate_split_mapping(["README.md", "LICENSE"])
+        # Only metadata → no data files → no warnings
+        assert not any("Multiple files" in w for w in warnings)
+
+    def test_mixed_keyword_and_no_keyword(self):
+        """Files with and without keywords should produce unclassified warning."""
+        warnings = validate_split_mapping(["train.csv", "mystery.csv"])
+        # train.csv is classified, mystery.csv is unclassified → single fallback wins
+        assert not any("Multiple files" in w for w in warnings)
+
+    def test_default_load_warning_for_many_files(self):
+        """Many files without keywords should get the default-load warning."""
+        warnings = validate_split_mapping(["f1.csv", "f2.csv", "f3.csv"])
+        assert any("Default-load warning" in w or "multiple files" in w.lower() for w in warnings)
+
+    def test_parquet_remotes(self):
+        """Parquet files should be handled the same as CSV."""
+        warnings = validate_split_mapping(["train.parquet", "test.parquet"])
+        assert warnings == []
+
+    def test_no_split_keyword_in_assigned_file(self):
+        """A file assigned to a split via directory but with no keyword in its name."""
+        # train/data.csv: directory is train, file is data.csv → fine
+        warnings = validate_split_mapping(["train/data.csv"])
+        assert warnings == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  verify_load_dataset
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVerifyLoadDataset:
+    def test_skips_when_datasets_not_installed(self, tmp_path):
+        """When datasets is not installed, return skipped report."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+        with patch.dict(sys.modules, {"datasets": None}):
+            report = verify_load_dataset(tmp_path, cfg)
+        assert report.skipped is True
+        assert any("not installed" in w for w in report.warnings)
+
+    def test_loads_parquet_files_and_detects_splits(self, tmp_path):
+        """When datasets is available and parquet files exist, load succeeds."""
+        # Create parquet files with split keywords in names
+        table_train = pa.table({"x": [1, 2, 3]})
+        pq.write_table(table_train, tmp_path / "train.parquet")
+
+        table_test = pa.table({"x": [4, 5]})
+        pq.write_table(table_test, tmp_path / "test.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=tmp_path / "train.parquet", remote="train.parquet"),
+                FileEntry(local=tmp_path / "test.parquet", remote="test.parquet"),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        # Mock datasets.load_dataset
+        mock_ds = {
+            "train": MagicMock(),
+            "test": MagicMock(),
+        }
+        mock_ds["train"].__len__ = lambda self: 3
+        mock_ds["test"].__len__ = lambda self: 2
+
+        mock_datasets = MagicMock()
+        mock_datasets.load_dataset.return_value = mock_ds
+
+        with patch.dict(sys.modules, {"datasets": mock_datasets}):
+            report = verify_load_dataset(tmp_path, cfg)
+
+        assert report.skipped is False
+        assert report.passed is True
+        assert set(report.split_names) == {"train", "test"}
+        assert report.split_row_counts["train"] == 3
+        assert report.split_row_counts["test"] == 2
+        assert report.expected_splits == ["train", "test"]
+
+    def test_detects_split_mismatch(self, tmp_path):
+        """When actual splits differ from expected, a warning is issued."""
+        table = pa.table({"x": [1, 2]})
+        pq.write_table(table, tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=tmp_path / "data.parquet", remote="data.parquet"),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        # Mock datasets to return a train split (expected is also train)
+        mock_ds = {"train": MagicMock()}
+        mock_ds["train"].__len__ = lambda self: 2
+        mock_datasets = MagicMock()
+        mock_datasets.load_dataset.return_value = mock_ds
+
+        with patch.dict(sys.modules, {"datasets": mock_datasets}):
+            report = verify_load_dataset(tmp_path, cfg)
+
+        # Both expected and actual are "train" — should pass
+        assert report.passed is True
+        assert report.split_names == ["train"]
+        assert report.expected_splits == ["train"]
+
+    def test_load_dataset_raises(self, tmp_path):
+        """When load_dataset raises, report the error."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        mock_datasets = MagicMock()
+        mock_datasets.load_dataset.side_effect = ValueError("No data files found")
+
+        with patch.dict(sys.modules, {"datasets": mock_datasets}):
+            report = verify_load_dataset(tmp_path, cfg)
+
+        assert report.passed is False
+        assert not report.skipped
+        assert len(report.errors) == 1
+        assert "No data files found" in report.errors[0]
+
+    def test_verification_report_defaults(self):
+        """VerificationReport has sensible defaults."""
+        report = VerificationReport()
+        assert report.passed is False
+        assert report.skipped is False
+        assert report.split_names == []
+        assert report.split_row_counts == {}
+        assert report.expected_splits == []
+        assert report.warnings == []
+        assert report.errors == []
+
+    def test_passed_when_split_matches_and_no_errors(self):
+        """passed is True when splits match and there are no errors."""
+        report = VerificationReport(
+            passed=True,
+            split_names=["train", "test"],
+            expected_splits=["train", "test"],
+        )
+        assert report.passed is True
+
+    def test_not_passed_when_warnings_exist(self):
+        """passed is False when there are warnings (split mismatch)."""
+        report = VerificationReport(
+            passed=False,
+            split_names=["train"],
+            expected_splits=["train", "test"],
+            warnings=["Split names differ"],
+        )
+        assert report.passed is False

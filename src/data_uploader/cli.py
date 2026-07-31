@@ -68,7 +68,13 @@ def _cmd_upload(args: argparse.Namespace) -> int:
         print("  \u26a0  Fix errors before uploading.\n")
         return 1
 
-    return run_upload(cfg, keep_csv=args.keep_csv, force=args.force, dry_run=args.dry_run)
+    return run_upload(
+        cfg,
+        keep_csv=args.keep_csv,
+        force=args.force,
+        dry_run=args.dry_run,
+        verify_load=args.verify_load,
+    )
 
 
 def _cmd_codebook(args: argparse.Namespace) -> int:
@@ -232,6 +238,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show repo diff and split report without uploading any files.",
+    )
+    u.add_argument(
+        "--verify-load",
+        action="store_true",
+        help="Test end-to-end loadability with datasets.load_dataset() after staging.",
     )
     u.set_defaults(func=_cmd_upload)
 
