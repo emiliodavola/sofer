@@ -294,7 +294,7 @@ class DatasetConfig:
         for entry in data.get("quality", []):
             check_name = entry.get("check", "")
             if check_name not in valid_checks:
-                print(f"  ⚠  Unknown quality check: '{check_name}' — ignoring.")
+                print(f"  [!] Unknown quality check: '{check_name}' — ignoring.")
                 continue
             quality_checks.append(
                 QualityCheck(

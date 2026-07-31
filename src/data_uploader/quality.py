@@ -545,7 +545,7 @@ def write_quality_report(report: ValidationReport, path: Path) -> None:
         lines.append("")
 
     if warn_findings:
-        lines.append("## ⚠️ Warnings")
+        lines.append("## [!] Warnings")
         lines.append("")
         for r in warn_findings:
             partial_note = " *(partial — sample-based)*" if r.partial else ""

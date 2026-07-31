@@ -505,7 +505,7 @@ def build_schema_report(
                 if col_name in seen_names:
                     prev_origin, _ = seen_names[col_name]
                     print(
-                        f"  ⚠  Duplicate column '{col_name}' across files "
+                        f"  [!] Duplicate column '{col_name}' across files "
                         f"({prev_origin}, {origin_name}); "
                         f"using first occurrence."
                     )
@@ -568,7 +568,7 @@ def build_schema_report(
                 if col_name in seen_names:
                     prev_origin, _ = seen_names[col_name]
                     print(
-                        f"  ⚠  Duplicate column '{col_name}' across files "
+                        f"  [!] Duplicate column '{col_name}' across files "
                         f"({prev_origin}, {local.name}); "
                         f"using first occurrence."
                     )
@@ -700,7 +700,7 @@ def build_dataset_card(
                 validated.append(vc)
             else:
                 print(
-                    f"  ⚠  Invalid size_category: '{c}' — ignoring. "
+                    f"  [!] Invalid size_category: '{c}' — ignoring. "
                     f"Valid values: {', '.join(sorted(_SIZE_CATEGORIES))}"
                 )
         if validated:

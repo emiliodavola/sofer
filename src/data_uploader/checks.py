@@ -48,35 +48,35 @@ class ValidationReport:
     def print_summary(self) -> None:
         """Print a human-readable summary to stdout."""
         print(f"\n  Validation report: {self.name}")
-        print(f"  {'─' * 50}")
+        print(f"  {'-' * 50}")
         print(f"  Errors:   {len(self.errors)}")
         for e in self.errors:
-            print(f"    ✗  {e}")
+            print(f"    X  {e}")
         print(f"  Warnings: {len(self.warnings)}")
         for w in self.warnings:
-            print(f"    ⚠  {w}")
+            print(f"    WARN  {w}")
         if self.quality_results:
-            print(f"  {'─' * 30}")
+            print(f"  {'-' * 30}")
             q_errors = [r for r in self.quality_results if r.severity == "fail"]
             q_warnings = [r for r in self.quality_results if r.severity == "warn"]
             q_passed, q_skipped = _count_passed_quality(self.quality_results, self.ran_checks)
             print("  Quality checks")
             print(f"  Errors:   {len(q_errors)}")
             for r in q_errors:
-                print(f"    ✗  {r.check}: {r.message}")
+                print(f"    X  {r.check}: {r.message}")
             print(f"  Warnings: {len(q_warnings)}")
             for r in q_warnings:
                 partial_note = " (partial)" if r.partial else ""
-                print(f"    ⚠  {r.check}: {r.message}{partial_note}")
+                print(f"    WARN  {r.check}: {r.message}{partial_note}")
             parts = [f"{q_passed} passed"]
             if q_skipped > 0:
                 parts.append(f"{q_skipped} skipped")
             parts.append(f"{len(q_errors)} failed")
             parts.append(f"{len(q_warnings)} warnings")
             q_summary = ", ".join(parts)
-            print(f"  ✓  Quality: {q_summary}")
+            print(f"  OK  Quality: {q_summary}")
         if self.passed and not self.quality_results:
-            print("  ✓  All checks passed.\n")
+            print("  OK  All checks passed.\n")
         elif self.passed:
             print()
         else:

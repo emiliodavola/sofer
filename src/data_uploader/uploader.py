@@ -426,7 +426,7 @@ def _check_overwrite_protection(
             if interactive:
                 try:
                     answer = input(
-                        f"  ⚠  {filename} already exists in the repo. Overwrite? [y/N]: "
+                        f"  [!] {filename} already exists in the repo. Overwrite? [y/N]: "
                     )
                     if answer.strip().lower() not in ("y", "yes"):
                         print(f"  i  {filename}: skipped (protected by user)")
@@ -436,7 +436,7 @@ def _check_overwrite_protection(
                     protected.add(filename.lower())
             else:
                 print(
-                    f"  ⚠  {filename} already exists in the repo. "
+                    f"  [!] {filename} already exists in the repo. "
                     f"Skipping overwrite (non-interactive mode — use --force to override)."
                 )
                 protected.add(filename.lower())
@@ -560,7 +560,7 @@ def _check_large_values(
         max_bytes:    Byte-size threshold (default 10 KB).
 
     Returns:
-        A list of ``"⚠ …"`` warning strings (empty = no large values found).
+        A list of ``"[!] …"`` warning strings (empty = no large values found).
     """
     warnings: list[str] = []
     fname = parquet_path.name
@@ -1024,14 +1024,14 @@ def _print_split_report(report: object) -> None:
         print(f"    [?] {len(report.unclassified)} file(s) unclassified")
 
     for w in report.warnings:
-        print(f"    ⚠  {w}")
+        print(f"    [!] {w}")
 
     # Layout validation
     layout_warnings = validate_layout(
         [f for s in report.splits for f in s.files] + report.unclassified
     )
     for w in layout_warnings:
-        print(f"    ⚠  {w}")
+        print(f"    [!] {w}")
 
 
 def _print_split_mapping_validation(remotes: list[str]) -> None:
@@ -1040,4 +1040,4 @@ def _print_split_mapping_validation(remotes: list[str]) -> None:
     if mapping_warnings:
         print("\n  Split mapping validation:")
         for w in mapping_warnings:
-            print(f"    ⚠  {w}")
+            print(f"    [!] {w}")

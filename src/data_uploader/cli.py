@@ -27,9 +27,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # validate the configuration itself
     config_errors = cfg.validate()
     if config_errors:
-        print("\n  ✗  Configuration errors:")
+        print("\n  X  Configuration errors:")
         for e in config_errors:
-            print(f"     ✗  {e}")
+            print(f"     X  {e}")
         return 1
 
     # validate the actual data on disk
@@ -162,10 +162,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
     """Write a ready-to-edit TOML template to disk."""
     output = Path(f"{args.name}.toml")
     if output.exists():
-        print(f"  ✗  File already exists: {output}")
+        print(f"  X  File already exists: {output}")
         return 1
     output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
-    print(f"  ✓  Created {output}")
+    print(f"  OK  Created {output}")
     print("     Edit the file and run:")
     print(f"       data-uploader validate {output.name}")
     print(f"       data-uploader upload   {output.name}")
