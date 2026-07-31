@@ -577,3 +577,162 @@ class TestVerifyLoadDataset:
             warnings=["Split names differ"],
         )
         assert report.passed is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  _assert_cross_file_schema
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAssertCrossFileSchema:
+    """Cross-file schema identity assertion per split (Issue #16)."""
+
+    def test_same_split_identical_schemas_passes(self, tmp_path):
+        """Two files in the same split with identical schemas → no errors."""
+        from data_uploader.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        # Create two parquet files with identical schema
+        t1 = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        pq.write_table(t1, staging / "train-1.parquet")
+
+        t2 = pa.table({"a": [3, 4], "b": ["z", "w"]})
+        pq.write_table(t2, staging / "train-2.parquet")
+
+        converted = {
+            "train-1": (staging / "train-1.parquet", Path(), ""),
+            "train-2": (staging / "train-2.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_column_name_mismatch_in_same_split_fails(self, tmp_path):
+        """Different column names in same split → error."""
+        from data_uploader.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t1 = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        pq.write_table(t1, staging / "train-1.parquet")
+
+        t2 = pa.table({"a": [1], "c": [3]})
+        pq.write_table(t2, staging / "train-2.parquet")
+
+        converted = {
+            "train-1": (staging / "train-1.parquet", Path(), ""),
+            "train-2": (staging / "train-2.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert len(errors) >= 1
+        assert any("Schema mismatch" in e for e in errors)
+        assert any("missing" in e.lower() for e in errors)
+
+    def test_dtype_mismatch_in_same_split_fails(self, tmp_path):
+        """Same column names but different dtype in same split → error."""
+        from data_uploader.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t1 = pa.table({"col": [1, 2, 3]})
+        pq.write_table(t1, staging / "train-1.parquet")
+
+        t2 = pa.table({"col": ["a", "b"]})
+        pq.write_table(t2, staging / "train-2.parquet")
+
+        converted = {
+            "train-1": (staging / "train-1.parquet", Path(), ""),
+            "train-2": (staging / "train-2.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert len(errors) >= 1
+        assert any("differ in dtypes" in e for e in errors)
+
+    def test_different_splits_different_schemas_passes(self, tmp_path):
+        """Different splits are NOT compared — only within-split identity."""
+        from data_uploader.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t_train = pa.table({"a": [1], "b": [2]})
+        pq.write_table(t_train, staging / "train.parquet")
+
+        t_test = pa.table({"x": ["a"], "y": ["b"]})
+        pq.write_table(t_test, staging / "test.parquet")
+
+        converted = {
+            "train": (staging / "train.parquet", Path(), ""),
+            "test": (staging / "test.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train.parquet"), remote="train.parquet"),
+                FileEntry(local=Path("test.parquet"), remote="test.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        # Each split has only 1 file → no within-split comparison
+        assert errors == []
+
+    def test_single_file_no_comparison_needed(self, tmp_path):
+        """A single file in a split → nothing to compare, no errors."""
+        from data_uploader.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t = pa.table({"a": [1, 2, 3]})
+        pq.write_table(t, staging / "train.parquet")
+
+        converted = {
+            "train": (staging / "train.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train.parquet"), remote="train.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert errors == []

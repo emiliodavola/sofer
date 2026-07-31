@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.csv as pc
 import pyarrow.parquet as pq
 from huggingface_hub import HfApi
@@ -102,7 +103,23 @@ def _convert_to_parquet(csv_path: Path, staging_dir: Path) -> Path | None:
         parse_opts = pc.ParseOptions(delimiter=delimiter)
         table = pc.read_csv(csv_path, parse_options=parse_opts)
         parquet_path = staging_dir / f"{csv_path.stem}.parquet"
-        pq.write_table(table, parquet_path, compression="zstd")
+        pq.write_table(
+            table,
+            parquet_path,
+            compression="zstd",
+            write_page_index=True,
+            row_group_size=100_000,
+        )
+
+        # ── Size check: warn if >500 MB ──────────────────────────────────
+        size_mb = parquet_path.stat().st_size / (1024 * 1024)
+        if size_mb > 500:
+            print(
+                f"  \u26a0  {parquet_path.name}: {size_mb:.1f} MB (>500 MB). "
+                f"Consider sharding into smaller files for better "
+                f"Dataset Viewer performance."
+            )
+
         return parquet_path
     except Exception as exc:
         print(f"  \u26a0  {csv_path.name}: conversion failed \u2014 uploading as CSV")
@@ -257,6 +274,157 @@ def _check_overwrite_protection(
     return protected
 
 
+def _assert_cross_file_schema(
+    converted: dict[str, tuple[Path, Path, str]],
+    cfg: DatasetConfig,
+) -> list[str]:
+    """Assert every file in a split has identical column names and dtypes.
+
+    Groups converted Parquet files by detected split and compares
+    schemas within each split.  Returns a list of human-readable error
+    messages (empty = all splits are consistent).
+    """
+    errors: list[str] = []
+
+    # ── Build (parquet_remote, parquet_path) pairs, de-duped by stem ──────
+    seen: set[str] = set()
+    parquet_specs: list[tuple[str, Path]] = []
+    for entry in cfg.files:
+        stem = Path(entry.remote).stem
+        if stem in converted and stem not in seen:
+            seen.add(stem)
+            parquet_remote = f"{stem}.parquet"
+            parquet_specs.append((parquet_remote, converted[stem][0]))
+
+    if len(parquet_specs) < 2:
+        return errors  # nothing to compare
+
+    # ── Detect splits from planned remote paths ───────────────────────────
+    remotes = [spec[0] for spec in parquet_specs]
+    report = detect_splits(remotes)
+
+    if not report.splits:
+        return errors
+
+    # ── Build split → file mapping ────────────────────────────────────────
+    split_files: dict[str, list[tuple[str, Path]]] = {}
+    for remote, path in parquet_specs:
+        for s in report.splits:
+            if remote in s.files:
+                split_files.setdefault(s.name, []).append((remote, path))
+                break
+
+    if not split_files:
+        return errors
+
+    # ── Compare schemas within each multi-file split ──────────────────────
+    for split_name, files in split_files.items():
+        if len(files) < 2:
+            continue
+
+        ref_remote, ref_path = files[0]
+        try:
+            ref_schema = pq.read_schema(ref_path)
+        except Exception as exc:
+            errors.append(f"Failed to read schema of '{ref_remote}': {exc}")
+            continue
+
+        ref_cols = set(ref_schema.names)
+        ref_types: dict[str, object] = {
+            name: ref_schema.field(name).type for name in ref_schema.names
+        }
+
+        for remote, path in files[1:]:
+            try:
+                schema = pq.read_schema(path)
+            except Exception as exc:
+                errors.append(f"Failed to read schema of '{remote}': {exc}")
+                continue
+
+            cols = set(schema.names)
+            types = {name: schema.field(name).type for name in schema.names}
+
+            # -- column name mismatch --
+            if cols != ref_cols:
+                missing = sorted(ref_cols - cols)
+                extra = sorted(cols - ref_cols)
+                detail_parts: list[str] = []
+                if missing:
+                    detail_parts.append(f"missing: {missing}")
+                if extra:
+                    detail_parts.append(f"extra: {extra}")
+                errors.append(
+                    f"Schema mismatch in split '{split_name}': "
+                    f"'{ref_remote}' columns={sorted(ref_cols)}, "
+                    f"'{remote}' columns={sorted(cols)} "
+                    f"({' ; '.join(detail_parts)})"
+                )
+                continue
+
+            # -- dtype mismatch (only when column names are identical) --
+            common = sorted(cols & ref_cols)
+            diffs = []
+            for col in common:
+                if str(types[col]) != str(ref_types[col]):
+                    diffs.append(f"{col}: {ref_types[col]} vs {types[col]}")
+            if diffs:
+                errors.append(
+                    f"Schema mismatch in split '{split_name}': "
+                    f"'{ref_remote}' and '{remote}' differ in dtypes "
+                    f"({' ; '.join(diffs)})"
+                )
+
+    return errors
+
+
+def _check_large_values(
+    parquet_path: Path,
+    max_bytes: int = 10_240,
+) -> list[str]:
+    """Emit warnings for string columns whose first-10-row values exceed
+    *max_bytes*, which can trigger ``TooBigContentError`` in the Hugging
+    Face Dataset Viewer.
+
+    Args:
+        parquet_path: Path to the Parquet file.
+        max_bytes:    Byte-size threshold (default 10 KB).
+
+    Returns:
+        A list of ``"⚠ …"`` warning strings (empty = no large values found).
+    """
+    warnings: list[str] = []
+    fname = parquet_path.name
+
+    try:
+        table = pq.read_table(parquet_path)
+    except Exception:
+        return warnings  # can't read — skip silently
+
+    first_rows = table.slice(0, min(10, table.num_rows))
+
+    for col_idx in range(first_rows.num_columns):
+        field = first_rows.schema.field(col_idx)
+        if not (pa.types.is_string(field.type) or pa.types.is_large_string(field.type)):
+            continue
+
+        col_data = first_rows.column(col_idx)
+        for row_idx in range(col_data.length()):
+            val = col_data[row_idx].as_py()
+            if val is None:
+                continue
+            byte_len = len(val.encode("utf-8"))
+            if byte_len > max_bytes:
+                warnings.append(
+                    f"{fname}: column '{field.name}' row {row_idx} is "
+                    f"{byte_len} bytes (>10 KB). Consider moving large "
+                    f"payloads to separate files to avoid "
+                    f"TooBigContentError in the Dataset Viewer."
+                )
+                break  # one warning per column is enough
+
+    return warnings
+
+
 def upload(
     cfg: DatasetConfig,
     keep_csv: bool = False,
@@ -371,6 +539,21 @@ def upload(
                 stem = Path(entry.remote).stem
                 converted[stem] = (result, local, entry.remote)
                 print(f"  [~] {local.name} -> {result.name}")
+
+        # ── 1b. Cross-file schema assertion per split ──────────────────
+        schema_errors = _assert_cross_file_schema(converted, cfg)
+        if schema_errors:
+            print("\n  \u2717  Cross-file schema assertion FAILED:")
+            for e in schema_errors:
+                print(f"     {e}")
+            print()
+            return 1
+
+        # ── 1c. Large-value check on converted Parquet files ───────────
+        for _stem, (_parquet_path, _csv_path, _orig_remote) in converted.items():
+            large_warnings = _check_large_values(_parquet_path)
+            for w in large_warnings:
+                print(f"  \u26a0  {w}")
 
         # ── 2. Compliance generation (reads Parquet when available) ─────
         print("  [i] Building schema report \u2026")
