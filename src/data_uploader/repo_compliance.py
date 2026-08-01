@@ -15,13 +15,148 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import yaml
 
+from ._sentinels import MISSING_VALUE_SENTINELS
 from .codebook import infer_column_type
 from .model import DatasetConfig
 
 _SCHEMA_SAMPLE_SIZE = 10_000
 
-# Sentinel values treated as missing (same across CSV and Parquet paths).
-_NULL_SENTINELS = frozenset({"NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL", ""})
+
+def normalize_header(col_name: str) -> str:
+    """Normalize a column name by stripping leading/trailing whitespace.
+
+    Column names are case-sensitive in HF datasets, so we preserve the
+    original casing and only remove surrounding whitespace inserted by
+    careless CSV exports.
+    """
+    return col_name.strip()
+
+
+# Map our internal dtype strings to HF Dataset Feature types (CSV fallback path)
+_HF_FEATURE_MAP: dict[str, str] = {
+    "numeric": "float64",
+    "categorical/text": "string",
+    "mixed (mostly numeric)": "string",
+    "unknown": "string",
+}
+
+# Canonical size_categories enumeration from huggingface_hub.DatasetCardData
+_SIZE_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "n<1K",
+        "1K<n<10K",
+        "10K<n<100K",
+        "100K<n<1M",
+        "1M<n<10M",
+        "10M<n<100M",
+        "100M<n<1B",
+        "1B<n<10B",
+        "10B<n<100B",
+        "100B<n<1T",
+        "n>1T",
+        "other",
+    }
+)
+
+# Known SPDX license identifiers we support (used to detect "other" license flow)
+_KNOWN_SPDX_IDS: frozenset[str] = frozenset(
+    {"cc0-1.0", "cc-by-4.0", "cc-by-sa-4.0", "mit", "apache-2.0", "unlicense", "pddl"}
+)
+
+# Supported values for annotations_creators / language_creators
+_KNOWN_CREATORS: frozenset[str] = frozenset(
+    {"found", "crowdsourced", "expert-generated", "machine-generated", "no-annotation", "other"}
+)
+
+# Supported values for multilinguality
+_KNOWN_MULTILINGUALITY: frozenset[str] = frozenset(
+    {"monolingual", "multilingual", "translation", "other"}
+)
+
+
+def _hf_feature_type(dtype: str) -> str:
+    """Map internal dtype to HF Dataset Feature type string (CSV fallback)."""
+    return _HF_FEATURE_MAP.get(dtype, "string")
+
+
+def _parquet_to_hf_dtype(pa_type: object) -> str | None:
+    """Map a pyarrow physical type to an HF Dataset feature type string.
+
+    Returns ``None`` for ``null`` type (should be omitted from features list).
+    """
+    import pyarrow as pa
+
+    # Integral types
+    if pa.types.is_int8(pa_type) or pa.types.is_int16(pa_type) or pa.types.is_int32(pa_type):
+        return "int32"
+    if pa.types.is_int64(pa_type):
+        return "int64"
+
+    # Floating point
+    if pa.types.is_float32(pa_type):
+        return "float32"
+    if pa.types.is_float64(pa_type):
+        return "float64"
+
+    # Boolean
+    if pa.types.is_boolean(pa_type):
+        return "bool"
+
+    # String types
+    if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
+        return "string"
+
+    # Binary types → string (no native binary in HF datasets)
+    if (
+        pa.types.is_binary(pa_type)
+        or pa.types.is_large_binary(pa_type)
+        or pa.types.is_fixed_size_binary(pa_type)
+    ):
+        return "string"
+
+    # Temporal types
+    if pa.types.is_date32(pa_type):
+        return "date32"
+    if pa.types.is_date64(pa_type):
+        return "timestamp[ms]"
+    if pa.types.is_timestamp(pa_type):
+        return "timestamp[s]"
+    if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
+        return "time64"
+
+    # Decimal
+    if pa.types.is_decimal(pa_type):
+        return "float64"
+
+    # Null — omit from features
+    if pa.types.is_null(pa_type):
+        return None
+
+    # Nested/complex types — fallback to string
+    return "string"
+
+
+def _validate_size_category(value: str) -> str | None:
+    """Validate a single size_category value against the canonical enumeration.
+
+    Returns the value if valid, or ``None`` if invalid.
+    """
+    if value.strip() in _SIZE_CATEGORIES:
+        return value.strip()
+    return None
+
+
+def _csv_values_look_like_bool(values: list[str]) -> bool:
+    """Check if all non-null CSV values look like boolean literals."""
+    bool_vals = {"true", "false", "1", "0", "yes", "no"}
+    non_null = [
+        v.strip().lower()
+        for v in values
+        if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
+    ]
+    if not non_null:
+        return False
+    return all(v in bool_vals for v in non_null)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -43,6 +178,10 @@ class ColumnSchema:
         unique:   Number of unique values observed in the sample,
                   excluding missing-value sentinels.
         missing:  Percentage of rows with missing values (float 0.0-100.0).
+        hf_dtype: HF Dataset feature type string (e.g. ``"int64"``, ``"string"``,
+                  ``"bool"``).  Populated from the Parquet schema when available;
+                  ``None`` when the type could not be determined from native
+                  schema metadata.
     """
 
     name: str
@@ -51,6 +190,7 @@ class ColumnSchema:
     example: str
     unique: int
     missing: float
+    hf_dtype: str | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -160,6 +300,12 @@ def build_license_file(license_id: str) -> str:
             "No license has been declared for this dataset.\n\n"
             "To choose a license for your dataset, visit:\n"
             "  https://choosealicense.com/\n"
+        )
+
+    if key == "other":
+        return (
+            "This dataset is licensed under custom terms.\n\n"
+            "See the LICENSE file in this repository for the full license text.\n"
         )
 
     return (
@@ -357,19 +503,13 @@ def build_schema_report(
 
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
-                    prev_origin, prev_idx = seen_names[col_name]
-                    if prev_origin != origin_name:
-                        prev_col = columns[prev_idx]
-                        columns[prev_idx] = ColumnSchema(
-                            name=f"{prev_origin}::{col}",
-                            dtype=prev_col.dtype,
-                            nullable=prev_col.nullable,
-                            example=prev_col.example,
-                            unique=prev_col.unique,
-                            missing=prev_col.missing,
-                        )
-                        col_name = f"{origin_name}::{col}"
-                        seen_names[col_name] = (origin_name, len(columns))
+                    prev_origin, _ = seen_names[col_name]
+                    print(
+                        f"  [!] Duplicate column '{col_name}' across files "
+                        f"({prev_origin}, {origin_name}); "
+                        f"using first occurrence."
+                    )
+                    continue
                 else:
                     seen_names[col_name] = (origin_name, len(columns))
 
@@ -387,13 +527,14 @@ def build_schema_report(
                 n_missing = sum(
                     1
                     for v in col_values
-                    if not v.strip()
-                    or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
+                    if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
                 )
                 pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
 
                 non_missing = [
-                    v for v in col_values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+                    v
+                    for v in col_values
+                    if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
                 n_unique = len(set(col_values))
@@ -406,6 +547,7 @@ def build_schema_report(
                         example=example,
                         unique=n_unique,
                         missing=pct_missing,
+                        hf_dtype=_parquet_to_hf_dtype(pa_field.type),
                     )
                 )
         else:
@@ -415,6 +557,8 @@ def build_schema_report(
                 continue  # skip missing / unreadable files gracefully
 
             headers, rows = result
+            # Normalize headers: strip whitespace, preserve case
+            headers = [normalize_header(h) for h in headers]
             sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
 
             for idx, col in enumerate(headers):
@@ -422,19 +566,13 @@ def build_schema_report(
 
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
-                    prev_origin, prev_idx = seen_names[col_name]
-                    if prev_origin != local.name:
-                        prev_col = columns[prev_idx]
-                        columns[prev_idx] = ColumnSchema(
-                            name=f"{prev_origin}::{col}",
-                            dtype=prev_col.dtype,
-                            nullable=prev_col.nullable,
-                            example=prev_col.example,
-                            unique=prev_col.unique,
-                            missing=prev_col.missing,
-                        )
-                        col_name = f"{local.name}::{col}"
-                        seen_names[col_name] = (local.name, len(columns))
+                    prev_origin, _ = seen_names[col_name]
+                    print(
+                        f"  [!] Duplicate column '{col_name}' across files "
+                        f"({prev_origin}, {local.name}); "
+                        f"using first occurrence."
+                    )
+                    continue
                 else:
                     seen_names[col_name] = (local.name, len(columns))
 
@@ -447,15 +585,23 @@ def build_schema_report(
                 n_missing = sum(
                     1
                     for v in col_values
-                    if not v.strip()
-                    or v.strip().upper() in ("NA", "N/A", "NOTAPPLICABLE", "MISSING", "NULL")
+                    if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
                 )
                 pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
 
                 dtype = infer_column_type(col_values)
 
+                # Detect boolean columns from CSV values
+                hf_dtype: str | None = None
+                if dtype == "categorical/text" and _csv_values_look_like_bool(col_values):
+                    hf_dtype = "bool"
+                elif dtype == "numeric":
+                    hf_dtype = _HF_FEATURE_MAP["numeric"]  # "float64" — fallback
+
                 non_missing = [
-                    v for v in col_values if v.strip() and v.strip().upper() not in _NULL_SENTINELS
+                    v
+                    for v in col_values
+                    if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
                 n_unique = len(set(col_values))
@@ -468,6 +614,7 @@ def build_schema_report(
                         example=example,
                         unique=n_unique,
                         missing=pct_missing,
+                        hf_dtype=hf_dtype,
                     )
                 )
 
@@ -500,130 +647,341 @@ def build_dataset_card(
     cfg: DatasetConfig,
     schema: list[ColumnSchema],
     recipe_content: str | None = None,
+    study_design_content: str | None = None,
+    empty_columns: list[str] | None = None,
+    duplicate_rows: dict[str, int] | None = None,
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
+    Follows the official Hugging Face Dataset Card template:
+    https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/templates/datasetcard_template.md
+
     Args:
-        cfg:            Dataset configuration.
-        schema:         Column schema list from :func:`build_schema_report`.
-        recipe_content: Pre-loaded recipe content, or ``None``.
+        cfg:                   Dataset configuration.
+        schema:                Column schema list from :func:`build_schema_report`.
+        recipe_content:        Pre-loaded recipe content, or ``None``.
+        study_design_content:  Pre-loaded study design content, or ``None``.
+        empty_columns:         Optional list of column names that are entirely empty.
+        duplicate_rows:        Optional dict mapping filenames to duplicate row counts.
 
     Returns:
         Complete ``README.md`` content as a single string.
     """
+    _ns = "[Not specified]"
+
     # ── YAML frontmatter ───────────────────────────────────────────────────
     frontmatter: dict[str, object] = {}
 
-    if cfg.language:
-        frontmatter["language"] = cfg.language
-    if cfg.license:
-        frontmatter["license"] = cfg.license
+    # -- Core metadata -------------------------------------------------------
     frontmatter["pretty_name"] = cfg.pretty_name or cfg.name
     if cfg.task_categories:
         frontmatter["task_categories"] = cfg.task_categories
-    if cfg.size_categories:
-        frontmatter["size_categories"] = cfg.size_categories
-    if cfg.tags:
-        frontmatter["tags"] = cfg.tags
 
+    # -- Tags (always include modality and library tags) ---------------------
+    tags: list[str] = list(cfg.tags)
+    # Always emit 'datasets' library tag since this IS a datasets-library-compatible repo.
+    if "datasets" not in tags:
+        tags.append("datasets")
+    # Emit 'tabular' as default modality when not already present.
+    if not any(
+        t in tags
+        for t in ("tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d")
+    ):
+        tags.append("tabular")
+    frontmatter["tags"] = tags
+
+    # -- size_categories: validate + emit as list ---------------------------
+    if cfg.size_categories:
+        categories = [c.strip() for c in cfg.size_categories.split(",") if c.strip()]
+        validated: list[str] = []
+        for c in categories:
+            vc = _validate_size_category(c)
+            if vc:
+                validated.append(vc)
+            else:
+                print(
+                    f"  [!] Invalid size_category: '{c}' — ignoring. "
+                    f"Valid values: {', '.join(sorted(_SIZE_CATEGORIES))}"
+                )
+        if validated:
+            frontmatter["size_categories"] = validated
+
+    # -- source_datasets: emit as repo ID (validate format loosely) ----------
+    if cfg.source:
+        # Per HF spec, source_datasets should be a dataset repo ID
+        # (e.g. 'wikipedia', 'laion/laion-2b'). cfg.source is conventionally
+        # an institution name; we emit it but users should verify it.
+        frontmatter["source_datasets"] = [cfg.source]
+
+    # -- configs (always emit when files declared) --------------------------
+    if cfg.files:
+        config_name = cfg.config_names[0] if cfg.config_names else (cfg.pretty_name or cfg.name)
+        data_files: list[dict[str, object]] = []
+        for e in cfg.files:
+            data_files.append({"split": "train", "path": e.remote})
+        if not data_files:
+            data_files.append({"split": "train", "path": "data/*"})
+        frontmatter["configs"] = [
+            {
+                "config_name": config_name,
+                "data_files": data_files,
+                "default": True,
+            }
+        ]
+
+    # -- dataset_info -------------------------------------------------------
+    if schema:
+        # features — now a LIST of {name, dtype} (not a dict)
+        # Skip ::-prefixed pseudo-columns from duplicate disambiguation
+        features_list: list[dict[str, str]] = []
+        for s in schema:
+            if "::" in s.name:
+                continue  # skip disambiguated pseudo-columns
+            hf_dtype = s.hf_dtype if s.hf_dtype is not None else _hf_feature_type(s.dtype)
+            features_list.append({"name": s.name, "dtype": hf_dtype})
+
+        dataset_info: dict[str, object] = {"features": features_list}
+
+        config_name = cfg.config_names[0] if cfg.config_names else (cfg.pretty_name or cfg.name)
+        dataset_info["config_name"] = config_name
+
+        # splits — estimate from schema when file info is present
+        if cfg.files:
+            approx_rows = len(cfg.files) * 100  # conservative fallback
+            if schema:
+                # Use a rough estimate from the schema
+                total_unique = sum(s.unique for s in schema)
+                approx_rows = total_unique if total_unique > 0 else approx_rows
+            splits = [{"name": "train", "num_examples": approx_rows}]
+            dataset_info["splits"] = splits
+
+        frontmatter["dataset_info"] = dataset_info
+
+    # -- Language -----------------------------------------------------------
+    if cfg.language:
+        frontmatter["language"] = cfg.language
+
+    # -- License ------------------------------------------------------------
+    license_id = cfg.license.strip().lower() if cfg.license else ""
+    if license_id:
+        if license_id in _KNOWN_SPDX_IDS:
+            frontmatter["license"] = cfg.license
+        else:
+            # "other" license flow
+            frontmatter["license"] = "other"
+            if cfg.license_name:
+                frontmatter["license_name"] = cfg.license_name
+            frontmatter["license_link"] = cfg.license_link or "LICENSE"
+            if cfg.license_details:
+                frontmatter["license_details"] = cfg.license_details
+            elif license_id not in ("", "restricted"):
+                frontmatter["license_details"] = cfg.license
+
+    # -- Optional metadata --------------------------------------------------
+    if cfg.annotations_creators:
+        frontmatter["annotations_creators"] = cfg.annotations_creators
+    if cfg.language_creators:
+        frontmatter["language_creators"] = cfg.language_creators
+    if cfg.language_details:
+        frontmatter["language_details"] = cfg.language_details
+    if cfg.multilinguality:
+        frontmatter["multilinguality"] = cfg.multilinguality
+    if cfg.task_ids:
+        frontmatter["task_ids"] = cfg.task_ids
+    if cfg.paperswithcode_id:
+        frontmatter["paperswithcode_id"] = cfg.paperswithcode_id
+    if cfg.config_names and len(cfg.config_names) > 1:
+        frontmatter["config_names"] = cfg.config_names
+
+    # ── Render YAML frontmatter ────────────────────────────────────────────
     yaml_block = yaml.safe_dump(frontmatter, default_flow_style=False, allow_unicode=True).strip()
     header = f"---\n{yaml_block}\n---\n"
 
-    # ── Helper ─────────────────────────────────────────────────────────────
-    _ns = "[Not specified]"
+    # ══════════════════════════════════════════════════════════════════════════
+    # Card body
+    # ══════════════════════════════════════════════════════════════════════════
 
-    # ── Section: Dataset Description ────────────────────────────────────────
     desc = cfg.description.strip() if cfg.description else _ns
     source = cfg.source.strip() if cfg.source else _ns
-    dataset_description = f"""## Dataset Description
-
-- **Description:** {desc}
-- **Source:** {source}
-"""
-
-    # ── Section: Raw Data Provenance ────────────────────────────────────────
     collection = cfg.collection_method.strip() if cfg.collection_method else _ns
-    raw_provenance = f"""## Raw Data Provenance
+    citation = cfg.citation.strip() if cfg.citation else _ns
+    lic_display = cfg.license.strip() if cfg.license else _ns
 
-- **Collection method:** {collection}
-- **Source organisation:** {source}
-"""
+    # ── Title ──────────────────────────────────────────────────────────────
+    name = cfg.pretty_name or cfg.name
+    lines = [f"# Dataset Card for {name}", "", desc, ""]
 
-    # ── Section: Tidy Data Description ──────────────────────────────────────
+    # ── Dataset Details ────────────────────────────────────────────────────
+    lines.append("## Dataset Details")
+    lines.append("")
+    lines.append("### Dataset Description")
+    lines.append("")
+    lines.append(f"- **Curated by:** {source}")
+    lines.append(f"- **Language(s):** {', '.join(cfg.language) if cfg.language else _ns}")
+    lines.append(f"- **License:** {lic_display}")
+    lines.append("")
+
+    # Optional: Funded by / Shared by
+    if cfg.funded_by:
+        lines.append(f"- **Funded by:** {cfg.funded_by}")
+        lines.append("")
+    if cfg.shared_by:
+        lines.append(f"- **Shared by:** {cfg.shared_by}")
+        lines.append("")
+
+    if collection:
+        lines.append(f"- **Collection method:** {collection}")
+        lines.append("")
+
+    lines.append("### Dataset Sources")
+    lines.append("")
+    lines.append("- **Repository:** " + _ns)
+    lines.append("")
+
+    # ── Uses ───────────────────────────────────────────────────────────────
+    lines.append("## Uses")
+    lines.append("")
+    lines.append("### Direct Use")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
+    lines.append("### Out-of-Scope Use")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
+
+    # ── Dataset Structure ──────────────────────────────────────────────────
+    lines.append("## Dataset Structure")
+    lines.append("")
+
     if cfg.files:
-        file_list = "\n".join(f"  - `{e.local}` → `{e.remote}`" for e in cfg.files)
-        tidy_desc = f"""## Tidy Data Description
-
-This dataset contains **{len(cfg.files)} file(s)**:
-
-{file_list}
-"""
+        file_list = "\n".join(f"  - `{e.local}` -> `{e.remote}`" for e in cfg.files)
+        lines.append(f"This dataset contains **{len(cfg.files)} file(s)**:")
+        lines.append("")
+        lines.append(file_list)
+        lines.append("")
     else:
-        tidy_desc = """## Tidy Data Description
+        lines.append("No data files declared.")
+        lines.append("")
 
-No data files declared.
-"""
-
-    # ── Section: Codebook ──────────────────────────────────────────────────
+    # Codebook table
     if schema:
-        rows = "\n".join(
-            f"| `{s.name}` | {s.dtype} | {'Yes' if s.nullable else 'No'} | "
-            f"`{s.example}` | {s.unique} | {s.missing}% |"
-            for s in schema
+        lines.append("### Data Fields")
+        lines.append("")
+        lines.append("| Column | Type | Nullable | Example | Unique (sample) | Missing (%) |")
+        lines.append("|--------|------|----------|---------|-----------------|-------------|")
+        for s in schema:
+            if "::" in s.name:
+                continue  # skip disambiguated pseudo-columns
+            lines.append(
+                f"| `{s.name}` | {s.dtype} | {'Yes' if s.nullable else 'No'} | "
+                f"`{s.example}` | {s.unique} | {s.missing}% |"
+            )
+        lines.append("")
+        lines.append(
+            "*Statistics (unique, missing%) based on a 10,000-row sample."
+            " Exact counts may differ in the full dataset.*"
         )
-        codebook = f"""## Codebook / Variable Reference
+        lines.append("")
 
-| Column | Type | Nullable | Example | Unique (sample) | Missing (%) |
-|--------|------|----------|---------|-----------------|-------------|
-{rows}
-"""
+    # ── Data Quality Notes (empty columns, duplicate rows) ──────────────────
+    schema_empty = [s.name for s in schema if s.missing == 100.0 and "::" not in s.name]
+    all_empty = schema_empty
+    if empty_columns:
+        for col in empty_columns:
+            if col not in all_empty:
+                all_empty.append(col)
+
+    has_quality_notes = bool(all_empty) or (duplicate_rows is not None and bool(duplicate_rows))
+    if has_quality_notes:
+        lines.append("### Data Quality Notes")
+        lines.append("")
+        if all_empty:
+            lines.append(f"- **Empty columns:** {', '.join(f'`{c}`' for c in all_empty)}")
+            lines.append("")
+        if duplicate_rows:
+            for filename, count in duplicate_rows.items():
+                if count > 0:
+                    lines.append(f"- **Duplicate rows in `{filename}`:** {count}")
+            lines.append("")
+
+    # ── Dataset Creation ───────────────────────────────────────────────────
+    lines.append("## Dataset Creation")
+    lines.append("")
+    lines.append("### Curation Rationale")
+    lines.append("")
+
+    if study_design_content is not None:
+        lines.append(study_design_content.strip())
+        lines.append("")
     else:
-        codebook = """## Codebook / Variable Reference
+        lines.append("[More Information Needed]")
+        lines.append("")
 
-No schema information available.
-"""
+    if collection:
+        lines.append("### Source Data")
+        lines.append("")
+        lines.append("#### Data Collection and Processing")
+        lines.append("")
+        lines.append(collection)
+        lines.append("")
 
-    # ── Section: Processing Recipe ─────────────────────────────────────────
+    # Processing recipe
     if recipe_content is not None:
         recipe_lang = _infer_language(cfg.recipe) if cfg.recipe else ""
-        recipe = f"""## Processing Recipe
-
-```{recipe_lang}
-{recipe_content}
-```
-"""
+        lines.append("#### Processing Recipe")
+        lines.append("")
+        lines.append(f"```{recipe_lang}")
+        lines.append(recipe_content)
+        lines.append("```")
+        lines.append("")
     elif cfg.recipe:
-        recipe = f"""## Processing Recipe
+        lines.append(f"Recipe file declared but not found: {cfg.recipe}")
+        lines.append("")
 
-Recipe file declared but not found: {cfg.recipe}
-"""
-    else:
-        recipe = ""
+    # ── Bias, Risks, and Limitations ───────────────────────────────────────
+    lines.append("## Bias, Risks, and Limitations")
+    lines.append("")
+    lines.append("[More Information Needed]")
+    lines.append("")
 
-    # ── Section: Citation ──────────────────────────────────────────────────
-    citation = cfg.citation.strip() if cfg.citation else _ns
-    citation_section = f"""## Citation
+    # ── Citation ───────────────────────────────────────────────────────────
+    lines.append("## Citation")
+    lines.append("")
+    lines.append("**BibTeX:**")
+    lines.append("")
+    lines.append(f"{citation}")
+    lines.append("")
 
-{citation}
-"""
+    # ── License ────────────────────────────────────────────────────────────
+    lines.append("## License")
+    lines.append("")
+    lines.append(lic_display)
+    lines.append("")
 
-    # ── Section: License ───────────────────────────────────────────────────
-    lic = cfg.license.strip() if cfg.license else _ns
-    license_section = f"""## License
+    # ── Optional sections ──────────────────────────────────────────────────
+    if cfg.dataset_card_authors:
+        lines.append("## Dataset Card Authors")
+        lines.append("")
+        lines.append(cfg.dataset_card_authors)
+        lines.append("")
 
-{lic}
-"""
+    if cfg.paper_url:
+        lines.append("## Paper")
+        lines.append("")
+        lines.append(f"- [{cfg.paper_url}]({cfg.paper_url})")
+        lines.append("")
 
-    # ── Assemble ───────────────────────────────────────────────────────────
-    body_paragraphs = [
-        dataset_description,
-        raw_provenance,
-        tidy_desc,
-        codebook,
-        recipe,
-        citation_section,
-        license_section,
-    ]
+    if cfg.demo_url:
+        lines.append("## Demo")
+        lines.append("")
+        lines.append(f"- [{cfg.demo_url}]({cfg.demo_url})")
+        lines.append("")
 
-    body = "\n".join(p for p in body_paragraphs if p)
-    return header + body
+    # ── Contact ────────────────────────────────────────────────────────────
+    lines.append("## Dataset Card Contact")
+    lines.append("")
+    lines.append(_ns)
+    lines.append("")
+
+    return header + "\n".join(lines)

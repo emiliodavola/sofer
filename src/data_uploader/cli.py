@@ -27,9 +27,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # validate the configuration itself
     config_errors = cfg.validate()
     if config_errors:
-        print("\n  ✗  Configuration errors:")
+        print("\n  X  Configuration errors:")
         for e in config_errors:
-            print(f"     ✗  {e}")
+            print(f"     X  {e}")
         return 1
 
     # validate the actual data on disk
@@ -50,9 +50,9 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
     config_errors = cfg.validate()
     if config_errors:
-        print("\n  ✗  Configuration errors — fix before uploading:")
+        print("\n  \u2717  Configuration errors \u2014 fix before uploading:")
         for e in config_errors:
-            print(f"     ✗  {e}")
+            print(f"     \u2717  {e}")
         return 1
 
     validator = DatasetValidator(cfg)
@@ -63,12 +63,14 @@ def _cmd_upload(args: argparse.Namespace) -> int:
     quality_report = quality.run()
     report.quality_results = quality_report.quality_results
 
-    if not report.passed:
-        report.print_summary()
-        print("  \u26a0  Fix errors before uploading.\n")
-        return 1
-
-    return run_upload(cfg, keep_csv=args.keep_csv)
+    return run_upload(
+        cfg,
+        keep_csv=args.keep_csv,
+        force=args.force,
+        dry_run=args.dry_run,
+        verify_load=args.verify_load,
+        quality_report=report,
+    )
 
 
 def _cmd_codebook(args: argparse.Namespace) -> int:
@@ -160,10 +162,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
     """Write a ready-to-edit TOML template to disk."""
     output = Path(f"{args.name}.toml")
     if output.exists():
-        print(f"  ✗  File already exists: {output}")
+        print(f"  X  File already exists: {output}")
         return 1
     output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
-    print(f"  ✓  Created {output}")
+    print(f"  OK  Created {output}")
     print("     Edit the file and run:")
     print(f"       data-uploader validate {output.name}")
     print(f"       data-uploader upload   {output.name}")
@@ -222,6 +224,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keep-csv",
         action="store_true",
         help="Upload the original CSV alongside the converted Parquet",
+    )
+    u.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip README.md / LICENSE overwrite confirmation and overwrite unconditionally.",
+    )
+    u.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show repo diff and split report without uploading any files.",
+    )
+    u.add_argument(
+        "--verify-load",
+        action="store_true",
+        help="Test end-to-end loadability with datasets.load_dataset() after staging.",
     )
     u.set_defaults(func=_cmd_upload)
 

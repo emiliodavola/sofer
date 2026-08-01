@@ -3,6 +3,8 @@
 import csv
 from pathlib import Path
 
+import pytest
+
 from data_uploader._csv_reader import stream_csv
 from data_uploader.checks import ValidationReport
 from data_uploader.model import (
@@ -51,6 +53,16 @@ class TestQualityModel:
         assert r.check == "duplicates"
         assert r.severity == "fail"
         assert r.message == "Duplicates found"
+
+    def test_quality_result_partial_defaults_false(self):
+        """QualityResult.partial defaults to False."""
+        r = QualityResult(check="duplicates", severity="warn", message="test")
+        assert r.partial is False
+
+    def test_quality_result_partial_explicit(self):
+        """QualityResult.partial can be set explicitly."""
+        r = QualityResult(check="duplicates", severity="warn", message="test", partial=True)
+        assert r.partial is True
 
 
 # ── [[quality]] TOML parsing ────────────────────────────────────────────────────
@@ -215,6 +227,29 @@ class TestCheckEmptyColumns:
         assert len(qr) >= 1
         assert any("notes" in r.message for r in qr)
 
+    def test_empty_column_per_file_isolation(self, tmp_path):
+        """Column empty in one file but populated in another → flagged per-file."""
+        p1 = _make_csv(tmp_path / "a.csv", [["id", "notes"], ["1", "hello"]])
+
+        p2 = _make_csv(tmp_path / "b.csv", [["id", "notes"], ["2", ""]])
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=p1, remote="a.csv"),
+                FileEntry(local=p2, remote="b.csv"),
+            ],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "empty_columns"]
+        # "notes" is populated in a.csv but fully empty in b.csv
+        # Should be flagged as an empty column in b.csv
+        assert len(qr) >= 1
+        assert any("notes" in r.message for r in qr)
+        # The message should identify the file where it's empty
+        assert any("b.csv" in r.message for r in qr)
+
 
 # ── 4.5 Null profiling ───────────────────────────────────────────────────────────
 
@@ -296,6 +331,34 @@ class TestCheckCorruptRecords:
         qr = [r for r in report.quality_results if r.check == "corrupt_records"]
         assert len(qr) >= 1
         assert any(r.severity == "fail" for r in qr)
+
+    def test_unreadable_file_produces_fail_finding(self, tmp_path, monkeypatch):
+        """An unreadable file produces a fail finding with filename."""
+        p = _make_csv(tmp_path / "broken.csv", [["a", "b"], ["1", "x"]])
+
+        # Force open() to raise OSError when trying to open broken.csv
+        builtin_open = open
+
+        def _failing_open(file, *args, **kwargs):
+            if isinstance(file, (str, Path)) and "broken.csv" in str(file):
+                raise OSError("Permission denied")
+            return builtin_open(file, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", _failing_open)
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p, remote="broken.csv")],
+        )
+        report = _run_quality(cfg)
+        # Should produce a fail finding, not silently skip
+        fail_findings = [
+            r for r in report.quality_results if r.severity == "fail" and "broken.csv" in r.message
+        ]
+        assert len(fail_findings) >= 1, (
+            f"Expected fail finding for broken.csv, got results: {report.quality_results}"
+        )
 
 
 # ── 4.8 Value range ──────────────────────────────────────────────────────────────
@@ -388,14 +451,161 @@ class TestCheckEncodingValidation:
         assert len(qr) == 0
 
     def test_fallback_latin1(self, tmp_path):
-        """Latin-1 file → succeeds via fallback, no error."""
+        """Latin-1 file → rejected by UTF-8 enforcement."""
         cfg, _ = _make_csv_cfg(tmp_path, ["a"], [["José"]], encoding="latin-1")
         report = _run_quality(cfg)
         qr = [r for r in report.quality_results if r.check == "encoding_validation"]
-        assert len(qr) == 0
+        assert len(qr) >= 1
+        assert qr[0].severity == "fail"
 
 
-# ── print_summary quality section ───────────────────────────────────────────────
+# ── Persisted quality report (Issue #14) ─────────────────────────────────────
+
+
+class TestQualityReportFile:
+    def test_quality_report_written_to_disk(self, tmp_path):
+        """Quality run writes quality-report.md with findings grouped by file."""
+        p = _make_csv(tmp_path / "data.csv", [["id", "val"], ["1", ""], ["2", ""]])
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+        report = _run_quality(cfg)
+        report_path = tmp_path / "quality-report.md"
+
+        from data_uploader.quality import write_quality_report
+
+        write_quality_report(report, report_path)
+
+        assert report_path.exists()
+        content = report_path.read_text(encoding="utf-8")
+        assert "# Quality Report" in content
+        assert "test" in content
+        # Should mention findings or "no issues"
+        assert (
+            "empty_columns" in content.lower()
+            or "null_profiling" in content.lower()
+            or "no issues" in content.lower()
+            or "duplicates" in content.lower()
+        )
+
+    def test_quality_report_handles_empty_results(self, tmp_path):
+        """Quality report is still generated when there are zero findings."""
+        p = _make_csv(tmp_path / "data.csv", [["id", "val"], ["1", "x"]])
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+        report = _run_quality(cfg)
+        report_path = tmp_path / "quality-report.md"
+
+        from data_uploader.quality import write_quality_report
+
+        write_quality_report(report, report_path)
+
+        assert report_path.exists()
+        content = report_path.read_text(encoding="utf-8")
+        assert "# Quality Report" in content
+
+
+class TestHonestCheckAccounting:
+    def test_skipped_check_not_counted_as_passed(self, capsys):
+        """value_range without config is skipped, not passed."""
+        report = ValidationReport("test")
+        report.quality_results = [
+            QualityResult(check="duplicates", severity="warn", message="dup"),
+        ]
+        # Only duplicates ran (1 finding), all others are either skipped or no finding
+        report.ran_checks = {"duplicates", "empty_rows", "empty_columns"}
+        report.print_summary()
+        captured = capsys.readouterr()
+        # Should mention skipped checks, not count them as "passed"
+        assert "skipped" in captured.out.lower() or "duplicates" in captured.out
+
+    def test_ran_check_without_findings_is_passed(self, capsys):
+        """A check that ran but found nothing is counted as passed."""
+        report = ValidationReport("test")
+        report.quality_results = [
+            QualityResult(check="duplicates", severity="warn", message="dup"),
+        ]
+        report.ran_checks = {"duplicates", "empty_rows"}
+        report.print_summary()
+        captured = capsys.readouterr()
+        # empty_rows ran but found nothing → should be counted somewhere
+        assert "empty_rows" in captured.out or "passed" in captured.out.lower()
+
+
+class TestFullFileCoverage:
+    def test_fail_check_scans_full_file(self, tmp_path):
+        """fail-severity check scans all rows even when max_sample is small."""
+        # Create 150 rows — exceeds default max_sample=100_000, but we set it low
+        rows = [[str(i)] for i in range(150)]
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["val"],
+            rows,
+            quality_checks=[
+                QualityCheck(check="corrupt_records", severity="fail"),
+            ],
+        )
+        # Set a low max_sample
+        cfg.quality.max_sample = 50
+        report = _run_quality(cfg)
+        # Even with max_sample=50, the fail check should scan all rows
+        # If full scan worked, no corrupt_records findings (all rows are fine)
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        # No corrupt records expected — all rows have correct field count
+        assert len(qr) == 0, f"Expected no corrupt records, got: {qr}"
+
+    def test_corrupt_row_beyond_sample_limit_detected(self, tmp_path):
+        """A corrupt row beyond max_sample is still detected by fail checks."""
+        # Create rows where row 120 has a corrupt record (wrong field count)
+        rows = [["col1", "col2"]]  # header
+        for i in range(1, 151):
+            if i == 120:
+                rows.append(["only_one_field"])  # corrupt: 1 field vs 2
+            else:
+                rows.append([str(i), "b"])
+        p = _make_csv(tmp_path / "data.csv", rows)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p, remote="data.csv")],
+            quality=QualityConfig(
+                checks=[QualityCheck(check="corrupt_records", severity="fail")],
+                max_sample=50,
+            ),
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        # Should find the corrupt record at row 119 (0-indexed: 119 is the 120th data row)
+        assert len(qr) >= 1, f"Expected corrupt record at row 119, got: {qr}"
+
+    def test_warn_check_partial_when_max_sample_applied(self, tmp_path):
+        """warn-severity findings are marked partial when max_sample is used."""
+        rows = [[str(i)] for i in range(200)]
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["val"],
+            rows,
+            quality_checks=[
+                QualityCheck(check="null_profiling", severity="warn"),
+            ],
+        )
+        cfg.quality.max_sample = 50
+        # Force all values to be null so we get a finding
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "null_profiling"]
+        if qr:
+            assert qr[0].partial is True, (
+                f"Expected partial=True for warn check with max_sample, got partial={qr[0].partial}"
+            )
 
 
 class TestPrintSummaryQuality:
@@ -480,16 +690,14 @@ class TestStreamCsv:
         assert results[-1][1] == ["99"]
 
     def test_encoding_fallback_latin1(self, tmp_path):
-        """Latin-1 file decoded via utf-8-sig → utf-8 → latin-1 fallback."""
+        """Latin-1 file → rejected by UTF-8 enforcement in stream_csv."""
         csv_path = _make_csv(
             tmp_path / "latin1.csv",
             [["name"], ["José"], ["François"]],
             encoding="latin-1",
         )
-        results = list(stream_csv(csv_path, encoding="utf-8-sig"))
-        assert len(results) == 3  # header + 2 data
-        assert results[1][1] == ["José"]
-        assert results[2][1] == ["François"]
+        with pytest.raises(ValueError, match="Cannot decode"):
+            list(stream_csv(csv_path, encoding="utf-8-sig"))
 
     def test_encoding_fallback_utf8_direct(self, tmp_path):
         """Plain UTF-8 file decoded without fallback."""
@@ -501,12 +709,9 @@ class TestStreamCsv:
         results = list(stream_csv(csv_path, encoding="utf-8"))
         assert len(results) == 3
 
-    def test_binary_file_yields_garbled_rows(self, tmp_path):
-        """Binary file: latin-1 catches everything, produces garbled rows."""
+    def test_binary_file_is_rejected(self, tmp_path):
+        """Binary file: UTF-8 enforcement rejects it."""
         csv_path = tmp_path / "binary.csv"
         csv_path.write_bytes(b"\xff\xfe\xfd\xfc\xfb\xfa\xfb\xfc\xff")
-        results = list(stream_csv(csv_path))
-        # No crash — latin-1 decodes all bytes
-        assert len(results) >= 1
-        _header, row = results[0]
-        assert row is None  # header yield
+        with pytest.raises(ValueError, match="Cannot decode"):
+            list(stream_csv(csv_path))

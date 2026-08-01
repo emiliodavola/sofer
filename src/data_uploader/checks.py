@@ -15,6 +15,7 @@ import csv
 from pathlib import Path
 
 from .model import DatasetConfig, QualityResult
+from .repo_compliance import normalize_header
 
 
 class ValidationReport:
@@ -24,6 +25,8 @@ class ValidationReport:
         name:     Dataset name (for display).
         errors:   List of hard failures that should block upload.
         warnings: Advisory messages that don't block upload.
+        quality_results: Per-check quality findings.
+        ran_checks:      Set of check names that actually executed (Issue #14).
     """
 
     def __init__(self, name: str):
@@ -31,6 +34,7 @@ class ValidationReport:
         self.errors: list[str] = []
         self.warnings: list[str] = []
         self.quality_results: list[QualityResult] = []
+        self.ran_checks: set[str] = set()
 
     @property
     def passed(self) -> bool:
@@ -44,57 +48,72 @@ class ValidationReport:
     def print_summary(self) -> None:
         """Print a human-readable summary to stdout."""
         print(f"\n  Validation report: {self.name}")
-        print(f"  {'─' * 50}")
+        print(f"  {'-' * 50}")
         print(f"  Errors:   {len(self.errors)}")
         for e in self.errors:
-            print(f"    ✗  {e}")
+            print(f"    X  {e}")
         print(f"  Warnings: {len(self.warnings)}")
         for w in self.warnings:
-            print(f"    ⚠  {w}")
+            print(f"    WARN  {w}")
         if self.quality_results:
-            print(f"  {'─' * 30}")
+            print(f"  {'-' * 30}")
             q_errors = [r for r in self.quality_results if r.severity == "fail"]
             q_warnings = [r for r in self.quality_results if r.severity == "warn"]
-            q_passed = _count_passed_quality(self.quality_results)
+            q_passed, q_skipped = _count_passed_quality(self.quality_results, self.ran_checks)
             print("  Quality checks")
             print(f"  Errors:   {len(q_errors)}")
             for r in q_errors:
-                print(f"    ✗  {r.check}: {r.message}")
+                print(f"    X  {r.check}: {r.message}")
             print(f"  Warnings: {len(q_warnings)}")
             for r in q_warnings:
-                print(f"    ⚠  {r.check}: {r.message}")
-            q_summary = f"{q_passed} passed, {len(q_errors)} failed, {len(q_warnings)} warnings"
-            print(f"  ✓  Quality: {q_summary}")
+                partial_note = " (partial)" if r.partial else ""
+                print(f"    WARN  {r.check}: {r.message}{partial_note}")
+            parts = [f"{q_passed} passed"]
+            if q_skipped > 0:
+                parts.append(f"{q_skipped} skipped")
+            parts.append(f"{len(q_errors)} failed")
+            parts.append(f"{len(q_warnings)} warnings")
+            q_summary = ", ".join(parts)
+            print(f"  OK  Quality: {q_summary}")
         if self.passed and not self.quality_results:
-            print("  ✓  All checks passed.\n")
+            print("  OK  All checks passed.\n")
         elif self.passed:
             print()
         else:
             print()
 
 
-def _count_passed_quality(results: list[QualityResult]) -> int:
-    """Count how many check *types* have zero findings of any severity.
+def _count_passed_quality(
+    results: list[QualityResult],
+    ran_checks: set[str],
+) -> tuple[int, int]:
+    """Count how many checks passed vs were skipped.
 
-    A check type (e.g. ``"duplicates"``) is considered "passed" when there
-    is no ``QualityResult`` with that check name.  We compute this by
-    subtracting unique check names that *did* produce results from the total
-    known check types.
+    A check is "passed" when it actually ran and produced no findings.
+    A check is "skipped" when it was never executed (e.g., value_range
+    without config).
+
+    Returns:
+        (passed, skipped) tuple.
     """
-    # Known check types per the built-in defaults
-    all_check_types = {
-        "duplicates",
-        "empty_rows",
-        "empty_columns",
-        "null_profiling",
-        "format_consistency",
-        "corrupt_records",
-        "value_range",
-        "cross_file_types",
-        "encoding_validation",
-    }
     found = {r.check for r in results}
-    return len(all_check_types - found)
+    passed = len(ran_checks - found)
+    skipped = len(
+        {
+            "duplicates",
+            "empty_rows",
+            "empty_columns",
+            "null_profiling",
+            "format_consistency",
+            "corrupt_records",
+            "value_range",
+            "cross_file_types",
+            "encoding_validation",
+        }
+        - ran_checks
+        - found
+    )
+    return (passed, skipped)
 
 
 class DatasetValidator:
@@ -167,7 +186,7 @@ class DatasetValidator:
             try:
                 with open(matched, newline="", encoding="utf-8-sig") as fh:
                     reader = csv.reader(fh, delimiter=";")
-                    headers = [h.strip().lower() for h in next(reader)]
+                    headers = [normalize_header(h).lower() for h in next(reader)]
             except Exception as exc:
                 self.report.warnings.append(f"Cannot read '{matched.name}': {exc}")
                 continue

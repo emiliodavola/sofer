@@ -3,7 +3,7 @@ Shared streaming CSV reader with encoding fallback.
 
 Provides :func:`stream_csv`, a generator that yields ``(header, row)`` tuples
 and handles encoding detection by trying a fallback chain:
-``utf-8-sig → utf-8 → latin-1 → cp1252``.
+``utf-8-sig → utf-8``.
 """
 
 from __future__ import annotations
@@ -12,15 +12,19 @@ import csv
 from collections.abc import Generator
 from pathlib import Path
 
-ENCODING_FALLBACKS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
-"""Ordered list of encodings tried when opening a CSV file."""
+ENCODING_FALLBACKS = ["utf-8-sig", "utf-8"]
+"""Ordered list of UTF-8 encodings tried when opening a CSV file.
+
+    Non-UTF-8 files are rejected — the quality gate enforces UTF-8 before
+    upload, so the reader should never encounter latin-1/cp1252 content.
+    """
 
 
 def stream_csv(
     path: Path,
     delimiter: str = ";",
     encoding: str = "utf-8-sig",
-    max_sample: int = 100_000,
+    max_sample: int | None = 100_000,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Yield ``(header, row)`` tuples from a CSV file, one at a time.
 
@@ -28,13 +32,14 @@ def stream_csv(
     Subsequent yields carry parsed data rows as ``list[str]``.
 
     Encoding fallback chain (tried in order):
-    ``utf-8-sig → utf-8 → latin-1 → cp1252``.
+    ``utf-8-sig → utf-8``.  Non-UTF-8 files raise ``ValueError``.
 
     Args:
         path:       Path to the CSV file.
         delimiter:  CSV field delimiter (default ``;``).
         encoding:   Initial encoding to try (default ``utf-8-sig``).
         max_sample: Maximum number of data rows to yield (default 100 000).
+                    Pass ``None`` to scan the entire file.
 
     Yields:
         ``(header, row)`` tuples. The first yield has ``row=None``.
@@ -73,7 +78,7 @@ def _read_csv(
     path: Path,
     delimiter: str,
     encoding: str,
-    max_sample: int,
+    max_sample: int | None,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Read a CSV with the given encoding and yield (header, row) tuples."""
     with open(path, newline="", encoding=encoding) as fh:
@@ -87,9 +92,12 @@ def _read_csv(
 
         yield header, None  # header-only yield
 
-        count = 0
-        for row in reader:
-            if count >= max_sample:
-                return
-            yield header, row
-            count += 1
+        if max_sample is None:
+            yield from ((header, row) for row in reader)
+        else:
+            count = 0
+            for row in reader:
+                if count >= max_sample:
+                    return
+                yield header, row
+                count += 1
