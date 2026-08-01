@@ -192,7 +192,7 @@ class QualityValidator:
         self._file_row_count[fname] = 0
 
         # Fail-severity checks always scan the full file (Issue #14)
-        effective_max_sample = self._max_sample
+        effective_max_sample: int | None = self._max_sample
         if self._has_fail_checks():
             effective_max_sample = None
         elif self._max_sample is not None:
