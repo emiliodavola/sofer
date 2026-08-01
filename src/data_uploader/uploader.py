@@ -228,7 +228,7 @@ def _check_conversion_parity(
         if altered:
             first = sorted(altered)[0]
             warnings.append(
-                f"  \u26a0  VALUE ALTERED: column '{col_name}' — "
+                f"  [!] VALUE ALTERED: column '{col_name}' — "
                 f"e.g. '{first}' changed after type inference"
             )
 
