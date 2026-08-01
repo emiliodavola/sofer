@@ -812,7 +812,11 @@ def upload(
 
         for entry in cfg.files:
             remote_lower = entry.remote.lower()
-            if entry.recursive or not remote_lower.endswith(".csv"):
+            if entry.recursive:
+                continue
+            if remote_lower.endswith(".csv") or remote_lower.endswith(".parquet"):
+                pass  # eligible for conversion
+            else:
                 continue
             if entry.upload_as_csv:
                 print(f"  i  {entry.remote}: upload_as_csv=True, skipping conversion")
