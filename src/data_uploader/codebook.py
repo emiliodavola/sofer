@@ -16,9 +16,13 @@ import csv
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ._formats import SUPPORTED_FORMATS
 from ._sentinels import MISSING_VALUE_SENTINELS
+
+if TYPE_CHECKING:
+    from .model import DatasetConfig
 
 
 def infer_column_type(values: list[str]) -> str:
@@ -353,7 +357,7 @@ def generate(
     return codebook
 
 
-def generate_all(cfg: DatasetConfig) -> list[str]:  # noqa: F821
+def generate_all(cfg: DatasetConfig) -> list[str]:
     """Generate codebooks for every ``[[file]]`` entry in the TOML config.
 
     Each codebook is placed alongside its data file as ``codebook.md``.
