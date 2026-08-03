@@ -1,4 +1,4 @@
-# Agent Instructions — data-uploader
+# Agent Instructions — sofer
 
 ## Code Quality Standards
 

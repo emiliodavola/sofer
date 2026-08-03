@@ -1,4 +1,4 @@
-# Project: data-uploader
+# Project: sofer
 
 Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards.
 

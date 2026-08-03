@@ -1,15 +1,15 @@
-# data-uploader
+# sofer
 
 **Publish any dataset to Hugging Face Hub with built-in validation and
 data-sharing standards.**
 
 ```
-data-uploader init my-dataset           # create a .toml template
-data-uploader scan my-dataset.toml      # discover & register data files
-data-uploader validate my-dataset.toml  # check data integrity + quality
-data-uploader codebook data.csv         # generate a codebook for one file
-data-uploader codebook --all-files      # generate codebooks for all tables
-data-uploader upload   my-dataset.toml  # upload to Hugging Face
+sofer init my-dataset           # create a .toml template
+sofer scan my-dataset.toml      # discover & register data files
+sofer validate my-dataset.toml  # check data integrity + quality
+sofer codebook data.csv         # generate a codebook for one file
+sofer codebook --all-files      # generate codebooks for all tables
+sofer upload   my-dataset.toml  # upload to Hugging Face
 ```
 
 ## Why
@@ -40,21 +40,21 @@ cp .env.template .env   # then edit .env with your HF token
 
 ```bash
 # 1. Create a configuration template
-data-uploader init my-dataset
+sofer init my-dataset
 
 # 2. Scan for data files (auto-registers all CSV, Parquet, Excel, JSONL files)
-data-uploader scan my-dataset.toml
+sofer scan my-dataset.toml
 
 # 3. Edit my-dataset.toml (repo_id, description, tags, etc.)
 
 # 4. Generate codebooks for all registered tables
-data-uploader codebook --all-files --config my-dataset.toml
+sofer codebook --all-files --config my-dataset.toml
 
 # 5. Validate locally — no network calls
-data-uploader validate my-dataset.toml
+sofer validate my-dataset.toml
 
 # 6. Upload to Hugging Face (auto-creates the repo if missing)
-data-uploader upload my-dataset.toml
+sofer upload my-dataset.toml
 ```
 
 ## TOML reference
@@ -154,7 +154,7 @@ Every dataset is checked before upload:
 ### Single file
 
 ```bash
-data-uploader codebook data/persons.csv -o codebook.md
+sofer codebook data/persons.csv -o codebook.md
 ```
 
 Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
@@ -164,7 +164,7 @@ typed formats), unique values, missing percentage, and a sample value.
 ### Batch generation
 
 ```bash
-data-uploader codebook --all-files --config my-dataset.toml
+sofer codebook --all-files --config my-dataset.toml
 ```
 
 Generates a `codebook.md` alongside each data file under `data/`,

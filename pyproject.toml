@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-data-uploader = "data_uploader.cli:main"
+sofer = "data_uploader.cli:main"
 
 [dependency-groups]
 dev = [
@@ -55,7 +55,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# ── data-uploader tool-wide defaults ──────────────────────────────────────
+# ── sofer tool-wide defaults ──────────────────────────────────────
 
 [tool.data-uploader]
 # ── Scan defaults ──

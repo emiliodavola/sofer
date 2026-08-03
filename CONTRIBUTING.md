@@ -1,4 +1,4 @@
-# Contributing to data-uploader
+# Contributing to sofer
 
 Thanks for taking the time to contribute! :rocket:
 
@@ -54,7 +54,7 @@ Prefixes: `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `refactor`.
 Use the issue template and include:
 - Steps to reproduce
 - Expected vs actual behaviour
-- `data-uploader --version` output
+- `sofer --version` output
 - Relevant TOML config (sanitised)
 
 ## Questions?
