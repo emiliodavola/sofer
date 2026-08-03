@@ -31,6 +31,13 @@ from .uploader import upload as run_upload
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
+    """Validate the local dataset against its TOML configuration and quality checks.
+
+    Runs :class:`DatasetValidator` (file existence, size, columns) followed
+    by :class:`QualityValidator` (streaming content checks: duplicates,
+    nulls, encoding, etc.).  Prints a summary report and returns 0 when
+    all checks pass, 1 otherwise.
+    """
     cfg = DatasetConfig.from_toml(args.config)
 
     # validate the configuration itself
@@ -55,6 +62,18 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_upload(args: argparse.Namespace) -> int:
+    """Validate, quality-check, and upload the dataset to Hugging Face Hub.
+
+    Full flow:
+        1. Validate the TOML configuration itself.
+        2. Run :class:`DatasetValidator` (file existence, size, columns).
+        3. Run :class:`QualityValidator` (content-quality checks).
+        4. If the quality gate passes, upload every declared file to the
+           HF repository — creating it if it doesn't exist.
+
+    The ``--dry-run`` flag skips the actual upload and prints what would
+    be pushed.
+    """
     cfg = DatasetConfig.from_toml(args.config)
 
     config_errors = cfg.validate()
@@ -83,6 +102,13 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _cmd_codebook(args: argparse.Namespace) -> int:
+    """Generate a markdown codebook for one file or all files in the config.
+
+    Without ``--all-files``: analyse *FILE* and print the codebook to
+    stdout (or write to ``--output``).  With ``--all-files``: read every
+    ``[[file]]`` entry from the TOML and write a per-directory codebook,
+    plus a root index.
+    """
     if args.all_files:
         if args.csv:
             print(
@@ -312,11 +338,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── validate ──────────────────────────────────────────────────
     v = sub.add_parser(
         "validate",
-        help="Check that the local data matches the TOML configuration.",
+        help="Check that the local data matches the TOML configuration and passes quality checks.",
         description=(
             "Read a TOML configuration, verify that every file exists, "
-            "check minimum size and column requirements, and print "
-            "a validation report.  Does NOT contact Hugging Face."
+            "check minimum size and column requirements, run streaming "
+            "quality checks (duplicates, nulls, encoding, corrupt rows, "
+            "and more), and print a validation report.  Does NOT contact "
+            "Hugging Face."
         ),
     )
     v.add_argument("config", help="Path to the .toml configuration file.")
@@ -325,11 +353,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── upload ────────────────────────────────────────────────────
     u = sub.add_parser(
         "upload",
-        help="Validate the dataset, then upload everything to HF.",
+        help="Validate, quality-check, then upload everything to HF.",
         description=(
-            "Run all validations first; abort if any check fails. "
-            "On success, upload every declared file to the HF repository. "
-            "The repository is created automatically if it doesn't exist."
+            "Run all validations and quality checks first; abort if any "
+            "failure blocks the quality gate. On success, upload every "
+            "declared file to the HF repository. The repository is "
+            "created automatically if it doesn't exist."
         ),
     )
     u.add_argument("config", help="Path to the .toml configuration file.")

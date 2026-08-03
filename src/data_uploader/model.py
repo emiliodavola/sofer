@@ -12,6 +12,20 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
+    {
+        "duplicates",
+        "empty_rows",
+        "empty_columns",
+        "null_profiling",
+        "format_consistency",
+        "corrupt_records",
+        "value_range",
+        "cross_file_types",
+        "encoding_validation",
+    }
+)
+
 
 @dataclass
 class FileEntry:
@@ -120,6 +134,9 @@ class DatasetConfig:
         repo_id:           HF repository identifier (``user/repo``).
         repo_type:         ``"dataset"`` (default) or ``"model"``.
         private:           Whether the HF repo is private.
+        skip_cross_file_schema:
+                           When ``True``, skip schema consistency checks across
+                           files that share the same column names.
 
         description:       One-liner shown on the HF repo page.
         license:           SPDX identifier or ``"restricted"``.
@@ -127,10 +144,55 @@ class DatasetConfig:
         source:            Origin institution or organisation.
         tags:              List of tags for discoverability.
 
+        language:          ISO 639-1/639-3 language code(s), e.g. ``["en"]``.
+        pretty_name:       Human-readable display name for the dataset card.
+        task_categories:   HF task category labels, e.g.
+                           ``["tabular-classification"]``.
+        size_categories:   Comma-separated size category string or single value
+                           from the canonical HF enumeration (``"1K<n<10K"``, etc.).
+        citation:          BibTeX or plain-text citation string.
+        collection_method: How the data was collected (``"survey"``,
+                           ``"admin"``, ``"sensor"``, etc.).
+
+        csv_delimiter:     Delimiter character used in CSV files
+                           (default ``";"``).
+        csv_encoding:      File encoding for CSV files
+                           (default ``"utf-8-sig"``).
+
+        annotations_creators:
+                           Source of data annotations (``"found"``,
+                           ``"crowdsourced"``, ``"expert-generated"``, etc.).
+        language_creators:
+                           Source of language content (same values as
+                           *annotations_creators*).
+        language_details:  Additional language metadata strings.
+        multilinguality:   ``"monolingual"``, ``"multilingual"``,
+                           ``"translation"``, or ``"other"``.
+        task_ids:          HF task identifiers (e.g. ``["binary-classification"]``).
+
+        paperswithcode_id: Papers With Code dataset identifier, if any.
+        config_names:      List of configuration names for multi-config
+                           datasets.
+
+        license_name:      Custom license name when *license* is not an SPDX
+                           identifier.
+        license_link:      URL or relative path to the full license text.
+        license_details:   Additional license notes or free-text terms.
+
+        funded_by:         Organisation or grant that funded the dataset.
+        shared_by:         Person or organisation that shared the dataset.
+        paper_url:         URL to an associated academic paper.
+        demo_url:          URL to an interactive demo or explorer.
+        dataset_card_authors:
+                           Author(s) of the HF dataset card (comma-separated
+                           or free-text).
+
         files:             List of file entries to upload.
         readme, codebook, study_design, recipe:
                            Optional paths to data-sharing documentation files
                            that will be uploaded alongside the data.
+
+        quality:           Quality check configuration (:class:`QualityConfig`).
 
         min_files:         Minimum number of file entries expected.
         min_total_size_mb: Minimum total data size in MB.
@@ -281,17 +343,7 @@ class DatasetConfig:
 
         # -- quality checks ------------------------------------------------
         quality_checks: list[QualityCheck] = []
-        valid_checks = {
-            "duplicates",
-            "empty_rows",
-            "empty_columns",
-            "null_profiling",
-            "format_consistency",
-            "corrupt_records",
-            "value_range",
-            "cross_file_types",
-            "encoding_validation",
-        }
+        valid_checks = set(QUALITY_CHECK_NAMES)
         for entry in data.get("quality", []):
             check_name = entry.get("check", "")
             if check_name not in valid_checks:

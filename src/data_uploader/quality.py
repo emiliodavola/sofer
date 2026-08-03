@@ -18,7 +18,7 @@ from ._csv_reader import ENCODING_FALLBACKS, stream_csv
 from ._sentinels import MISSING_VALUE_SENTINELS
 from .checks import ValidationReport
 from .codebook import infer_column_type
-from .model import DatasetConfig, QualityCheck, QualityResult
+from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityCheck, QualityResult
 
 # ---------------------------------------------------------------------------
 #  Built-in defaults — used when the user gives no explicit [[quality]] config
@@ -555,18 +555,7 @@ def write_quality_report(report: ValidationReport, path: Path) -> None:
     # Passed / skipped summary
     found = {r.check for r in report.quality_results}
     passed = len(report.ran_checks - found)
-    all_checks = {
-        "duplicates",
-        "empty_rows",
-        "empty_columns",
-        "null_profiling",
-        "format_consistency",
-        "corrupt_records",
-        "value_range",
-        "cross_file_types",
-        "encoding_validation",
-    }
-    skipped = len(all_checks - report.ran_checks - found)
+    skipped = len(QUALITY_CHECK_NAMES - report.ran_checks - found)
 
     lines.append("## Summary")
     lines.append("")

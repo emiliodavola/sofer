@@ -14,7 +14,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from .model import DatasetConfig, QualityResult
+from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityResult
 from .repo_compliance import normalize_header
 
 
@@ -98,21 +98,7 @@ def _count_passed_quality(
     """
     found = {r.check for r in results}
     passed = len(ran_checks - found)
-    skipped = len(
-        {
-            "duplicates",
-            "empty_rows",
-            "empty_columns",
-            "null_profiling",
-            "format_consistency",
-            "corrupt_records",
-            "value_range",
-            "cross_file_types",
-            "encoding_validation",
-        }
-        - ran_checks
-        - found
-    )
+    skipped = len(QUALITY_CHECK_NAMES - ran_checks - found)
     return (passed, skipped)
 
 

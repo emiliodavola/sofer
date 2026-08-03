@@ -19,6 +19,7 @@ import tomli_w
 from ._formats import SUPPORTED_FORMATS
 from .model import FileEntry
 
+#: Directory names excluded from recursive file discovery (scan command).
 EXCLUSIONS: frozenset[str] = frozenset(
     {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
 )

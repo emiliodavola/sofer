@@ -19,6 +19,11 @@ from ._sentinels import MISSING_VALUE_SENTINELS
 from .codebook import infer_column_type
 from .model import DatasetConfig
 
+# Number of rows sampled per file for schema inference.
+# 10,000 balances statistical confidence (coverage of low-cardinality values,
+# reasonable missing-value estimates) against read-time cost — even for wide
+# Parquet files with hundreds of columns, the row-group read stays under a few
+# seconds on typical hardware.
 _SCHEMA_SAMPLE_SIZE = 10_000
 
 
