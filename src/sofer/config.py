@@ -1,5 +1,5 @@
 """
-Tool-wide configuration loaded from ``pyproject.toml`` under ``[tool.data-uploader]``.
+Tool-wide configuration loaded from ``pyproject.toml`` under ``[tool.sofer]``.
 
 Every value has a sensible default — the ``pyproject.toml`` section is optional.
 Module-level constants are read once at import time.
@@ -12,7 +12,7 @@ from typing import Any
 
 # ---------------------------------------------------------------------------
 #  Hard-coded fallback defaults — used when pyproject.toml is absent or
-#  the ``[tool.data-uploader]`` section is missing keys.
+#  the ``[tool.sofer]`` section is missing keys.
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: dict[str, Any] = {
@@ -60,7 +60,7 @@ def _find_project_root() -> Path:
 
 
 def _load_tool_config() -> dict[str, Any]:
-    """Read ``[tool.data-uploader]`` from the project's ``pyproject.toml``.
+    """Read ``[tool.sofer]`` from the project's ``pyproject.toml``.
 
     All keys are optional — missing keys fall back to :data:`_DEFAULTS`.
     Returns a merged ``dict``: TOML values take precedence over defaults.
@@ -81,7 +81,7 @@ def _load_tool_config() -> dict[str, Any]:
         except Exception:
             toml_data = {}
 
-    tool_section: dict[str, Any] = toml_data.get("tool", {}).get("data-uploader", {})
+    tool_section: dict[str, Any] = toml_data.get("tool", {}).get("sofer", {})
 
     merged = dict(_DEFAULTS)
     for key, default in _DEFAULTS.items():

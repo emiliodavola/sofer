@@ -14,7 +14,7 @@
 ### Build & Tests Execution
 **Build**: ✅ Passed
 ```text
-$ uv run ruff check src/data_uploader/ tests/
+$ uv run ruff check src/sofer/ tests/
 All checks passed!
 ```
 

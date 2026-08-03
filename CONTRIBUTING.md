@@ -59,4 +59,4 @@ Use the issue template and include:
 
 ## Questions?
 
-Open a [discussion](https://github.com/emiliodavola/data-uploader/discussions) or reach out in an issue.
+Open a [discussion](https://github.com/emiliodavola/sofer/discussions) or reach out in an issue.

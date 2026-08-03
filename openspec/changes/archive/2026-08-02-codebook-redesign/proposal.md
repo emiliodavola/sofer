@@ -45,11 +45,11 @@ Output collision (multiple formats in same dir) warns and uses format-specific s
 
 | Area | Impact | Description |
 |------|--------|-------------|
-| `src/data_uploader/codebook.py` | Modified | Split into format readers + abstract analysis + markdown renderer; add `generate_all()` |
-| `src/data_uploader/cli.py` | Modified | New `--all-files` flag; positional arg becomes optional (`nargs="?"`) |
+| `src/sofer/codebook.py` | Modified | Split into format readers + abstract analysis + markdown renderer; add `generate_all()` |
+| `src/sofer/cli.py` | Modified | New `--all-files` flag; positional arg becomes optional (`nargs="?"`) |
 | `tests/test_codebook.py` | Modified | Parquet/XLSX/TSV/JSONL fixtures; batch generation tests; output placement tests |
 | `pyproject.toml` | Modified | Add `openpyxl` dependency |
-| `src/data_uploader/_formats.py` | Read-only | Consumed by format dispatcher |
+| `src/sofer/_formats.py` | Read-only | Consumed by format dispatcher |
 
 ## Risks
 

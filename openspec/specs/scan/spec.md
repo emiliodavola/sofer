@@ -94,7 +94,7 @@ MUST remain untouched. Directory creation SHALL be lazy (only when needed).
 
 ### Requirement: CLI Interface (SCN-04)
 
-The system MUST provide `data-uploader scan [config.toml] [--dry-run] [--force] [--ext .ext]`.
+The system MUST provide `sofer scan [config.toml] [--dry-run] [--force] [--ext .ext]`.
 Default config SHALL be `dataset.toml` in the current directory. `--dry-run`
 MUST report without filesystem changes. `--force` MUST skip the confirmation
 prompt. Exit code 0 on success, 1 on error.
@@ -102,20 +102,20 @@ prompt. Exit code 0 on success, 1 on error.
 #### Scenario: Default config and interactive confirm
 
 - GIVEN `dataset.toml` in the working directory
-- WHEN `data-uploader scan` is called
+- WHEN `sofer scan` is called
 - THEN `dataset.toml` SHALL be used as config
 - AND the user SHALL be prompted before files are copied
 
 #### Scenario: --force skips confirmation
 
 - GIVEN discovered files and `dataset.toml`
-- WHEN `data-uploader scan --force` is called
+- WHEN `sofer scan --force` is called
 - THEN files SHALL be copied without prompting
 
 #### Scenario: Explicit config path
 
 - GIVEN `my-project/config.toml` exists
-- WHEN `data-uploader scan my-project/config.toml` is called
+- WHEN `sofer scan my-project/config.toml` is called
 - THEN that file SHALL be used as the TOML source
 
 ---
@@ -143,7 +143,7 @@ destination conflicts, and malformed TOML. All errors SHALL produce exit code 1.
 #### Scenario: Config file not found
 
 - GIVEN `dataset.toml` does not exist
-- WHEN `data-uploader scan` is called
+- WHEN `sofer scan` is called
 - THEN an error message SHALL be printed
 - AND exit code SHALL be 1
 

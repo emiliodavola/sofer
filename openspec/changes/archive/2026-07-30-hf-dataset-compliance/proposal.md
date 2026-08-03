@@ -2,7 +2,7 @@
 
 ## Intent
 
-The `data-uploader` CLI uploads raw files to Hugging Face Hub but produces repos that don't follow official HF dataset standards — no Dataset Card, no LICENSE, no schema declaration. This makes repos invisible to the Dataset Viewer, breaks `datasets.load_dataset()`, and undermines the Leek group data-sharing principles the tool claims to follow.
+The `sofer` CLI uploads raw files to Hugging Face Hub but produces repos that don't follow official HF dataset standards — no Dataset Card, no LICENSE, no schema declaration. This makes repos invisible to the Dataset Viewer, breaks `datasets.load_dataset()`, and undermines the Leek group data-sharing principles the tool claims to follow.
 
 ## Scope
 
@@ -30,7 +30,7 @@ The `data-uploader` CLI uploads raw files to Hugging Face Hub but produces repos
 ## Approach
 
 1. Extend `DatasetConfig.dataclass` in `model.py` with new `[meta]` fields (language, pretty_name, task_categories, size_categories, citation, source_organization, collection_method)
-2. Create `src/data_uploader/repo_compliance.py` with three pure functions:
+2. Create `src/sofer/repo_compliance.py` with three pure functions:
    - `build_dataset_card(cfg, schema) -> str` — generates `README.md` with YAML frontmatter + Leek-aligned body
    - `build_license_file(license_id) -> str` — returns well-known license text or descriptive fallback for unknown identifiers
    - `build_schema_report(cfg) -> list[ColumnSchema]` — reads CSV headers/sample to infer types
@@ -41,10 +41,10 @@ The `data-uploader` CLI uploads raw files to Hugging Face Hub but produces repos
 
 | Area | Impact | Description |
 |------|--------|-------------|
-| `src/data_uploader/model.py` | Modified | New `[meta]` fields on `DatasetConfig` |
-| `src/data_uploader/repo_compliance.py` | New | Dataset Card, LICENSE, schema generation |
-| `src/data_uploader/uploader.py` | Modified | Orchestrates compliance before upload |
-| `src/data_uploader/cli.py` | None | No CLI changes this slice |
+| `src/sofer/model.py` | Modified | New `[meta]` fields on `DatasetConfig` |
+| `src/sofer/repo_compliance.py` | New | Dataset Card, LICENSE, schema generation |
+| `src/sofer/uploader.py` | Modified | Orchestrates compliance before upload |
+| `src/sofer/cli.py` | None | No CLI changes this slice |
 | `tests/` | Modified | New test file `test_repo_compliance.py` |
 
 ## Risks
@@ -69,7 +69,7 @@ The `data-uploader` CLI uploads raw files to Hugging Face Hub but produces repos
 
 ## Success Criteria
 
-- [ ] `data-uploader upload <config.toml>` generates a HF repo with `README.md` (valid YAML frontmatter) + `LICENSE`
+- [ ] `sofer upload <config.toml>` generates a HF repo with `README.md` (valid YAML frontmatter) + `LICENSE`
 - [ ] Dataset Card renders correctly on HF Hub Dataset Viewer
 - [ ] `from datasets import load_dataset; load_dataset("user/repo")` works without custom code
 - [ ] All existing 54 unit tests pass unchanged

@@ -31,10 +31,10 @@
 
 ### Affected Areas
 
-- **`src/data_uploader/codebook.py`** — Heavy refactor. The `generate()` function is hardwired to `csv.reader`. Must be split into format-specific read + common analysis + markdown rendering. The column analysis logic (`infer_column_type`) works on strings; for typed formats (Parquet, JSONL), a parallel dtype-based path is needed.
-- **`src/data_uploader/cli.py`** — New args: `--config` (TOML path), `--all-files` flag, positional arg becomes optional with `--all-files`. New handler logic for batch generation, output location strategy.
-- **`src/data_uploader/model.py`** — Minor. `DatasetConfig` already provides `files`, `_base_dir`, and format info via `FileEntry.local.suffix`. May need a helper to filter files eligible for codebook generation.
-- **`src/data_uploader/_formats.py`** — Minimal. Already has the format registry; codebook just needs to consume it.
+- **`src/sofer/codebook.py`** — Heavy refactor. The `generate()` function is hardwired to `csv.reader`. Must be split into format-specific read + common analysis + markdown rendering. The column analysis logic (`infer_column_type`) works on strings; for typed formats (Parquet, JSONL), a parallel dtype-based path is needed.
+- **`src/sofer/cli.py`** — New args: `--config` (TOML path), `--all-files` flag, positional arg becomes optional with `--all-files`. New handler logic for batch generation, output location strategy.
+- **`src/sofer/model.py`** — Minor. `DatasetConfig` already provides `files`, `_base_dir`, and format info via `FileEntry.local.suffix`. May need a helper to filter files eligible for codebook generation.
+- **`src/sofer/_formats.py`** — Minimal. Already has the format registry; codebook just needs to consume it.
 - **`tests/test_codebook.py`** — Significant expansion. Need test fixtures for each supported format (`.parquet`, `.xlsx`, `.tsv`, `.jsonl`). Need tests for batch generation from TOML. Need tests for output placement strategy. Need regression tests to confirm single-file CSV generation is unchanged.
 - **`pyproject.toml`** — New dependencies: `openpyxl` (for `.xlsx` reading) at minimum; possibly `pandas` if chosen as the read backend.
 
@@ -100,9 +100,9 @@ codebook.py:
 
 CLI changes:
 ```
-data-uploader codebook <file>              # single file (current behavior, unchanged)
-data-uploader codebook --config <toml> --all-files  # batch from TOML
-data-uploader codebook --config <toml> --all-files --index  # batch + root index
+sofer codebook <file>              # single file (current behavior, unchanged)
+sofer codebook --config <toml> --all-files  # batch from TOML
+sofer codebook --config <toml> --all-files --index  # batch + root index
 ```
 
 Output placement for `--all-files`:

@@ -1,4 +1,4 @@
-"""Tests for data_uploader.cli — argument parsing and command dispatch.
+"""Tests for sofer.cli — argument parsing and command dispatch.
 
 The upload and validate commands depend on Hugging Face credentials and real
 filesystem state, so they are integration-level.  Here we test everything
@@ -8,7 +8,7 @@ that can be verified without network calls or real data.
 import sys
 from argparse import Namespace
 
-from data_uploader import cli
+from sofer import cli
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 

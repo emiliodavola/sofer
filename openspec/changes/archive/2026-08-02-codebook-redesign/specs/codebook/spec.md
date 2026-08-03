@@ -39,7 +39,7 @@ surface the storage dtype alongside the inferred type.
 
 ### Requirement: Single-File Generation (CB-R02)
 
-The existing `data-uploader codebook <file>` interface MUST remain functional
+The existing `sofer codebook <file>` interface MUST remain functional
 for all supported formats. Output SHALL go to stdout by default or to `-o
 <file>`. The positional argument MUST retain the name `csv` with `metavar`
 changed to `FILE` for backward compatibility.
@@ -47,19 +47,19 @@ changed to `FILE` for backward compatibility.
 #### Scenario: CSV backward compatibility
 
 - GIVEN a `.csv` file from a prior workflow
-- WHEN `data-uploader codebook data.csv` is called
+- WHEN `sofer codebook data.csv` is called
 - THEN the output SHALL be identical to the current implementation
 
 #### Scenario: Parquet single-file
 
 - GIVEN a `.parquet` file at `data/survey.parquet`
-- WHEN `data-uploader codebook data/survey.parquet` is called
+- WHEN `sofer codebook data/survey.parquet` is called
 - THEN a markdown codebook SHALL be printed to stdout
 
 #### Scenario: Output to file
 
 - GIVEN any supported-format file
-- WHEN `data-uploader codebook data.csv -o out.md` is called
+- WHEN `sofer codebook data.csv -o out.md` is called
 - THEN the codebook SHALL be written to `out.md`
 
 ---
@@ -75,7 +75,7 @@ Each codebook MUST be placed alongside its data file as `codebook.md`.
 
 - GIVEN `dataset.toml` with `[[file]]` entries for `data/a.csv`,
   `data/b.parquet`, and `data/c.docx`
-- WHEN `data-uploader codebook --config dataset.toml --all-files` is called
+- WHEN `sofer codebook --config dataset.toml --all-files` is called
 - THEN `data/codebook.md` SHALL be generated alongside `a.csv`
 - AND `data/codebook.md` SHALL be generated alongside `b.parquet`
 - AND `c.docx` SHALL be skipped with a warning
@@ -99,7 +99,7 @@ links to each generated codebook and a dataset summary.
 
 - GIVEN `dataset.toml` in `/proj/` with files in `data/a.csv` and
   `data/b.parquet`
-- WHEN `data-uploader codebook --config dataset.toml --all-files` completes
+- WHEN `sofer codebook --config dataset.toml --all-files` completes
 - THEN `/proj/codebook.md` SHALL exist
 - AND SHALL contain links to each generated per-file codebook
 

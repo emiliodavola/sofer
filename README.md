@@ -1,5 +1,8 @@
 # sofer
 
+> **Sofer** (Hebrew: סופר, "scribe") — a person who meticulously transcribes
+> sacred texts. This tool brings the same care to dataset documentation.
+
 **Publish any dataset to Hugging Face Hub with built-in validation and
 data-sharing standards.**
 
@@ -174,7 +177,7 @@ links to all per-table codebooks.
 ## Architecture
 
 ```
-src/data_uploader/
+src/sofer/
 ├── __init__.py         # Version + public API
 ├── _formats.py         # Supported file extension registry
 ├── _sentinels.py       # Shared sentinel value sets

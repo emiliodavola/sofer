@@ -26,7 +26,7 @@ Chain strategy: N/A
 
 ## Phase 1: Foundation — Multi-Format Readers
 
-- [x] 1.1 Add `_read_csv(path, encoding, delimiter)` and `_read_tsv(path, encoding)` to `src/data_uploader/codebook.py` — extract CSV reading from current `generate()` into `_read_csv`; TSV is CSV with `\t` delimiter; both return `(headers, columns, None)` — covers CB-R01
+- [x] 1.1 Add `_read_csv(path, encoding, delimiter)` and `_read_tsv(path, encoding)` to `src/sofer/codebook.py` — extract CSV reading from current `generate()` into `_read_csv`; TSV is CSV with `\t` delimiter; both return `(headers, columns, None)` — covers CB-R01
 - [x] 1.2 Add `_read_parquet(path)` to `codebook.py` — use `pyarrow.parquet.read_table`, convert to columnar `list[list[str]]`, return `(headers, columns, dtypes)` — covers CB-R01 scenario "Read Parquet with dtype display"
 - [x] 1.3 Add `_read_xlsx(path)` to `codebook.py` — use `openpyxl.load_workbook`, read first sheet, return `(headers, columns, dtypes)` where `dtypes` is `dict[str, str]` from cell types — covers CB-R01 scenario "Read XLSX with multi-format"
 - [x] 1.4 Add `_read_jsonl(path)` to `codebook.py` — read line-delimited JSON, unify keys as column headers, return `(headers, columns, None)` — covers CB-R01
@@ -45,7 +45,7 @@ Chain strategy: N/A
 - [x] 3.2 Add root index generation in `generate_all` — write `codebook.md` at config root with TOC, relative links, dataset summary per design — covers CB-R04 scenario "Root index after batch generation"
 - [x] 3.3 Add output collision handling — detect multiple supported files sharing parent dir; use format-specific suffix (`codebook_parquet.md`, `codebook_csv.md`); emit warning — covers CB-R05 scenario "Same-dir multi-format collision"
 - [x] 3.4 Add error handling in `generate_all` — skip + warn for unsupported format, missing file, directory entry; minimal codebook for empty file; exit 1 on malformed TOML — covers CB-R06 all scenarios
-- [x] 3.5 Update CLI in `src/data_uploader/cli.py` — make `csv` arg optional (`nargs="?"`), change `metavar` to `"FILE"`; add `--all-files` flag and `--config` option; handler dispatches single-file vs batch — covers CB-R02, CB-R03
+- [x] 3.5 Update CLI in `src/sofer/cli.py` — make `csv` arg optional (`nargs="?"`), change `metavar` to `"FILE"`; add `--all-files` flag and `--config` option; handler dispatches single-file vs batch — covers CB-R02, CB-R03
 
 ## Phase 4: Testing
 

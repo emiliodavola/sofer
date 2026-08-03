@@ -2,7 +2,7 @@
 
 ## Current State
 
-The `data-uploader` CLI (`cli.py`) uses argparse subparsers with a `func` dispatch pattern. Four commands exist today: `init`, `validate`, `upload`, `codebook`. Datasets are registered in TOML via `[[file]]` entries, each with a `local` path (relative to the TOML's directory, resolved via `_base_dir`) and a `remote` path for the HF repo. There is no automated discovery — users manually list files.
+The `sofer` CLI (`cli.py`) uses argparse subparsers with a `func` dispatch pattern. Four commands exist today: `init`, `validate`, `upload`, `codebook`. Datasets are registered in TOML via `[[file]]` entries, each with a `local` path (relative to the TOML's directory, resolved via `_base_dir`) and a `remote` path for the HF repo. There is no automated discovery — users manually list files.
 
 ### Key architecture pieces
 
@@ -29,10 +29,10 @@ There is NO centralized format/extension registry. Extensions are handled ad-hoc
 
 ## Affected Areas
 
-- `src/data_uploader/cli.py` — New subparser for `scan`, new `_cmd_scan` function, new `_SCAN_DESCRIPTION` help text
-- `src/data_uploader/model.py` — Optional: `write_toml()` class method, `DatasetConfig.to_toml()`, or a new `_formats.py` for the extension registry
-- `src/data_uploader/scanner.py` — **NEW MODULE**: scan logic, file walking, TOML merging
-- `src/data_uploader/__init__.py` — Minor: update docstring to mention `scan`
+- `src/sofer/cli.py` — New subparser for `scan`, new `_cmd_scan` function, new `_SCAN_DESCRIPTION` help text
+- `src/sofer/model.py` — Optional: `write_toml()` class method, `DatasetConfig.to_toml()`, or a new `_formats.py` for the extension registry
+- `src/sofer/scanner.py` — **NEW MODULE**: scan logic, file walking, TOML merging
+- `src/sofer/__init__.py` — Minor: update docstring to mention `scan`
 - `tests/test_cli.py` — Parser tests for new subparser + `--flags`
 - `tests/test_scanner.py` — **NEW**: scan logic tests (file discovery, TOML merge, move)
 - `pyproject.toml` — Optional: `openpyxl` dependency if `.xlsx` support is in scope for the initial delivery
@@ -75,7 +75,7 @@ Add `DatasetConfig.scan_directory()` and `DatasetConfig.to_toml()` as methods on
 ### Detailed design sketch
 
 ```
-src/data_uploader/
+src/sofer/
 ├── _formats.py          ← NEW — SUPPORTED_FORMATS dict
 ├── scanner.py           ← NEW — scan_project(), merge_entries(), reorganize_files()
 ├── model.py             ← MODIFIED — (only if to_toml() lives here; see open question)
@@ -100,7 +100,7 @@ SUPPORTED_FORMATS: dict[str, str] = {
 
 **CLI interface**:
 ```
-data-uploader scan [config.toml] [--move] [--dry-run] [--force]
+sofer scan [config.toml] [--move] [--dry-run] [--force]
 ```
 - `config`: Path to TOML config file (creates if doesn't exist)
 - `--move`: Actually move files to `data/` (default: only register)

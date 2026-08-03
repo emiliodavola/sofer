@@ -50,8 +50,8 @@ _build_markdown(headers, columns, dtypes, path, max_sample)
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/data_uploader/codebook.py` | Modify | Add `_read_csv`, `_read_tsv`, `_read_parquet`, `_read_xlsx`, `_read_jsonl`, `_read_file`, `_build_markdown`, `generate_all`. Refactor `generate` to compose `_read_file` + `_build_markdown`. Keep `infer_column_type` and `_infer_type` unchanged. |
-| `src/data_uploader/cli.py` | Modify | `codebook` subparser: `csv` gains `nargs="?"` + `metavar="FILE"`. Add `--all-files` (flag) and `--config` (TOML path). Handler dispatches batch or single-file. |
+| `src/sofer/codebook.py` | Modify | Add `_read_csv`, `_read_tsv`, `_read_parquet`, `_read_xlsx`, `_read_jsonl`, `_read_file`, `_build_markdown`, `generate_all`. Refactor `generate` to compose `_read_file` + `_build_markdown`. Keep `infer_column_type` and `_infer_type` unchanged. |
+| `src/sofer/cli.py` | Modify | `codebook` subparser: `csv` gains `nargs="?"` + `metavar="FILE"`. Add `--all-files` (flag) and `--config` (TOML path). Handler dispatches batch or single-file. |
 | `tests/test_codebook.py` | Modify | Add format-specific fixtures (`.tsv`, `.parquet`, `.xlsx`, `.jsonl`), batch generation tests, output placement tests, root index tests. |
 | `pyproject.toml` | Modify | Add `openpyxl` to `dependencies`. |
 

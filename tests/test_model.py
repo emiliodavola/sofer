@@ -1,8 +1,8 @@
-"""Tests for data_uploader.model — TOML loading, config representation, validation."""
+"""Tests for sofer.model — TOML loading, config representation, validation."""
 
 from pathlib import Path
 
-from data_uploader.model import DatasetConfig, FileEntry
+from sofer.model import DatasetConfig, FileEntry
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

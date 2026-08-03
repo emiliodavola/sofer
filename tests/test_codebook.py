@@ -1,11 +1,11 @@
-"""Tests for data_uploader.codebook — multi-format analysis and markdown generation."""
+"""Tests for sofer.codebook — multi-format analysis and markdown generation."""
 
 import csv
 import sys
 
 import pytest
 
-from data_uploader.codebook import (
+from sofer.codebook import (
     _build_markdown,
     _infer_type,
     _read_csv,
@@ -498,7 +498,7 @@ class TestGenerateAll:
         return toml_path
 
     def test_generates_for_all_toml_entries(self, tmp_path):
-        from data_uploader.model import DatasetConfig
+        from sofer.model import DatasetConfig
 
         a = tmp_path / "a.csv"
         a.write_text("x;y\n1;2\n", encoding="utf-8")
@@ -526,7 +526,7 @@ class TestGenerateAll:
         assert "Tables:" in root_content
 
     def test_root_index_has_correct_links(self, tmp_path):
-        from data_uploader.model import DatasetConfig
+        from sofer.model import DatasetConfig
 
         sub = tmp_path / "data"
         sub.mkdir()
@@ -542,7 +542,7 @@ class TestGenerateAll:
         assert "1 columns" in content
 
     def test_skips_unsupported_format(self, tmp_path, capsys):
-        from data_uploader.model import DatasetConfig
+        from sofer.model import DatasetConfig
 
         (tmp_path / "f.txt").write_text("hello", encoding="utf-8")
 
@@ -555,7 +555,7 @@ class TestGenerateAll:
         assert "Unsupported format" in captured.err
 
     def test_skips_missing_file(self, tmp_path, capsys):
-        from data_uploader.model import DatasetConfig
+        from sofer.model import DatasetConfig
 
         toml_path = self._write_toml(tmp_path, ["nonexistent.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
@@ -566,7 +566,7 @@ class TestGenerateAll:
         assert "missing" in captured.err.lower()
 
     def test_skips_directory_entry(self, tmp_path, capsys):
-        from data_uploader.model import DatasetConfig
+        from sofer.model import DatasetConfig
 
         sub = tmp_path / "mydir"
         sub.mkdir()
@@ -587,7 +587,7 @@ class TestGenerateAll:
 
 class TestEdgeCases:
     def test_output_collision_uses_suffixes(self, tmp_path, capsys):
-        from data_uploader.model import DatasetConfig
+        from sofer.model import DatasetConfig
 
         sub = tmp_path / "data"
         sub.mkdir()
@@ -684,13 +684,13 @@ class TestEdgeCases:
 
 class TestCodebookCLI:
     def _invoke(self, args, monkeypatch):
-        import data_uploader.cli
+        import sofer.cli
 
         monkeypatch.setattr(sys, "argv", ["sofer", "codebook", *args])
         exc = None
         # noinspection PyBroadException
         try:
-            data_uploader.cli.main()
+            sofer.cli.main()
         except SystemExit as e:
             exc = e
         return exc

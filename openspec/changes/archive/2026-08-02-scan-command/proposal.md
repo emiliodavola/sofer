@@ -3,7 +3,7 @@
 ## Intent
 
 Manually maintaining `[[file]]` entries is error-prone — users must list every file,
-keep paths in sync, and remember to update on adds/removals. `data-uploader scan`
+keep paths in sync, and remember to update on adds/removals. `sofer scan`
 automates discovery, copies files to `data/`, and writes TOML, making the config
 the single source of truth for all downstream commands (codebook, upload, validate).
 
@@ -46,7 +46,7 @@ Three new components, following the existing architecture (one domain module per
    to `data/`, preserving subdirectory structure), `write_toml()` (serialise full
    config via `tomli_w.dumps()`).
 3. **`cli.py`** — `scan` subparser wired via `set_defaults(func=_cmd_scan)`.
-   CLI: `data-uploader scan [config.toml] [--dry-run] [--force] [--ext .ext]`.
+   CLI: `sofer scan [config.toml] [--dry-run] [--force] [--ext .ext]`.
 
 TOML round-trip: `tomli.load()` → merge new `[[file]]` entries → `tomli_w.dumps()`.
 Comment preservation is not guaranteed (`tomli_w` is write-only) — accepted tradeoff
@@ -56,10 +56,10 @@ per user decision.
 
 | Area | Impact | Description |
 |------|--------|-------------|
-| `src/data_uploader/_formats.py` | New | Extension registry |
-| `src/data_uploader/scanner.py` | New | Discovery, merge, copy, TOML write |
-| `src/data_uploader/cli.py` | Modified | `scan` subparser + `_cmd_scan` |
-| `src/data_uploader/__init__.py` | Modified | Docstring update |
+| `src/sofer/_formats.py` | New | Extension registry |
+| `src/sofer/scanner.py` | New | Discovery, merge, copy, TOML write |
+| `src/sofer/cli.py` | Modified | `scan` subparser + `_cmd_scan` |
+| `src/sofer/__init__.py` | Modified | Docstring update |
 | `pyproject.toml` | Modified | Add `tomli_w` dependency |
 | `tests/test_scanner.py` | New | Scan logic tests |
 | `tests/test_cli.py` | Modified | Subparser + flag tests |
@@ -85,9 +85,9 @@ files lose functionality. If TOML was modified by scan, restore from git or back
 
 ## Success Criteria
 
-- [ ] `data-uploader scan dataset.toml` discovers all supported files and registers them
+- [ ] `sofer scan dataset.toml` discovers all supported files and registers them
 - [ ] Running scan twice produces identical TOML output (no duplicate entries)
-- [ ] `data-uploader validate dataset.toml` passes on scan-produced config
+- [ ] `sofer validate dataset.toml` passes on scan-produced config
 - [ ] `--dry-run` reports planned changes without modifying disk or TOML
 - [ ] Excluded directories (`.git/`, `.venv/`, etc.) never appear in scan results
 - [ ] Copy preserves relative subdirectory structure inside `data/`; originals untouched
