@@ -6,6 +6,7 @@ generates codebooks, and uploads everything to HF following data-sharing best pr
 
 Usage:
     data-uploader init my-dataset          # Create a TOML template
+    data-uploader scan my-dataset.toml     # Auto-discover and register data files
     data-uploader validate my-dataset.toml # Check data integrity
     data-uploader upload   my-dataset.toml # Upload to Hugging Face
     data-uploader codebook data.csv        # Generate a markdown codebook

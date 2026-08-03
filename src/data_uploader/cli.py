@@ -12,10 +12,18 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator
 from .codebook import generate as generate_codebook
 from .model import DatasetConfig
 from .quality import QualityValidator
+from .scanner import (
+    EXCLUSIONS,
+    copy_files,
+    discover_files,
+    merge_entries,
+    write_toml,
+)
 from .uploader import upload as run_upload
 
 # ── command implementations ────────────────────────────────────────────
@@ -81,6 +89,88 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     )
     if not args.output:
         print(codebook)
+    return 0
+
+
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """Discover data files, register them in TOML, and copy to ``data/``."""
+    config_path = Path(args.config).resolve()
+
+    if not config_path.exists():
+        print(f"  X  Config file not found: {config_path}", file=sys.stderr)
+        return 1
+
+    # 1. Load raw TOML.
+    try:
+        import tomli as _tomli
+    except ImportError:
+        import tomllib as _tomli
+
+    try:
+        with open(config_path, "rb") as fh:
+            raw_toml = _tomli.load(fh)
+    except Exception as exc:
+        print(f"  X  Failed to read TOML: {exc}", file=sys.stderr)
+        return 1
+
+    base_dir = config_path.parent.resolve()
+    data_dir = base_dir / "data"
+
+    # 2. Discover supported files (exclude data/ destination directory).
+    extensions = args.ext if args.ext else None
+    exclude = EXCLUSIONS | frozenset({"data"})
+    discovered = discover_files(base_dir, extensions, exclude_dirs=exclude)
+
+    if not discovered:
+        print("  OK  No supported files found.")
+        return 0
+
+    # 3. Merge new entries into the raw TOML dict.
+    before_count = len(raw_toml.get("file", []))
+    raw_toml = merge_entries(discovered, raw_toml, base_dir, data_dir)
+    after_count = len(raw_toml.get("file", []))
+    new_count = after_count - before_count
+
+    print(f"  OK  Discovered {len(discovered)} supported file(s).")
+    if new_count:
+        print(f"  OK  Registered {new_count} new [[file]] entry(s).")
+    else:
+        print("  OK  All discovered files already registered (idempotent).")
+
+    # 4. Confirm with the user before copying (unless --force or --dry-run).
+    if not args.dry_run and not args.force:
+        print("\n  The following files will be copied to data/:")
+        for f in discovered:
+            print(f"     → data/{f.relative_to(base_dir)}")
+        answer = input("\n  Continue? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("  OK  Aborted.")
+            return 0
+
+    # 5. Copy files to data/.
+    try:
+        copied = copy_files(discovered, base_dir, data_dir, dry_run=args.dry_run, force=args.force)
+    except FileExistsError as exc:
+        print(f"  X  {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        print("  DRY RUN  Would copy the following files:")
+        for _src, dest in copied:
+            print(f"     → {dest.relative_to(base_dir)}")
+    else:
+        for _src, dest in copied:
+            print(f"     OK  {dest.relative_to(base_dir)}")
+
+    # 6. Write TOML (skip on dry-run — no disk mutation at all).
+    if not args.dry_run:
+        try:
+            write_toml(raw_toml, config_path)
+            print(f"  OK  Updated {config_path.name}")
+        except Exception as exc:
+            print(f"  X  Failed to write TOML: {exc}", file=sys.stderr)
+            return 1
+
     return 0
 
 
@@ -278,6 +368,45 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     i.add_argument("name", help="Short name for the dataset.")
     i.set_defaults(func=_cmd_init)
+
+    # ── scan ───────────────────────────────────────────────────────
+    s = sub.add_parser(
+        "scan",
+        help="Discover data files and register them in the TOML config.",
+        description=(
+            "Recursively scan the config file's directory for supported "
+            "data formats (.csv, .tsv, .parquet, .xlsx, .jsonl), register "
+            "new files as [[file]] entries in the TOML, and copy them into "
+            "the data/ directory preserving subdirectory structure.\n"
+            "\n"
+            "Running scan twice is safe — already-registered files are "
+            "skipped."
+        ),
+    )
+    s.add_argument(
+        "config",
+        nargs="?",
+        default="dataset.toml",
+        help="Path to the .toml configuration file (default: dataset.toml).",
+    )
+    s.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be done without modifying the disk or TOML.",
+    )
+    s.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing files in data/ without raising an error.",
+    )
+    s.add_argument(
+        "--ext",
+        action="append",
+        choices=list(SUPPORTED_FORMATS.keys()),
+        help="Only scan for files with these extensions (repeatable). "
+        "When omitted, all supported formats are included.",
+    )
+    s.set_defaults(func=_cmd_scan)
 
     return parser
 
