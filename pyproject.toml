@@ -55,6 +55,44 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
+# ── data-uploader tool-wide defaults ──────────────────────────────────────
+
+[tool.data-uploader]
+# ── Scan defaults ──
+output_dir = "data"
+default_config_name = "dataset.toml"
+
+# ── Parquet defaults ──
+parquet_row_group_size = 100_000
+parquet_compression = "zstd"
+parquet_shard_warning_mb = 500
+
+# ── Report defaults ──
+report_max_items = 10
+report_max_modified = 5
+report_max_corrupt_records = 20
+report_line_width = 50
+report_sub_line_width = 30
+
+# ── Codebook defaults ──
+codebook_max_sample = 100_000
+codebook_numeric_threshold = 0.9
+codebook_mixed_threshold = 0.5
+
+# ── Encoding / IO ──
+output_encoding = "utf-8"
+probe_chunk_bytes = 8192
+csv_delimiter = ";"
+csv_encoding = "utf-8-sig"
+
+# ── Sniffing ──
+sniff_delimiters = [";", ",", "\t"]
+
+# ── Dataset Card ──
+card_fallback_rows_per_file = 100
+card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d"]
+card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

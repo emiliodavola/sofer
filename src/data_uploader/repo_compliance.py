@@ -15,8 +15,15 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import yaml
 
+from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS
 from .codebook import infer_column_type
+from .config import (
+    CARD_BOOLEAN_VALUES,
+    CARD_FALLBACK_ROWS_PER_FILE,
+    CARD_MODALITY_TAGS,
+    PROBE_CHUNK_BYTES,
+)
 from .model import DatasetConfig
 
 # Number of rows sampled per file for schema inference.
@@ -84,63 +91,6 @@ def _hf_feature_type(dtype: str) -> str:
     return _HF_FEATURE_MAP.get(dtype, "string")
 
 
-def _parquet_to_hf_dtype(pa_type: object) -> str | None:
-    """Map a pyarrow physical type to an HF Dataset feature type string.
-
-    Returns ``None`` for ``null`` type (should be omitted from features list).
-    """
-    import pyarrow as pa
-
-    # Integral types
-    if pa.types.is_int8(pa_type) or pa.types.is_int16(pa_type) or pa.types.is_int32(pa_type):
-        return "int32"
-    if pa.types.is_int64(pa_type):
-        return "int64"
-
-    # Floating point
-    if pa.types.is_float32(pa_type):
-        return "float32"
-    if pa.types.is_float64(pa_type):
-        return "float64"
-
-    # Boolean
-    if pa.types.is_boolean(pa_type):
-        return "bool"
-
-    # String types
-    if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
-        return "string"
-
-    # Binary types → string (no native binary in HF datasets)
-    if (
-        pa.types.is_binary(pa_type)
-        or pa.types.is_large_binary(pa_type)
-        or pa.types.is_fixed_size_binary(pa_type)
-    ):
-        return "string"
-
-    # Temporal types
-    if pa.types.is_date32(pa_type):
-        return "date32"
-    if pa.types.is_date64(pa_type):
-        return "timestamp[ms]"
-    if pa.types.is_timestamp(pa_type):
-        return "timestamp[s]"
-    if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
-        return "time64"
-
-    # Decimal
-    if pa.types.is_decimal(pa_type):
-        return "float64"
-
-    # Null — omit from features
-    if pa.types.is_null(pa_type):
-        return None
-
-    # Nested/complex types — fallback to string
-    return "string"
-
-
 def _validate_size_category(value: str) -> str | None:
     """Validate a single size_category value against the canonical enumeration.
 
@@ -153,7 +103,7 @@ def _validate_size_category(value: str) -> str | None:
 
 def _csv_values_look_like_bool(values: list[str]) -> bool:
     """Check if all non-null CSV values look like boolean literals."""
-    bool_vals = {"true", "false", "1", "0", "yes", "no"}
+    bool_vals = set(CARD_BOOLEAN_VALUES)
     non_null = [
         v.strip().lower()
         for v in values
@@ -341,7 +291,7 @@ def _read_csv_sample(
             if delimiter is None:
                 # First try ";", Sniffer fallback
                 try:
-                    sample = fh.read(8192)
+                    sample = fh.read(PROBE_CHUNK_BYTES)
                     fh.seek(0)
                     dialect = csv.Sniffer().sniff(sample)
                     delimiter = dialect.delimiter
@@ -440,7 +390,7 @@ def _read_parquet_sample(
 def build_schema_report(
     cfg: DatasetConfig,
     csv_delimiter: str | None = None,
-    csv_encoding: str = "utf-8-sig",
+    csv_encoding: str | None = None,
     staging_dir: Path | None = None,
 ) -> list[ColumnSchema]:
     """Analyse CSV / Parquet files declared in *cfg* and produce a typed schema report.
@@ -467,6 +417,7 @@ def build_schema_report(
     """
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
     delimiter = csv_delimiter or cfg.csv_delimiter
+    csv_encoding = csv_encoding or cfg.csv_encoding
     columns: list[ColumnSchema] = []
     seen_names: dict[str, tuple[str, int]] = {}
 
@@ -688,10 +639,7 @@ def build_dataset_card(
     if "datasets" not in tags:
         tags.append("datasets")
     # Emit 'tabular' as default modality when not already present.
-    if not any(
-        t in tags
-        for t in ("tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d")
-    ):
+    if not any(t in tags for t in CARD_MODALITY_TAGS):
         tags.append("tabular")
     frontmatter["tags"] = tags
 
@@ -752,7 +700,7 @@ def build_dataset_card(
 
         # splits — estimate from schema when file info is present
         if cfg.files:
-            approx_rows = len(cfg.files) * 100  # conservative fallback
+            approx_rows = len(cfg.files) * CARD_FALLBACK_ROWS_PER_FILE  # conservative fallback
             if schema:
                 # Use a rough estimate from the schema
                 total_unique = sum(s.unique for s in schema)

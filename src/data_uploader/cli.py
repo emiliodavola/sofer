@@ -16,6 +16,7 @@ from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
+from .config import DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
 from .quality import QualityValidator
 from .scanner import (
@@ -163,11 +164,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     base_dir = config_path.parent.resolve()
-    data_dir = base_dir / "data"
+    data_dir = base_dir / OUTPUT_DIR
 
     # 2. Discover supported files (exclude data/ destination directory).
     extensions = args.ext if args.ext else None
-    exclude = EXCLUSIONS | frozenset({"data"})
+    exclude = EXCLUSIONS | frozenset({OUTPUT_DIR})
     discovered = discover_files(base_dir, extensions, exclude_dirs=exclude)
 
     if not discovered:
@@ -422,7 +423,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument(
         "--config",
-        default="dataset.toml",
+        default=DEFAULT_CONFIG_NAME,
         help="Path to the TOML config file (used with --all-files, default: dataset.toml).",
     )
     c.set_defaults(func=_cmd_codebook)
@@ -457,7 +458,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "config",
         nargs="?",
-        default="dataset.toml",
+        default=DEFAULT_CONFIG_NAME,
         help="Path to the .toml configuration file (default: dataset.toml).",
     )
     s.add_argument(
