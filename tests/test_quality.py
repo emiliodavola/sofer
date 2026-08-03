@@ -1,20 +1,20 @@
-"""Tests for data_uploader._csv_reader and data_uploader.quality."""
+"""Tests for sofer._csv_reader and sofer.quality."""
 
 import csv
 from pathlib import Path
 
 import pytest
 
-from data_uploader._csv_reader import stream_csv
-from data_uploader.checks import ValidationReport
-from data_uploader.model import (
+from sofer._csv_reader import stream_csv
+from sofer.checks import ValidationReport
+from sofer.model import (
     DatasetConfig,
     FileEntry,
     QualityCheck,
     QualityConfig,
     QualityResult,
 )
-from data_uploader.quality import QualityValidator
+from sofer.quality import QualityValidator
 
 
 def _make_csv(
@@ -476,7 +476,7 @@ class TestQualityReportFile:
         report = _run_quality(cfg)
         report_path = tmp_path / "quality-report.md"
 
-        from data_uploader.quality import write_quality_report
+        from sofer.quality import write_quality_report
 
         write_quality_report(report, report_path)
 
@@ -505,7 +505,7 @@ class TestQualityReportFile:
         report = _run_quality(cfg)
         report_path = tmp_path / "quality-report.md"
 
-        from data_uploader.quality import write_quality_report
+        from sofer.quality import write_quality_report
 
         write_quality_report(report, report_path)
 

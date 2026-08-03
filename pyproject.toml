@@ -1,5 +1,5 @@
 [project]
-name = "data-uploader"
+name = "sofer"
 version = "0.1.0"
 description = "Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards."
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-data-uploader = "data_uploader.cli:main"
+sofer = "sofer.cli:main"
 
 [dependency-groups]
 dev = [
@@ -55,9 +55,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# ── data-uploader tool-wide defaults ──────────────────────────────────────
+# ── sofer tool-wide defaults ──────────────────────────────────────
 
-[tool.data-uploader]
+[tool.sofer]
 # ── Scan defaults ──
 output_dir = "data"
 default_config_name = "dataset.toml"

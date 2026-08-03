@@ -1,10 +1,10 @@
-"""Tests for data_uploader.checks — data integrity verification."""
+"""Tests for sofer.checks — data integrity verification."""
 
 import csv
 from pathlib import Path
 
-from data_uploader.checks import DatasetValidator
-from data_uploader.model import ColumnCheck, DatasetConfig, FileEntry
+from sofer.checks import DatasetValidator
+from sofer.model import ColumnCheck, DatasetConfig, FileEntry
 
 
 def _make_csv(path: Path, rows: list[list[str]], delimiter: str = ";") -> Path:

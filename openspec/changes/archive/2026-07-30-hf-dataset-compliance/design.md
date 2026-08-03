@@ -45,9 +45,9 @@ TOML config → DatasetConfig.from_toml()
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/data_uploader/model.py` | Modify | Add 6 `[meta]` fields + `csv_delimiter` to `DatasetConfig`; reuse existing `source` field instead of adding `source_organization`; extend `from_toml()` with `.get()` calls |
-| `src/data_uploader/repo_compliance.py` | Create | `build_dataset_card()`, `build_license_file()`, `build_schema_report()`, `ColumnSchema` dataclass, `_LICENSE_TEMPLATES` dict |
-| `src/data_uploader/uploader.py` | Modify | Call compliance after `_ensure_repo()`, pre-load recipe content, write to tempdir, upload compliance files before data files |
+| `src/sofer/model.py` | Modify | Add 6 `[meta]` fields + `csv_delimiter` to `DatasetConfig`; reuse existing `source` field instead of adding `source_organization`; extend `from_toml()` with `.get()` calls |
+| `src/sofer/repo_compliance.py` | Create | `build_dataset_card()`, `build_license_file()`, `build_schema_report()`, `ColumnSchema` dataclass, `_LICENSE_TEMPLATES` dict |
+| `src/sofer/uploader.py` | Modify | Call compliance after `_ensure_repo()`, pre-load recipe content, write to tempdir, upload compliance files before data files |
 | `tests/test_repo_compliance.py` | Create | Unit tests for all 3 functions + integration mock test for upload ordering |
 
 No changes: `cli.py`, `checks.py`, `__init__.py`.  Updated: `codebook.py` (promote `_infer_type` to public `infer_column_type`); `pyproject.toml` (replace `tomli-w` with `PyYAML`).

@@ -38,7 +38,7 @@ untouched (unless `--keep-csv` requests a local copy).
 
 ### 2.1 `upload_as_csv` field
 
-The `FileEntry` dataclass in `src/data_uploader/model.py` SHALL gain an optional
+The `FileEntry` dataclass in `src/sofer/model.py` SHALL gain an optional
 boolean field:
 
 | Field | Type | Default | Description |
@@ -113,7 +113,7 @@ dependencies = [
 
 ### 4.1 New module function
 
-A new module-level function SHALL be added to `src/data_uploader/uploader.py`:
+A new module-level function SHALL be added to `src/sofer/uploader.py`:
 
 ```python
 def _convert_to_parquet(
@@ -471,9 +471,9 @@ least 90 % (branch coverage). The modified `upload()` function SHALL have at lea
 | File | Change |
 |------|--------|
 | `pyproject.toml` | Add `pyarrow>=14.0` to `dependencies`. |
-| `src/data_uploader/model.py` | Add `upload_as_csv: bool = False` to `FileEntry`; update `from_toml()` to read the field. |
-| `src/data_uploader/uploader.py` | Add `_convert_to_parquet()` function; add conversion loop in `upload()`; update `_hf_upload` call sites; add `keep_csv` parameter. |
-| `src/data_uploader/cli.py` | Add `--keep-csv` argument to upload subparser; pass to `upload()`. |
+| `src/sofer/model.py` | Add `upload_as_csv: bool = False` to `FileEntry`; update `from_toml()` to read the field. |
+| `src/sofer/uploader.py` | Add `_convert_to_parquet()` function; add conversion loop in `upload()`; update `_hf_upload` call sites; add `keep_csv` parameter. |
+| `src/sofer/cli.py` | Add `--keep-csv` argument to upload subparser; pass to `upload()`. |
 
 ### 11.2 Files to create
 
@@ -485,8 +485,8 @@ least 90 % (branch coverage). The modified `upload()` function SHALL have at lea
 
 | File | Reason |
 |------|--------|
-| `src/data_uploader/repo_compliance.py` | Schema report changes are covered by the `repo-compliance` delta spec (separate file). |
-| `src/data_uploader/codebook.py` | No changes — `infer_column_type` remains CSV-based for downstream users. |
+| `src/sofer/repo_compliance.py` | Schema report changes are covered by the `repo-compliance` delta spec (separate file). |
+| `src/sofer/codebook.py` | No changes — `infer_column_type` remains CSV-based for downstream users. |
 
 ---
 

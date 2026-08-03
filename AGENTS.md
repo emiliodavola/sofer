@@ -1,10 +1,10 @@
-# Agent Instructions — data-uploader
+# Agent Instructions — sofer
 
 ## Code Quality Standards
 
 ### 1. No hardcoded values
 - **Never** inline magic numbers or default strings in function bodies.
-- Tool-wide defaults belong in `pyproject.toml` under `[tool.data-uploader]`, loaded via `src/data_uploader/config.py`.
+- Tool-wide defaults belong in `pyproject.toml` under `[tool.sofer]`, loaded via `src/sofer/config.py`.
 - Dataset-level config belongs in the per-dataset TOML file, loaded via `DatasetConfig`.
 - Before writing a numeric literal or default string, ask: "Should this be configurable?"
 

@@ -43,10 +43,10 @@ CSV is the default upload format today — but Parquet is the standard for tabul
 | Area | Impact | Description |
 |------|--------|-------------|
 | `pyproject.toml` | Modified | Add `pyarrow` dependency |
-| `src/data_uploader/model.py` | Modified | Add `upload_as_csv` to `FileEntry`; TOML parsing |
-| `src/data_uploader/uploader.py` | Modified | Conversion loop in `upload()` before file upload |
-| `src/data_uploader/cli.py` | Modified | Add `--keep-csv` to upload subparser |
-| `src/data_uploader/repo_compliance.py` | Modified | `build_schema_report` reads Parquet when available |
+| `src/sofer/model.py` | Modified | Add `upload_as_csv` to `FileEntry`; TOML parsing |
+| `src/sofer/uploader.py` | Modified | Conversion loop in `upload()` before file upload |
+| `src/sofer/cli.py` | Modified | Add `--keep-csv` to upload subparser |
+| `src/sofer/repo_compliance.py` | Modified | `build_schema_report` reads Parquet when available |
 | `openspec/specs/repo-compliance/spec.md` | Modified | Delta spec for schema-report behavior change |
 | `tests/` | New/Modified | Tests for conversion, fallback, type fidelity |
 

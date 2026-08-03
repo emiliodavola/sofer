@@ -1,4 +1,4 @@
-"""Tests for data_uploader.scanner — discover, merge, copy, write, and integration."""
+"""Tests for sofer.scanner — discover, merge, copy, write, and integration."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from data_uploader.model import DatasetConfig
-from data_uploader.scanner import (
+from sofer.model import DatasetConfig
+from sofer.scanner import (
     copy_files,
     discover_files,
     merge_entries,
@@ -305,7 +305,7 @@ class TestIntegration:
 
     def test_full_pipeline(self, tmp_path: Path, monkeypatch) -> None:
         """Full scan produces valid TOML that passes DatasetConfig.validate()."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         # Build a realistic tree.
         _touch(tmp_path / "a.csv")
@@ -339,7 +339,7 @@ class TestIntegration:
 
     def test_dry_run_no_disk_changes(self, tmp_path: Path, monkeypatch) -> None:
         """dry_run reports but modifies neither TOML nor data/."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         _touch(tmp_path / "a.csv")
         config = tmp_path / "dataset.toml"
@@ -361,7 +361,7 @@ class TestIntegration:
 
     def test_idempotent_scan(self, tmp_path: Path, monkeypatch) -> None:
         """Running scan twice with same files produces identical TOML [[file]] count."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         _touch(tmp_path / "a.csv")
         config = tmp_path / "dataset.toml"
@@ -388,7 +388,7 @@ class TestIntegration:
 
     def test_missing_config_returns_error(self, tmp_path: Path, monkeypatch) -> None:
         """Calling scan with a nonexistent config returns exit code 1."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         monkeypatch.chdir(tmp_path)
         from argparse import Namespace
@@ -399,7 +399,7 @@ class TestIntegration:
 
     def test_no_supported_files_returns_ok(self, tmp_path: Path, monkeypatch) -> None:
         """Scan on a directory with only unsupported files returns exit code 0."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
         (tmp_path / "readme.md").write_text("# doc", encoding="utf-8")
@@ -415,7 +415,7 @@ class TestIntegration:
 
     def test_malformed_toml_returns_error(self, tmp_path: Path, monkeypatch) -> None:
         """Scan with a syntactically invalid TOML returns exit code 1."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         config = tmp_path / "dataset.toml"
         config.write_text("this is not valid [[[[ toml", encoding="utf-8")
@@ -429,7 +429,7 @@ class TestIntegration:
 
     def test_confirmation_yes_proceeds(self, tmp_path: Path, monkeypatch) -> None:
         """Prompting 'y' proceeds with copy."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         _touch(tmp_path / "a.csv")
         config = tmp_path / "dataset.toml"
@@ -446,7 +446,7 @@ class TestIntegration:
 
     def test_confirmation_no_aborts(self, tmp_path: Path, monkeypatch) -> None:
         """Prompting 'n' aborts without copying."""
-        from data_uploader.cli import _cmd_scan
+        from sofer.cli import _cmd_scan
 
         _touch(tmp_path / "a.csv")
         config = tmp_path / "dataset.toml"

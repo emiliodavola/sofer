@@ -54,11 +54,11 @@ Key design choices:
 
 | Area | Impact | Description |
 |------|--------|-------------|
-| `src/data_uploader/quality.py` | **New** | `QualityValidator` class with all P0 check methods |
-| `src/data_uploader/_csv_reader.py` | **New** | Shared streaming CSV reader utility |
-| `src/data_uploader/model.py` | Modified | Add `QualityCheck`, `QualityConfig` dataclasses; parse `[[quality]]` in `from_toml()` |
-| `src/data_uploader/checks.py` | Modified | `ValidationReport.print_summary()` gets quality section |
-| `src/data_uploader/cli.py` | Modified | Both `_cmd_validate` and `_cmd_upload` call `QualityValidator` |
+| `src/sofer/quality.py` | **New** | `QualityValidator` class with all P0 check methods |
+| `src/sofer/_csv_reader.py` | **New** | Shared streaming CSV reader utility |
+| `src/sofer/model.py` | Modified | Add `QualityCheck`, `QualityConfig` dataclasses; parse `[[quality]]` in `from_toml()` |
+| `src/sofer/checks.py` | Modified | `ValidationReport.print_summary()` gets quality section |
+| `src/sofer/cli.py` | Modified | Both `_cmd_validate` and `_cmd_upload` call `QualityValidator` |
 | `tests/test_quality.py` | **New** | Unit tests for all check types |
 
 ## Risks

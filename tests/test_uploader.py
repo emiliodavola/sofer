@@ -1,6 +1,6 @@
 """Tests for split detection, repo inspection, remote path validation,
 overwrite protection, split mapping validation, and load_dataset verification
-in data_uploader.uploader, data_uploader.splits, and data_uploader.verification."""
+in sofer.uploader, sofer.splits, and sofer.verification."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from data_uploader.model import DatasetConfig, FileEntry
-from data_uploader.splits import (
+from sofer.model import DatasetConfig, FileEntry
+from sofer.splits import (
     SplitInfo,
     SplitReport,
     detect_split_keyword,
@@ -20,12 +20,12 @@ from data_uploader.splits import (
     validate_layout,
     validate_split_mapping,
 )
-from data_uploader.uploader import (
+from sofer.uploader import (
     _check_overwrite_protection,
     _repo_diff_summary,
     _validate_remote_paths,
 )
-from data_uploader.verification import VerificationReport, verify_load_dataset
+from sofer.verification import VerificationReport, verify_load_dataset
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  detect_split_keyword
@@ -589,7 +589,7 @@ class TestAssertCrossFileSchema:
 
     def test_same_split_identical_schemas_passes(self, tmp_path):
         """Two files in the same split with identical schemas → no errors."""
-        from data_uploader.uploader import _assert_cross_file_schema
+        from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -620,7 +620,7 @@ class TestAssertCrossFileSchema:
 
     def test_column_name_mismatch_in_same_split_fails(self, tmp_path):
         """Different column names in same split → error."""
-        from data_uploader.uploader import _assert_cross_file_schema
+        from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -652,7 +652,7 @@ class TestAssertCrossFileSchema:
 
     def test_dtype_mismatch_in_same_split_fails(self, tmp_path):
         """Same column names but different dtype in same split → error."""
-        from data_uploader.uploader import _assert_cross_file_schema
+        from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -683,7 +683,7 @@ class TestAssertCrossFileSchema:
 
     def test_different_splits_different_schemas_passes(self, tmp_path):
         """Different splits are NOT compared — only within-split identity."""
-        from data_uploader.uploader import _assert_cross_file_schema
+        from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -714,7 +714,7 @@ class TestAssertCrossFileSchema:
 
     def test_single_file_no_comparison_needed(self, tmp_path):
         """A single file in a split → nothing to compare, no errors."""
-        from data_uploader.uploader import _assert_cross_file_schema
+        from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -746,9 +746,9 @@ class TestAssertCrossFileSchema:
 class TestUploadQualityGate:
     def test_upload_gates_on_failed_quality_report(self, tmp_path):
         """upload() returns 1 before any upload when quality report has failures."""
-        from data_uploader.checks import ValidationReport
-        from data_uploader.quality import QualityResult
-        from data_uploader.uploader import upload
+        from sofer.checks import ValidationReport
+        from sofer.quality import QualityResult
+        from sofer.uploader import upload
 
         data = tmp_path / "data.csv"
         data.write_text("a;b\n1;2\n", encoding="utf-8")
@@ -772,8 +772,8 @@ class TestUploadQualityGate:
 
     def test_upload_proceeds_when_quality_report_passes(self, tmp_path):
         """upload() proceeds normally when quality report has no failures."""
-        from data_uploader.checks import ValidationReport
-        from data_uploader.uploader import upload
+        from sofer.checks import ValidationReport
+        from sofer.uploader import upload
 
         data = tmp_path / "data.csv"
         data.write_text("a;b\n1;2\n", encoding="utf-8")
@@ -803,7 +803,7 @@ class TestReadmeOverride:
 
     def test_readme_file_used_when_set(self, tmp_path, monkeypatch):
         """When cfg.readme points to a file, use it instead of generating."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -847,7 +847,7 @@ class TestReadmeOverride:
 
     def test_readme_fallback_when_file_missing(self, tmp_path, monkeypatch):
         """When cfg.readme points to a missing file, fall back to generation."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -891,7 +891,7 @@ class TestCodebookUpload:
 
     def test_codebook_uploaded_to_codebook_subpath(self, tmp_path, monkeypatch):
         """When cfg.codebook is set, upload to codebook/ path."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -932,7 +932,7 @@ class TestCodebookUpload:
 
     def test_codebook_missing_file_warns(self, tmp_path, monkeypatch, capsys):
         """When cfg.codebook points to a missing file, warn but don't fail."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -972,8 +972,8 @@ class TestSchemaAssertion:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from data_uploader.repo_compliance import ColumnSchema
-        from data_uploader.uploader import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
+        from sofer.uploader import _assert_card_dtypes_match_parquet
 
         parquet_path = tmp_path / "test.parquet"
         table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
@@ -1011,8 +1011,8 @@ class TestSchemaAssertion:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from data_uploader.repo_compliance import ColumnSchema
-        from data_uploader.uploader import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
+        from sofer.uploader import _assert_card_dtypes_match_parquet
 
         parquet_path = tmp_path / "test.parquet"
         table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
@@ -1052,8 +1052,8 @@ class TestSchemaAssertion:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from data_uploader.repo_compliance import ColumnSchema
-        from data_uploader.uploader import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
+        from sofer.uploader import _assert_card_dtypes_match_parquet
 
         parquet_path = tmp_path / "test.parquet"
         table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})

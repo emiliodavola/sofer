@@ -33,7 +33,7 @@
 All scan-command source files pass ruff cleanly:
 
 ```
-uv run ruff check src/data_uploader/scanner.py src/data_uploader/_formats.py src/data_uploader/cli.py src/data_uploader/__init__.py
+uv run ruff check src/sofer/scanner.py src/sofer/_formats.py src/sofer/cli.py src/sofer/__init__.py
 All checks passed!
 ```
 

@@ -27,13 +27,13 @@ Chain strategy: single-pr
 
 ## Phase 1 — Foundation: _csv_reader.py + model dataclasses
 
-- [x] 1.1 Create `src/data_uploader/_csv_reader.py` with `stream_csv()` generator — encoding fallback chain utf-8-sig→utf-8→latin-1→cp1252, `max_sample` cap, empty-file handling
-- [x] 1.2 Add `QualityCheck`, `QualityConfig`, `QualityResult` dataclasses to `src/data_uploader/model.py`
+- [x] 1.1 Create `src/sofer/_csv_reader.py` with `stream_csv()` generator — encoding fallback chain utf-8-sig→utf-8→latin-1→cp1252, `max_sample` cap, empty-file handling
+- [x] 1.2 Add `QualityCheck`, `QualityConfig`, `QualityResult` dataclasses to `src/sofer/model.py`
 - [x] 1.3 Add `quality: QualityConfig` field to `DatasetConfig` (default: empty checks) and parse `[[quality]]` TOML section in `from_toml()`, warn on unknown check names
 
 ## Phase 2 — Core: quality.py with all 9 P0 checks
 
-- [x] 2.1 Create `src/data_uploader/quality.py` with `QualityValidator.__init__()` — merge `QualityConfig.checks` with built-in defaults table
+- [x] 2.1 Create `src/sofer/quality.py` with `QualityValidator.__init__()` — merge `QualityConfig.checks` with built-in defaults table
 - [x] 2.2 Implement `run()` — single-pass interleaving: open each CSV file once via `stream_csv()`, distribute rows to all active check accumulators
 - [x] 2.3 Implement `_check_duplicates()` — set-of-row-hashes, report duplicate row numbers
 - [x] 2.4 Implement `_check_empty_rows()` — detect rows with all fields empty/NA/NULL
@@ -71,5 +71,5 @@ Chain strategy: single-pr
 ## Phase 5 — Verification
 
 - [x] 5.1 Run `uv run pytest tests/test_quality.py -v` — all tests pass
-- [x] 5.2 Run `uv run ruff check src/data_uploader/ tests/` — no lint errors
+- [x] 5.2 Run `uv run ruff check src/sofer/ tests/` — no lint errors
 - [x] 5.3 Run `uv run pytest tests/` — existing test suite still passes

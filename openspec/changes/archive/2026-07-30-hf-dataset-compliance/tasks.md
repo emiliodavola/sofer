@@ -50,5 +50,5 @@
 ## Phase 5 — Verification
 
 - [x] **5.1** `pytest tests/ -v` — all 92 tests pass (54 existing + 38 new)
-- [x] **5.2** `ruff check src/data_uploader/ tests/` — no lint errors
-- [x] **5.3** `mypy src/data_uploader/` — no type errors (with `repo_compliance.py` added to coverage)
+- [x] **5.2** `ruff check src/sofer/ tests/` — no lint errors
+- [x] **5.3** `mypy src/sofer/` — no type errors (with `repo_compliance.py` added to coverage)

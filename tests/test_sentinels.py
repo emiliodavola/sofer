@@ -1,6 +1,6 @@
-"""Tests for data_uploader._sentinels — shared missing-value sentinel set."""
+"""Tests for sofer._sentinels — shared missing-value sentinel set."""
 
-from data_uploader._sentinels import MISSING_VALUE_SENTINELS
+from sofer._sentinels import MISSING_VALUE_SENTINELS
 
 
 class TestMissingValueSentinels:
@@ -60,7 +60,7 @@ class TestSentinelModuleConsistency:
 
     def test_codebook_uses_shared_sentinels(self):
         """codebook.infer_column_type should reference the shared set."""
-        from data_uploader.codebook import infer_column_type
+        from sofer.codebook import infer_column_type
 
         # Smoke-test: the function should still be callable after the refactor
         result = infer_column_type(["1", "2", "3"])
@@ -68,7 +68,7 @@ class TestSentinelModuleConsistency:
 
     def test_quality_uses_shared_sentinels(self):
         """quality._is_empty should reference the shared set."""
-        from data_uploader.quality import _is_empty
+        from sofer.quality import _is_empty
 
         assert _is_empty("") is True
         assert _is_empty("NA") is True
@@ -78,7 +78,7 @@ class TestSentinelModuleConsistency:
     def test_repo_compliance_uses_shared_sentinels(self):
         """repo_compliance should reference the shared set (no _NULL_SENTINELS)."""
         # Verify _NULL_SENTINELS is gone and MISSING_VALUE_SENTINELS is available
-        from data_uploader import repo_compliance
+        from sofer import repo_compliance
 
         assert not hasattr(repo_compliance, "_NULL_SENTINELS"), (
             "_NULL_SENTINELS should no longer exist in repo_compliance"
@@ -89,9 +89,9 @@ class TestSentinelModuleConsistency:
 
     def test_shared_sentinel_identity(self):
         """All three modules should reference the exact same frozenset object."""
-        from data_uploader._sentinels import MISSING_VALUE_SENTINELS as SRC
-        from data_uploader.codebook import MISSING_VALUE_SENTINELS as CB
-        from data_uploader.quality import MISSING_VALUE_SENTINELS as Q
-        from data_uploader.repo_compliance import MISSING_VALUE_SENTINELS as RC
+        from sofer._sentinels import MISSING_VALUE_SENTINELS as SRC
+        from sofer.codebook import MISSING_VALUE_SENTINELS as CB
+        from sofer.quality import MISSING_VALUE_SENTINELS as Q
+        from sofer.repo_compliance import MISSING_VALUE_SENTINELS as RC
 
         assert SRC is CB is Q is RC, "All modules must reference the same frozenset object"

@@ -17,7 +17,7 @@ Three additive components following the existing one-module-per-command pattern:
 ## Data Flow
 
 ```
-user: data-uploader scan [config.toml] [--dry-run] [--force] [--ext .ext]
+user: sofer scan [config.toml] [--dry-run] [--force] [--ext .ext]
   │
   ▼
 _cmd_scan(args)
@@ -96,10 +96,10 @@ Subparser: `scan` with positional `[config]` (nargs="?", default="dataset.toml")
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/data_uploader/_formats.py` | Create | `SUPPORTED_FORMATS` dict |
-| `src/data_uploader/scanner.py` | Create | `discover_files`, `merge_entries`, `copy_files`, `write_toml` |
-| `src/data_uploader/cli.py` | Modify | New `scan` subparser + `_cmd_scan` handler + imports |
-| `src/data_uploader/__init__.py` | Modify | Add `scan` to docstring usage block |
+| `src/sofer/_formats.py` | Create | `SUPPORTED_FORMATS` dict |
+| `src/sofer/scanner.py` | Create | `discover_files`, `merge_entries`, `copy_files`, `write_toml` |
+| `src/sofer/cli.py` | Modify | New `scan` subparser + `_cmd_scan` handler + imports |
+| `src/sofer/__init__.py` | Modify | Add `scan` to docstring usage block |
 | `pyproject.toml` | Modify | Add `tomli_w` to `dependencies` |
 | `tests/test_scanner.py` | Create | Unit + integration tests |
 | `tests/test_cli.py` | Modify | `scan` subparser parsing tests |

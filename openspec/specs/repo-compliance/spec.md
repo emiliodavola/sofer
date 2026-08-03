@@ -37,7 +37,7 @@ repository is compliant from the moment its first commit lands.
 ### 2.1 `DatasetConfig` additions
 
 The following fields SHALL be added to the `DatasetConfig` dataclass in
-`src/data_uploader/model.py`.  Every field MUST default to a value that produces
+`src/sofer/model.py`.  Every field MUST default to a value that produces
 sensible output when the field is absent from the TOML.
 
 | Field | Type | Default | YAML frontmatter key | Description |
@@ -97,7 +97,7 @@ continue to parse without error.
 
 ---
 
-## 3. Module: `src/data_uploader/repo_compliance.py`
+## 3. Module: `src/sofer/repo_compliance.py`
 
 ### 3.0 Module structure
 
@@ -536,7 +536,7 @@ THEN the returned list SHALL contain
 
 ### 4.1 `uploader.upload()` changes
 
-The `upload()` function in `src/data_uploader/uploader.py` SHALL be modified to
+The `upload()` function in `src/sofer/uploader.py` SHALL be modified to
 call the compliance module **after** validation passes and **before** pushing any
 files to Hugging Face Hub. When Parquet conversion is enabled, the conversion
 step SHALL run **before** compliance so `build_schema_report` reads the
@@ -719,17 +719,17 @@ at least 80% coverage via mocked compliance calls.
 
 | File | Purpose |
 |------|---------|
-| `src/data_uploader/repo_compliance.py` | New module with `build_dataset_card`, `build_license_file`, `build_schema_report`, `ColumnSchema`. |
+| `src/sofer/repo_compliance.py` | New module with `build_dataset_card`, `build_license_file`, `build_schema_report`, `ColumnSchema`. |
 | `tests/test_repo_compliance.py` | Full test suite for the new module. |
 
 ### 7.2 Files to modify
 
 | File | Change |
 |------|--------|
-| `src/data_uploader/model.py` | Add new `[meta]` fields to `DatasetConfig` + update `from_toml()`. |
-| `src/data_uploader/codebook.py` | Rename `_infer_type` to public `infer_column_type` for cross-module reuse. |
-| `src/data_uploader/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic with type mapping. |
-| `src/data_uploader/uploader.py` | Add conversion loop before compliance; pass `staging_dir=tmpdir` to `build_schema_report`. |
+| `src/sofer/model.py` | Add new `[meta]` fields to `DatasetConfig` + update `from_toml()`. |
+| `src/sofer/codebook.py` | Rename `_infer_type` to public `infer_column_type` for cross-module reuse. |
+| `src/sofer/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic with type mapping. |
+| `src/sofer/uploader.py` | Add conversion loop before compliance; pass `staging_dir=tmpdir` to `build_schema_report`. |
 | `pyproject.toml` | Replace `tomli-w` dependency with `PyYAML`. |
 | `tests/test_repo_compliance.py` | Add Parquet-based schema tests (happy path, fallback, sampling, disambiguation). |
 
@@ -737,10 +737,10 @@ at least 80% coverage via mocked compliance calls.
 
 | File | Reason |
 |------|--------|
-| `src/data_uploader/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
-| `src/data_uploader/checks.py` | Compliance is not validation — separate concern. |
-| `src/data_uploader/__init__.py` | No public API changes for P0. |
-| `src/data_uploader/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
+| `src/sofer/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
+| `src/sofer/checks.py` | Compliance is not validation — separate concern. |
+| `src/sofer/__init__.py` | No public API changes for P0. |
+| `src/sofer/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
 
 ---
 

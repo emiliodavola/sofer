@@ -1,12 +1,12 @@
-"""Tests for data_uploader.repo_compliance — Dataset Card, LICENSE, schema report."""
+"""Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
 from pathlib import Path
 
 import pytest
 import yaml
 
-from data_uploader.model import DatasetConfig, FileEntry
-from data_uploader.repo_compliance import (
+from sofer.model import DatasetConfig, FileEntry
+from sofer.repo_compliance import (
     _SIZE_CATEGORIES,
     ColumnSchema,
     _csv_values_look_like_bool,
@@ -368,14 +368,14 @@ class TestUploadCompliance:
 
     def _mock_hf_api(self, monkeypatch):
         """Mock huggingface_hub API calls used by uploader."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
 
     def test_compliance_called_before_upload(self, tmp_path, monkeypatch):
         """Compliance functions should be called — verify via mocked tracking."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -402,7 +402,7 @@ class TestUploadCompliance:
 
     def test_upload_order_readme_license_data(self, tmp_path, monkeypatch):
         """README.md should be uploaded first, then LICENSE, then data files."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -444,7 +444,7 @@ class TestUploadCompliance:
 
     def test_tempdir_cleanup_on_success(self, tmp_path, monkeypatch):
         """Temp directory should be cleaned up after successful upload."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -469,7 +469,7 @@ class TestUploadCompliance:
 
     def test_tempdir_cleanup_on_exception(self, tmp_path, monkeypatch):
         """Temp directory should be cleaned up even when compliance raises."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         cfg = DatasetConfig(
             name="test",
@@ -501,7 +501,7 @@ class TestUploadCompliance:
 
     def test_schema_exception_propagates(self, tmp_path, monkeypatch):
         """Exception from build_schema_report should propagate to caller."""
-        from data_uploader import uploader
+        from sofer import uploader
 
         cfg = DatasetConfig(
             name="test",

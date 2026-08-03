@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for data-uploader
+about: Suggest an idea for sofer
 title: "feat: "
 labels: ["enhancement"]
 assignees: []

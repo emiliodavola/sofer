@@ -1,4 +1,4 @@
-# Project: data-uploader
+# Project: sofer
 
 Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards.
 
@@ -19,7 +19,7 @@ Publish any dataset to Hugging Face Hub with built-in validation and data-sharin
 ## Project Structure
 
 ```
-src/data_uploader/
+src/sofer/
 ├── __init__.py          # Module entry, version
 ├── cli.py               # argparse CLI, 4 commands: init, validate, upload, codebook
 ├── model.py             # DatasetConfig dataclass, TOML loading, config validation
@@ -52,7 +52,7 @@ tests/
 
 ## Conventions
 
-- Source in `src/data_uploader/` (flat module, not namespace package)
+- Source in `src/sofer/` (flat module, not namespace package)
 - Tests in `tests/` with `test_*.py` naming
 - Classes named `Test*` and methods `test_*`
 - `tmp_path` fixture used for filesystem tests, `monkeypatch` for env/args
