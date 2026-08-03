@@ -5,9 +5,11 @@ data-sharing standards.**
 
 ```
 data-uploader init my-dataset           # create a .toml template
-data-uploader validate my-dataset.toml  # check data integrity
+data-uploader scan my-dataset.toml      # discover & register data files
+data-uploader validate my-dataset.toml  # check data integrity + quality
+data-uploader codebook data.csv         # generate a codebook for one file
+data-uploader codebook --all-files      # generate codebooks for all tables
 data-uploader upload   my-dataset.toml  # upload to Hugging Face
-data-uploader codebook data.csv         # generate a markdown codebook
 ```
 
 ## Why
@@ -40,12 +42,18 @@ cp .env.template .env   # then edit .env with your HF token
 # 1. Create a configuration template
 data-uploader init my-dataset
 
-# 2. Edit my-dataset.toml (file paths, repo_id, description, etc.)
+# 2. Scan for data files (auto-registers all CSV, Parquet, Excel, JSONL files)
+data-uploader scan my-dataset.toml
 
-# 3. Validate locally — no network calls
+# 3. Edit my-dataset.toml (repo_id, description, tags, etc.)
+
+# 4. Generate codebooks for all registered tables
+data-uploader codebook --all-files --config my-dataset.toml
+
+# 5. Validate locally — no network calls
 data-uploader validate my-dataset.toml
 
-# 4. Upload to Hugging Face (auto-creates the repo if missing)
+# 6. Upload to Hugging Face (auto-creates the repo if missing)
 data-uploader upload my-dataset.toml
 ```
 
@@ -79,6 +87,16 @@ min_files = 2
 [[check]]
 columns = "file.csv"
 expected = ["column_a", "column_b"]
+
+# Quality checks: run automatically with sensible defaults.
+# Uncomment to customise severity or thresholds:
+# [[quality]]
+# check = "duplicates"
+# severity = "fail"
+#
+# [[quality]]
+# check = "null_profiling"
+# max_null_pct = 15.0
 ```
 
 ## Command reference
@@ -86,50 +104,99 @@ expected = ["column_a", "column_b"]
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
-| `validate <config.toml>` | Verify config + local data. Never contacts HF. |
-| `upload <config.toml>` | Validate + upload everything to HF. |
-| `codebook <file.csv>` | Analyse a CSV and produce a markdown codebook. |
+| `scan [config.toml]` | Discover supported files, register in TOML, copy to `data/`. Use `--dry-run` to preview. |
+| `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
+| `upload <config.toml>` | Validate + quality gate + upload to HF. Supports `--dry-run`, `--force`, `--verify-load`, `--keep-csv`. |
+| `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
+| `codebook --all-files` | Generate codebooks for every `[[file]]` entry. Always creates a root index. Use `--config` to specify the TOML file. |
 | `--help` | Detailed help for any command. |
 
-## Validation checks (automatic)
+## Data format support
+
+| Format | `scan` | `codebook` |
+|---|---|---|
+| CSV (`.csv`) | ✅ | ✅ |
+| TSV (`.tsv`) | ✅ | ✅ |
+| Parquet (`.parquet`) | ✅ | ✅ |
+| Excel (`.xlsx`) | ✅ | ✅ |
+| JSON Lines (`.jsonl`) | ✅ | ✅ |
+
+## Validation & quality checks (automatic)
 
 Every dataset is checked before upload:
+
+### Integrity checks
 
 | Check | What it does | Blocks upload? |
 |---|---|---|
 | File existence | Every declared path must exist on disk | Yes |
-| Min file count | Configurable via ``[[check]] min_files`` | Yes |
-| Min total size | Configurable via ``[[check]] min_total_size_mb`` | No (warning) |
+| Min file count | Configurable via `[[check]] min_files` | Yes |
+| Min total size | Configurable via `[[check]] min_total_size_mb` | No (warning) |
 | CSV columns | Checks expected columns exist | Yes |
-| Config integrity | Valid ``repo_id``, valid paths | Yes |
+| Config integrity | Valid `repo_id`, valid paths | Yes |
+
+### Quality checks
+
+| Check | What it detects |
+|---|---|
+| Duplicates | Duplicate rows in tabular data |
+| Empty rows | Rows with no values |
+| Empty columns | Columns with no values |
+| Null profiling | Columns exceeding null threshold |
+| Format consistency | Mixed types within columns |
+| Corrupt records | Unparseable rows |
+| Value range | Values outside min/max bounds |
+| Cross-file types | Dtype mismatches across configs |
+| Encoding validation | File encoding issues |
 
 ## Codebook generation
+
+### Single file
 
 ```bash
 data-uploader codebook data/persons.csv -o codebook.md
 ```
 
-Produces a table with: column name, inferred type (numeric / categorical / mixed),
-unique values, missing percentage, and a sample value.
-Analyses up to 100 000 rows by default (configurable with ``--max-sample``).
+Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
+Produces a table with: column name, inferred type, actual dtype (for
+typed formats), unique values, missing percentage, and a sample value.
+
+### Batch generation
+
+```bash
+data-uploader codebook --all-files --config my-dataset.toml
+```
+
+Generates a `codebook.md` alongside each data file under `data/`,
+plus a root `codebook.md` index with a table of contents and relative
+links to all per-table codebooks.
 
 ## Architecture
 
 ```
 src/data_uploader/
-├── __init__.py     # Module docstring
-├── cli.py          # CLI parser & command dispatch
-├── model.py        # DatasetConfig — loads & validates TOML
-├── checks.py       # DatasetValidator — runs data integrity checks
-├── codebook.py     # CSV analyser & markdown codebook generator
-└── uploader.py     # Upload engine (wraps huggingface-cli)
+├── __init__.py         # Version + public API
+├── _formats.py         # Supported file extension registry
+├── _sentinels.py       # Shared sentinel value sets
+├── _csv_reader.py      # CSV/TSV streaming reader
+├── cli.py              # argparse CLI with 6 subcommands
+├── model.py            # DatasetConfig — loads & validates TOML
+├── checks.py           # DatasetValidator — data integrity checks
+├── quality.py          # QualityValidator — 9 quality checks (single-pass)
+├── codebook.py         # Multi-format codebook generator
+├── scanner.py          # File discovery, TOML merge, copy-to-data
+├── uploader.py         # HF upload engine (huggingface_hub API + Parquet conversion)
+├── repo_compliance.py  # Dataset Card & schema compliance
+├── splits.py           # Split detection (train/test/validation)
+└── verification.py     # load_dataset() end-to-end verification
 ```
 
 ## Development
 
 ```bash
 uv run pytest
-uv run data-uploader validate examples/sample.toml   # smoke test
+uv run mypy src/
+uv run ruff check src/ tests/
 ```
 
 ## Related

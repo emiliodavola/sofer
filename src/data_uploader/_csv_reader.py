@@ -12,6 +12,8 @@ import csv
 from collections.abc import Generator
 from pathlib import Path
 
+from .config import CODEBOOK_MAX_SAMPLE, CSV_DELIMITER, CSV_ENCODING
+
 ENCODING_FALLBACKS = ["utf-8-sig", "utf-8"]
 """Ordered list of UTF-8 encodings tried when opening a CSV file.
 
@@ -22,9 +24,9 @@ ENCODING_FALLBACKS = ["utf-8-sig", "utf-8"]
 
 def stream_csv(
     path: Path,
-    delimiter: str = ";",
-    encoding: str = "utf-8-sig",
-    max_sample: int | None = 100_000,
+    delimiter: str = CSV_DELIMITER,
+    encoding: str = CSV_ENCODING,
+    max_sample: int | None = CODEBOOK_MAX_SAMPLE,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Yield ``(header, row)`` tuples from a CSV file, one at a time.
 

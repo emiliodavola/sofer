@@ -22,6 +22,16 @@ import pyarrow.csv as pc
 import pyarrow.parquet as pq
 from huggingface_hub import HfApi
 
+from ._parquet_helpers import _parquet_to_hf_dtype
+from .config import (
+    OUTPUT_ENCODING,
+    PARQUET_COMPRESSION,
+    PARQUET_ROW_GROUP_SIZE,
+    PARQUET_SHARD_WARNING_MB,
+    REPORT_MAX_ITEMS,
+    REPORT_MAX_MODIFIED,
+    SNIFF_DELIMITERS,
+)
 from .model import DatasetConfig
 from .repo_compliance import (
     ColumnSchema,
@@ -136,7 +146,7 @@ def _count_delimiters_outside_quotes(line: str) -> dict[str, int]:
     >>> _count_delimiters_outside_quotes('a;"b,c";d')
     {';': 2, ',': 0, '\\t': 0}
     """
-    counts: dict[str, int] = {";": 0, ",": 0, "\t": 0}
+    counts: dict[str, int] = {d: 0 for d in SNIFF_DELIMITERS}
     in_quotes = False
     for ch in line:
         if ch == '"':
@@ -302,14 +312,14 @@ def _convert_to_parquet(
         pq.write_table(
             table,
             parquet_path,
-            compression="zstd",
+            compression=PARQUET_COMPRESSION,
             write_page_index=True,
-            row_group_size=100_000,
+            row_group_size=PARQUET_ROW_GROUP_SIZE,
         )
 
         # ── Size check: warn if >500 MB ──────────────────────────────────
         size_mb = parquet_path.stat().st_size / (1024 * 1024)
-        if size_mb > 500:
+        if size_mb > PARQUET_SHARD_WARNING_MB:
             print(
                 f"  \u26a0  {parquet_path.name}: {size_mb:.1f} MB (>500 MB). "
                 f"Consider sharding into smaller files for better "
@@ -411,16 +421,16 @@ def _repo_diff_summary(
 
     if new:
         lines.append(f"    + {len(new)} file(s) will be ADDED:")
-        for f in new[:10]:
+        for f in new[:REPORT_MAX_ITEMS]:
             lines.append(f"      + {f}")
-        if len(new) > 10:
+        if len(new) > REPORT_MAX_ITEMS:
             lines.append(f"      … and {len(new) - 10} more")
 
     if modified:
         lines.append(f"    ~ {len(modified)} file(s) will be OVERWRITTEN:")
-        for f in modified[:5]:
+        for f in modified[:REPORT_MAX_MODIFIED]:
             lines.append(f"      ~ {f}")
-        if len(modified) > 5:
+        if len(modified) > REPORT_MAX_MODIFIED:
             lines.append(f"      … and {len(modified) - 5} more")
 
     return "\n".join(lines)
@@ -601,7 +611,7 @@ def _check_large_values(
     except Exception:
         return warnings  # can't read — skip silently
 
-    first_rows = table.slice(0, min(10, table.num_rows))
+    first_rows = table.slice(0, min(REPORT_MAX_ITEMS, table.num_rows))
 
     for col_idx in range(first_rows.num_columns):
         field = first_rows.schema.field(col_idx)
@@ -664,7 +674,7 @@ def _assert_card_dtypes_match_parquet(
                     continue
                 field_idx = names.index(col.name)
                 pa_type = pf.schema_arrow.field(field_idx).type
-                actual = _parquet_to_hf_dtype_type(pa_type)
+                actual = _parquet_to_hf_dtype(pa_type)
                 if actual is not None and actual in _integral_types:
                     mismatches.append(
                         f"Column '{col.name}' card dtype=float64 but "
@@ -678,61 +688,6 @@ def _assert_card_dtypes_match_parquet(
     if mismatches:
         for m in mismatches:
             print(f"  \u26a0  SCHEMA ASSERTION: {m}")
-
-
-def _parquet_to_hf_dtype_type(pa_type: object) -> str | None:
-    """Map a pyarrow physical type to an HF Dataset feature type string.
-
-    Identical to ``repo_compliance._parquet_to_hf_dtype`` but kept local
-    to avoid a circular import.
-    """
-    # Integral types
-    if pa.types.is_int8(pa_type) or pa.types.is_int16(pa_type) or pa.types.is_int32(pa_type):
-        return "int32"
-    if pa.types.is_int64(pa_type):
-        return "int64"
-
-    # Floating point
-    if pa.types.is_float32(pa_type):
-        return "float32"
-    if pa.types.is_float64(pa_type):
-        return "float64"
-
-    # Boolean
-    if pa.types.is_boolean(pa_type):
-        return "bool"
-
-    # String types
-    if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
-        return "string"
-
-    # Binary types → string
-    if (
-        pa.types.is_binary(pa_type)
-        or pa.types.is_large_binary(pa_type)
-        or pa.types.is_fixed_size_binary(pa_type)
-    ):
-        return "string"
-
-    # Temporal types
-    if pa.types.is_date32(pa_type):
-        return "date32"
-    if pa.types.is_date64(pa_type):
-        return "timestamp[ms]"
-    if pa.types.is_timestamp(pa_type):
-        return "timestamp[s]"
-    if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
-        return "time64"
-
-    # Decimal
-    if pa.types.is_decimal(pa_type):
-        return "float64"
-
-    # Null — omit from features
-    if pa.types.is_null(pa_type):
-        return None
-
-    return "string"
 
 
 def upload(
@@ -940,8 +895,8 @@ def upload(
         print("  [i] Generating LICENSE \u2026")
         license_text = build_license_file(cfg.license)
 
-        (tmpdir / "README.md").write_text(card, encoding="utf-8")
-        (tmpdir / "LICENSE").write_text(license_text, encoding="utf-8")
+        (tmpdir / "README.md").write_text(card, encoding=OUTPUT_ENCODING)
+        (tmpdir / "LICENSE").write_text(license_text, encoding=OUTPUT_ENCODING)
 
         # ── 2a. Schema assertion: card dtypes vs Parquet on-disk dtypes ──
         _assert_card_dtypes_match_parquet(schema, converted)
@@ -1068,9 +1023,9 @@ def _print_split_report(report: object) -> None:
     print("\n  Split detection:")
     for s in report.splits:
         print(f"    [{s.name}] {len(s.files)} file(s)")
-        for f in s.files[:5]:
+        for f in s.files[:REPORT_MAX_MODIFIED]:
             print(f"      - {f}")
-        if len(s.files) > 5:
+        if len(s.files) > REPORT_MAX_MODIFIED:
             print(f"      … and {len(s.files) - 5} more")
 
     if report.unclassified:

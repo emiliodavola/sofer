@@ -17,8 +17,10 @@ from typing import Any
 import tomli_w
 
 from ._formats import SUPPORTED_FORMATS
+from .config import OUTPUT_ENCODING
 from .model import FileEntry
 
+#: Directory names excluded from recursive file discovery (scan command).
 EXCLUSIONS: frozenset[str] = frozenset(
     {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
 )
@@ -171,4 +173,4 @@ def copy_files(
 
 def write_toml(raw_toml: dict[str, Any], config_path: Path) -> None:
     """Serialize *raw_toml* and overwrite *config_path*."""
-    config_path.write_text(tomli_w.dumps(raw_toml), encoding="utf-8")
+    config_path.write_text(tomli_w.dumps(raw_toml), encoding=OUTPUT_ENCODING)

@@ -18,7 +18,13 @@ from ._csv_reader import ENCODING_FALLBACKS, stream_csv
 from ._sentinels import MISSING_VALUE_SENTINELS
 from .checks import ValidationReport
 from .codebook import infer_column_type
-from .model import DatasetConfig, QualityCheck, QualityResult
+from .config import (
+    OUTPUT_ENCODING,
+    PROBE_CHUNK_BYTES,
+    REPORT_MAX_CORRUPT_RECORDS,
+    REPORT_MAX_ITEMS,
+)
+from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityCheck, QualityResult
 
 # ---------------------------------------------------------------------------
 #  Built-in defaults — used when the user gives no explicit [[quality]] config
@@ -330,7 +336,7 @@ class QualityValidator:
         self._ran_checks.add("duplicates")
         if not self._dup_findings:
             return
-        pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:10])
+        pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:REPORT_MAX_ITEMS])
         sev = self._checks["duplicates"]["severity"]
         self._add_result("duplicates", sev, f"Duplicate rows: {pairs}")
 
@@ -340,7 +346,7 @@ class QualityValidator:
         self._ran_checks.add("empty_rows")
         if not self._empty_row_numbers:
             return
-        sample = ", ".join(str(r) for r in self._empty_row_numbers[:10])
+        sample = ", ".join(str(r) for r in self._empty_row_numbers[:REPORT_MAX_ITEMS])
         sev = self._checks["empty_rows"]["severity"]
         self._add_result("empty_rows", sev, f"Empty rows: {sample}")
 
@@ -427,7 +433,7 @@ class QualityValidator:
         if not self._corrupt_findings:
             return
         sev = self._checks["corrupt_records"]["severity"]
-        for fname, row, actual, expected in self._corrupt_findings[:20]:
+        for fname, row, actual, expected in self._corrupt_findings[:REPORT_MAX_CORRUPT_RECORDS]:
             self._add_result(
                 "corrupt_records",
                 sev,
@@ -484,7 +490,7 @@ class QualityValidator:
         sev = self._checks["encoding_validation"]["severity"]
         # Read first 8 KB and try each encoding
         try:
-            chunk = resolved.read_bytes()[:8192]
+            chunk = resolved.read_bytes()[:PROBE_CHUNK_BYTES]
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
             return
@@ -530,7 +536,7 @@ def write_quality_report(report: ValidationReport, path: Path) -> None:
 
     if not report.quality_results:
         lines.append("✅ No quality issues found.")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        path.write_text("\n".join(lines) + "\n", encoding=OUTPUT_ENCODING)
         return
 
     # Group by severity, then by check
@@ -555,18 +561,7 @@ def write_quality_report(report: ValidationReport, path: Path) -> None:
     # Passed / skipped summary
     found = {r.check for r in report.quality_results}
     passed = len(report.ran_checks - found)
-    all_checks = {
-        "duplicates",
-        "empty_rows",
-        "empty_columns",
-        "null_profiling",
-        "format_consistency",
-        "corrupt_records",
-        "value_range",
-        "cross_file_types",
-        "encoding_validation",
-    }
-    skipped = len(all_checks - report.ran_checks - found)
+    skipped = len(QUALITY_CHECK_NAMES - report.ran_checks - found)
 
     lines.append("## Summary")
     lines.append("")
@@ -576,4 +571,4 @@ def write_quality_report(report: ValidationReport, path: Path) -> None:
     lines.append(f"- {len(fail_findings)} failure(s)")
     lines.append(f"- {len(warn_findings)} warning(s)")
 
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding=OUTPUT_ENCODING)
