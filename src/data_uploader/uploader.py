@@ -838,7 +838,8 @@ def upload(
         base = cfg._base_dir if cfg._base_dir else Path.cwd()
 
         # ── 1. Conversion loop — CSV → Parquet ──────────────────────────
-        # Map: remote key (stem or full path without ext) → (parquet_path, original_csv_path, original_remote)
+        # Map: remote key (stem or full path without ext)
+        #      → (parquet_path, original_csv_path, original_remote)
         converted: dict[str, tuple[Path, Path, str]] = {}
 
         for entry in cfg.files:
