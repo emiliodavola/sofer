@@ -142,6 +142,7 @@ class DatasetConfig:
     repo_id: str
     repo_type: str = "dataset"
     private: bool = True
+    skip_cross_file_schema: bool = False
 
     # -- metadata ----------------------------------------------------------
     description: str = ""
@@ -326,6 +327,7 @@ class DatasetConfig:
             repo_id=ds["repo_id"],
             repo_type=ds.get("repo_type", "dataset"),
             private=ds.get("private", True),
+            skip_cross_file_schema=ds.get("skip_cross_file_schema", False),
             description=meta.get("description", ""),
             license=meta.get("license", ""),
             confidential=meta.get("confidential", False),
