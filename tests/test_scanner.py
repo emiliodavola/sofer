@@ -19,6 +19,7 @@ from data_uploader.scanner import (
 # Helpers
 # ------------------------------------------------------------------
 
+
 def _touch(path: Path, content: str = "x") -> Path:
     """Create *path* and its parents, write *content*, return the path."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,9 +145,7 @@ class TestMergeEntries:
         (tmp_path / "data").mkdir()
         _touch(tmp_path / "data" / "a.csv")
 
-        raw = self._raw_toml(
-            file=[{"local": "data/a.csv", "remote": "a.csv"}]
-        )
+        raw = self._raw_toml(file=[{"local": "data/a.csv", "remote": "a.csv"}])
         discovered = [tmp_path / "a.csv"]
 
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
@@ -317,12 +316,7 @@ class TestIntegration:
         # Minimal TOML fixture.
         config = tmp_path / "dataset.toml"
         init_content = (
-            '[dataset]\n'
-            'name = "test"\n'
-            'repo_id = "u/t"\n'
-            '\n'
-            '[meta]\n'
-            'description = "scan test"\n'
+            '[dataset]\nname = "test"\nrepo_id = "u/t"\n\n[meta]\ndescription = "scan test"\n'
         )
         config.write_text(init_content, encoding="utf-8")
 

@@ -333,8 +333,7 @@ class TestReadJsonl:
     def test_reads_jsonl(self, tmp_path):
         jsonl_path = tmp_path / "data.jsonl"
         jsonl_path.write_text(
-            '{"name": "Alice", "age": 30}\n'
-            '{"name": "Bob", "age": 25}\n',
+            '{"name": "Alice", "age": 30}\n{"name": "Bob", "age": 25}\n',
             encoding="utf-8",
         )
 
@@ -347,8 +346,7 @@ class TestReadJsonl:
     def test_jsonl_missing_keys(self, tmp_path):
         jsonl_path = tmp_path / "partial.jsonl"
         jsonl_path.write_text(
-            '{"a": 1, "b": 2}\n'
-            '{"b": 3, "c": 4}\n',
+            '{"a": 1, "b": 2}\n{"b": 3, "c": 4}\n',
             encoding="utf-8",
         )
 
@@ -507,10 +505,13 @@ class TestGenerateAll:
         b = tmp_path / "b.csv"
         b.write_text("p;q\n10;20\n", encoding="utf-8")
 
-        toml_path = self._write_toml(tmp_path, [
-            str(a.relative_to(tmp_path)),
-            str(b.relative_to(tmp_path)),
-        ])
+        toml_path = self._write_toml(
+            tmp_path,
+            [
+                str(a.relative_to(tmp_path)),
+                str(b.relative_to(tmp_path)),
+            ],
+        )
 
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
@@ -598,11 +599,11 @@ class TestEdgeCases:
             'name = "test"',
             'repo_id = "u/test"',
             "",
-            '[[file]]',
+            "[[file]]",
             'local = "data/f.csv"',
             'remote = "f.csv"',
             "",
-            '[[file]]',
+            "[[file]]",
             'local = "data/f.tsv"',
             'remote = "f.tsv"',
             "",
@@ -665,8 +666,7 @@ class TestEdgeCases:
     def test_jsonl_single_file(self, tmp_path):
         jsonl_path = tmp_path / "data.jsonl"
         jsonl_path.write_text(
-            '{"name": "Alice", "age": 30}\n'
-            '{"name": "Bob", "age": 25}\n',
+            '{"name": "Alice", "age": 30}\n{"name": "Bob", "age": 25}\n',
             encoding="utf-8",
         )
 
@@ -712,7 +712,7 @@ class TestCodebookCLI:
             'name = "test"',
             'repo_id = "u/test"',
             "",
-            '[[file]]',
+            "[[file]]",
             'local = "d.csv"',
             'remote = "d.csv"',
             "",

@@ -394,8 +394,7 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument(
         "--config",
         default="dataset.toml",
-        help="Path to the TOML config file (used with --all-files, "
-        "default: dataset.toml).",
+        help="Path to the TOML config file (used with --all-files, default: dataset.toml).",
     )
     c.set_defaults(func=_cmd_codebook)
 
