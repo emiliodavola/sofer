@@ -11,7 +11,7 @@ import csv as csv_module
 import shutil
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -72,6 +72,32 @@ def _hf_upload(
             repo_type=repo_type,
         )
         print(f"  \u2713  {label}")
+        return True
+    except Exception as exc:
+        print(f"  \u2717  {exc}")
+        return False
+
+
+def _hf_upload_folder(
+    repo_id: str,
+    local_path: str | Path,
+    remote_path: str,
+    repo_type: str,
+) -> bool:
+    """Upload a directory recursively to Hugging Face Hub.
+
+    Uses ``HfApi.upload_folder()``.
+    """
+    label = Path(local_path).name
+    print(f"  \u2191  {label}/  \u2192  {remote_path}")
+    try:
+        _api.upload_folder(
+            folder_path=str(local_path),
+            path_in_repo=remote_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+        print(f"  \u2713  {label}/")
         return True
     except Exception as exc:
         print(f"  \u2717  {exc}")
@@ -366,8 +392,8 @@ def _repo_diff_summary(
         if entry.recursive:
             planned.append(f"{entry.remote}*")  # directory — can't list contents
         elif remote_lower.endswith(".csv") and not entry.upload_as_csv:
-            stem = Path(entry.remote).stem
-            planned.append(f"{stem}.parquet")
+            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            planned.append(parquet_remote)
             if keep_csv:
                 planned.append(entry.remote)
         else:
@@ -456,15 +482,20 @@ def _assert_cross_file_schema(
     """
     errors: list[str] = []
 
-    # ── Build (parquet_remote, parquet_path) pairs, de-duped by stem ──────
+    # ── Honour skip flag for multi-table / relational datasets ────────────
+    if cfg.skip_cross_file_schema:
+        print("  [i] Skipping cross-file schema check (skip_cross_file_schema=true)")
+        return errors
+
+    # ── Build (parquet_remote, parquet_path) pairs, de-duped by remote_key ──
     seen: set[str] = set()
     parquet_specs: list[tuple[str, Path]] = []
     for entry in cfg.files:
-        stem = Path(entry.remote).stem
-        if stem in converted and stem not in seen:
-            seen.add(stem)
-            parquet_remote = f"{stem}.parquet"
-            parquet_specs.append((parquet_remote, converted[stem][0]))
+        remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
+        if remote_key in converted and remote_key not in seen:
+            seen.add(remote_key)
+            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            parquet_specs.append((parquet_remote, converted[remote_key][0]))
 
     if len(parquet_specs) < 2:
         return errors  # nothing to compare
@@ -608,13 +639,13 @@ def _assert_card_dtypes_match_parquet(
 
     Args:
         schema:    The schema report from :func:`build_schema_report`.
-        converted: Map ``stem → (parquet_path, csv_path, original_remote)``
+        converted: Map ``remote_key → (parquet_path, csv_path, original_remote)``
                    from the conversion step.
     """
     _integral_types = frozenset({"int8", "int16", "int32", "int64"})
 
-    # Build stem→parquet_path lookup
-    parquet_by_stem: dict[str, Path] = {stem: p for stem, (p, _c, _r) in converted.items()}
+    # Build remote_key→parquet_path lookup
+    parquet_by_key: dict[str, Path] = {key: p for key, (p, _c, _r) in converted.items()}
 
     mismatches: list[str] = []
 
@@ -624,8 +655,8 @@ def _assert_card_dtypes_match_parquet(
         if col.hf_dtype is None or col.hf_dtype != "float64":
             continue  # only flag suspect float64 entries
 
-        # Find which Parquet file this column belongs to by checking stems
-        for stem, parquet_path in parquet_by_stem.items():
+        # Find which Parquet file this column belongs to
+        for remote_key, parquet_path in parquet_by_key.items():
             try:
                 pf = pq.ParquetFile(parquet_path)
                 names = pf.schema_arrow.names
@@ -637,7 +668,7 @@ def _assert_card_dtypes_match_parquet(
                 if actual is not None and actual in _integral_types:
                     mismatches.append(
                         f"Column '{col.name}' card dtype=float64 but "
-                        f"Parquet '{stem}.parquet' has {actual} — "
+                        f"Parquet '{remote_key}.parquet' has {actual} — "
                         f"mismatch may indicate schema-source drift."
                     )
                     break  # one mismatch per column is enough
@@ -780,8 +811,8 @@ def upload(
         if entry.recursive:
             planned_remotes.append(entry.remote.rstrip("/\\"))
         elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-            stem = Path(entry.remote).stem
-            planned_remotes.append(f"{stem}.parquet")
+            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            planned_remotes.append(parquet_remote)
             if keep_csv:
                 planned_remotes.append(entry.remote)
         else:
@@ -807,7 +838,7 @@ def upload(
         base = cfg._base_dir if cfg._base_dir else Path.cwd()
 
         # ── 1. Conversion loop — CSV → Parquet ──────────────────────────
-        # Map: remote stem → (parquet_path, original_csv_path, original_remote)
+        # Map: remote key (stem or full path without ext) → (parquet_path, original_csv_path, original_remote)
         converted: dict[str, tuple[Path, Path, str]] = {}
 
         for entry in cfg.files:
@@ -828,8 +859,10 @@ def upload(
 
             result = _convert_to_parquet(local, tmpdir, delimiter=cfg.csv_delimiter)
             if result is not None:
-                stem = Path(entry.remote).stem
-                converted[stem] = (result, local, entry.remote)
+                # Use the full remote path (without extension) as the key so
+                # that data/PROV/train and data/DPTO/train are distinct entries.
+                remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
+                converted[remote_key] = (result, local, entry.remote)
                 print(f"  [~] {local.name} -> {result.name}")
 
         # ── 1b. Cross-file schema assertion per split ──────────────────
@@ -950,13 +983,28 @@ def upload(
                 fail += 1
                 continue
 
+            # Recursive directories use upload_folder
+            if entry.recursive:
+                if local.is_dir():
+                    if _hf_upload_folder(cfg.repo_id, local, remote, cfg.repo_type):
+                        ok += 1
+                    else:
+                        fail += 1
+                else:
+                    print(f"  \u2717  NOT A DIRECTORY: {local}")
+                    fail += 1
+                continue
+
             # Determine if this entry was converted to Parquet
-            entry_stem = Path(entry.remote).stem
-            is_converted = entry_stem in converted and not entry.recursive
+            remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
+            is_converted = remote_key in converted and not entry.recursive
 
             if is_converted:
-                parquet_path, csv_path, original_remote = converted[entry_stem]
-                parquet_remote = f"{entry_stem}.parquet"
+                parquet_path, csv_path, original_remote = converted[remote_key]
+
+                # Preserve directory structure from the original remote path
+                # so that data/PROV/train.csv → data/PROV/train.parquet
+                parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
 
                 # Upload the Parquet version (from staging dir)
                 if _hf_upload(cfg.repo_id, parquet_path, parquet_remote, cfg.repo_type):
