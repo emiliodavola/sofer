@@ -15,6 +15,7 @@ from . import __version__
 from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator
 from .codebook import generate as generate_codebook
+from .codebook import generate_all as generate_all_codebooks
 from .model import DatasetConfig
 from .quality import QualityValidator
 from .scanner import (
@@ -82,6 +83,28 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _cmd_codebook(args: argparse.Namespace) -> int:
+    if args.all_files:
+        if args.csv:
+            print(
+                "Error: --all-files cannot be used with a positional file argument.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            cfg = DatasetConfig.from_toml(args.config)
+        except Exception as exc:
+            print(f"Error: Failed to read TOML: {exc}", file=sys.stderr)
+            return 1
+        generate_all_codebooks(cfg)
+        return 0
+
+    if not args.csv:
+        print(
+            "Error: Must specify a FILE or use --all-files.",
+            file=sys.stderr,
+        )
+        return 1
+
     codebook = generate_codebook(
         args.csv,
         output_path=args.output,
@@ -335,14 +358,23 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── codebook ──────────────────────────────────────────────────
     c = sub.add_parser(
         "codebook",
-        help="Generate a markdown codebook from a CSV file.",
+        help="Generate a markdown codebook from a data file.",
         description=(
-            "Analyse a CSV file and produce a human-readable codebook "
-            "that lists every column, its inferred type, unique count, "
-            "missing percentage, and a sample value."
+            "Analyse a data file (CSV, TSV, Parquet, Excel, or JSON Lines) "
+            "and produce a human-readable codebook that lists every column, "
+            "its inferred type, unique count, missing percentage, "
+            "and a sample value.\n"
+            "\n"
+            "Use --all-files to generate codebooks for every [[file]] entry "
+            "in the TOML configuration."
         ),
     )
-    c.add_argument("csv", help="Path to the CSV file.")
+    c.add_argument(
+        "csv",
+        nargs="?",
+        metavar="FILE",
+        help="Path to the data file (CSV, TSV, Parquet, Excel, or JSON Lines).",
+    )
     c.add_argument(
         "-o",
         "--output",
@@ -353,6 +385,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=100_000,
         help="Maximum rows to sample for analysis (default: 100 000).",
+    )
+    c.add_argument(
+        "--all-files",
+        action="store_true",
+        help="Generate codebooks for every [[file]] entry in the TOML config.",
+    )
+    c.add_argument(
+        "--config",
+        default="dataset.toml",
+        help="Path to the TOML config file (used with --all-files, default: dataset.toml).",
     )
     c.set_defaults(func=_cmd_codebook)
 

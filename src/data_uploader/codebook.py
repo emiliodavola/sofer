@@ -1,5 +1,5 @@
 """
-Automatic codebook generation from CSV files.
+Automatic codebook generation from tabular data files.
 
 A *codebook* documents every column in a dataset: name, inferred type,
 unique values, missing percentage, and a sample value.  This follows the
@@ -7,16 +7,22 @@ data-sharing standard recommended by the `Leek group guide`_.
 
 .. _Leek group guide: https://github.com/jtleek/datasharing
 
-The implementation is intentionally domain-agnostic — it works for
-census data, surveys, shapes, or any tabular data.
+Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
 """
 
 from __future__ import annotations
 
 import csv
+import json
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from ._formats import SUPPORTED_FORMATS
 from ._sentinels import MISSING_VALUE_SENTINELS
+
+if TYPE_CHECKING:
+    from .model import DatasetConfig
 
 
 def infer_column_type(values: list[str]) -> str:
@@ -36,10 +42,10 @@ def infer_column_type(values: list[str]) -> str:
             numeric_count += 1
         except ValueError:
             pass
-    if numeric_count == 0:
-        return "categorical/text"
     if total == 0:
         return "unknown"
+    if numeric_count == 0:
+        return "categorical/text"
     ratio = numeric_count / total
     if ratio > 0.9:
         return "numeric"
@@ -52,36 +58,196 @@ def infer_column_type(values: list[str]) -> str:
 _infer_type = infer_column_type
 
 
-def generate(
-    csv_path: str,
-    output_path: str | None = None,
-    delimiter: str = ";",
+# ══════════════════════════════════════════════════════════════════════════
+#  Format-specific readers
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _read_csv(
+    path: str,
     encoding: str = "utf-8-sig",
-    max_sample: int = 100_000,
-) -> str:
-    """Generate a markdown codebook from a CSV file.
+    delimiter: str = ";",
+) -> tuple[list[str], list[list[str]], None]:
+    """Read a CSV file and return ``(headers, columns, None)``.
 
-    The codebook analyses up to *max_sample* rows to infer column types,
-    unique value counts, and missing-data proportions.
-
-    Args:
-        csv_path:   Path to the input CSV.
-        output_path: If given, write the codebook to this file.
-        delimiter:  CSV delimiter character (default ``;``).
-        encoding:   File encoding (default ``utf-8-sig`` for Excel compat).
-        max_sample: Maximum rows to read for analysis.
-
-    Returns:
-        The codebook as a markdown string.
+    Columns are returned column-by-column (not row-by-row) so that
+    :func:`infer_column_type` can consume them directly.
     """
-    path = Path(csv_path)
     with open(path, newline="", encoding=encoding) as fh:
         reader = csv.reader(fh, delimiter=delimiter)
         headers = next(reader)
         rows = list(reader)
 
-    total_rows = len(rows)
-    sample = rows[: min(total_rows, max_sample)]
+    n_cols = len(headers)
+    columns: list[list[str]] = [[] for _ in range(n_cols)]
+    for row in rows:
+        for i in range(n_cols):
+            columns[i].append(row[i] if i < len(row) else "")
+
+    return headers, columns, None
+
+
+def _read_tsv(
+    path: str,
+    encoding: str = "utf-8-sig",
+) -> tuple[list[str], list[list[str]], None]:
+    """Read a TSV file using ``csv.reader(delimiter='\\\\t')``."""
+    return _read_csv(path, encoding=encoding, delimiter="\t")
+
+
+def _read_parquet(path: str) -> tuple[list[str], list[list[str]], dict[str, str]]:
+    """Read a Parquet file via ``pyarrow``.
+
+    Returns ``(headers, columns, dtypes)`` where *dtypes* maps each
+    column name to its Parquet storage type (e.g. ``"int64"``).
+    """
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)
+    headers = table.column_names
+    n_cols = len(headers)
+    columns: list[list[str]] = [[] for _ in range(n_cols)]
+    dtypes: dict[str, str] = {}
+
+    for i, name in enumerate(headers):
+        col = table.column(i).to_pylist()
+        dtypes[name] = str(table.column(i).type)
+        for v in col:
+            columns[i].append("" if v is None else str(v))
+
+    return headers, columns, dtypes
+
+
+def _read_xlsx(path: str) -> tuple[list[str], list[list[str]], dict[str, str] | None]:
+    """Read the first sheet of an Excel file via ``openpyxl``.
+
+    Returns ``(headers, columns, dtypes)``.  *dtypes* reflects the
+    Python type of the first non-empty value in each column.
+    """
+    import openpyxl
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+    headers = [str(v) if v is not None else f"col_{i}" for i, v in enumerate(header_row)]
+    n_cols = len(headers)
+
+    columns: list[list[str]] = [[] for _ in range(n_cols)]
+    dtypes: dict[str, str] = {}
+    dtype_determined = [False] * n_cols
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        for i in range(n_cols):
+            val = row[i] if i < len(row) else None
+            if val is None:
+                columns[i].append("")
+            else:
+                columns[i].append(str(val))
+                if not dtype_determined[i]:
+                    if isinstance(val, bool):
+                        dtypes[headers[i]] = "bool"
+                    elif isinstance(val, int):
+                        dtypes[headers[i]] = "int"
+                    elif isinstance(val, float):
+                        dtypes[headers[i]] = "float"
+                    elif isinstance(val, str):
+                        dtypes[headers[i]] = "string"
+                    else:
+                        dtypes[headers[i]] = "object"
+                    dtype_determined[i] = True
+
+    wb.close()
+
+    for i, name in enumerate(headers):
+        if name not in dtypes:
+            dtypes[name] = "unknown"
+
+    return headers, columns, dtypes
+
+
+def _read_jsonl(path: str) -> tuple[list[str], list[list[str]], None]:
+    """Read a JSON Lines file, unifying keys across all objects.
+
+    Keys are collected in discovery order so that the column order is
+    stable within a file.
+    """
+    all_keys: list[str] = []
+    rows: list[dict[str, object]] = []
+
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            obj = json.loads(stripped)
+            for k in obj:
+                if k not in all_keys:
+                    all_keys.append(k)
+            rows.append(obj)
+
+    n_cols = len(all_keys)
+    columns: list[list[str]] = [[] for _ in range(n_cols)]
+
+    for row in rows:
+        for i, key in enumerate(all_keys):
+            val = row.get(key)
+            columns[i].append("" if val is None else str(val))
+
+    return all_keys, columns, None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Dispatcher
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _read_file(
+    path: str,
+    delimiter: str = ";",
+    encoding: str = "utf-8-sig",
+) -> tuple[list[str], list[list[str]], dict[str, str] | None]:
+    """Route to the correct format-specific reader based on file suffix.
+
+    Raises ``ValueError`` for unsupported formats.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix == ".csv":
+        return _read_csv(path, encoding=encoding, delimiter=delimiter)
+    elif suffix == ".tsv":
+        return _read_tsv(path, encoding=encoding)
+    elif suffix == ".parquet":
+        return _read_parquet(path)
+    elif suffix == ".xlsx":
+        return _read_xlsx(path)
+    elif suffix == ".jsonl":
+        return _read_jsonl(path)
+    else:
+        raise ValueError(f"Unsupported file format: {suffix}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Markdown builder
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _build_markdown(
+    headers: list[str],
+    columns: list[list[str]],
+    dtypes: dict[str, str] | None,
+    file_path: str,
+    max_sample: int = 100_000,
+) -> str:
+    """Build a markdown codebook from columnar data.
+
+    This function is format-agnostic — it receives already-parsed
+    ``(headers, columns, dtypes?)`` and renders the markdown table.
+    When *dtypes* is not ``None``, an extra ``| Actual Type |``
+    column is added.
+    """
+    path = Path(file_path)
+    total_rows = len(columns[0]) if columns else 0
+    n_analysed = min(total_rows, max_sample)
 
     lines = [
         f"# Codebook: {path.name}",
@@ -89,20 +255,25 @@ def generate(
         f"**File:** `{path.name}`",
         f"**Rows:** {total_rows:,}",
         f"**Columns:** {len(headers)}",
-        f"**Analysed rows:** {min(total_rows, max_sample):,} "
+        f"**Analysed rows:** {n_analysed:,} "
         f"({'full scan' if total_rows <= max_sample else 'sample'})",
         "",
-        "| # | Column | Type | Unique | Missing (%) | Example |",
-        "|---|--------|------|--------|-------------|---------|",
     ]
 
-    for idx, col in enumerate(headers, 1):
-        col_values = [row[idx - 1] if idx - 1 < len(row) else "" for row in sample]
+    if dtypes is not None:
+        lines.append("| # | Column | Type | Actual Type | Unique | Missing (%) | Example |")
+        lines.append("|---|--------|------|-------------|--------|-------------|---------|")
+    else:
+        lines.append("| # | Column | Type | Unique | Missing (%) | Example |")
+        lines.append("|---|--------|------|--------|-------------|---------|")
+
+    for idx, col_name in enumerate(headers, 1):
+        col_values = columns[idx - 1][:n_analysed]
         n_unique = len(set(col_values))
         n_missing = sum(
             1 for v in col_values if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
         )
-        pct_missing = round(n_missing / len(sample) * 100, 1) if sample else 0.0
+        pct_missing = round(n_missing / len(col_values) * 100, 1) if col_values else 0.0
         col_type = infer_column_type(col_values)
         example = next(
             (
@@ -112,14 +283,163 @@ def generate(
             ),
             "",
         )
-        lines.append(
-            f"| {idx} | `{col}` | {col_type} | {n_unique} | {pct_missing}% | `{example}` |"
-        )
+
+        if dtypes is not None:
+            actual_type = dtypes.get(col_name, "")
+            lines.append(
+                f"| {idx} | `{col_name}` | {col_type} | {actual_type} | "
+                f"{n_unique} | {pct_missing}% | `{example}` |"
+            )
+        else:
+            lines.append(
+                f"| {idx} | `{col_name}` | {col_type} | {n_unique} | {pct_missing}% | `{example}` |"
+            )
 
     lines.extend(["", "", "_Generated by data-uploader_"])
-    codebook = "\n".join(lines)
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Public API
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def generate(
+    csv_path: str,
+    output_path: str | None = None,
+    delimiter: str = ";",
+    encoding: str = "utf-8-sig",
+    max_sample: int = 100_000,
+) -> str:
+    """Generate a markdown codebook from a data file.
+
+    Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
+
+    The codebook analyses up to *max_sample* rows to infer column types,
+    unique value counts, and missing-data proportions.
+
+    Args:
+        csv_path:   Path to the input data file.
+        output_path: If given, write the codebook to this file.
+        delimiter:  CSV delimiter character (default ``;``).  Only used
+                    for CSV/TSV files; ignored for other formats.
+        encoding:   File encoding (default ``utf-8-sig``).  Only used
+                    for CSV/TSV files; ignored for other formats.
+        max_sample: Maximum rows to read for analysis.
+
+    Returns:
+        The codebook as a markdown string.
+    """
+    headers, columns, dtypes = _read_file(csv_path, delimiter=delimiter, encoding=encoding)
+    codebook = _build_markdown(headers, columns, dtypes, csv_path, max_sample)
 
     if output_path:
         Path(output_path).write_text(codebook, encoding="utf-8")
 
     return codebook
+
+
+def generate_all(cfg: DatasetConfig) -> list[str]:
+    """Generate codebooks for every ``[[file]]`` entry in the TOML config.
+
+    Each codebook is placed alongside its data file as ``codebook.md``.
+    When multiple supported formats share the same parent directory,
+    format-specific suffixes are used (``codebook_parquet.md``, etc.)
+    and a warning is emitted.  A root ``codebook.md`` index is written
+    in the config file's directory.
+
+    Args:
+        cfg: A ``DatasetConfig`` loaded from a TOML file.
+
+    Returns:
+        List of generated codebook file paths (including the root index).
+    """
+
+    base_dir = cfg._base_dir.resolve()
+
+    # ── First pass: collect valid, readable file entries ─────────────
+    entries: list[tuple[Path, str]] = []
+    for file_entry in cfg.files:
+        local = file_entry.resolve(base_dir)
+
+        if local.is_dir():
+            print(f"  ⚠  Skipping directory: {local}", file=sys.stderr)
+            continue
+
+        if not local.exists():
+            print(f"  ⚠  Skipping missing file: {local}", file=sys.stderr)
+            continue
+
+        suffix = local.suffix.lower()
+        if suffix not in SUPPORTED_FORMATS:
+            print(f"  ⚠  Unsupported format, skipping: {local}", file=sys.stderr)
+            continue
+
+        entries.append((local, suffix))
+
+    if not entries:
+        return []
+
+    # ── Detect output collisions (multiple files sharing a directory) ─
+    dir_counts: dict[Path, int] = {}
+    for local, _suffix in entries:
+        dir_counts[local.parent] = dir_counts.get(local.parent, 0) + 1
+
+    # ── Generate per-file codebooks ──────────────────────────────────
+    generated: list[str] = []
+    outputs: list[tuple[Path, int]] = []  # (output_path, n_cols)
+
+    for local, suffix in entries:
+        has_collision = dir_counts[local.parent] > 1
+
+        try:
+            headers, columns, dtypes = _read_file(str(local))
+        except Exception as exc:
+            print(f"  ✗  Error reading {local}: {exc}", file=sys.stderr)
+            continue
+
+        if has_collision:
+            fmt_label = (
+                SUPPORTED_FORMATS.get(suffix, suffix.lstrip("."))
+                .lower()
+                .replace(" ", "_")
+                .replace("(", "")
+                .replace(")", "")
+            )
+            output_path = local.parent / f"codebook_{fmt_label}.md"
+            print(
+                f"  ⚠  Multiple formats in {local.parent}: using '{output_path.name}'",
+                file=sys.stderr,
+            )
+        else:
+            output_path = local.parent / "codebook.md"
+
+        codebook = _build_markdown(headers, columns, dtypes, str(local))
+        output_path.write_text(codebook, encoding="utf-8")
+        generated.append(str(output_path))
+        outputs.append((output_path, len(headers)))
+        print(f"  OK  {output_path}")
+
+    # ── Root index ───────────────────────────────────────────────────
+    root_path = base_dir / "codebook.md"
+    total_cols = sum(n for _, n in outputs)
+    total_tables = len(outputs)
+
+    index_lines = [
+        f"# Codebook Index: {cfg.name}",
+        "",
+        f"**Repository:** `{cfg.repo_id}`",
+        f"**Tables:** {total_tables} | **Total columns:** {total_cols}",
+        "",
+        "## Contents",
+    ]
+
+    for out_path, n_cols in outputs:
+        rel = out_path.relative_to(base_dir).as_posix()
+        index_lines.append(f"- [`{rel}`]({rel}) — {n_cols} columns")
+
+    index_lines.extend(["", "", "_Generated by data-uploader_"])
+    root_path.write_text("\n".join(index_lines), encoding="utf-8")
+    generated.append(str(root_path))
+
+    return generated

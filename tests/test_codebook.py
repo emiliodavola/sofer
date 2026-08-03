@@ -1,8 +1,23 @@
-"""Tests for data_uploader.codebook — CSV analysis and markdown generation."""
+"""Tests for data_uploader.codebook — multi-format analysis and markdown generation."""
 
 import csv
+import sys
 
-from data_uploader.codebook import _infer_type, generate, infer_column_type
+import pytest
+
+from data_uploader.codebook import (
+    _build_markdown,
+    _infer_type,
+    _read_csv,
+    _read_file,
+    _read_jsonl,
+    _read_parquet,
+    _read_tsv,
+    _read_xlsx,
+    generate,
+    generate_all,
+    infer_column_type,
+)
 
 # ── _infer_type ───────────────────────────────────────────────────────────────
 
@@ -165,3 +180,589 @@ class TestGenerate:
 
         result = generate(str(csv_path))
         assert "categorical/text" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4.1 — Unit tests for each _read_* reader
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReadCsv:
+    def test_reads_semicolon_delimited(self, tmp_path):
+        csv_path = tmp_path / "data.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["a", "b", "c"])
+            w.writerow(["1", "x", "3"])
+            w.writerow(["4", "y", "6"])
+
+        headers, columns, dtypes = _read_csv(str(csv_path))
+
+        assert headers == ["a", "b", "c"]
+        assert dtypes is None
+        assert columns == [["1", "4"], ["x", "y"], ["3", "6"]]
+
+    def test_reads_comma_delimited(self, tmp_path):
+        csv_path = tmp_path / "data.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=",")
+            w.writerow(["x", "y"])
+            w.writerow(["alpha", "beta"])
+
+        headers, columns, _dtypes = _read_csv(str(csv_path), delimiter=",")
+
+        assert headers == ["x", "y"]
+        assert columns == [["alpha"], ["beta"]]
+
+    def test_handles_uneven_rows(self, tmp_path):
+        csv_path = tmp_path / "uneven.csv"
+        csv_path.write_text("a;b;c\n1;2\n3\n", encoding="utf-8")
+
+        headers, columns, _dtypes = _read_csv(str(csv_path))
+
+        assert headers == ["a", "b", "c"]
+        assert columns[0] == ["1", "3"]
+        assert columns[1] == ["2", ""]
+        assert columns[2] == ["", ""]
+
+    def test_empty_file(self, tmp_path):
+        csv_path = tmp_path / "empty.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["only", "headers"])
+
+        headers, columns, dtypes = _read_csv(str(csv_path))
+
+        assert headers == ["only", "headers"]
+        assert dtypes is None
+        assert columns == [[], []]
+
+
+class TestReadTsv:
+    def test_reads_tab_delimited(self, tmp_path):
+        tsv_path = tmp_path / "data.tsv"
+        tsv_path.write_text("name\tage\nAlice\t30\nBob\t25\n", encoding="utf-8")
+
+        headers, columns, dtypes = _read_tsv(str(tsv_path))
+
+        assert headers == ["name", "age"]
+        assert dtypes is None
+        assert columns == [["Alice", "Bob"], ["30", "25"]]
+
+
+class TestReadParquet:
+    def test_reads_parquet_with_dtypes(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq_path = tmp_path / "data.parquet"
+        table = pa.table(
+            {
+                "name": pa.array(["Alice", "Bob", "Charlie"]),
+                "age": pa.array([30, 25, 35], type=pa.int64()),
+                "active": pa.array([True, False, True]),
+            }
+        )
+        pq.write_table(table, pq_path)
+
+        headers, columns, dtypes = _read_parquet(str(pq_path))
+
+        assert headers == ["name", "age", "active"]
+        assert columns == [
+            ["Alice", "Bob", "Charlie"],
+            ["30", "25", "35"],
+            ["True", "False", "True"],
+        ]
+        assert dtypes is not None
+        assert dtypes["name"] == "string"
+        assert "int" in dtypes["age"].lower()
+        assert dtypes["active"] == "bool"
+
+    def test_handles_null_values(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq_path = tmp_path / "nulls.parquet"
+        table = pa.table({"x": pa.array(["a", None, "c"])})
+        pq.write_table(table, pq_path)
+
+        headers, columns, _dtypes = _read_parquet(str(pq_path))
+
+        assert headers == ["x"]
+        assert columns == [["a", "", "c"]]
+
+
+class TestReadXlsx:
+    def test_reads_xlsx_with_dtypes(self, tmp_path):
+        import openpyxl
+
+        xlsx_path = tmp_path / "data.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["name", "score", "active"])
+        ws.append(["Alice", 95, True])
+        ws.append(["Bob", 82, False])
+        wb.save(xlsx_path)
+
+        headers, columns, dtypes = _read_xlsx(str(xlsx_path))
+
+        assert headers == ["name", "score", "active"]
+        assert columns == [["Alice", "Bob"], ["95", "82"], ["True", "False"]]
+        assert dtypes is not None
+        assert dtypes["name"] == "string"
+        assert dtypes["score"] in ("int", "float")
+        assert dtypes["active"] == "bool"
+
+    def test_empty_xlsx(self, tmp_path):
+        import openpyxl
+
+        xlsx_path = tmp_path / "empty.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["col_a", "col_b"])
+        wb.save(xlsx_path)
+
+        headers, columns, dtypes = _read_xlsx(str(xlsx_path))
+
+        assert headers == ["col_a", "col_b"]
+        assert columns == [[], []]
+        assert dtypes == {"col_a": "unknown", "col_b": "unknown"}
+
+
+class TestReadJsonl:
+    def test_reads_jsonl(self, tmp_path):
+        jsonl_path = tmp_path / "data.jsonl"
+        jsonl_path.write_text(
+            '{"name": "Alice", "age": 30}\n{"name": "Bob", "age": 25}\n',
+            encoding="utf-8",
+        )
+
+        headers, columns, dtypes = _read_jsonl(str(jsonl_path))
+
+        assert headers == ["name", "age"]
+        assert dtypes is None
+        assert columns == [["Alice", "Bob"], ["30", "25"]]
+
+    def test_jsonl_missing_keys(self, tmp_path):
+        jsonl_path = tmp_path / "partial.jsonl"
+        jsonl_path.write_text(
+            '{"a": 1, "b": 2}\n{"b": 3, "c": 4}\n',
+            encoding="utf-8",
+        )
+
+        headers, columns, _dtypes = _read_jsonl(str(jsonl_path))
+
+        assert headers == ["a", "b", "c"]
+        assert columns[0] == ["1", ""]
+        assert columns[1] == ["2", "3"]
+        assert columns[2] == ["", "4"]
+
+    def test_jsonl_empty_file(self, tmp_path):
+        jsonl_path = tmp_path / "empty.jsonl"
+        jsonl_path.write_text("", encoding="utf-8")
+
+        headers, columns, dtypes = _read_jsonl(str(jsonl_path))
+
+        assert headers == []
+        assert columns == []
+        assert dtypes is None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4.2 — _read_file dispatcher tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReadFileDispatcher:
+    def test_routes_csv(self, tmp_path):
+        p = tmp_path / "f.csv"
+        p.write_text("a;b\n1;2\n", encoding="utf-8")
+        headers, _columns, dtypes = _read_file(str(p))
+        assert headers == ["a", "b"]
+        assert dtypes is None
+
+    def test_routes_tsv(self, tmp_path):
+        p = tmp_path / "f.tsv"
+        p.write_text("x\ty\n10\t20\n", encoding="utf-8")
+        headers, _columns, _dtypes = _read_file(str(p))
+        assert headers == ["x", "y"]
+
+    def test_routes_parquet(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        p = tmp_path / "f.parquet"
+        pq.write_table(pa.table({"v": [1]}), p)
+        headers, _columns, dtypes = _read_file(str(p))
+        assert headers == ["v"]
+        assert dtypes is not None
+
+    def test_routes_xlsx(self, tmp_path):
+        import openpyxl
+
+        p = tmp_path / "f.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["k"])
+        ws.append(["val"])
+        wb.save(p)
+        headers, _columns, dtypes = _read_file(str(p))
+        assert headers == ["k"]
+        assert dtypes is not None
+
+    def test_routes_jsonl(self, tmp_path):
+        p = tmp_path / "f.jsonl"
+        p.write_text('{"q": "x"}\n', encoding="utf-8")
+        headers, _columns, _dtypes = _read_file(str(p))
+        assert headers == ["q"]
+
+    def test_raises_unsupported(self, tmp_path):
+        p = tmp_path / "f.txt"
+        p.write_text("hello", encoding="utf-8")
+        with pytest.raises(ValueError, match="Unsupported file format"):
+            _read_file(str(p))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4.3 — _build_markdown diff test
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildMarkdown:
+    def test_matches_generate_output(self, tmp_path):
+        csv_path = tmp_path / "test.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["id", "name", "age"])
+            w.writerow(["1", "Alice", "30"])
+            w.writerow(["2", "Bob", "25"])
+
+        result_via_generate = generate(str(csv_path))
+
+        headers, columns, dtypes = _read_file(str(csv_path))
+        result_via_builder = _build_markdown(headers, columns, dtypes, str(csv_path))
+
+        assert result_via_builder == result_via_generate
+
+    def test_includes_actual_type_column(self):
+        headers = ["name", "score"]
+        columns = [["Alice", "Bob"], ["95", "82"]]
+        dtypes = {"name": "string", "score": "int"}
+
+        result = _build_markdown(headers, columns, dtypes, "data.csv")
+
+        assert "| Actual Type |" in result
+        assert "string" in result
+        assert "int" in result
+
+    def test_no_actual_type_when_dtypes_none(self):
+        headers = ["col"]
+        columns = [["a", "b"]]
+
+        result = _build_markdown(headers, columns, None, "f.csv")
+
+        assert "Actual Type" not in result
+
+    def test_empty_file_minimal_codebook(self):
+        headers = ["a", "b"]
+        columns = [[], []]
+
+        result = _build_markdown(headers, columns, None, "empty.csv")
+
+        assert "# Codebook: empty.csv" in result
+        assert "**Rows:** 0" in result
+        assert "**Columns:** 2" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4.4 — Integration tests for generate_all()
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGenerateAll:
+    def _write_toml(self, base_path, entries):
+        lines = [
+            "[dataset]",
+            'name = "test-ds"',
+            'repo_id = "user/test-ds"',
+            "",
+        ]
+        for local in entries:
+            lines.append("[[file]]")
+            lines.append(f'local = "{local}"')
+            lines.append(f'remote = "{local}"')
+            lines.append("")
+
+        toml_path = base_path / "dataset.toml"
+        toml_path.write_text("\n".join(lines), encoding="utf-8")
+        return toml_path
+
+    def test_generates_for_all_toml_entries(self, tmp_path):
+        from data_uploader.model import DatasetConfig
+
+        a = tmp_path / "a.csv"
+        a.write_text("x;y\n1;2\n", encoding="utf-8")
+        b = tmp_path / "b.csv"
+        b.write_text("p;q\n10;20\n", encoding="utf-8")
+
+        toml_path = self._write_toml(
+            tmp_path,
+            [
+                str(a.relative_to(tmp_path)),
+                str(b.relative_to(tmp_path)),
+            ],
+        )
+
+        cfg = DatasetConfig.from_toml(toml_path)
+        results = generate_all(cfg)
+
+        assert len(results) >= 3  # 2 per-file + root index
+        assert (tmp_path / "codebook.md").exists()  # a.csv codebook
+        assert (tmp_path / "codebook.md" in str(r) for r in results)
+        root = tmp_path / "codebook.md"
+        assert root.exists()
+        root_content = root.read_text(encoding="utf-8")
+        assert "Codebook Index" in root_content
+        assert "Tables:" in root_content
+
+    def test_root_index_has_correct_links(self, tmp_path):
+        from data_uploader.model import DatasetConfig
+
+        sub = tmp_path / "data"
+        sub.mkdir()
+        (sub / "f.csv").write_text("col\n1\n", encoding="utf-8")
+
+        toml_path = self._write_toml(tmp_path, ["data/f.csv"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        generate_all(cfg)
+
+        root = tmp_path / "codebook.md"
+        content = root.read_text(encoding="utf-8")
+        assert "data/codebook.md" in content
+        assert "1 columns" in content
+
+    def test_skips_unsupported_format(self, tmp_path, capsys):
+        from data_uploader.model import DatasetConfig
+
+        (tmp_path / "f.txt").write_text("hello", encoding="utf-8")
+
+        toml_path = self._write_toml(tmp_path, ["f.txt"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        results = generate_all(cfg)
+
+        assert results == []
+        captured = capsys.readouterr()
+        assert "Unsupported format" in captured.err
+
+    def test_skips_missing_file(self, tmp_path, capsys):
+        from data_uploader.model import DatasetConfig
+
+        toml_path = self._write_toml(tmp_path, ["nonexistent.csv"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        results = generate_all(cfg)
+
+        assert results == []
+        captured = capsys.readouterr()
+        assert "missing" in captured.err.lower()
+
+    def test_skips_directory_entry(self, tmp_path, capsys):
+        from data_uploader.model import DatasetConfig
+
+        sub = tmp_path / "mydir"
+        sub.mkdir()
+
+        toml_path = self._write_toml(tmp_path, ["mydir"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        results = generate_all(cfg)
+
+        assert results == []
+        captured = capsys.readouterr()
+        assert "directory" in captured.err.lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4.5 — Edge case tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEdgeCases:
+    def test_output_collision_uses_suffixes(self, tmp_path, capsys):
+        from data_uploader.model import DatasetConfig
+
+        sub = tmp_path / "data"
+        sub.mkdir()
+        (sub / "f.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (sub / "f.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
+
+        lines = [
+            "[dataset]",
+            'name = "test"',
+            'repo_id = "u/test"',
+            "",
+            "[[file]]",
+            'local = "data/f.csv"',
+            'remote = "f.csv"',
+            "",
+            "[[file]]",
+            'local = "data/f.tsv"',
+            'remote = "f.tsv"',
+            "",
+        ]
+        (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
+        generate_all(cfg)
+
+        assert (sub / "codebook_csv.md").exists()
+        assert (sub / "codebook_tsv.md").exists()
+        captured = capsys.readouterr()
+        assert "Multiple formats" in captured.err
+
+    def test_empty_csv_minimal_codebook(self, tmp_path):
+        csv_path = tmp_path / "header_only.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["col_a", "col_b"])
+
+        result = generate(str(csv_path))
+
+        assert "# Codebook: header_only.csv" in result
+        assert "**Rows:** 0" in result
+        assert "**Columns:** 2" in result
+        assert "| 1 | `col_a`" in result
+        assert "| 2 | `col_b`" in result
+
+    def test_parquet_with_bool_column(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq_path = tmp_path / "bools.parquet"
+        table = pa.table({"flag": pa.array([True, False, True])})
+        pq.write_table(table, pq_path)
+
+        result = generate(str(pq_path))
+
+        assert "Actual Type" in result
+        assert "bool" in result
+
+    def test_xlsx_single_file(self, tmp_path):
+        import openpyxl
+
+        xlsx_path = tmp_path / "sheet.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["item", "price"])
+        ws.append(["apple", 1.5])
+        ws.append(["banana", 2.0])
+        wb.save(xlsx_path)
+
+        result = generate(str(xlsx_path))
+
+        assert "# Codebook: sheet.xlsx" in result
+        assert "Actual Type" in result
+        assert "`item`" in result
+        assert "`price`" in result
+
+    def test_jsonl_single_file(self, tmp_path):
+        jsonl_path = tmp_path / "data.jsonl"
+        jsonl_path.write_text(
+            '{"name": "Alice", "age": 30}\n{"name": "Bob", "age": 25}\n',
+            encoding="utf-8",
+        )
+
+        result = generate(str(jsonl_path))
+
+        assert "# Codebook: data.jsonl" in result
+        assert "`name`" in result
+        assert "`age`" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 4.6 — CLI tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCodebookCLI:
+    def _invoke(self, args, monkeypatch):
+        import data_uploader.cli
+
+        monkeypatch.setattr(sys, "argv", ["data-uploader", "codebook", *args])
+        exc = None
+        # noinspection PyBroadException
+        try:
+            data_uploader.cli.main()
+        except SystemExit as e:
+            exc = e
+        return exc
+
+    def test_csv_optional_allows_all_files(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "t.csv"
+        csv_path.write_text("x;y\n1;2\n", encoding="utf-8")
+
+        exc = self._invoke([str(csv_path)], monkeypatch)
+        assert exc is not None
+        assert exc.code == 0
+
+    def test_all_files_without_csv_succeeds(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "d.csv"
+        csv_path.write_text("k\n1\n", encoding="utf-8")
+
+        lines = [
+            "[dataset]",
+            'name = "test"',
+            'repo_id = "u/test"',
+            "",
+            "[[file]]",
+            'local = "d.csv"',
+            'remote = "d.csv"',
+            "",
+        ]
+        (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        exc = self._invoke(["--all-files"], monkeypatch)
+        assert exc is not None
+        assert exc.code == 0
+
+    def test_both_args_error(self, tmp_path, monkeypatch, capsys):
+        csv_path = tmp_path / "t.csv"
+        csv_path.write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "dataset.toml").write_text(
+            '[dataset]\nname="t"\nrepo_id="u/t"\n[[file]]\nlocal="t.csv"\nremote="t.csv"\n',
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(tmp_path)
+        exc = self._invoke([str(csv_path), "--all-files"], monkeypatch)
+        assert exc is not None
+        assert exc.code == 1
+        captured = capsys.readouterr()
+        assert "cannot be used" in captured.err
+
+    def test_no_args_error(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        exc = self._invoke([], monkeypatch)
+        assert exc is not None
+        assert exc.code == 1
+        captured = capsys.readouterr()
+        assert "Must specify a FILE" in captured.err
+
+    def test_positional_with_output(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "t.csv"
+        csv_path.write_text("a\n1\n", encoding="utf-8")
+        out = tmp_path / "out.md"
+
+        exc = self._invoke([str(csv_path), "-o", str(out)], monkeypatch)
+        assert exc is not None
+        assert exc.code == 0
+        assert out.exists()
+
+    def test_malformed_toml_exits_1(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "dataset.toml").write_text("bad = [[[[\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        exc = self._invoke(["--all-files"], monkeypatch)
+        assert exc is not None
+        assert exc.code == 1
+        captured = capsys.readouterr()
+        assert "TOML" in captured.err
