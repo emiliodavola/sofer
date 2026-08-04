@@ -66,18 +66,24 @@ changed to `FILE` for backward compatibility.
 
 ### Requirement: Batch Generation (CB-R03)
 
-When `--all-files` is specified, the system MUST generate a codebook for
+When `--all-files` is specified, the system MUST generate one codebook for
 every `[[file]]` entry in the TOML config that points to a supported-format
 file. Directories and unsupported formats MUST be skipped with a warning.
-Each codebook MUST be placed alongside its data file as `codebook.md`.
+Each codebook MUST be written to `data/codebooks/<rel-stem>.md`, where
+`<rel-stem>` is the file's path relative to the `data/` directory with the
+extension replaced by `.md` (e.g. `data/DPTO.csv` → `data/codebooks/DPTO.md`;
+`data/Labels/etiquetas_a.csv` → `data/codebooks/Labels/etiquetas_a.md`). No
+format suffix SHALL be appended. When two or more files resolve to the same
+codebook path, the system MUST print an error naming each source file, MUST
+exit 1, and MUST NOT write a codebook for any colliding file.
 
 #### Scenario: Batch from TOML config
 
 - GIVEN `dataset.toml` with `[[file]]` entries for `data/a.csv`,
   `data/b.parquet`, and `data/c.docx`
 - WHEN `sofer codebook --config dataset.toml --all-files` is called
-- THEN `data/codebook.md` SHALL be generated alongside `a.csv`
-- AND `data/codebook.md` SHALL be generated alongside `b.parquet`
+- THEN `data/codebooks/a.md` SHALL be generated for `a.csv`
+- AND `data/codebooks/b.md` SHALL be generated for `b.parquet`
 - AND `c.docx` SHALL be skipped with a warning
 
 #### Scenario: Directory entry skipped
@@ -87,13 +93,28 @@ Each codebook MUST be placed alongside its data file as `codebook.md`.
 - THEN a warning SHALL be emitted
 - AND no codebook SHALL be generated for that entry
 
+#### Scenario: Nested file keeps its relative path
+
+- GIVEN a `[[file]]` entry for `data/Labels/etiquetas_a.csv`
+- WHEN `--all-files` executes
+- THEN `data/codebooks/Labels/etiquetas_a.md` SHALL be generated
+
+#### Scenario: Same-stem collision errors
+
+- GIVEN `data/PROV.csv` and `data/PROV.parquet` in the same folder (both map to `data/codebooks/PROV.md`)
+- WHEN `--all-files` executes
+- THEN an error SHALL be printed naming both `PROV.csv` and `PROV.parquet`
+- AND exit code SHALL be 1
+- AND no codebook SHALL be written for either file
+
 ---
 
 ### Requirement: Root Index (CB-R04)
 
 When `--all-files` is used, the system MUST generate a root `codebook.md` in
-the TOML config's directory containing a table of contents with relative
-links to each generated codebook and a dataset summary.
+the TOML config's directory containing a table of contents with relative links
+to each generated codebook and a dataset summary. The links SHALL point to the
+per-file codebook paths under `data/codebooks/`.
 
 #### Scenario: Root index after batch generation
 
@@ -101,22 +122,7 @@ links to each generated codebook and a dataset summary.
   `data/b.parquet`
 - WHEN `sofer codebook --config dataset.toml --all-files` completes
 - THEN `/proj/codebook.md` SHALL exist
-- AND SHALL contain links to each generated per-file codebook
-
----
-
-### Requirement: Output Collision (CB-R05)
-
-When multiple supported files share the same parent directory, the system
-MUST use format-specific suffixes (`codebook_<fmt>.md`) and emit a warning.
-
-#### Scenario: Same-dir multi-format collision
-
-- GIVEN `data/PROV.parquet` and `data/PROV.csv` in the same directory
-- WHEN `--all-files` generates codebooks
-- THEN `data/codebook_parquet.md` SHALL be written for the parquet file
-- AND `data/codebook_csv.md` SHALL be written for the CSV file
-- AND a warning SHALL be emitted about the collision
+- AND SHALL contain links to `data/codebooks/a.md` and `data/codebooks/b.md`
 
 ---
 

@@ -26,6 +26,50 @@ EXCLUSIONS: frozenset[str] = frozenset(
 )
 
 
+def flatten_first_level(relative: Path) -> Path:
+    """Drop the first path segment; root-level paths are returned unchanged.
+
+    ``raw/DPTO.csv`` becomes ``DPTO.csv``, ``raw/Labels/a.csv`` becomes
+    ``Labels/a.csv``, and a root-level ``x.csv`` is returned as ``x.csv``.
+    """
+    parts = relative.parts
+    if len(parts) <= 1:
+        return relative
+    return Path(*parts[1:])
+
+
+def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
+    """Raise :class:`ValueError` if two or more discovered files flatten to the same destination.
+
+    The error message names every colliding source path and the destination they
+    conflict on.
+
+    Args:
+        discovered: Absolute or relative paths to discovered files.
+        base_dir: The base directory against which relative paths are computed.
+
+    Raises:
+        ValueError: When any flattened destination is produced by more than one
+            source file.  The message names all sources for each collision.
+    """
+    from collections import defaultdict
+
+    collisions: dict[Path, list[Path]] = defaultdict(list)
+    for src in discovered:
+        relative = src.relative_to(base_dir)
+        flat = flatten_first_level(relative)
+        collisions[flat].append(src)
+
+    errors: list[str] = []
+    for flat, sources in sorted(collisions.items()):
+        if len(sources) > 1:
+            src_list = " and ".join(s.as_posix() for s in sorted(sources))
+            errors.append(f"Collision in data/: {flat.as_posix()} from {src_list}")
+
+    if errors:
+        raise ValueError("\n".join(errors))
+
+
 def _file_entry_from_raw(entry: dict[str, Any]) -> FileEntry:
     """Build a :class:`FileEntry` from a raw TOML ``[[file]]`` dict."""
     return FileEntry(
@@ -76,20 +120,30 @@ def merge_entries(
     """Add new ``[[file]]`` entries for each file in *discovered*.
 
     Deduplication: a discovered file is skipped when its computed destination
-    path (``data_dir / relative_to(base_dir)``) resolves to the same absolute
-    path as an existing entry's ``FileEntry.local`` after resolving against
-    *base_dir*.
+    path (``data_dir / flatten_first_level(relative_to(base_dir))``) resolves
+    to the same absolute path as an existing entry's ``FileEntry.local`` after
+    resolving against *base_dir*.
+
+    Paths are flattened by dropping the first segment:
+    ``raw/DPTO.csv`` → ``DPTO.csv``, ``raw/Labels/a.csv`` → ``Labels/a.csv``.
 
     New entries are shaped as::
 
         [[file]]
-        local = "data/<relative>"
-        remote = "<Posix relative>"
+        local = "data/<flattened>"
+        remote = "<Posix flattened>"
 
     The *raw_toml* dict is mutated in-place and also returned for convenience.
     All non-``[[file]]`` top-level keys (``[dataset]``, ``[meta]``, ``[[check]]``,
     ``[[quality]]``) are preserved untouched.
     """
+    # Strip template entries left over from ``sofer init`` (their local
+    # path is a placeholder that starts with ``TODO:`` and would cause
+    # spurious errors downstream in validate / upload).
+    raw_toml["file"] = [
+        e for e in raw_toml.get("file", []) if not str(e.get("local", "")).startswith("TODO:")
+    ]
+
     # Build the set of already-registered resolved destination paths.
     existing: set[Path] = set()
     for entry in raw_toml.get("file", []):
@@ -107,15 +161,16 @@ def merge_entries(
     added = 0
     for src in discovered:
         relative = src.relative_to(base_dir)
-        dest = data_dir / relative
+        flat = flatten_first_level(relative)
+        dest = data_dir / flat
 
         if dest in existing:
             continue
 
         file_entries.append(
             {
-                "local": "data/" + str(PurePosixPath(relative)),
-                "remote": str(PurePosixPath(relative)),
+                "local": "data/" + str(PurePosixPath(flat)),
+                "remote": str(PurePosixPath(flat)),
             }
         )
         existing.add(dest)
@@ -132,11 +187,11 @@ def copy_files(
     dry_run: bool = False,
     force: bool = False,
 ) -> list[tuple[Path, Path]]:
-    """Copy discovered files into *data_dir*, preserving subdirectory structure.
+    """Copy discovered files into *data_dir*, flattening the first path segment.
 
     Each file is copied via :func:`shutil.copy2` to
-    ``data_dir / <relative to base_dir>``.  Parent directories are created
-    lazily on first use.
+    ``data_dir / <flatten_first_level(relative)>``.  Parent directories are
+    created lazily on first use.
 
     Parameters:
         dry_run: When ``True``, only compute what *would* be copied — do not
@@ -156,7 +211,8 @@ def copy_files(
 
     for src in discovered:
         relative = src.relative_to(base_dir)
-        dest = data_dir / relative
+        flat = flatten_first_level(relative)
+        dest = data_dir / flat
 
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)

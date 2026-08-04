@@ -618,8 +618,9 @@ class TestAssertCrossFileSchema:
         errors = _assert_cross_file_schema(converted, cfg)
         assert errors == []
 
-    def test_column_name_mismatch_in_same_split_fails(self, tmp_path):
-        """Different column names in same split → error."""
+    def test_different_column_sets_in_same_split_passes(self, tmp_path):
+        """Multi-table datasets: files in the same split with different
+        column sets are independent tables → no cross-file check."""
         from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
@@ -646,9 +647,7 @@ class TestAssertCrossFileSchema:
         )
 
         errors = _assert_cross_file_schema(converted, cfg)
-        assert len(errors) >= 1
-        assert any("Schema mismatch" in e for e in errors)
-        assert any("missing" in e.lower() for e in errors)
+        assert errors == []
 
     def test_dtype_mismatch_in_same_split_fails(self, tmp_path):
         """Same column names but different dtype in same split → error."""
@@ -737,10 +736,77 @@ class TestAssertCrossFileSchema:
         errors = _assert_cross_file_schema(converted, cfg)
         assert errors == []
 
+    def test_multi_table_same_split_standalone_tables_pass(self, tmp_path):
+        """Census-style multi-table: each table has unique columns → no errors.
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Quality gate inside upload() — Issue #14
-# ═══════════════════════════════════════════════════════════════════════════════
+        Simulates CPV2010 (['ref_id']) + HOGAR (['foo','bar']) — different
+        column sets → each is a standalone table, no cross-file check.
+        """
+        from sofer.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t_cpv = pa.table({"CPV2010_REF_ID": [1]})
+        pq.write_table(t_cpv, staging / "CPV2010.parquet")
+
+        t_dpto = pa.table({"DPTO": ["a"], "NOMDPTO": ["b"]})
+        pq.write_table(t_dpto, staging / "DPTO.parquet")
+
+        t_hogar = pa.table({"HOGAR_REF_ID": [1], "NHOG": [2], "PROP": [3]})
+        pq.write_table(t_hogar, staging / "HOGAR.parquet")
+
+        converted = {
+            "CPV2010": (staging / "CPV2010.parquet", Path(), ""),
+            "DPTO": (staging / "DPTO.parquet", Path(), ""),
+            "HOGAR": (staging / "HOGAR.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("CPV2010.parquet"), remote="CPV2010.parquet"),
+                FileEntry(local=Path("DPTO.parquet"), remote="DPTO.parquet"),
+                FileEntry(local=Path("HOGAR.parquet"), remote="HOGAR.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_multi_table_same_columns_dtype_mismatch_still_fails(self, tmp_path):
+        """If two files share column names but have different dtypes,
+        the check still fires (they're assumed to be the same table)."""
+        from sofer.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t1 = pa.table({"col": [1, 2, 3]})
+        pq.write_table(t1, staging / "train-1.parquet")
+
+        t2 = pa.table({"col": ["a", "b"]})
+        pq.write_table(t2, staging / "train-2.parquet")
+
+        # These share columns → same group → dtype check runs
+        converted = {
+            "train-1": (staging / "train-1.parquet", Path(), ""),
+            "train-2": (staging / "train-2.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert len(errors) >= 1
+        assert any("differ in dtypes" in e for e in errors)
 
 
 class TestUploadQualityGate:
@@ -887,27 +953,36 @@ class TestReadmeOverride:
 
 
 class TestCodebookUpload:
-    """cfg.codebook should upload the codebook alongside data files."""
+    """RC-C01: Generated codebooks uploaded under codebooks/ prefix after data files."""
 
     def test_codebook_uploaded_to_codebook_subpath(self, tmp_path, monkeypatch):
-        """When cfg.codebook is set, upload to codebook/ path."""
+        """Per-file codebooks and root index uploaded with correct remotes and order."""
         from sofer import uploader
+        from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
 
-        csv = tmp_path / "data.csv"
-        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        # Create data file
+        data_dir = tmp_path / OUTPUT_DIR
+        data_dir.mkdir(parents=True)
+        csv = data_dir / "DPTO.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
 
-        cb = tmp_path / "my_codebook.md"
-        cb.write_text("# Codebook\nTest content.", encoding="utf-8")
+        # Create generated per-file codebooks
+        codebooks_path = data_dir / CODEBOOKS_DIR
+        codebooks_path.mkdir(parents=True)
+        (codebooks_path / "DPTO.md").write_text("# DPTO codebook", encoding="utf-8")
+        (codebooks_path / "PROV.md").write_text("# PROV codebook", encoding="utf-8")
+
+        # Create root index
+        (tmp_path / "codebook.md").write_text("# Root index", encoding="utf-8")
 
         cfg = DatasetConfig(
             name="test",
             repo_id="user/test",
-            files=[FileEntry(local=csv, remote="data.csv")],
-            codebook=str(cb),
+            files=[FileEntry(local=csv, remote="DPTO.csv", upload_as_csv=True)],
             _base_dir=tmp_path,
         )
 
-        uploaded = []
+        uploaded: list[str] = []
 
         def _track(path_or_fileobj="", path_in_repo="", **kw):
             uploaded.append(path_in_repo)
@@ -923,30 +998,51 @@ class TestCodebookUpload:
 
         uploader.upload(cfg)
 
-        # Should contain a codebook/ upload
-        codebook_uploads = [u for u in uploaded if "codebook/" in u]
+        # ── Assert correct remote paths ──
+        codebook_uploads = [u for u in uploaded if u.startswith("codebooks/") or u == "codebook.md"]
         assert len(codebook_uploads) >= 1
-        assert any("my_codebook.md" in u for u in codebook_uploads)
+        assert "codebooks/DPTO.md" in codebook_uploads
+        assert "codebooks/PROV.md" in codebook_uploads
+        assert "codebook.md" in codebook_uploads
+
+        # ── Assert order: data files before codebooks, root index last ──
+        data_remotes = {
+            u
+            for u in uploaded
+            if not u.startswith("codebook") and u != "README.md" and u != "LICENSE"
+        }
+        assert "DPTO.csv" in data_remotes
+        last_data_idx = max(uploaded.index(u) for u in uploaded if u in data_remotes)
+        codebook_idxes = [i for i, u in enumerate(uploaded) if u.startswith("codebooks/")]
+        assert codebook_idxes, "expected per-file codebook uploads"
+        assert last_data_idx < min(codebook_idxes), "data files must be uploaded before codebooks"
+
+        index_idx = uploaded.index("codebook.md")
+        assert max(codebook_idxes) < index_idx, "root index must upload after per-file codebooks"
 
         assert not td.exists()
 
-    def test_codebook_missing_file_warns(self, tmp_path, monkeypatch, capsys):
-        """When cfg.codebook points to a missing file, warn but don't fail."""
+    def test_no_codebooks_generated_skips(self, tmp_path, monkeypatch, capsys):
+        """No data/codebooks/ directory or codebook.md → skip silently, no warning."""
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
-        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
 
         cfg = DatasetConfig(
             name="test",
             repo_id="user/test",
-            files=[FileEntry(local=csv, remote="data.csv")],
-            codebook="nonexistent_codebook.md",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
             _base_dir=tmp_path,
         )
 
+        uploaded: list[str] = []
+
+        def _track(path_or_fileobj="", path_in_repo="", **kw):
+            uploaded.append(path_in_repo)
+
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _track)
 
         import tempfile
 
@@ -956,12 +1052,173 @@ class TestCodebookUpload:
 
         uploader.upload(cfg)
         captured = capsys.readouterr()
-        assert (
-            "codebook declared but not found" in captured.out
-            or "codebook declared but not found" in captured.err
-        )
+
+        # No codebook-related uploads
+        codebook_uploads = [u for u in uploaded if "codebook" in u.lower()]
+        assert codebook_uploads == [], f"unexpected codebook uploads: {codebook_uploads}"
+
+        # No warning about missing codebooks
+        assert "codebook" not in captured.out.lower()
+        assert "codebook" not in captured.err.lower()
 
         assert not td.exists()
+
+    def test_legacy_codebook_not_uploaded(self, tmp_path, monkeypatch):
+        """cfg.codebook declared in TOML → uploader ignores it; RC-C01 supersedes."""
+        from sofer import uploader
+        from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
+
+        # Set up generated codebooks (RC-C01 path)
+        data_dir = tmp_path / OUTPUT_DIR
+        data_dir.mkdir(parents=True)
+        csv = data_dir / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        codebooks_path = data_dir / CODEBOOKS_DIR
+        codebooks_path.mkdir(parents=True)
+        (codebooks_path / "data.md").write_text("# Generated codebook", encoding="utf-8")
+        (tmp_path / "codebook.md").write_text("# Root index", encoding="utf-8")
+
+        # Also create the legacy codebook file (should be ignored)
+        legacy_cb = tmp_path / "old_codebook.md"
+        legacy_cb.write_text("# Legacy — should be ignored", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
+            codebook=str(legacy_cb),  # legacy path — RC-C01 ignores it
+            _base_dir=tmp_path,
+        )
+
+        uploaded: list[str] = []
+
+        def _track(path_or_fileobj="", path_in_repo="", **kw):
+            uploaded.append(path_in_repo)
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _track)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        # RC-C01 codebooks uploaded
+        assert "codebooks/data.md" in uploaded
+        assert "codebook.md" in uploaded
+
+        # Legacy codebook NOT uploaded — no codebook/old_codebook.md
+        assert "old_codebook.md" not in uploaded
+        assert not any("codebook/old_codebook.md" in u for u in uploaded)
+
+        assert not td.exists()
+
+    def test_codebook_upload_order_data_first(self, tmp_path, monkeypatch):
+        """_hf_upload for codebooks happens AFTER the data-file loop."""
+        from sofer import uploader
+        from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
+
+        data_dir = tmp_path / OUTPUT_DIR
+        data_dir.mkdir(parents=True)
+        csv = data_dir / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        codebooks_path = data_dir / CODEBOOKS_DIR
+        codebooks_path.mkdir(parents=True)
+        (codebooks_path / "data.md").write_text("# codebook", encoding="utf-8")
+        (tmp_path / "codebook.md").write_text("# index", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+
+        call_order: list[str] = []
+
+        def _track(path_or_fileobj="", path_in_repo="", **kw):
+            call_order.append(path_in_repo)
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _track)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        data_idx = call_order.index("data.csv")
+        first_cb_idx = min(call_order.index(u) for u in call_order if u.startswith("codebooks/"))
+        assert data_idx < first_cb_idx, f"data.csv at {data_idx}, first codebook at {first_cb_idx}"
+
+        assert not td.exists()
+
+    def test_root_index_uploaded_as_codebook_md(self, tmp_path, monkeypatch):
+        """codebook.md in base_dir is uploaded as codebook.md in HF."""
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        (tmp_path / "codebook.md").write_text("# Root index content", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+
+        uploaded: list[str] = []
+
+        def _track(path_or_fileobj="", path_in_repo="", **kw):
+            uploaded.append(path_in_repo)
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _track)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        assert "codebook.md" in uploaded
+
+        assert not td.exists()
+
+    def test_repo_diff_summary_lists_codebook_remotes(self, tmp_path):
+        """_repo_diff_summary includes codebook remotes when provided."""
+        from sofer.config import OUTPUT_DIR
+
+        data_dir = tmp_path / OUTPUT_DIR
+        data_dir.mkdir(parents=True)
+        data = data_dir / "data.csv"
+        data.write_text("x\n1\n", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=data, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        codebook_remotes = ["codebooks/data.md", "codebook.md"]
+        summary = _repo_diff_summary(
+            cfg, existing_files=[], keep_csv=False, codebook_remotes=codebook_remotes
+        )
+        assert "codebooks/data.md" in summary
+        assert "codebook.md" in summary
 
 
 class TestSchemaAssertion:

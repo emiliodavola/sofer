@@ -7,13 +7,121 @@ from typing import Any
 
 import pytest
 
+from sofer import config
 from sofer.model import DatasetConfig
 from sofer.scanner import (
+    check_flatten_collisions,
     copy_files,
     discover_files,
+    flatten_first_level,
     merge_entries,
     write_toml,
 )
+
+# ------------------------------------------------------------------
+# TestConfigConstants
+# ------------------------------------------------------------------
+
+
+class TestConfigConstants:
+    """Unit tests for tool-wide config constants used by the scan pipeline."""
+
+    def test_codebooks_dir_constant_exists(self) -> None:
+        """CODEBOOKS_DIR is a str constant exposed by the config module."""
+        assert hasattr(config, "CODEBOOKS_DIR")
+        assert isinstance(config.CODEBOOKS_DIR, str)
+        assert config.CODEBOOKS_DIR == "codebooks"
+
+
+# ------------------------------------------------------------------
+# TestFlattenFirstLevel
+# ------------------------------------------------------------------
+
+
+class TestFlattenFirstLevel:
+    """Unit tests for :func:`flatten_first_level` — first-segment stripping."""
+
+    def test_root_file_unchanged(self) -> None:
+        """A file at the config root (no directory component) keeps its name."""
+        result = flatten_first_level(Path("a.csv"))
+        assert result == Path("a.csv")
+
+    def test_single_dir_strips_first_segment(self) -> None:
+        """A file one level deep gets its first segment removed."""
+        result = flatten_first_level(Path("raw/a.csv"))
+        assert result == Path("a.csv")
+
+    def test_nested_strips_only_first_segment(self) -> None:
+        """Deeper subdirectories beyond the first segment are preserved."""
+        result = flatten_first_level(Path("raw/Labels/a.csv"))
+        assert result == Path("Labels/a.csv")
+
+    def test_root_file_without_extension(self) -> None:
+        """Flatten works on files without extensions too."""
+        result = flatten_first_level(Path("README"))
+        assert result == Path("README")
+
+
+# ------------------------------------------------------------------
+# TestCheckFlattenCollisions
+# ------------------------------------------------------------------
+
+
+class TestCheckFlattenCollisions:
+    """Unit tests for :func:`check_flatten_collisions`."""
+
+    def test_collision_raises_naming_sources(self) -> None:
+        """Two files from different source dirs colliding on the same dest raise ValueError."""
+        discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
+        with pytest.raises(ValueError, match="Collision in data/"):
+            check_flatten_collisions(discovered, Path("."))
+
+    def test_collision_error_names_both_sources(self) -> None:
+        """The error message names all colliding source paths."""
+        discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
+        try:
+            check_flatten_collisions(discovered, Path("."))
+        except ValueError as exc:
+            msg = str(exc)
+            assert "raw/a.csv" in msg
+            assert "processed/a.csv" in msg
+
+    def test_collision_with_more_than_two_sources(self) -> None:
+        """Three or more sources colliding on the same destination all appear in the error."""
+        discovered = [
+            Path("A/data.csv"),
+            Path("B/data.csv"),
+            Path("C/data.csv"),
+        ]
+        try:
+            check_flatten_collisions(discovered, Path("."))
+        except ValueError as exc:
+            msg = str(exc)
+            assert "A/data.csv" in msg
+            assert "B/data.csv" in msg
+            assert "C/data.csv" in msg
+
+    def test_no_collision_single_source(self) -> None:
+        """No error when all files come from the same first-level dir."""
+        discovered = [Path("raw/a.csv"), Path("raw/b.csv")]
+        # Should not raise.
+        check_flatten_collisions(discovered, Path("."))
+
+    def test_no_collision_different_flattened_names(self) -> None:
+        """No error when files flatten to different names."""
+        discovered = [Path("raw/a.csv"), Path("processed/b.csv")]
+        # Should not raise.
+        check_flatten_collisions(discovered, Path("."))
+
+    def test_no_collision_nested_different_dirs(self) -> None:
+        """No error when nested paths flatten to distinct destinations."""
+        discovered = [
+            Path("raw/Labels/a.csv"),
+            Path("raw/Config/b.csv"),
+        ]
+        # Should not raise — different flattened names.
+        check_flatten_collisions(discovered, Path("."))
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -183,13 +291,13 @@ class TestMergeEntries:
         assert len(raw["file"]) == len_after_first
 
     def test_remote_uses_posix_separators(self, tmp_path: Path) -> None:
-        """Remote paths use forward slashes (PurePosixPath)."""
+        """Remote paths use forward slashes (PurePosixPath) after flattening."""
         _touch(tmp_path / "sub" / "nested" / "a.csv")
         discovered = [tmp_path / "sub" / "nested" / "a.csv"]
 
         raw = self._raw_toml()
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
-        assert raw["file"][0]["remote"] == "sub/nested/a.csv"
+        assert raw["file"][0]["remote"] == "nested/a.csv"
 
     def test_preserves_existing_unrelated_entries(self, tmp_path: Path) -> None:
         """Pre-existing [[file]] entries for unrelated files are kept."""
@@ -205,6 +313,50 @@ class TestMergeEntries:
         assert len(raw["file"]) == 2
         assert raw["file"][0]["local"] == "data/readme.md"
 
+    def test_merge_flattened_local_and_remote(self, tmp_path: Path) -> None:
+        """local and remote paths use the flattened first-segment shape (SCN-02)."""
+        _touch(tmp_path / "raw" / "DPTO.csv")
+        _touch(tmp_path / "raw" / "Labels" / "etiquetas_a.csv")
+        discovered = sorted(
+            [tmp_path / "raw" / "DPTO.csv", tmp_path / "raw" / "Labels" / "etiquetas_a.csv"]
+        )
+
+        raw = self._raw_toml()
+        merge_entries(discovered, raw, tmp_path, tmp_path / "data")
+
+        assert raw["file"][0]["local"] == "data/DPTO.csv"
+        assert raw["file"][0]["remote"] == "DPTO.csv"
+        assert raw["file"][1]["local"] == "data/Labels/etiquetas_a.csv"
+        assert raw["file"][1]["remote"] == "Labels/etiquetas_a.csv"
+
+    def test_root_level_file_keeps_name(self, tmp_path: Path) -> None:
+        """A root-level file (no directory) keeps its name in local and remote (SCN-02)."""
+        _touch(tmp_path / "x.csv")
+        discovered = [tmp_path / "x.csv"]
+
+        raw = self._raw_toml()
+        merge_entries(discovered, raw, tmp_path, tmp_path / "data")
+
+        assert raw["file"][0]["local"] == "data/x.csv"
+        assert raw["file"][0]["remote"] == "x.csv"
+
+    def test_merge_removes_todo_template_entries(self, tmp_path: Path) -> None:
+        """Template entries from ``sofer init`` (local starting with ``TODO:``)
+        are stripped before merging, so they never reach validate/upload."""
+        _touch(tmp_path / "a.csv")
+        raw: dict[str, Any] = {
+            "file": [
+                {"local": "TODO: path/to/file.csv", "remote": "file.csv"},
+                {"local": "TODO: path/to/dir/", "remote": "subfolder/", "recursive": True},
+            ]
+        }
+        merge_entries([tmp_path / "a.csv"], raw, tmp_path, tmp_path / "data")
+        # All TODO entries must be gone.
+        remaining = [str(e["local"]) for e in raw["file"]]
+        assert not any("TODO:" in r for r in remaining), f"TODO entries survived: {remaining}"
+        # The discovered file must be present.
+        assert any("a.csv" in r for r in remaining), f"Discovered file missing: {remaining}"
+
 
 # ------------------------------------------------------------------
 # TestCopyFiles
@@ -215,13 +367,13 @@ class TestCopyFiles:
     """Unit tests for :func:`copy_files`."""
 
     def test_creates_subdirs_lazily(self, tmp_path: Path) -> None:
-        """Parent directories in data/ are created on demand."""
+        """Parent directories in data/ are created on demand after flattening."""
         _touch(tmp_path / "sub" / "nested" / "a.csv")
         discovered = [tmp_path / "sub" / "nested" / "a.csv"]
         data_dir = tmp_path / "data"
 
         copy_files(discovered, tmp_path, data_dir)
-        dest = data_dir / "sub" / "nested" / "a.csv"
+        dest = data_dir / "nested" / "a.csv"
         assert dest.exists()
         assert dest.read_text(encoding="utf-8") == "x"
 
@@ -460,3 +612,67 @@ class TestIntegration:
         rc = _cmd_scan(args)
         assert rc == 0
         assert not (tmp_path / "data").exists()
+
+    def test_scan_collision_exits_1_no_copy(self, tmp_path: Path, monkeypatch) -> None:
+        """Flatten collision across source dirs → exit 1, no files copied."""
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv")
+        _touch(tmp_path / "processed" / "a.csv")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=False, force=True, ext=None)
+        rc = _cmd_scan(args)
+        assert rc == 1
+        # No data/ files should have been created.
+        assert not (tmp_path / "data").exists()
+
+    def test_scan_dry_run_reports_flattened_paths(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """--dry-run shows flattened destination paths."""
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=True, force=False, ext=None)
+        rc = _cmd_scan(args)
+        assert rc == 0
+
+        captured = capsys.readouterr().out
+        # The dry-run report shows flattened paths: "data/a.csv", not "data/raw/a.csv"
+        assert "a.csv" in captured
+        # Should NOT show the raw/ prefix — the first segment was dropped.
+        assert "data/raw/" not in captured
+
+    def test_scan_preview_shows_flattened_paths(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Interactive preview before copy shows flattened paths."""
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        # Simulate answering "y" to the prompt so the scan proceeds.
+        monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=False, force=False, ext=None)
+        rc = _cmd_scan(args)
+        assert rc == 0
+
+        captured = capsys.readouterr().out
+        # The preview lists flattened paths: "→ data/a.csv", not "→ data/raw/a.csv"
+        assert "data/a.csv" in captured
+        assert "data/raw/" not in captured

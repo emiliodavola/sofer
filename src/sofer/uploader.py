@@ -24,6 +24,8 @@ from huggingface_hub import HfApi
 
 from ._parquet_helpers import _parquet_to_hf_dtype
 from .config import (
+    CODEBOOKS_DIR,
+    OUTPUT_DIR,
     OUTPUT_ENCODING,
     PARQUET_COMPRESSION,
     PARQUET_ROW_GROUP_SIZE,
@@ -376,6 +378,7 @@ def _repo_diff_summary(
     cfg: DatasetConfig,
     existing_files: list[str],
     keep_csv: bool,
+    codebook_remotes: list[str] | None = None,
 ) -> str:
     """Build a human-readable diff of what will be added vs modified.
 
@@ -383,6 +386,7 @@ def _repo_diff_summary(
         cfg:            Dataset configuration.
         existing_files: Files already in the repo (from :func:`_inspect_repo`).
         keep_csv:       Whether original CSVs will be uploaded alongside Parquet.
+        codebook_remotes: Optional planned codebook remote paths (RC-C01).
 
     Returns:
         A multiline string suitable for printing.
@@ -408,6 +412,10 @@ def _repo_diff_summary(
                 planned.append(entry.remote)
         else:
             planned.append(entry.remote)
+
+    # ── Codebook remotes (RC-C01) ──
+    if codebook_remotes:
+        planned.extend(codebook_remotes)
 
     new = [p for p in planned if p.lower() not in existing_set]
     modified = [p for p in planned if p.lower() in existing_set]
@@ -528,62 +536,48 @@ def _assert_cross_file_schema(
     if not split_files:
         return errors
 
-    # ── Compare schemas within each multi-file split ──────────────────────
+    # ── Group files by column name sets; only check groups with 2+ files ──
+    # Multi-table datasets (e.g., census with CPV2010 ≠ DPTO ≠ Labels)
+    # naturally have distinct column sets — each standalone table is skipped.
+    # Files that share the exact same column names are assumed to be the
+    # same logical table (e.g., train/test splits) and are checked for
+    # dtype consistency.
     for split_name, files in split_files.items():
         if len(files) < 2:
             continue
 
-        ref_remote, ref_path = files[0]
-        try:
-            ref_schema = pq.read_schema(ref_path)
-        except Exception as exc:
-            errors.append(f"Failed to read schema of '{ref_remote}': {exc}")
-            continue
+        # Read schemas and group by sorted column names.
+        from collections import defaultdict
 
-        ref_cols = set(ref_schema.names)
-        ref_types: dict[str, object] = {
-            name: ref_schema.field(name).type for name in ref_schema.names
-        }
-
-        for remote, path in files[1:]:
+        col_groups: dict[tuple[str, ...], list[tuple[str, dict[str, object]]]] = defaultdict(list)
+        for remote, path in files:
             try:
                 schema = pq.read_schema(path)
             except Exception as exc:
                 errors.append(f"Failed to read schema of '{remote}': {exc}")
                 continue
-
-            cols = set(schema.names)
+            cols_key = tuple(sorted(schema.names))
             types = {name: schema.field(name).type for name in schema.names}
+            col_groups[cols_key].append((remote, types))
 
-            # -- column name mismatch --
-            if cols != ref_cols:
-                missing = sorted(ref_cols - cols)
-                extra = sorted(cols - ref_cols)
-                detail_parts: list[str] = []
-                if missing:
-                    detail_parts.append(f"missing: {missing}")
-                if extra:
-                    detail_parts.append(f"extra: {extra}")
-                errors.append(
-                    f"Schema mismatch in split '{split_name}': "
-                    f"'{ref_remote}' columns={sorted(ref_cols)}, "
-                    f"'{remote}' columns={sorted(cols)} "
-                    f"({' ; '.join(detail_parts)})"
-                )
+        # Only validate groups with 2+ files (same-table variants).
+        for cols_key, group in col_groups.items():
+            if len(group) < 2:
                 continue
 
-            # -- dtype mismatch (only when column names are identical) --
-            common = sorted(cols & ref_cols)
-            diffs = []
-            for col in common:
-                if str(types[col]) != str(ref_types[col]):
-                    diffs.append(f"{col}: {ref_types[col]} vs {types[col]}")
-            if diffs:
-                errors.append(
-                    f"Schema mismatch in split '{split_name}': "
-                    f"'{ref_remote}' and '{remote}' differ in dtypes "
-                    f"({' ; '.join(diffs)})"
-                )
+            ref_remote, ref_types = group[0]
+            for remote, types in group[1:]:
+                diffs = []
+                for col in cols_key:
+                    if str(types[col]) != str(ref_types[col]):
+                        diffs.append(f"{col}: {ref_types[col]} vs {types[col]}")
+                if diffs:
+                    cols_list = sorted(cols_key)
+                    errors.append(
+                        f"Schema mismatch in split '{split_name}': "
+                        f"'{ref_remote}' and '{remote}' differ in dtypes "
+                        f"({' ; '.join(diffs)}) — shared columns: {cols_list}"
+                    )
 
     return errors
 
@@ -753,7 +747,19 @@ def upload(
 
     # ── 0b. Pre-upload repo inspection ─────────────────────────────────
     existing_files = _inspect_repo(cfg)
-    diff_summary = _repo_diff_summary(cfg, existing_files, keep_csv)
+
+    # Collect planned codebook remotes for the diff summary (RC-C01).
+    _base = cfg._base_dir or Path.cwd()
+    _data = _base / OUTPUT_DIR
+    _planned_codebooks: list[str] = []
+    _cbd = _data / CODEBOOKS_DIR
+    if _cbd.is_dir():
+        for _cf in sorted(_cbd.rglob("*.md")):
+            _planned_codebooks.append(_cf.relative_to(_data).as_posix())
+    if (_base / "codebook.md").exists():
+        _planned_codebooks.append("codebook.md")
+
+    diff_summary = _repo_diff_summary(cfg, existing_files, keep_csv, _planned_codebooks)
     print(diff_summary)
     print()
 
@@ -883,15 +889,6 @@ def upload(
                 study_design_content=study_design_content,
             )
 
-        # Codebook file (optional — uploaded alongside data files)
-        codebook_local: Path | None = None
-        if cfg.codebook:
-            cb_path = Path(cfg.codebook)
-            if cb_path.exists():
-                codebook_local = cb_path
-            else:
-                print(f"  \u26a0  codebook declared but not found: {cfg.codebook}")
-
         print("  [i] Generating LICENSE \u2026")
         license_text = build_license_file(cfg.license)
 
@@ -981,10 +978,19 @@ def upload(
                 else:
                     fail += 1
 
-        # ── 3b. Upload codebook file (optional) ─────────────────────────
-        if codebook_local is not None:
-            codebook_remote = f"codebook/{codebook_local.name}"
-            if _hf_upload(cfg.repo_id, codebook_local, codebook_remote, cfg.repo_type):
+        # ── 3b. Upload generated codebooks (RC-C01) ─────────────────────
+        data_dir = base / OUTPUT_DIR
+        codebooks_dir = data_dir / CODEBOOKS_DIR
+        if codebooks_dir.is_dir():
+            for cb_file in sorted(codebooks_dir.rglob("*.md")):
+                remote = cb_file.relative_to(data_dir).as_posix()
+                if _hf_upload(cfg.repo_id, cb_file, remote, cfg.repo_type):
+                    ok += 1
+                else:
+                    fail += 1
+        root_index = base / "codebook.md"
+        if root_index.exists():
+            if _hf_upload(cfg.repo_id, root_index, "codebook.md", cfg.repo_type):
                 ok += 1
             else:
                 fail += 1

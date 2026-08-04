@@ -75,6 +75,7 @@ report_line_width = 50
 report_sub_line_width = 30
 
 # ── Codebook defaults ──
+codebooks_dir = "codebooks"
 codebook_max_sample = 100_000
 codebook_numeric_threshold = 0.9
 codebook_mixed_threshold = 0.5

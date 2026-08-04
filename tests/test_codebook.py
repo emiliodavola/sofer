@@ -475,28 +475,35 @@ class TestBuildMarkdown:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _write_toml(base_path, entries):
+    """Write a minimal dataset.toml with [[file]] entries to *base_path*."""
+    lines = [
+        "[dataset]",
+        'name = "test-ds"',
+        'repo_id = "user/test-ds"',
+        "",
+    ]
+    for local in entries:
+        lines.append("[[file]]")
+        lines.append(f'local = "{local}"')
+        lines.append(f'remote = "{local}"')
+        lines.append("")
+
+    toml_path = base_path / "dataset.toml"
+    toml_path.write_text("\n".join(lines), encoding="utf-8")
+    return toml_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Phase 4.4 — Integration tests for generate_all()
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 class TestGenerateAll:
-    def _write_toml(self, base_path, entries):
-        lines = [
-            "[dataset]",
-            'name = "test-ds"',
-            'repo_id = "user/test-ds"',
-            "",
-        ]
-        for local in entries:
-            lines.append("[[file]]")
-            lines.append(f'local = "{local}"')
-            lines.append(f'remote = "{local}"')
-            lines.append("")
-
-        toml_path = base_path / "dataset.toml"
-        toml_path.write_text("\n".join(lines), encoding="utf-8")
-        return toml_path
-
     def test_generates_for_all_toml_entries(self, tmp_path):
         from sofer.model import DatasetConfig
 
@@ -505,7 +512,7 @@ class TestGenerateAll:
         b = tmp_path / "b.csv"
         b.write_text("p;q\n10;20\n", encoding="utf-8")
 
-        toml_path = self._write_toml(
+        toml_path = _write_toml(
             tmp_path,
             [
                 str(a.relative_to(tmp_path)),
@@ -516,9 +523,10 @@ class TestGenerateAll:
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
+        codebooks_dir = tmp_path / "data" / "codebooks"
         assert len(results) >= 3  # 2 per-file + root index
-        assert (tmp_path / "codebook.md").exists()  # a.csv codebook
-        assert (tmp_path / "codebook.md" in str(r) for r in results)
+        assert (codebooks_dir / "a.md").exists()
+        assert (codebooks_dir / "b.md").exists()
         root = tmp_path / "codebook.md"
         assert root.exists()
         root_content = root.read_text(encoding="utf-8")
@@ -532,13 +540,13 @@ class TestGenerateAll:
         sub.mkdir()
         (sub / "f.csv").write_text("col\n1\n", encoding="utf-8")
 
-        toml_path = self._write_toml(tmp_path, ["data/f.csv"])
+        toml_path = _write_toml(tmp_path, ["data/f.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
         generate_all(cfg)
 
         root = tmp_path / "codebook.md"
         content = root.read_text(encoding="utf-8")
-        assert "data/codebook.md" in content
+        assert "data/codebooks/f.md" in content
         assert "1 columns" in content
 
     def test_skips_unsupported_format(self, tmp_path, capsys):
@@ -546,7 +554,7 @@ class TestGenerateAll:
 
         (tmp_path / "f.txt").write_text("hello", encoding="utf-8")
 
-        toml_path = self._write_toml(tmp_path, ["f.txt"])
+        toml_path = _write_toml(tmp_path, ["f.txt"])
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
@@ -557,7 +565,7 @@ class TestGenerateAll:
     def test_skips_missing_file(self, tmp_path, capsys):
         from sofer.model import DatasetConfig
 
-        toml_path = self._write_toml(tmp_path, ["nonexistent.csv"])
+        toml_path = _write_toml(tmp_path, ["nonexistent.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
@@ -571,7 +579,7 @@ class TestGenerateAll:
         sub = tmp_path / "mydir"
         sub.mkdir()
 
-        toml_path = self._write_toml(tmp_path, ["mydir"])
+        toml_path = _write_toml(tmp_path, ["mydir"])
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
@@ -586,13 +594,14 @@ class TestGenerateAll:
 
 
 class TestEdgeCases:
-    def test_output_collision_uses_suffixes(self, tmp_path, capsys):
+    def test_same_stem_collision_errors(self, tmp_path, capsys):
+        """Two files with different extensions but same stem → ValueError, exit 1."""
         from sofer.model import DatasetConfig
 
         sub = tmp_path / "data"
         sub.mkdir()
-        (sub / "f.csv").write_text("a;b\n1;2\n", encoding="utf-8")
-        (sub / "f.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
+        (sub / "PROV.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (sub / "PROV.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
 
         lines = [
             "[dataset]",
@@ -600,23 +609,141 @@ class TestEdgeCases:
             'repo_id = "u/test"',
             "",
             "[[file]]",
-            'local = "data/f.csv"',
-            'remote = "f.csv"',
+            'local = "data/PROV.csv"',
+            'remote = "PROV.csv"',
             "",
             "[[file]]",
-            'local = "data/f.tsv"',
-            'remote = "f.tsv"',
+            'local = "data/PROV.tsv"',
+            'remote = "PROV.tsv"',
             "",
         ]
         (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
 
         cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
-        generate_all(cfg)
+        with pytest.raises(ValueError, match="Collision"):
+            generate_all(cfg)
 
-        assert (sub / "codebook_csv.md").exists()
-        assert (sub / "codebook_tsv.md").exists()
         captured = capsys.readouterr()
-        assert "Multiple formats" in captured.err
+        # Collision error names both sources on stderr
+        assert "PROV.csv" in captured.err
+        assert "PROV.tsv" in captured.err
+        # No codebook written for colliding files
+        assert not (tmp_path / "data" / "codebooks" / "PROV.md").exists()
+
+    def test_collision_partial_write_non_colliding(self, tmp_path, capsys):
+        """Non-colliding codebooks are written; colliding ones are not; exit 1."""
+        from sofer.model import DatasetConfig
+
+        sub = tmp_path / "data"
+        sub.mkdir()
+        (sub / "A.csv").write_text("x;y\n1;2\n", encoding="utf-8")
+        (sub / "B.csv").write_text("p;q\n10;20\n", encoding="utf-8")
+        (sub / "PROV.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (sub / "PROV.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
+
+        lines = [
+            "[dataset]",
+            'name = "test"',
+            'repo_id = "u/test"',
+            "",
+            "[[file]]",
+            'local = "data/A.csv"',
+            'remote = "A.csv"',
+            "",
+            "[[file]]",
+            'local = "data/B.csv"',
+            'remote = "B.csv"',
+            "",
+            "[[file]]",
+            'local = "data/PROV.csv"',
+            'remote = "PROV.csv"',
+            "",
+            "[[file]]",
+            'local = "data/PROV.tsv"',
+            'remote = "PROV.tsv"',
+            "",
+        ]
+        (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
+        codebooks_dir = tmp_path / "data" / "codebooks"
+
+        with pytest.raises(ValueError, match="Collision"):
+            generate_all(cfg)
+
+        # Non-colliding codebooks written
+        assert (codebooks_dir / "A.md").exists()
+        assert (codebooks_dir / "B.md").exists()
+        # Colliding codebook NOT written
+        assert not (codebooks_dir / "PROV.md").exists()
+        # No root index on failure
+        assert not (tmp_path / "codebook.md").exists()
+        captured = capsys.readouterr()
+        assert "PROV.csv" in captured.err
+        assert "PROV.tsv" in captured.err
+
+    def test_no_index_on_failed_run(self, tmp_path, capsys):
+        """Root codebook.md index is NOT generated when collision occurs."""
+        from sofer.model import DatasetConfig
+
+        sub = tmp_path / "data"
+        sub.mkdir()
+        (sub / "DUP.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (sub / "DUP.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
+
+        lines = [
+            "[dataset]",
+            'name = "test"',
+            'repo_id = "u/test"',
+            "",
+            "[[file]]",
+            'local = "data/DUP.csv"',
+            'remote = "DUP.csv"',
+            "",
+            "[[file]]",
+            'local = "data/DUP.tsv"',
+            'remote = "DUP.tsv"',
+            "",
+        ]
+        (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
+        with pytest.raises(ValueError):
+            generate_all(cfg)
+
+        assert not (tmp_path / "codebook.md").exists()
+
+    def test_rel_stem_under_data(self, tmp_path):
+        """rel-stem preserves nested directory structure under data/."""
+        from sofer.model import DatasetConfig
+
+        sub = tmp_path / "data" / "Labels"
+        sub.mkdir(parents=True)
+        (sub / "etiquetas.csv").write_text("k;v\n1;2\n", encoding="utf-8")
+
+        toml_path = _write_toml(tmp_path, ["data/Labels/etiquetas.csv"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        results = generate_all(cfg)
+
+        codebook_path = tmp_path / "data" / "codebooks" / "Labels" / "etiquetas.md"
+        assert codebook_path.exists()
+        assert str(codebook_path) in results
+
+    def test_rel_stem_outside_data(self, tmp_path):
+        """Files outside data/ fall back to relative_to(base_dir) for rel-stem."""
+        from sofer.model import DatasetConfig
+
+        # File at project root, not under data/
+        (tmp_path / "root_file.csv").write_text("x;y\n1;2\n", encoding="utf-8")
+
+        toml_path = _write_toml(tmp_path, ["root_file.csv"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        results = generate_all(cfg)
+
+        # Falls back to rel to base_dir → codebooks placed under data/codebooks/
+        codebook_path = tmp_path / "data" / "codebooks" / "root_file.md"
+        assert codebook_path.exists()
+        assert str(codebook_path) in results
 
     def test_empty_csv_minimal_codebook(self, tmp_path):
         csv_path = tmp_path / "header_only.csv"
@@ -766,3 +893,33 @@ class TestCodebookCLI:
         assert exc.code == 1
         captured = capsys.readouterr()
         assert "TOML" in captured.err
+
+    def test_codebook_cli_collision_exits_1(self, tmp_path, monkeypatch, capsys):
+        """CLI catches ValueError from generate_all and exits 1 on collision."""
+        sub = tmp_path / "data"
+        sub.mkdir()
+        (sub / "DUP.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (sub / "DUP.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
+
+        lines = [
+            "[dataset]",
+            'name = "test"',
+            'repo_id = "u/test"',
+            "",
+            "[[file]]",
+            'local = "data/DUP.csv"',
+            'remote = "DUP.csv"',
+            "",
+            "[[file]]",
+            'local = "data/DUP.tsv"',
+            'remote = "DUP.tsv"',
+            "",
+        ]
+        (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        exc = self._invoke(["--all-files"], monkeypatch)
+        assert exc is not None
+        assert exc.code == 1
+        captured = capsys.readouterr()
+        assert "Collision" in captured.err or "collision" in captured.err.lower()

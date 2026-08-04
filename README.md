@@ -6,13 +6,13 @@
 **Publish any dataset to Hugging Face Hub with built-in validation and
 data-sharing standards.**
 
-```
+```plaintext
 sofer init my-dataset           # create a .toml template
 sofer scan my-dataset.toml      # discover & register data files
-sofer validate my-dataset.toml  # check data integrity + quality
 sofer codebook data.csv         # generate a codebook for one file
 sofer codebook --all-files      # generate codebooks for all tables
-sofer upload   my-dataset.toml  # upload to Hugging Face
+sofer validate my-dataset.toml  # check data integrity + quality
+sofer upload my-dataset.toml    # upload to Hugging Face
 ```
 
 ## Why
@@ -107,11 +107,11 @@ expected = ["column_a", "column_b"]
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
-| `scan [config.toml]` | Discover supported files, register in TOML, copy to `data/`. Use `--dry-run` to preview. |
+| `scan [config.toml]` | Discover supported files, flatten first path segment (`raw/DPTO.csv` → `data/DPTO.csv`), register in TOML, copy to `data/`. Use `--dry-run` to preview. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
-| `upload <config.toml>` | Validate + quality gate + upload to HF. Supports `--dry-run`, `--force`, `--verify-load`, `--keep-csv`. |
+| `upload <config.toml>` | Validate + quality gate + upload data files, generated codebooks, and root index to HF. Supports `--dry-run`, `--force`, `--verify-load`, `--keep-csv`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
-| `codebook --all-files` | Generate codebooks for every `[[file]]` entry. Always creates a root index. Use `--config` to specify the TOML file. |
+| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `data/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
 | `--help` | Detailed help for any command. |
 
 ## Data format support
@@ -170,9 +170,22 @@ typed formats), unique values, missing percentage, and a sample value.
 sofer codebook --all-files --config my-dataset.toml
 ```
 
-Generates a `codebook.md` alongside each data file under `data/`,
-plus a root `codebook.md` index with a table of contents and relative
-links to all per-table codebooks.
+Generates one codebook per registered file under `data/codebooks/<rel-stem>.md`,
+plus a root `codebook.md` index with a table of contents and relative links to
+all per-table codebooks.  Files from the same source directory that would
+resolve to the same output stem (collision) are detected before writing — the
+non-colliding files still get their codebook written; the run fails with an
+error listing the colliding sources.
+
+### Upload with codebooks
+
+When you run `sofer upload`, the uploader automatically includes any generated
+codebooks after the data files:
+- Per-file codebooks from `data/codebooks/` are uploaded under the `codebooks/`
+  prefix (e.g., `data/codebooks/DPTO.md` → `codebooks/DPTO.md`).
+- The root index `codebook.md` is uploaded to the repo root.
+- If neither the directory nor the root index exists, the step is skipped
+  silently — the upload still succeeds.
 
 ## Architecture
 
