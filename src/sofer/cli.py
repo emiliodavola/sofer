@@ -458,7 +458,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── scan ───────────────────────────────────────────────────────
     s = sub.add_parser(
         "scan",
-        help="Discover data files, flatten directory structure, and register them in the TOML config.",
+        help=(
+            "Discover data files, flatten directory structure, "
+            "and register them in the TOML config."
+        ),
         description=(
             "Recursively scan the config file's directory for supported "
             "data formats (.csv, .tsv, .parquet, .xlsx, .jsonl), flatten "

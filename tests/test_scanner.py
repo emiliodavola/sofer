@@ -18,7 +18,6 @@ from sofer.scanner import (
     write_toml,
 )
 
-
 # ------------------------------------------------------------------
 # TestConfigConstants
 # ------------------------------------------------------------------
@@ -318,7 +317,9 @@ class TestMergeEntries:
         """local and remote paths use the flattened first-segment shape (SCN-02)."""
         _touch(tmp_path / "raw" / "DPTO.csv")
         _touch(tmp_path / "raw" / "Labels" / "etiquetas_a.csv")
-        discovered = sorted([tmp_path / "raw" / "DPTO.csv", tmp_path / "raw" / "Labels" / "etiquetas_a.csv"])
+        discovered = sorted(
+            [tmp_path / "raw" / "DPTO.csv", tmp_path / "raw" / "Labels" / "etiquetas_a.csv"]
+        )
 
         raw = self._raw_toml()
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
@@ -636,9 +637,7 @@ class TestIntegration:
         # Should NOT show the raw/ prefix — the first segment was dropped.
         assert "data/raw/" not in captured
 
-    def test_scan_preview_shows_flattened_paths(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
+    def test_scan_preview_shows_flattened_paths(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """Interactive preview before copy shows flattened paths."""
         from sofer.cli import _cmd_scan
 

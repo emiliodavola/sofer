@@ -467,9 +467,7 @@ def generate_all(cfg: DatasetConfig) -> list[str]:
         for out, sources in collision_sources.items():
             if len(sources) > 1:
                 rel_out = out.relative_to(base_dir).as_posix()
-                source_list = ", ".join(
-                    s.relative_to(base_dir).as_posix() for s in sources
-                )
+                source_list = ", ".join(s.relative_to(base_dir).as_posix() for s in sources)
                 print(
                     f"  X  Collision: {rel_out} is target for: {source_list}",
                     file=sys.stderr,

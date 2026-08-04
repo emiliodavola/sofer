@@ -504,7 +504,6 @@ def _write_toml(base_path, entries):
 
 
 class TestGenerateAll:
-
     def test_generates_for_all_toml_entries(self, tmp_path):
         from sofer.model import DatasetConfig
 
