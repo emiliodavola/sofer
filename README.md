@@ -6,12 +6,12 @@
 **Publish any dataset to Hugging Face Hub with built-in validation and
 data-sharing standards.**
 
-```
+```plaintext
 sofer init my-dataset           # create a .toml template
 sofer scan my-dataset.toml      # discover & register data files
-sofer validate my-dataset.toml  # check data integrity + quality
 sofer codebook data.csv         # generate a codebook for one file
 sofer codebook --all-files      # generate codebooks for all tables
+sofer validate my-dataset.toml  # check data integrity + quality
 sofer upload   my-dataset.toml  # upload to Hugging Face
 ```
 
