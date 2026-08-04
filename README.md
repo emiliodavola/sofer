@@ -12,7 +12,7 @@ sofer scan my-dataset.toml      # discover & register data files
 sofer codebook data.csv         # generate a codebook for one file
 sofer codebook --all-files      # generate codebooks for all tables
 sofer validate my-dataset.toml  # check data integrity + quality
-sofer upload   my-dataset.toml  # upload to Hugging Face
+sofer upload my-dataset.toml    # upload to Hugging Face
 ```
 
 ## Why
