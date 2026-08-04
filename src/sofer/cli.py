@@ -109,8 +109,8 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
 
     Without ``--all-files``: analyse *FILE* and print the codebook to
     stdout (or write to ``--output``).  With ``--all-files``: read every
-    ``[[file]]`` entry from the TOML and write a per-directory codebook,
-    plus a root index.
+    ``[[file]]`` entry from the TOML and write one codebook per file
+    under ``data/codebooks/``, plus a root index.
     """
     if args.all_files:
         if args.csv:
@@ -124,7 +124,11 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"Error: Failed to read TOML: {exc}", file=sys.stderr)
             return 1
-        generate_all_codebooks(cfg)
+        try:
+            generate_all_codebooks(cfg)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
         return 0
 
     if not args.csv:
@@ -405,8 +409,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "its inferred type, unique count, missing percentage, "
             "and a sample value.\n"
             "\n"
-            "Use --all-files to generate codebooks for every [[file]] entry "
-            "in the TOML configuration."
+            "Use --all-files to generate one codebook per [[file]] entry "
+            "in the TOML configuration, written under data/codebooks/."
         ),
     )
     c.add_argument(

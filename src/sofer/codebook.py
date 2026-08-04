@@ -24,6 +24,8 @@ from .config import (
     CODEBOOK_MAX_SAMPLE,
     CODEBOOK_MIXED_THRESHOLD,
     CODEBOOK_NUMERIC_THRESHOLD,
+    CODEBOOKS_DIR,
+    OUTPUT_DIR,
     OUTPUT_ENCODING,
 )
 
@@ -357,22 +359,33 @@ def generate(
 
 
 def generate_all(cfg: DatasetConfig) -> list[str]:
-    """Generate codebooks for every ``[[file]]`` entry in the TOML config.
+    """Generate one codebook per ``[[file]]`` entry under ``data/codebooks/``.
 
-    Each codebook is placed alongside its data file as ``codebook.md``.
-    When multiple supported formats share the same parent directory,
-    format-specific suffixes are used (``codebook_parquet.md``, etc.)
-    and a warning is emitted.  A root ``codebook.md`` index is written
-    in the config file's directory.
+    Each codebook is written to ``{CODEBOOKS_DIR}/<rel-stem>.md``, where
+    ``<rel-stem>`` is the file's path relative to the ``data/`` directory
+    (falling back to the TOML config directory for files outside ``data/``).
+    When two or more entries resolve to the same output path the system
+    writes codebooks for all non-colliding files first, then raises
+    ``ValueError`` naming every colliding source on stderr — no codebook
+    is written for any colliding file and the root index is not generated.
 
     Args:
         cfg: A ``DatasetConfig`` loaded from a TOML file.
 
     Returns:
-        List of generated codebook file paths (including the root index).
+        List of generated codebook file paths (including the root index
+        when there are no collisions).
+
+    Raises:
+        ValueError: When two or more files resolve to the same output path
+            (after non-colliding codebooks have already been written).
     """
 
+    from pathlib import PurePath
+
     base_dir = cfg._base_dir.resolve()
+    data_dir = base_dir / OUTPUT_DIR
+    codebooks_dir = data_dir / CODEBOOKS_DIR
 
     # ── First pass: collect valid, readable file entries ─────────────
     entries: list[tuple[Path, str]] = []
@@ -397,17 +410,43 @@ def generate_all(cfg: DatasetConfig) -> list[str]:
     if not entries:
         return []
 
-    # ── Detect output collisions (multiple files sharing a directory) ─
-    dir_counts: dict[Path, int] = {}
-    for local, _suffix in entries:
-        dir_counts[local.parent] = dir_counts.get(local.parent, 0) + 1
+    # ── Pre-compute output paths and detect collisions ───────────────
+    output_paths: dict[Path, Path] = {}  # local → output path
+    collision_sources: dict[Path, list[Path]] = {}  # output → source files
 
-    # ── Generate per-file codebooks ──────────────────────────────────
+    for local, _suffix in entries:
+        # Derive rel-stem: under data/ → relative to data dir,
+        # otherwise fall back to relative to base dir.
+        if local.is_relative_to(data_dir):
+            rel_stem = local.relative_to(data_dir)
+        else:
+            rel_stem = local.relative_to(base_dir)
+
+        # Compute output path: only the last suffix is replaced.
+        out = (codebooks_dir / rel_stem).with_suffix(
+            "".join(PurePath(rel_stem.name).suffixes[:-1]) + ".md"
+            if len(PurePath(rel_stem.name).suffixes) > 1
+            else ".md"
+        )
+
+        output_paths[local] = out
+        if out not in collision_sources:
+            collision_sources[out] = []
+        collision_sources[out].append(local)
+
+    # ── Partition: non-colliding vs colliding ────────────────────────
+    colliding_locals: set[Path] = set()
+    for out, sources in collision_sources.items():
+        if len(sources) > 1:
+            colliding_locals.update(sources)
+
+    # ── Generate per-file codebooks (non-colliding only) ─────────────
     generated: list[str] = []
     outputs: list[tuple[Path, int]] = []  # (output_path, n_cols)
 
     for local, suffix in entries:
-        has_collision = dir_counts[local.parent] > 1
+        if local in colliding_locals:
+            continue
 
         try:
             headers, columns, dtypes = _read_file(str(local))
@@ -415,29 +454,33 @@ def generate_all(cfg: DatasetConfig) -> list[str]:
             print(f"  ✗  Error reading {local}: {exc}", file=sys.stderr)
             continue
 
-        if has_collision:
-            fmt_label = (
-                SUPPORTED_FORMATS.get(suffix, suffix.lstrip("."))
-                .lower()
-                .replace(" ", "_")
-                .replace("(", "")
-                .replace(")", "")
-            )
-            output_path = local.parent / f"codebook_{fmt_label}.md"
-            print(
-                f"  ⚠  Multiple formats in {local.parent}: using '{output_path.name}'",
-                file=sys.stderr,
-            )
-        else:
-            output_path = local.parent / "codebook.md"
-
+        output_path = output_paths[local]
         codebook = _build_markdown(headers, columns, dtypes, str(local))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(codebook, encoding=OUTPUT_ENCODING)
         generated.append(str(output_path))
         outputs.append((output_path, len(headers)))
         print(f"  OK  {output_path}")
 
-    # ── Root index ───────────────────────────────────────────────────
+    # ── If collisions exist: raise ValueError after partial write ────
+    if colliding_locals:
+        for out, sources in collision_sources.items():
+            if len(sources) > 1:
+                rel_out = out.relative_to(base_dir).as_posix()
+                source_list = ", ".join(
+                    s.relative_to(base_dir).as_posix() for s in sources
+                )
+                print(
+                    f"  X  Collision: {rel_out} is target for: {source_list}",
+                    file=sys.stderr,
+                )
+        raise ValueError(
+            f"Collision detected: {len(colliding_locals)} file(s) "
+            f"share the same output path(s). No codebook written "
+            f"for colliding files."
+        )
+
+    # ── Root index (only when no collisions) ─────────────────────────
     root_path = base_dir / "codebook.md"
     total_cols = sum(n for _, n in outputs)
     total_tables = len(outputs)
