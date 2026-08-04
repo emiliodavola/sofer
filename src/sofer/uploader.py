@@ -24,6 +24,8 @@ from huggingface_hub import HfApi
 
 from ._parquet_helpers import _parquet_to_hf_dtype
 from .config import (
+    CODEBOOKS_DIR,
+    OUTPUT_DIR,
     OUTPUT_ENCODING,
     PARQUET_COMPRESSION,
     PARQUET_ROW_GROUP_SIZE,
@@ -376,6 +378,7 @@ def _repo_diff_summary(
     cfg: DatasetConfig,
     existing_files: list[str],
     keep_csv: bool,
+    codebook_remotes: list[str] | None = None,
 ) -> str:
     """Build a human-readable diff of what will be added vs modified.
 
@@ -383,6 +386,7 @@ def _repo_diff_summary(
         cfg:            Dataset configuration.
         existing_files: Files already in the repo (from :func:`_inspect_repo`).
         keep_csv:       Whether original CSVs will be uploaded alongside Parquet.
+        codebook_remotes: Optional planned codebook remote paths (RC-C01).
 
     Returns:
         A multiline string suitable for printing.
@@ -408,6 +412,10 @@ def _repo_diff_summary(
                 planned.append(entry.remote)
         else:
             planned.append(entry.remote)
+
+    # ── Codebook remotes (RC-C01) ──
+    if codebook_remotes:
+        planned.extend(codebook_remotes)
 
     new = [p for p in planned if p.lower() not in existing_set]
     modified = [p for p in planned if p.lower() in existing_set]
@@ -883,15 +891,6 @@ def upload(
                 study_design_content=study_design_content,
             )
 
-        # Codebook file (optional — uploaded alongside data files)
-        codebook_local: Path | None = None
-        if cfg.codebook:
-            cb_path = Path(cfg.codebook)
-            if cb_path.exists():
-                codebook_local = cb_path
-            else:
-                print(f"  \u26a0  codebook declared but not found: {cfg.codebook}")
-
         print("  [i] Generating LICENSE \u2026")
         license_text = build_license_file(cfg.license)
 
@@ -981,10 +980,19 @@ def upload(
                 else:
                     fail += 1
 
-        # ── 3b. Upload codebook file (optional) ─────────────────────────
-        if codebook_local is not None:
-            codebook_remote = f"codebook/{codebook_local.name}"
-            if _hf_upload(cfg.repo_id, codebook_local, codebook_remote, cfg.repo_type):
+        # ── 3b. Upload generated codebooks (RC-C01) ─────────────────────
+        data_dir = base / OUTPUT_DIR
+        codebooks_dir = data_dir / CODEBOOKS_DIR
+        if codebooks_dir.is_dir():
+            for cb_file in sorted(codebooks_dir.rglob("*.md")):
+                remote = cb_file.relative_to(data_dir).as_posix()
+                if _hf_upload(cfg.repo_id, cb_file, remote, cfg.repo_type):
+                    ok += 1
+                else:
+                    fail += 1
+        root_index = base / "codebook.md"
+        if root_index.exists():
+            if _hf_upload(cfg.repo_id, root_index, "codebook.md", cfg.repo_type):
                 ok += 1
             else:
                 fail += 1
