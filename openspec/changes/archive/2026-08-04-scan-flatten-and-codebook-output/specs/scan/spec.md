@@ -1,42 +1,6 @@
-# Scan Specification
+# Delta for Scan
 
-## Purpose
-
-Automated data-file discovery, copy, and TOML registration. The `scan` command
-eliminates manual `[[file]]` maintenance by discovering supported formats,
-copying them to `data/`, and writing the updated config.
-
-## Requirements
-
-### Requirement: File Discovery (SCN-01)
-
-The system MUST recursively discover files with supported extensions from the
-config directory. Supported formats SHALL come from an extensible registry:
-`.csv`, `.tsv`, `.parquet`, `.xlsx`, `.jsonl`. Standard exclusion directories
-MUST be skipped: `.git/`, `__pycache__/`, `.venv/`, `node_modules/`, `dist/`,
-`build/`.
-
-#### Scenario: Discover supported files in a project tree
-
-- GIVEN a directory with `raw/survey.csv`, `raw/notes.txt`, `archive/data.parquet`
-- WHEN `scan` executes
-- THEN `survey.csv` and `data.parquet` SHALL be discovered
-- AND `notes.txt` SHALL be excluded (unsupported extension)
-
-#### Scenario: Excluded directories are never traversed
-
-- GIVEN a `.venv/lib/data.csv` and `node_modules/pkg/data.jsonl`
-- WHEN `scan` executes
-- THEN neither file SHALL appear in results
-- AND `.venv/` and `node_modules/` subtrees SHALL be skipped entirely
-
-#### Scenario: `--ext .ext` filters to a single extension
-
-- GIVEN files `a.csv`, `b.parquet`, `c.jsonl`
-- WHEN `scan --ext .csv` executes
-- THEN only `a.csv` SHALL be discovered
-
----
+## MODIFIED Requirements
 
 ### Requirement: TOML Merge (SCN-02)
 
@@ -52,6 +16,8 @@ the config directory SHALL be dropped. A file at the config root (no directory
 component) SHALL keep only its filename. All remaining subdirectory segments
 SHALL be preserved. `local` SHALL be `data/<flattened relative>`; `remote`
 SHALL be the flattened relative path with `PurePosixPath` separators.
+(Previously: `local`/`remote` preserved the full source path, e.g.
+`raw/sub/data.csv` → `data/raw/sub/data.csv`.)
 
 #### Scenario: Merge new files into existing TOML
 
@@ -97,6 +63,8 @@ root-level `x.csv` SHALL be copied to `data/x.csv`. Subdirectories beyond the
 first segment SHALL be preserved (`raw/Labels/y.csv` → `data/Labels/y.csv`).
 `shutil.copy2` SHALL be used for metadata preservation. Source files MUST
 remain untouched. Directory creation SHALL be lazy (only when needed).
+(Previously: the full relative path was preserved, so `raw/sub/data.csv` was
+copied to `data/raw/sub/data.csv`.)
 
 #### Scenario: Copy flattens the first path segment
 
@@ -127,49 +95,6 @@ remain untouched. Directory creation SHALL be lazy (only when needed).
 
 ---
 
-### Requirement: CLI Interface (SCN-04)
-
-The system MUST provide `sofer scan [config.toml] [--dry-run] [--force] [--ext .ext]`.
-Default config SHALL be `dataset.toml` in the current directory. `--dry-run`
-MUST report without filesystem changes. `--force` MUST skip the confirmation
-prompt. Exit code 0 on success, 1 on error.
-
-#### Scenario: Default config and interactive confirm
-
-- GIVEN `dataset.toml` in the working directory
-- WHEN `sofer scan` is called
-- THEN `dataset.toml` SHALL be used as config
-- AND the user SHALL be prompted before files are copied
-
-#### Scenario: --force skips confirmation
-
-- GIVEN discovered files and `dataset.toml`
-- WHEN `sofer scan --force` is called
-- THEN files SHALL be copied without prompting
-
-#### Scenario: Explicit config path
-
-- GIVEN `my-project/config.toml` exists
-- WHEN `sofer scan my-project/config.toml` is called
-- THEN that file SHALL be used as the TOML source
-
----
-
-### Requirement: Idempotency (SCN-05)
-
-The system MUST produce identical TOML output on repeated runs with the same
-filesystem state. Two consecutive `scan` invocations with no file changes SHALL
-yield byte-identical `dataset.toml`.
-
-#### Scenario: Repeated scan with no file changes
-
-- GIVEN `dataset.toml` after a successful `scan`
-- AND no files added/removed
-- WHEN `scan` is called a second time
-- THEN the resulting TOML SHALL be identical to the first run's output
-
----
-
 ### Requirement: Error Handling (SCN-06)
 
 The system MUST handle errors gracefully: missing config, no discovered files,
@@ -178,6 +103,8 @@ destination conflicts, and malformed TOML. All errors SHALL produce exit code 1.
 When two or more discovered files flatten to the same destination path, the
 system MUST fail before any copy occurs, printing an error that names every
 conflicting source path. No deduplication and no silent overwrite SHALL occur.
+(Previously: flatten collisions were not detected; conflicting files could
+overwrite or deduplicate silently.)
 
 #### Scenario: Config file not found
 
