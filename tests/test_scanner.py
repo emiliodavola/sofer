@@ -292,13 +292,13 @@ class TestMergeEntries:
         assert len(raw["file"]) == len_after_first
 
     def test_remote_uses_posix_separators(self, tmp_path: Path) -> None:
-        """Remote paths use forward slashes (PurePosixPath)."""
+        """Remote paths use forward slashes (PurePosixPath) after flattening."""
         _touch(tmp_path / "sub" / "nested" / "a.csv")
         discovered = [tmp_path / "sub" / "nested" / "a.csv"]
 
         raw = self._raw_toml()
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
-        assert raw["file"][0]["remote"] == "sub/nested/a.csv"
+        assert raw["file"][0]["remote"] == "nested/a.csv"
 
     def test_preserves_existing_unrelated_entries(self, tmp_path: Path) -> None:
         """Pre-existing [[file]] entries for unrelated files are kept."""
@@ -314,6 +314,31 @@ class TestMergeEntries:
         assert len(raw["file"]) == 2
         assert raw["file"][0]["local"] == "data/readme.md"
 
+    def test_merge_flattened_local_and_remote(self, tmp_path: Path) -> None:
+        """local and remote paths use the flattened first-segment shape (SCN-02)."""
+        _touch(tmp_path / "raw" / "DPTO.csv")
+        _touch(tmp_path / "raw" / "Labels" / "etiquetas_a.csv")
+        discovered = sorted([tmp_path / "raw" / "DPTO.csv", tmp_path / "raw" / "Labels" / "etiquetas_a.csv"])
+
+        raw = self._raw_toml()
+        merge_entries(discovered, raw, tmp_path, tmp_path / "data")
+
+        assert raw["file"][0]["local"] == "data/DPTO.csv"
+        assert raw["file"][0]["remote"] == "DPTO.csv"
+        assert raw["file"][1]["local"] == "data/Labels/etiquetas_a.csv"
+        assert raw["file"][1]["remote"] == "Labels/etiquetas_a.csv"
+
+    def test_root_level_file_keeps_name(self, tmp_path: Path) -> None:
+        """A root-level file (no directory) keeps its name in local and remote (SCN-02)."""
+        _touch(tmp_path / "x.csv")
+        discovered = [tmp_path / "x.csv"]
+
+        raw = self._raw_toml()
+        merge_entries(discovered, raw, tmp_path, tmp_path / "data")
+
+        assert raw["file"][0]["local"] == "data/x.csv"
+        assert raw["file"][0]["remote"] == "x.csv"
+
 
 # ------------------------------------------------------------------
 # TestCopyFiles
@@ -324,13 +349,13 @@ class TestCopyFiles:
     """Unit tests for :func:`copy_files`."""
 
     def test_creates_subdirs_lazily(self, tmp_path: Path) -> None:
-        """Parent directories in data/ are created on demand."""
+        """Parent directories in data/ are created on demand after flattening."""
         _touch(tmp_path / "sub" / "nested" / "a.csv")
         discovered = [tmp_path / "sub" / "nested" / "a.csv"]
         data_dir = tmp_path / "data"
 
         copy_files(discovered, tmp_path, data_dir)
-        dest = data_dir / "sub" / "nested" / "a.csv"
+        dest = data_dir / "nested" / "a.csv"
         assert dest.exists()
         assert dest.read_text(encoding="utf-8") == "x"
 

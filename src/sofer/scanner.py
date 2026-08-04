@@ -120,15 +120,18 @@ def merge_entries(
     """Add new ``[[file]]`` entries for each file in *discovered*.
 
     Deduplication: a discovered file is skipped when its computed destination
-    path (``data_dir / relative_to(base_dir)``) resolves to the same absolute
-    path as an existing entry's ``FileEntry.local`` after resolving against
-    *base_dir*.
+    path (``data_dir / flatten_first_level(relative_to(base_dir))``) resolves
+    to the same absolute path as an existing entry's ``FileEntry.local`` after
+    resolving against *base_dir*.
+
+    Paths are flattened by dropping the first segment:
+    ``raw/DPTO.csv`` → ``DPTO.csv``, ``raw/Labels/a.csv`` → ``Labels/a.csv``.
 
     New entries are shaped as::
 
         [[file]]
-        local = "data/<relative>"
-        remote = "<Posix relative>"
+        local = "data/<flattened>"
+        remote = "<Posix flattened>"
 
     The *raw_toml* dict is mutated in-place and also returned for convenience.
     All non-``[[file]]`` top-level keys (``[dataset]``, ``[meta]``, ``[[check]]``,
@@ -151,15 +154,16 @@ def merge_entries(
     added = 0
     for src in discovered:
         relative = src.relative_to(base_dir)
-        dest = data_dir / relative
+        flat = flatten_first_level(relative)
+        dest = data_dir / flat
 
         if dest in existing:
             continue
 
         file_entries.append(
             {
-                "local": "data/" + str(PurePosixPath(relative)),
-                "remote": str(PurePosixPath(relative)),
+                "local": "data/" + str(PurePosixPath(flat)),
+                "remote": str(PurePosixPath(flat)),
             }
         )
         existing.add(dest)
@@ -176,11 +180,11 @@ def copy_files(
     dry_run: bool = False,
     force: bool = False,
 ) -> list[tuple[Path, Path]]:
-    """Copy discovered files into *data_dir*, preserving subdirectory structure.
+    """Copy discovered files into *data_dir*, flattening the first path segment.
 
     Each file is copied via :func:`shutil.copy2` to
-    ``data_dir / <relative to base_dir>``.  Parent directories are created
-    lazily on first use.
+    ``data_dir / <flatten_first_level(relative)>``.  Parent directories are
+    created lazily on first use.
 
     Parameters:
         dry_run: When ``True``, only compute what *would* be copied — do not
@@ -200,7 +204,8 @@ def copy_files(
 
     for src in discovered:
         relative = src.relative_to(base_dir)
-        dest = data_dir / relative
+        flat = flatten_first_level(relative)
+        dest = data_dir / flat
 
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
