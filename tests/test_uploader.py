@@ -618,8 +618,9 @@ class TestAssertCrossFileSchema:
         errors = _assert_cross_file_schema(converted, cfg)
         assert errors == []
 
-    def test_column_name_mismatch_in_same_split_fails(self, tmp_path):
-        """Different column names in same split → error."""
+    def test_different_column_sets_in_same_split_passes(self, tmp_path):
+        """Multi-table datasets: files in the same split with different
+        column sets are independent tables → no cross-file check."""
         from sofer.uploader import _assert_cross_file_schema
 
         staging = tmp_path / "staging"
@@ -646,9 +647,7 @@ class TestAssertCrossFileSchema:
         )
 
         errors = _assert_cross_file_schema(converted, cfg)
-        assert len(errors) >= 1
-        assert any("Schema mismatch" in e for e in errors)
-        assert any("missing" in e.lower() for e in errors)
+        assert errors == []
 
     def test_dtype_mismatch_in_same_split_fails(self, tmp_path):
         """Same column names but different dtype in same split → error."""
@@ -737,10 +736,77 @@ class TestAssertCrossFileSchema:
         errors = _assert_cross_file_schema(converted, cfg)
         assert errors == []
 
+    def test_multi_table_same_split_standalone_tables_pass(self, tmp_path):
+        """Census-style multi-table: each table has unique columns → no errors.
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Quality gate inside upload() — Issue #14
-# ═══════════════════════════════════════════════════════════════════════════════
+        Simulates CPV2010 (['ref_id']) + HOGAR (['foo','bar']) — different
+        column sets → each is a standalone table, no cross-file check.
+        """
+        from sofer.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t_cpv = pa.table({"CPV2010_REF_ID": [1]})
+        pq.write_table(t_cpv, staging / "CPV2010.parquet")
+
+        t_dpto = pa.table({"DPTO": ["a"], "NOMDPTO": ["b"]})
+        pq.write_table(t_dpto, staging / "DPTO.parquet")
+
+        t_hogar = pa.table({"HOGAR_REF_ID": [1], "NHOG": [2], "PROP": [3]})
+        pq.write_table(t_hogar, staging / "HOGAR.parquet")
+
+        converted = {
+            "CPV2010": (staging / "CPV2010.parquet", Path(), ""),
+            "DPTO": (staging / "DPTO.parquet", Path(), ""),
+            "HOGAR": (staging / "HOGAR.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("CPV2010.parquet"), remote="CPV2010.parquet"),
+                FileEntry(local=Path("DPTO.parquet"), remote="DPTO.parquet"),
+                FileEntry(local=Path("HOGAR.parquet"), remote="HOGAR.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_multi_table_same_columns_dtype_mismatch_still_fails(self, tmp_path):
+        """If two files share column names but have different dtypes,
+        the check still fires (they're assumed to be the same table)."""
+        from sofer.uploader import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        t1 = pa.table({"col": [1, 2, 3]})
+        pq.write_table(t1, staging / "train-1.parquet")
+
+        t2 = pa.table({"col": ["a", "b"]})
+        pq.write_table(t2, staging / "train-2.parquet")
+
+        # These share columns → same group → dtype check runs
+        converted = {
+            "train-1": (staging / "train-1.parquet", Path(), ""),
+            "train-2": (staging / "train-2.parquet", Path(), ""),
+        }
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert len(errors) >= 1
+        assert any("differ in dtypes" in e for e in errors)
 
 
 class TestUploadQualityGate:

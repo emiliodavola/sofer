@@ -536,62 +536,48 @@ def _assert_cross_file_schema(
     if not split_files:
         return errors
 
-    # ── Compare schemas within each multi-file split ──────────────────────
+    # ── Group files by column name sets; only check groups with 2+ files ──
+    # Multi-table datasets (e.g., census with CPV2010 ≠ DPTO ≠ Labels)
+    # naturally have distinct column sets — each standalone table is skipped.
+    # Files that share the exact same column names are assumed to be the
+    # same logical table (e.g., train/test splits) and are checked for
+    # dtype consistency.
     for split_name, files in split_files.items():
         if len(files) < 2:
             continue
 
-        ref_remote, ref_path = files[0]
-        try:
-            ref_schema = pq.read_schema(ref_path)
-        except Exception as exc:
-            errors.append(f"Failed to read schema of '{ref_remote}': {exc}")
-            continue
+        # Read schemas and group by sorted column names.
+        from collections import defaultdict
 
-        ref_cols = set(ref_schema.names)
-        ref_types: dict[str, object] = {
-            name: ref_schema.field(name).type for name in ref_schema.names
-        }
-
-        for remote, path in files[1:]:
+        col_groups: dict[tuple[str, ...], list[tuple[str, dict[str, object]]]] = defaultdict(list)
+        for remote, path in files:
             try:
                 schema = pq.read_schema(path)
             except Exception as exc:
                 errors.append(f"Failed to read schema of '{remote}': {exc}")
                 continue
-
-            cols = set(schema.names)
+            cols_key = tuple(sorted(schema.names))
             types = {name: schema.field(name).type for name in schema.names}
+            col_groups[cols_key].append((remote, types))
 
-            # -- column name mismatch --
-            if cols != ref_cols:
-                missing = sorted(ref_cols - cols)
-                extra = sorted(cols - ref_cols)
-                detail_parts: list[str] = []
-                if missing:
-                    detail_parts.append(f"missing: {missing}")
-                if extra:
-                    detail_parts.append(f"extra: {extra}")
-                errors.append(
-                    f"Schema mismatch in split '{split_name}': "
-                    f"'{ref_remote}' columns={sorted(ref_cols)}, "
-                    f"'{remote}' columns={sorted(cols)} "
-                    f"({' ; '.join(detail_parts)})"
-                )
+        # Only validate groups with 2+ files (same-table variants).
+        for cols_key, group in col_groups.items():
+            if len(group) < 2:
                 continue
 
-            # -- dtype mismatch (only when column names are identical) --
-            common = sorted(cols & ref_cols)
-            diffs = []
-            for col in common:
-                if str(types[col]) != str(ref_types[col]):
-                    diffs.append(f"{col}: {ref_types[col]} vs {types[col]}")
-            if diffs:
-                errors.append(
-                    f"Schema mismatch in split '{split_name}': "
-                    f"'{ref_remote}' and '{remote}' differ in dtypes "
-                    f"({' ; '.join(diffs)})"
-                )
+            ref_remote, ref_types = group[0]
+            for remote, types in group[1:]:
+                diffs = []
+                for col in cols_key:
+                    if str(types[col]) != str(ref_types[col]):
+                        diffs.append(f"{col}: {ref_types[col]} vs {types[col]}")
+                if diffs:
+                    cols_list = sorted(cols_key)
+                    errors.append(
+                        f"Schema mismatch in split '{split_name}': "
+                        f"'{ref_remote}' and '{remote}' differ in dtypes "
+                        f"({' ; '.join(diffs)}) — shared columns: {cols_list}"
+                    )
 
     return errors
 
