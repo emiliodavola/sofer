@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from sofer import config
 from sofer.model import DatasetConfig
 from sofer.scanner import (
     copy_files,
@@ -14,6 +15,21 @@ from sofer.scanner import (
     merge_entries,
     write_toml,
 )
+
+
+# ------------------------------------------------------------------
+# TestConfigConstants
+# ------------------------------------------------------------------
+
+
+class TestConfigConstants:
+    """Unit tests for tool-wide config constants used by the scan pipeline."""
+
+    def test_codebooks_dir_constant_exists(self) -> None:
+        """CODEBOOKS_DIR is a str constant exposed by the config module."""
+        assert hasattr(config, "CODEBOOKS_DIR")
+        assert isinstance(config.CODEBOOKS_DIR, str)
+        assert config.CODEBOOKS_DIR == "codebooks"
 
 # ------------------------------------------------------------------
 # Helpers

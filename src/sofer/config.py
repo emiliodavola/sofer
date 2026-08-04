@@ -26,6 +26,7 @@ _DEFAULTS: dict[str, Any] = {
     "report_max_corrupt_records": 20,
     "report_line_width": 50,
     "report_sub_line_width": 30,
+    "codebooks_dir": "codebooks",
     "codebook_max_sample": 100_000,
     "codebook_numeric_threshold": 0.9,
     "codebook_mixed_threshold": 0.5,
@@ -117,6 +118,7 @@ REPORT_MAX_CORRUPT_RECORDS: int = _tool["report_max_corrupt_records"]
 REPORT_LINE_WIDTH: int = _tool["report_line_width"]
 REPORT_SUB_LINE_WIDTH: int = _tool["report_sub_line_width"]
 
+CODEBOOKS_DIR: str = _tool["codebooks_dir"]
 CODEBOOK_MAX_SAMPLE: int = _tool["codebook_max_sample"]
 CODEBOOK_NUMERIC_THRESHOLD: float = _tool["codebook_numeric_threshold"]
 CODEBOOK_MIXED_THRESHOLD: float = _tool["codebook_mixed_threshold"]
