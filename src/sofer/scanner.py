@@ -26,6 +26,50 @@ EXCLUSIONS: frozenset[str] = frozenset(
 )
 
 
+def flatten_first_level(relative: Path) -> Path:
+    """Drop the first path segment; root-level paths are returned unchanged.
+
+    ``raw/DPTO.csv`` becomes ``DPTO.csv``, ``raw/Labels/a.csv`` becomes
+    ``Labels/a.csv``, and a root-level ``x.csv`` is returned as ``x.csv``.
+    """
+    parts = relative.parts
+    if len(parts) <= 1:
+        return relative
+    return Path(*parts[1:])
+
+
+def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
+    """Raise :class:`ValueError` if two or more discovered files flatten to the same destination.
+
+    The error message names every colliding source path and the destination they
+    conflict on.
+
+    Args:
+        discovered: Absolute or relative paths to discovered files.
+        base_dir: The base directory against which relative paths are computed.
+
+    Raises:
+        ValueError: When any flattened destination is produced by more than one
+            source file.  The message names all sources for each collision.
+    """
+    from collections import defaultdict
+
+    collisions: dict[Path, list[Path]] = defaultdict(list)
+    for src in discovered:
+        relative = src.relative_to(base_dir)
+        flat = flatten_first_level(relative)
+        collisions[flat].append(src)
+
+    errors: list[str] = []
+    for flat, sources in sorted(collisions.items()):
+        if len(sources) > 1:
+            src_list = " and ".join(s.as_posix() for s in sorted(sources))
+            errors.append(f"Collision in data/: {flat.as_posix()} from {src_list}")
+
+    if errors:
+        raise ValueError("\n".join(errors))
+
+
 def _file_entry_from_raw(entry: dict[str, Any]) -> FileEntry:
     """Build a :class:`FileEntry` from a raw TOML ``[[file]]`` dict."""
     return FileEntry(

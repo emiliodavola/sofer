@@ -10,8 +10,10 @@ import pytest
 from sofer import config
 from sofer.model import DatasetConfig
 from sofer.scanner import (
+    check_flatten_collisions,
     copy_files,
     discover_files,
+    flatten_first_level,
     merge_entries,
     write_toml,
 )
@@ -30,6 +32,97 @@ class TestConfigConstants:
         assert hasattr(config, "CODEBOOKS_DIR")
         assert isinstance(config.CODEBOOKS_DIR, str)
         assert config.CODEBOOKS_DIR == "codebooks"
+
+
+# ------------------------------------------------------------------
+# TestFlattenFirstLevel
+# ------------------------------------------------------------------
+
+
+class TestFlattenFirstLevel:
+    """Unit tests for :func:`flatten_first_level` — first-segment stripping."""
+
+    def test_root_file_unchanged(self) -> None:
+        """A file at the config root (no directory component) keeps its name."""
+        result = flatten_first_level(Path("a.csv"))
+        assert result == Path("a.csv")
+
+    def test_single_dir_strips_first_segment(self) -> None:
+        """A file one level deep gets its first segment removed."""
+        result = flatten_first_level(Path("raw/a.csv"))
+        assert result == Path("a.csv")
+
+    def test_nested_strips_only_first_segment(self) -> None:
+        """Deeper subdirectories beyond the first segment are preserved."""
+        result = flatten_first_level(Path("raw/Labels/a.csv"))
+        assert result == Path("Labels/a.csv")
+
+    def test_root_file_without_extension(self) -> None:
+        """Flatten works on files without extensions too."""
+        result = flatten_first_level(Path("README"))
+        assert result == Path("README")
+
+
+# ------------------------------------------------------------------
+# TestCheckFlattenCollisions
+# ------------------------------------------------------------------
+
+
+class TestCheckFlattenCollisions:
+    """Unit tests for :func:`check_flatten_collisions`."""
+
+    def test_collision_raises_naming_sources(self) -> None:
+        """Two files from different source dirs colliding on the same dest raise ValueError."""
+        discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
+        with pytest.raises(ValueError, match="Collision in data/"):
+            check_flatten_collisions(discovered, Path("."))
+
+    def test_collision_error_names_both_sources(self) -> None:
+        """The error message names all colliding source paths."""
+        discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
+        try:
+            check_flatten_collisions(discovered, Path("."))
+        except ValueError as exc:
+            msg = str(exc)
+            assert "raw/a.csv" in msg
+            assert "processed/a.csv" in msg
+
+    def test_collision_with_more_than_two_sources(self) -> None:
+        """Three or more sources colliding on the same destination all appear in the error."""
+        discovered = [
+            Path("A/data.csv"),
+            Path("B/data.csv"),
+            Path("C/data.csv"),
+        ]
+        try:
+            check_flatten_collisions(discovered, Path("."))
+        except ValueError as exc:
+            msg = str(exc)
+            assert "A/data.csv" in msg
+            assert "B/data.csv" in msg
+            assert "C/data.csv" in msg
+
+    def test_no_collision_single_source(self) -> None:
+        """No error when all files come from the same first-level dir."""
+        discovered = [Path("raw/a.csv"), Path("raw/b.csv")]
+        # Should not raise.
+        check_flatten_collisions(discovered, Path("."))
+
+    def test_no_collision_different_flattened_names(self) -> None:
+        """No error when files flatten to different names."""
+        discovered = [Path("raw/a.csv"), Path("processed/b.csv")]
+        # Should not raise.
+        check_flatten_collisions(discovered, Path("."))
+
+    def test_no_collision_nested_different_dirs(self) -> None:
+        """No error when nested paths flatten to distinct destinations."""
+        discovered = [
+            Path("raw/Labels/a.csv"),
+            Path("raw/Config/b.csv"),
+        ]
+        # Should not raise — different flattened names.
+        check_flatten_collisions(discovered, Path("."))
+
 
 # ------------------------------------------------------------------
 # Helpers
