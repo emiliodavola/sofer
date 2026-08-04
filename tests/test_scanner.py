@@ -340,6 +340,23 @@ class TestMergeEntries:
         assert raw["file"][0]["local"] == "data/x.csv"
         assert raw["file"][0]["remote"] == "x.csv"
 
+    def test_merge_removes_todo_template_entries(self, tmp_path: Path) -> None:
+        """Template entries from ``sofer init`` (local starting with ``TODO:``)
+        are stripped before merging, so they never reach validate/upload."""
+        _touch(tmp_path / "a.csv")
+        raw: dict[str, Any] = {
+            "file": [
+                {"local": "TODO: path/to/file.csv", "remote": "file.csv"},
+                {"local": "TODO: path/to/dir/", "remote": "subfolder/", "recursive": True},
+            ]
+        }
+        merge_entries([tmp_path / "a.csv"], raw, tmp_path, tmp_path / "data")
+        # All TODO entries must be gone.
+        remaining = [str(e["local"]) for e in raw["file"]]
+        assert not any("TODO:" in r for r in remaining), f"TODO entries survived: {remaining}"
+        # The discovered file must be present.
+        assert any("a.csv" in r for r in remaining), f"Discovered file missing: {remaining}"
+
 
 # ------------------------------------------------------------------
 # TestCopyFiles

@@ -137,6 +137,13 @@ def merge_entries(
     All non-``[[file]]`` top-level keys (``[dataset]``, ``[meta]``, ``[[check]]``,
     ``[[quality]]``) are preserved untouched.
     """
+    # Strip template entries left over from ``sofer init`` (their local
+    # path is a placeholder that starts with ``TODO:`` and would cause
+    # spurious errors downstream in validate / upload).
+    raw_toml["file"] = [
+        e for e in raw_toml.get("file", []) if not str(e.get("local", "")).startswith("TODO:")
+    ]
+
     # Build the set of already-registered resolved destination paths.
     existing: set[Path] = set()
     for entry in raw_toml.get("file", []):

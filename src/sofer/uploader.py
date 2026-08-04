@@ -761,7 +761,19 @@ def upload(
 
     # ── 0b. Pre-upload repo inspection ─────────────────────────────────
     existing_files = _inspect_repo(cfg)
-    diff_summary = _repo_diff_summary(cfg, existing_files, keep_csv)
+
+    # Collect planned codebook remotes for the diff summary (RC-C01).
+    _base = cfg._base_dir or Path.cwd()
+    _data = _base / OUTPUT_DIR
+    _planned_codebooks: list[str] = []
+    _cbd = _data / CODEBOOKS_DIR
+    if _cbd.is_dir():
+        for _cf in sorted(_cbd.rglob("*.md")):
+            _planned_codebooks.append(_cf.relative_to(_data).as_posix())
+    if (_base / "codebook.md").exists():
+        _planned_codebooks.append("codebook.md")
+
+    diff_summary = _repo_diff_summary(cfg, existing_files, keep_csv, _planned_codebooks)
     print(diff_summary)
     print()
 
