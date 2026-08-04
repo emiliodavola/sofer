@@ -594,3 +594,69 @@ class TestIntegration:
         rc = _cmd_scan(args)
         assert rc == 0
         assert not (tmp_path / "data").exists()
+
+    def test_scan_collision_exits_1_no_copy(self, tmp_path: Path, monkeypatch) -> None:
+        """Flatten collision across source dirs → exit 1, no files copied."""
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv")
+        _touch(tmp_path / "processed" / "a.csv")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=False, force=True, ext=None)
+        rc = _cmd_scan(args)
+        assert rc == 1
+        # No data/ files should have been created.
+        assert not (tmp_path / "data").exists()
+
+    def test_scan_dry_run_reports_flattened_paths(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """--dry-run shows flattened destination paths."""
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=True, force=False, ext=None)
+        rc = _cmd_scan(args)
+        assert rc == 0
+
+        captured = capsys.readouterr().out
+        # The dry-run report shows flattened paths: "data/a.csv", not "data/raw/a.csv"
+        assert "a.csv" in captured
+        # Should NOT show the raw/ prefix — the first segment was dropped.
+        assert "data/raw/" not in captured
+
+    def test_scan_preview_shows_flattened_paths(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Interactive preview before copy shows flattened paths."""
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        # Simulate answering "y" to the prompt so the scan proceeds.
+        monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=False, force=False, ext=None)
+        rc = _cmd_scan(args)
+        assert rc == 0
+
+        captured = capsys.readouterr().out
+        # The preview lists flattened paths: "→ data/a.csv", not "→ data/raw/a.csv"
+        assert "data/a.csv" in captured
+        assert "data/raw/" not in captured

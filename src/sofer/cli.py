@@ -21,8 +21,10 @@ from .model import DatasetConfig
 from .quality import QualityValidator
 from .scanner import (
     EXCLUSIONS,
+    check_flatten_collisions,
     copy_files,
     discover_files,
+    flatten_first_level,
     merge_entries,
     write_toml,
 )
@@ -175,6 +177,13 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print("  OK  No supported files found.")
         return 0
 
+    # 2a. Check for flatten collisions BEFORE any copy or merge.
+    try:
+        check_flatten_collisions(discovered, base_dir)
+    except ValueError as exc:
+        print(f"  X  {exc}", file=sys.stderr)
+        return 1
+
     # 3. Merge new entries into the raw TOML dict.
     before_count = len(raw_toml.get("file", []))
     raw_toml = merge_entries(discovered, raw_toml, base_dir, data_dir)
@@ -191,7 +200,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if not args.dry_run and not args.force:
         print("\n  The following files will be copied to data/:")
         for f in discovered:
-            print(f"     → data/{f.relative_to(base_dir)}")
+            flat = flatten_first_level(f.relative_to(base_dir))
+            print(f"     → data/{flat.as_posix()}")
         answer = input("\n  Continue? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("  OK  Aborted.")
@@ -207,10 +217,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("  DRY RUN  Would copy the following files:")
         for _src, dest in copied:
-            print(f"     → {dest.relative_to(base_dir)}")
+            print(f"     → {dest.relative_to(base_dir).as_posix()}")
     else:
         for _src, dest in copied:
-            print(f"     OK  {dest.relative_to(base_dir)}")
+            print(f"     OK  {dest.relative_to(base_dir).as_posix()}")
 
     # 6. Write TOML (skip on dry-run — no disk mutation at all).
     if not args.dry_run:
@@ -444,12 +454,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── scan ───────────────────────────────────────────────────────
     s = sub.add_parser(
         "scan",
-        help="Discover data files and register them in the TOML config.",
+        help="Discover data files, flatten directory structure, and register them in the TOML config.",
         description=(
             "Recursively scan the config file's directory for supported "
-            "data formats (.csv, .tsv, .parquet, .xlsx, .jsonl), register "
+            "data formats (.csv, .tsv, .parquet, .xlsx, .jsonl), flatten "
+            "the first path segment (raw/DPTO.csv → data/DPTO.csv), register "
             "new files as [[file]] entries in the TOML, and copy them into "
-            "the data/ directory preserving subdirectory structure.\n"
+            "the data/ directory.\n"
             "\n"
             "Running scan twice is safe — already-registered files are "
             "skipped."
