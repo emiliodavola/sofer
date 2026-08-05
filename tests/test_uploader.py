@@ -395,13 +395,8 @@ class TestOverwriteProtection:
             _base_dir=tmp_path,
         )
 
-        uploaded: list[str] = []
-
-        def _track(path_or_fileobj="", path_in_repo="", **kw):
-            uploaded.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _track)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
 
         import tempfile
 
@@ -921,6 +916,8 @@ class TestReadmeOverride:
 
     def test_readme_file_used_when_set(self, tmp_path, monkeypatch):
         """When cfg.readme points to a file, use it instead of generating."""
+        import shutil as _shutil
+
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -938,17 +935,8 @@ class TestReadmeOverride:
         )
 
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-
-        # Track what gets written as the README.md upload
-        uploaded_readme_content: list[str] = []
-
-        def _track_upload(path_or_fileobj="", path_in_repo="", **kw):
-            if path_in_repo == "README.md":
-                uploaded_readme_content.append(
-                    Path(str(path_or_fileobj)).read_text(encoding="utf-8")
-                )
-
-        monkeypatch.setattr(uploader._api, "upload_file", _track_upload)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -958,13 +946,18 @@ class TestReadmeOverride:
 
         uploader.upload(cfg)
 
-        assert len(uploaded_readme_content) >= 1
-        assert "My Custom Dataset" in uploaded_readme_content[0]
-        assert "Custom content" in uploaded_readme_content[0]
-        assert not td.exists()  # cleanup verified
+        # README.md should be staged in staging_root/repo/ with custom content
+        staging_root = Path(td) / "repo"
+        readme = staging_root / "README.md"
+        assert readme.is_file(), "README.md missing from staging_root"
+        content = readme.read_text(encoding="utf-8")
+        assert "My Custom Dataset" in content
+        assert "Custom content" in content
 
     def test_readme_fallback_when_file_missing(self, tmp_path, monkeypatch):
         """When cfg.readme points to a missing file, fall back to generation."""
+        import shutil as _shutil
+
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -979,16 +972,8 @@ class TestReadmeOverride:
         )
 
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-
-        uploaded_readme_content: list[str] = []
-
-        def _track_upload(path_or_fileobj="", path_in_repo="", **kw):
-            if path_in_repo == "README.md":
-                uploaded_readme_content.append(
-                    Path(str(path_or_fileobj)).read_text(encoding="utf-8")
-                )
-
-        monkeypatch.setattr(uploader._api, "upload_file", _track_upload)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -998,17 +983,21 @@ class TestReadmeOverride:
 
         uploader.upload(cfg)
 
-        assert len(uploaded_readme_content) >= 1
-        # Should be a generated card (not the missing file)
-        assert "Dataset Card for test" in uploaded_readme_content[0]
-        assert not td.exists()
+        # README.md should be staged with generated card content
+        staging_root = Path(td) / "repo"
+        readme = staging_root / "README.md"
+        assert readme.is_file(), "README.md missing from staging_root"
+        content = readme.read_text(encoding="utf-8")
+        assert "Dataset Card for test" in content
 
 
 class TestCodebookUpload:
     """RC-C01: Generated codebooks uploaded under codebooks/ prefix after data files."""
 
     def test_codebook_uploaded_to_codebook_subpath(self, tmp_path, monkeypatch):
-        """Per-file codebooks and root index uploaded with correct remotes and order."""
+        """Per-file codebooks and root index staged with correct paths in staging_root."""
+        import shutil as _shutil
+
         from sofer import uploader
         from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
 
@@ -1034,13 +1023,9 @@ class TestCodebookUpload:
             _base_dir=tmp_path,
         )
 
-        uploaded: list[str] = []
-
-        def _track(path_or_fileobj="", path_in_repo="", **kw):
-            uploaded.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _track)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -1050,32 +1035,28 @@ class TestCodebookUpload:
 
         uploader.upload(cfg)
 
-        # ── Assert correct remote paths ──
-        codebook_uploads = [u for u in uploaded if u.startswith("codebooks/") or u == "codebook.md"]
-        assert len(codebook_uploads) >= 1
-        assert "codebooks/DPTO.md" in codebook_uploads
-        assert "codebooks/PROV.md" in codebook_uploads
-        assert "codebook.md" in codebook_uploads
+        staging_root = Path(td) / "repo"
+        assert staging_root.is_dir()
 
-        # ── Assert order: data files before codebooks, root index last ──
-        data_remotes = {
-            u
-            for u in uploaded
-            if not u.startswith("codebook") and u != "README.md" and u != "LICENSE"
-        }
-        assert "DPTO.csv" in data_remotes
-        last_data_idx = max(uploaded.index(u) for u in uploaded if u in data_remotes)
-        codebook_idxes = [i for i, u in enumerate(uploaded) if u.startswith("codebooks/")]
-        assert codebook_idxes, "expected per-file codebook uploads"
-        assert last_data_idx < min(codebook_idxes), "data files must be uploaded before codebooks"
+        # Codebooks at codebooks/ relative to staging root
+        cb_dpto = staging_root / "codebooks" / "DPTO.md"
+        assert cb_dpto.is_file(), f"Missing: {cb_dpto}"
+        assert cb_dpto.read_text(encoding="utf-8") == "# DPTO codebook"
 
-        index_idx = uploaded.index("codebook.md")
-        assert max(codebook_idxes) < index_idx, "root index must upload after per-file codebooks"
+        cb_prov = staging_root / "codebooks" / "PROV.md"
+        assert cb_prov.is_file(), f"Missing: {cb_prov}"
+        assert cb_prov.read_text(encoding="utf-8") == "# PROV codebook"
 
-        assert not td.exists()
+        # Root index at codebook.md
+        root_idx = staging_root / "codebook.md"
+        assert root_idx.is_file(), f"Missing: {root_idx}"
+        assert root_idx.read_text(encoding="utf-8") == "# Root index"
+
+        # Data file also staged
+        assert (staging_root / "DPTO.csv").is_file(), "Data file missing from staging"
 
     def test_no_codebooks_generated_skips(self, tmp_path, monkeypatch, capsys):
-        """No data/codebooks/ directory or codebook.md → advisory on stderr, no upload."""
+        """No data/codebooks/ directory or codebook.md → advisory on stderr, no codebook staged."""
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -1088,13 +1069,8 @@ class TestCodebookUpload:
             _base_dir=tmp_path,
         )
 
-        uploaded: list[str] = []
-
-        def _track(path_or_fileobj="", path_in_repo="", **kw):
-            uploaded.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _track)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
 
         import tempfile
 
@@ -1105,18 +1081,20 @@ class TestCodebookUpload:
         uploader.upload(cfg)
         captured = capsys.readouterr()
 
-        # No codebook-related uploads
-        codebook_uploads = [u for u in uploaded if "codebook" in u.lower()]
-        assert codebook_uploads == [], f"unexpected codebook uploads: {codebook_uploads}"
+        staging_root = Path(td) / "repo"
+
+        # No codebook-related files staged
+        codebook_files = [str(f.relative_to(staging_root)) for f in staging_root.rglob("codebook*")]
+        assert codebook_files == [], f"unexpected codebook files staged: {codebook_files}"
 
         # Advisory printed to stderr (not stdout)
-        assert "codebook" not in captured.out.lower()
         assert "sofer codebook" in captured.err.lower()
-
-        assert not td.exists()
+        assert not Path(td).exists()
 
     def test_legacy_codebook_not_uploaded(self, tmp_path, monkeypatch):
-        """cfg.codebook declared in TOML → uploader ignores it; RC-C01 supersedes."""
+        """cfg.codebook declared in TOML → staging ignores it; RC-C01 supersedes."""
+        import shutil as _shutil
+
         from sofer import uploader
         from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
 
@@ -1143,13 +1121,9 @@ class TestCodebookUpload:
             _base_dir=tmp_path,
         )
 
-        uploaded: list[str] = []
-
-        def _track(path_or_fileobj="", path_in_repo="", **kw):
-            uploaded.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _track)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -1159,18 +1133,21 @@ class TestCodebookUpload:
 
         uploader.upload(cfg)
 
-        # RC-C01 codebooks uploaded
-        assert "codebooks/data.md" in uploaded
-        assert "codebook.md" in uploaded
+        staging_root = Path(td) / "repo"
 
-        # Legacy codebook NOT uploaded — no codebook/old_codebook.md
-        assert "old_codebook.md" not in uploaded
-        assert not any("codebook/old_codebook.md" in u for u in uploaded)
+        # RC-C01 codebooks staged
+        assert (staging_root / "codebooks" / "data.md").is_file()
+        assert (staging_root / "codebook.md").is_file()
 
-        assert not td.exists()
+        # Legacy codebook NOT staged
+        assert not (staging_root / "old_codebook.md").exists()
+        assert not (staging_root / "codebook" / "old_codebook.md").exists()
 
     def test_codebook_upload_order_data_first(self, tmp_path, monkeypatch):
-        """_hf_upload for codebooks happens AFTER the data-file loop."""
+        """All files (data + codebooks) are staged together; upload_folder handles
+        the batch. Order is irrelevant since it's a single call."""
+        import shutil as _shutil
+
         from sofer import uploader
         from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
 
@@ -1191,13 +1168,9 @@ class TestCodebookUpload:
             _base_dir=tmp_path,
         )
 
-        call_order: list[str] = []
-
-        def _track(path_or_fileobj="", path_in_repo="", **kw):
-            call_order.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _track)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -1207,14 +1180,17 @@ class TestCodebookUpload:
 
         uploader.upload(cfg)
 
-        data_idx = call_order.index("data.csv")
-        first_cb_idx = min(call_order.index(u) for u in call_order if u.startswith("codebooks/"))
-        assert data_idx < first_cb_idx, f"data.csv at {data_idx}, first codebook at {first_cb_idx}"
+        staging_root = Path(td) / "repo"
 
-        assert not td.exists()
+        # Both data and codebooks are staged together
+        assert (staging_root / "data.csv").is_file(), "Data file missing from staging"
+        assert (staging_root / "codebooks" / "data.md").is_file(), "Codebook missing from staging"
+        assert (staging_root / "codebook.md").is_file(), "Root index missing from staging"
 
     def test_root_index_uploaded_as_codebook_md(self, tmp_path, monkeypatch):
-        """codebook.md in base_dir is uploaded as codebook.md in HF."""
+        """codebook.md in base_dir is staged as codebook.md in staging root."""
+        import shutil as _shutil
+
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -1229,13 +1205,9 @@ class TestCodebookUpload:
             _base_dir=tmp_path,
         )
 
-        uploaded: list[str] = []
-
-        def _track(path_or_fileobj="", path_in_repo="", **kw):
-            uploaded.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _track)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -1245,9 +1217,10 @@ class TestCodebookUpload:
 
         uploader.upload(cfg)
 
-        assert "codebook.md" in uploaded
-
-        assert not td.exists()
+        staging_root = Path(td) / "repo"
+        root_idx = staging_root / "codebook.md"
+        assert root_idx.is_file(), f"Missing: {root_idx}"
+        assert root_idx.read_text(encoding="utf-8") == "# Root index content"
 
     def test_repo_diff_summary_lists_codebook_remotes(self, tmp_path):
         """_repo_diff_summary includes codebook remotes when provided."""
@@ -1393,3 +1366,365 @@ class TestSchemaAssertion:
             sys.stdout = old_stdout
 
         assert "SCHEMA ASSERTION" not in output
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Batch Hugging Face Uploads — staging + upload_folder (Issue #38)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBatchStaging:
+    """Tests for batch HF uploads: staging mirror, codebook copy, single
+    upload_folder call."""
+
+    def test_parquet_placed_in_remote_subdirs(self, tmp_path, monkeypatch):
+        """Converted Parquet files are placed in staging_root/<remote-path>/
+        subdirectories, not flat in tmpdir. (Task 3.1)"""
+        import shutil as _shutil
+
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data/PROV/data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        staging_root = Path(td) / "repo"
+        assert staging_root.is_dir(), f"staging_root not created: {staging_root}"
+
+        expected = staging_root / "data" / "PROV" / "data.parquet"
+        assert expected.is_file(), (
+            f"Expected {expected}, found files: {list(staging_root.rglob('*'))}"
+        )
+
+        flat = staging_root / "data.parquet"
+        assert not flat.exists(), (
+            "Parquet should NOT be flat in staging root — "
+            "must be in subdirectories matching remote path"
+        )
+
+    def test_codebooks_staged_in_tmpdir(self, tmp_path, monkeypatch):
+        """Generated codebooks and root index copied to staging_root with
+        correct relative paths. (Task 3.2)"""
+        import shutil as _shutil
+
+        from sofer import uploader
+        from sofer.config import CODEBOOKS_DIR, OUTPUT_DIR
+
+        data_dir = tmp_path / OUTPUT_DIR
+        data_dir.mkdir(parents=True)
+        csv = data_dir / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        codebooks_path = data_dir / CODEBOOKS_DIR
+        codebooks_path.mkdir(parents=True)
+        (codebooks_path / "DPTO.md").write_text("# DPTO codebook", encoding="utf-8")
+        (codebooks_path / "PROV.md").write_text("# PROV codebook", encoding="utf-8")
+        (tmp_path / "codebook.md").write_text("# Root index", encoding="utf-8")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        staging_root = Path(td) / "repo"
+        assert staging_root.is_dir()
+
+        cb_dpto = staging_root / "codebooks" / "DPTO.md"
+        assert cb_dpto.is_file(), f"Missing: {cb_dpto}"
+        assert cb_dpto.read_text(encoding="utf-8") == "# DPTO codebook"
+
+        cb_prov = staging_root / "codebooks" / "PROV.md"
+        assert cb_prov.is_file(), f"Missing: {cb_prov}"
+        assert cb_prov.read_text(encoding="utf-8") == "# PROV codebook"
+
+        root_idx = staging_root / "codebook.md"
+        assert root_idx.is_file(), f"Missing: {root_idx}"
+        assert root_idx.read_text(encoding="utf-8") == "# Root index"
+
+    def test_upload_folder_called_once(self, tmp_path, monkeypatch):
+        """_hf_upload_folder is called exactly once; _hf_upload is NOT called
+        for individual files. (Task 3.3)"""
+        import shutil as _shutil
+
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        upload_folder_calls: list[tuple] = []
+        upload_file_calls: list[tuple] = []
+
+        orig_upload_folder = uploader._hf_upload_folder
+        orig_upload = uploader._hf_upload
+
+        def _track_upload_folder(*args, **kwargs):
+            upload_folder_calls.append(args)
+            return orig_upload_folder(*args, **kwargs)
+
+        def _track_upload(*args, **kwargs):
+            upload_file_calls.append(args)
+            return orig_upload(*args, **kwargs)
+
+        monkeypatch.setattr(uploader, "_hf_upload_folder", _track_upload_folder)
+        monkeypatch.setattr(uploader, "_hf_upload", _track_upload)
+
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        exit_code = uploader.upload(cfg)
+
+        assert (
+            len(upload_folder_calls) == 1
+        ), f"Expected 1 upload_folder call, got {len(upload_folder_calls)}"
+
+        staging_root = Path(td) / "repo"
+        assert staging_root.is_dir(), "staging_root not created"
+        call_path = Path(upload_folder_calls[0][1]) if len(upload_folder_calls) > 0 else None
+        assert call_path == staging_root, f"Called with {call_path}, expected {staging_root}"
+
+        assert len(upload_file_calls) == 0, (
+            f"_hf_upload was called {len(upload_file_calls)} times — "
+            f"should be 0 after batch staging"
+        )
+
+        assert exit_code == 0
+
+    def test_upload_folder_failure_sets_fail(self, tmp_path, monkeypatch):
+        """When _hf_upload_folder raises, exit_code=1 and tmpdir is cleaned up.
+        (Task 3.4)"""
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+
+        def _failing_upload_folder(*args, **kwargs):
+            raise RuntimeError("Simulated network failure")
+
+        monkeypatch.setattr(uploader, "_hf_upload_folder", _failing_upload_folder)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        exit_code = uploader.upload(cfg)
+
+        assert exit_code == 1, f"Expected exit_code 1, got {exit_code}"
+        assert not Path(td).exists(), f"tmpdir should be cleaned up, but {td} still exists"
+
+    def test_not_found_files_skipped_in_staging(self, tmp_path, monkeypatch):
+        """Files that don't exist on disk are skipped during staging, not
+        uploaded. (Task 1.3)"""
+        import shutil as _shutil
+
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        missing = tmp_path / "missing.csv"
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv, remote="data.csv"),
+                FileEntry(local=missing, remote="missing.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        staging_root = Path(td) / "repo"
+
+        data_files = [
+            str(f.relative_to(staging_root))
+            for f in staging_root.rglob("*")
+            if f.is_file()
+        ]
+        assert any("data" in f for f in data_files), f"data file not found in staging: {data_files}"
+
+        missing_files = [f for f in data_files if "missing" in f]
+        assert missing_files == [], f"NOT FOUND file was staged: {missing_files}"
+
+    def test_non_csv_files_copied_to_staging(self, tmp_path, monkeypatch):
+        """Non-CSV files (e.g., .parquet directly) are copied to staging_root
+        preserving their remote path."""
+        import shutil as _shutil
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from sofer import uploader
+
+        parquet_file = tmp_path / "direct.parquet"
+        table = pa.table({"x": [1, 2, 3]})
+        pq.write_table(table, parquet_file)
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=parquet_file, remote="subdir/direct.parquet")],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        staging_root = Path(td) / "repo"
+
+        expected = staging_root / "subdir" / "direct.parquet"
+        assert expected.is_file(), (
+            f"Expected {expected}, found: {list(staging_root.rglob('*'))}"
+        )
+
+    def test_keep_csv_stages_original_csv(self, tmp_path, monkeypatch):
+        """When keep_csv=True, both the Parquet and the original CSV are staged
+        in the correct remote paths."""
+        import shutil as _shutil
+
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg, keep_csv=True)
+
+        staging_root = Path(td) / "repo"
+
+        parquet_file = staging_root / "data.parquet"
+        csv_file = staging_root / "data.csv"
+
+        assert parquet_file.is_file(), f"Parquet missing: {parquet_file}"
+        assert csv_file.is_file(), f"CSV missing (keep_csv=True): {csv_file}"
+
+    def test_compliance_files_staged_in_staging_root(self, tmp_path, monkeypatch):
+        """README.md and LICENSE are staged in staging_root (not flat in tmpdir)."""
+        import shutil as _shutil
+
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+
+        staging_root = Path(td) / "repo"
+        readme = staging_root / "README.md"
+        license_file = staging_root / "LICENSE"
+
+        assert readme.is_file(), "README.md missing from staging_root"
+        assert license_file.is_file(), "LICENSE missing from staging_root"
+        assert "Dataset Card for test" in readme.read_text(encoding="utf-8")
