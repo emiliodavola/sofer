@@ -172,6 +172,26 @@ class TestCheckDuplicates:
         assert len(qr) >= 1
         assert any("duplicate" in r.message.lower() for r in qr)
 
+    def test_duplicates_file_scoped_no_cross_file(self, tmp_path):
+        """Two files sharing identical row content → NO duplicate warning.
+
+        RED: dup_hashes is currently global, so identical rows across files
+        are falsely reported as duplicates.
+        """
+        p1 = _make_csv(tmp_path / "a.csv", [["id", "val"], ["1", "x"]])
+        p2 = _make_csv(tmp_path / "b.csv", [["id", "val"], ["1", "x"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=p1, remote="a.csv"),
+                FileEntry(local=p2, remote="b.csv"),
+            ],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "duplicates"]
+        assert len(qr) == 0, f"Cross-file duplicates should NOT be flagged, but got: {qr}"
+
 
 # ── 4.3 Empty rows ──────────────────────────────────────────────────────────────
 
@@ -250,8 +270,21 @@ class TestCheckEmptyColumns:
         # The message should identify the file where it's empty
         assert any("b.csv" in r.message for r in qr)
 
+    def test_empty_columns_skips_zero_row_file(self, tmp_path):
+        """Header-only file (0 data rows) → no empty_columns finding.
 
-# ── 4.5 Null profiling ───────────────────────────────────────────────────────────
+        RED: a file with only a header gets every column tagged as "empty"
+        because _col_nonempty entries are never populated for 0-row files.
+        """
+        p = _make_csv(tmp_path / "header_only.csv", [["id", "name"]])  # 0 data rows
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p, remote="header_only.csv")],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "empty_columns"]
+        assert len(qr) == 0, f"Zero-row file should not report empty columns, but got: {qr}"
 
 
 class TestCheckNullProfiling:
@@ -437,6 +470,30 @@ class TestCheckCrossFileTypes:
         qr = [r for r in report.quality_results if r.check == "cross_file_types"]
         assert len(qr) >= 1
         assert any("year" in r.message for r in qr)
+
+    def test_cross_file_types_skips_zero_row_file(self, tmp_path):
+        """Header-only file (0 data rows) → NOT included in type comparison.
+
+        RED: header-only file gets type "unknown" and miscompares with data files.
+        """
+        # Header-only file listed FIRST so _col_samples is empty when inferring
+        # its types (no cross-file sample leakage). This triggers the real bug:
+        # type "unknown" vs "numeric" for the shared column.
+        p1 = _make_csv(tmp_path / "header_only.csv", [["year"]])  # 0 data rows
+        p2 = _make_csv(tmp_path / "data.csv", [["year"], ["2020"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=p1, remote="header_only.csv"),
+                FileEntry(local=p2, remote="data.csv"),
+            ],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "cross_file_types"]
+        assert len(qr) == 0, (
+            f"Zero-row file should not participate in cross_file_types, but got: {qr}"
+        )
 
 
 # ── 4.10 Encoding validation ─────────────────────────────────────────────────────

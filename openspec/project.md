@@ -82,7 +82,7 @@ tests/
 
 - Strict TDD: active (verify-reports in archive document Strict TDD mode with 6/6 TDD compliance)
 - Test runner: pytest 9.1.1 — `uv run pytest tests/ -q`
-- Current suite: 453 tests passing
+- Current suite: 457 tests passing (2026-08-04: +4 regression tests for quality-checks-reporting bugfixes)
 - Coverage tooling: not installed (no pytest-cov / coverage dependency)
 
 ---

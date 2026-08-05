@@ -59,6 +59,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     quality = QualityValidator(cfg)
     quality_report = quality.run()
     report.quality_results = quality_report.quality_results
+    report.ran_checks = quality_report.ran_checks
 
     report.print_summary()
     return 0 if report.passed else 1
@@ -93,6 +94,7 @@ def _cmd_upload(args: argparse.Namespace) -> int:
     quality = QualityValidator(cfg)
     quality_report = quality.run()
     report.quality_results = quality_report.quality_results
+    report.ran_checks = quality_report.ran_checks
 
     return run_upload(
         cfg,

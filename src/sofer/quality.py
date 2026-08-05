@@ -303,9 +303,9 @@ class QualityValidator:
                         except ValueError:
                             pass
 
-        # duplicates — hash the entire row
+        # duplicates — hash the entire row (scoped per file to avoid cross-file false positives)
         if "duplicates" in self._checks:
-            row_str = "|".join(row)
+            row_str = f"{self._current_file}|{'|'.join(row)}"
             h = hashlib.md5(row_str.encode("utf-8"), usedforsecurity=False).hexdigest()
             if h in self._dup_hashes:
                 self._dup_findings.append((self._dup_hashes[h], row_number))
@@ -365,6 +365,9 @@ class QualityValidator:
             return
         sev = self._checks["empty_columns"]["severity"]
         for fname, cols in per_file.items():
+            # Skip zero-row files — a header-only file has no data to check
+            if self._file_row_count.get(fname, 0) == 0:
+                continue
             self._add_result(
                 "empty_columns",
                 sev,
@@ -468,13 +471,16 @@ class QualityValidator:
             return
         self._ran_checks.add("cross_file_types")
         sev = self._checks["cross_file_types"]["severity"]
-        # Find shared column names across files
+        # Find shared column names across files (skip zero-row files)
         all_cols: set[str] = set()
-        for fname, cols in self._file_col_types.items():
+        active_files = {f for f in self._file_col_types if self._file_row_count.get(f, 0) > 0}
+        for fname in active_files:
+            cols = self._file_col_types[fname]
             all_cols.update(cols.keys())
         for col in all_cols:
             types_found: dict[str, str] = {}
-            for fname, cols in self._file_col_types.items():
+            for fname in active_files:
+                cols = self._file_col_types[fname]
                 if col in cols:
                     types_found[fname] = cols[col]
             # Compare types — if they differ, report
