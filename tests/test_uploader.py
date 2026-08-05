@@ -344,25 +344,77 @@ class TestOverwriteProtection:
         assert protected == set()
 
     def test_not_force_non_interactive(self, monkeypatch):
-        """In non-interactive mode without force, existing files are protected."""
-        # Simulate non-interactive stdin
+        """Auto-generated files bypass protection even in non-interactive mode."""
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         protected = _check_overwrite_protection(
             existing_files=["README.md", "LICENSE"],
             force=False,
         )
-        assert "readme.md" in protected
-        assert "license" in protected
+        assert "readme.md" not in protected
+        assert "license" not in protected
 
     def test_not_force_one_file_each(self, monkeypatch):
-        """Only existing compliance files are protected, not all of them."""
+        """README.md is auto-generated — never protected."""
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         protected = _check_overwrite_protection(
-            existing_files=["README.md"],  # only README exists
+            existing_files=["README.md"],
             force=False,
         )
-        assert "readme.md" in protected
+        assert "readme.md" not in protected
         assert "license" not in protected
+
+    def test_readme_always_uploaded_even_when_in_repo(self, monkeypatch):
+        """README.md in existing_files → never protected (auto-generated)."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["README.md"],
+            force=False,
+        )
+        assert "readme.md" not in protected
+
+    def test_license_always_uploaded_even_when_in_repo(self, monkeypatch):
+        """LICENSE in existing_files → never protected (auto-generated)."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["LICENSE"],
+            force=False,
+        )
+        assert "license" not in protected
+
+    def test_codebook_missing_advisory(self, tmp_path, monkeypatch, capsys):
+        """No data/codebooks/ dir and no codebook.md → advisory printed to stderr."""
+        from sofer import uploader
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+
+        uploaded: list[str] = []
+
+        def _track(path_or_fileobj="", path_in_repo="", **kw):
+            uploaded.append(path_in_repo)
+
+        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(uploader._api, "upload_file", _track)
+
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+
+        uploader.upload(cfg)
+        captured = capsys.readouterr()
+
+        assert "sofer codebook" in captured.err.lower(), (
+            "Expected advisory on stderr, got: " + repr(captured.err)
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1023,7 +1075,7 @@ class TestCodebookUpload:
         assert not td.exists()
 
     def test_no_codebooks_generated_skips(self, tmp_path, monkeypatch, capsys):
-        """No data/codebooks/ directory or codebook.md → skip silently, no warning."""
+        """No data/codebooks/ directory or codebook.md → advisory on stderr, no upload."""
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -1057,9 +1109,9 @@ class TestCodebookUpload:
         codebook_uploads = [u for u in uploaded if "codebook" in u.lower()]
         assert codebook_uploads == [], f"unexpected codebook uploads: {codebook_uploads}"
 
-        # No warning about missing codebooks
+        # Advisory printed to stderr (not stdout)
         assert "codebook" not in captured.out.lower()
-        assert "codebook" not in captured.err.lower()
+        assert "sofer codebook" in captured.err.lower()
 
         assert not td.exists()
 
