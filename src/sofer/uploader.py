@@ -25,6 +25,7 @@ from huggingface_hub import HfApi
 from ._parquet_helpers import _parquet_to_hf_dtype
 from .config import (
     CODEBOOKS_DIR,
+    DEFAULT_CONFIG_NAME,
     OUTPUT_DIR,
     OUTPUT_ENCODING,
     PARQUET_COMPRESSION,
@@ -45,6 +46,10 @@ from .splits import detect_splits, validate_layout, validate_split_mapping
 from .verification import VerificationReport, _print_verification_report, verify_load_dataset
 
 _api = HfApi()
+
+# Auto-generated compliance files that always overwrite silently.
+# These are NOT protected by _check_overwrite_protection.
+_AUTO_GENERATED: frozenset[str] = frozenset({"readme.md", "license", "codebook.md"})
 
 
 def _ensure_repo(cfg: DatasetConfig) -> None:
@@ -448,7 +453,10 @@ def _check_overwrite_protection(
     existing_files: list[str],
     force: bool,
 ) -> set[str]:
-    """Check whether README.md / LICENSE already exist and gate overwrites.
+    """Check whether compliance files already exist and gate overwrites.
+
+    Auto-generated files (:data:`_AUTO_GENERATED`) always pass through
+    unprotected — they are regenerated on every upload.
 
     When *force* is ``True``, skip the check entirely.
 
@@ -466,6 +474,8 @@ def _check_overwrite_protection(
     interactive = sys.stdin.isatty()
 
     for filename in ("README.md", "LICENSE"):
+        if filename.lower() in _AUTO_GENERATED:
+            continue
         if filename.lower() in existing_set:
             if interactive:
                 try:
@@ -702,8 +712,8 @@ def upload(
         cfg:            Dataset configuration.
         keep_csv:       When ``True`` and a CSV was converted to Parquet, also
                         upload the original CSV as a secondary file.
-        force:          When ``True``, skip the README.md / LICENSE overwrite
-                        protection prompt and overwrite unconditionally.
+        force:          When ``True``, skip overwrite protection and overwrite
+                        unconditionally.
         dry_run:        When ``True``, show the repo diff and split report but
                         do not upload any files.
         verify_load:    When ``True``, run ``datasets.load_dataset()`` against
@@ -981,6 +991,12 @@ def upload(
         # ── 3b. Upload generated codebooks (RC-C01) ─────────────────────
         data_dir = base / OUTPUT_DIR
         codebooks_dir = data_dir / CODEBOOKS_DIR
+        if not codebooks_dir.is_dir() and not (base / "codebook.md").exists():
+            print(
+                f"  i  Run `sofer codebook --all-files --config "
+                f"{DEFAULT_CONFIG_NAME}` to generate codebooks before upload.",
+                file=sys.stderr,
+            )
         if codebooks_dir.is_dir():
             for cb_file in sorted(codebooks_dir.rglob("*.md")):
                 remote = cb_file.relative_to(data_dir).as_posix()
