@@ -401,7 +401,10 @@ class TestUploadCompliance:
         assert not td.exists()
 
     def test_upload_order_readme_license_data(self, tmp_path, monkeypatch):
-        """README.md should be uploaded first, then LICENSE, then data files."""
+        """All files (README, LICENSE, data) are staged together in staging_root
+        for batch upload."""
+        import shutil
+
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -414,13 +417,9 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
-
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append(path_in_repo)
-
         monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
+        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr(shutil, "rmtree", lambda p, **kw: None)
 
         import tempfile
 
@@ -430,17 +429,13 @@ class TestUploadCompliance:
 
         uploader.upload(cfg)
 
-        # README.md should appear before LICENSE before data file
-        readme_idx = next(i for i, t in enumerate(upload_targets) if t == "README.md")
-        lic_idx = next(i for i, t in enumerate(upload_targets) if t == "LICENSE")
-        data_idx = next(
-            i for i, t in enumerate(upload_targets) if t.endswith(".parquet") or t.endswith(".csv")
-        )
+        staging_root = td / "repo"
+        assert (staging_root / "README.md").is_file(), "README.md missing"
+        assert (staging_root / "LICENSE").is_file(), "LICENSE missing"
 
-        assert readme_idx < lic_idx < data_idx, (
-            f"Upload order wrong: README.md at {readme_idx}, LICENSE at {lic_idx},"
-            f" data at {data_idx} ({upload_targets[data_idx]})"
-        )
+        # Data file (.parquet after conversion) is also staged
+        parquet_files = list(staging_root.rglob("*.parquet"))
+        assert len(parquet_files) >= 1, "No .parquet file found in staging"
 
     def test_tempdir_cleanup_on_success(self, tmp_path, monkeypatch):
         """Temp directory should be cleaned up after successful upload."""

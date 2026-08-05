@@ -708,6 +708,11 @@ def upload(
     report can read native Parquet types.  Falls back to CSV when conversion
     fails.
 
+    Stages every file — converted Parquet, compliance (README / LICENSE),
+    codebooks, and original CSVs (when *keep_csv* is ``True``) — under a
+    single staging directory that mirrors the remote repo layout.  Then
+    pushes the whole tree in one ``HfApi.upload_folder()`` call.
+
     Args:
         cfg:            Dataset configuration.
         keep_csv:       When ``True`` and a CSV was converted to Parquet, also
@@ -927,68 +932,48 @@ def upload(
             print(f"{'=' * 60}\n")
             return 0
 
-        # Upload compliance files (respect overwrite protection)
-        if "readme.md" not in protected:
-            _hf_upload(cfg.repo_id, tmpdir / "README.md", "README.md", cfg.repo_type)
-        if "license" not in protected:
-            _hf_upload(cfg.repo_id, tmpdir / "LICENSE", "LICENSE", cfg.repo_type)
+        # ── 3. Batch staging: mirror HF repo structure in staging_root ────
+        # All files (data, compliance, codebooks) are staged under
+        # tmpdir/repo/ with the exact remote-relative paths, then a single
+        # upload_folder() call pushes the whole tree.
+        staging_root = tmpdir / "repo"
+        staging_root.mkdir()
 
-        # ── 3. Upload data files ────────────────────────────────────────
-        ok = 0
-        fail = 0
+        # ── 3a. Stage converted Parquet files ────────────────────────────
+        for remote_key, (parquet_path, _csv_path, original_remote) in converted.items():
+            parquet_remote = str(PurePosixPath(original_remote).with_suffix(".parquet"))
+            dest = staging_root / parquet_remote
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(parquet_path, dest)
 
+        # ── 3b. Stage non-converted files (upload_as_csv, .parquet, etc.) ─
         for entry in cfg.files:
-            local = entry.resolve(base)
-            remote = entry.remote
-
-            if not local.exists():
-                print(f"  \u2717  NOT FOUND: {local}")
-                fail += 1
-                continue
-
-            # Recursive directories use upload_folder
-            if entry.recursive:
-                if local.is_dir():
-                    if _hf_upload_folder(cfg.repo_id, local, remote, cfg.repo_type):
-                        ok += 1
-                    else:
-                        fail += 1
-                else:
-                    print(f"  \u2717  NOT A DIRECTORY: {local}")
-                    fail += 1
-                continue
-
-            # Determine if this entry was converted to Parquet
             remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
-            is_converted = remote_key in converted and not entry.recursive
+            if remote_key in converted:
+                continue  # already staged as Parquet above
+            local = entry.resolve(base)
+            if not local.exists():
+                continue  # will be reported as NOT FOUND below
+            dest = staging_root / entry.remote
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local, dest)
 
-            if is_converted:
-                parquet_path, csv_path, original_remote = converted[remote_key]
+        # ── 3c. Stage original CSVs when keep_csv=True ────────────────────
+        if keep_csv:
+            for _remote_key, (_parquet_path, csv_path, original_remote) in converted.items():
+                dest = staging_root / original_remote
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(csv_path, dest)
 
-                # Preserve directory structure from the original remote path
-                # so that data/PROV/train.csv → data/PROV/train.parquet
-                parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+        # ── 3d. Move compliance files to staging_root ─────────────────────
+        readme_src = tmpdir / "README.md"
+        license_src = tmpdir / "LICENSE"
+        if "readme.md" not in protected and readme_src.exists():
+            shutil.move(str(readme_src), str(staging_root / "README.md"))
+        if "license" not in protected and license_src.exists():
+            shutil.move(str(license_src), str(staging_root / "LICENSE"))
 
-                # Upload the Parquet version (from staging dir)
-                if _hf_upload(cfg.repo_id, parquet_path, parquet_remote, cfg.repo_type):
-                    ok += 1
-                else:
-                    fail += 1
-
-                # If keep_csv, also upload the original CSV
-                if keep_csv:
-                    if _hf_upload(cfg.repo_id, csv_path, original_remote, cfg.repo_type):
-                        ok += 1
-                    else:
-                        fail += 1
-            else:
-                # Upload original file (CSV with upload_as_csv, .parquet, or other)
-                if _hf_upload(cfg.repo_id, local, remote, cfg.repo_type):
-                    ok += 1
-                else:
-                    fail += 1
-
-        # ── 3b. Upload generated codebooks (RC-C01) ─────────────────────
+        # ── 3e. Stage generated codebooks (RC-C01) ────────────────────────
         data_dir = base / OUTPUT_DIR
         codebooks_dir = data_dir / CODEBOOKS_DIR
         if not codebooks_dir.is_dir() and not (base / "codebook.md").exists():
@@ -999,17 +984,34 @@ def upload(
             )
         if codebooks_dir.is_dir():
             for cb_file in sorted(codebooks_dir.rglob("*.md")):
-                remote = cb_file.relative_to(data_dir).as_posix()
-                if _hf_upload(cfg.repo_id, cb_file, remote, cfg.repo_type):
-                    ok += 1
-                else:
-                    fail += 1
+                rel = cb_file.relative_to(data_dir)
+                dest = staging_root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cb_file, dest)
         root_index = base / "codebook.md"
         if root_index.exists():
-            if _hf_upload(cfg.repo_id, root_index, "codebook.md", cfg.repo_type):
-                ok += 1
-            else:
-                fail += 1
+            shutil.copy2(root_index, staging_root / "codebook.md")
+
+        # ── 3f. Report NOT FOUND files ────────────────────────────────────
+        not_found: list[str] = []
+        for entry in cfg.files:
+            local = entry.resolve(base)
+            if not local.exists():
+                not_found.append(str(local))
+        if not_found:
+            for nf in not_found:
+                print(f"  \u2717  NOT FOUND: {nf}")
+
+        # ── 4. Single batch upload via upload_folder ──────────────────────
+        staged_count = sum(1 for _ in staging_root.rglob("*") if _.is_file())
+        try:
+            _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type)
+            ok = staged_count
+            fail = 0
+        except Exception as exc:
+            print(f"  \u2717  upload_folder failed: {exc}")
+            ok = 0
+            fail = staged_count
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
