@@ -234,8 +234,10 @@ on the first failure — all checks run regardless.
 ### 4.1 Duplicates — row-hash based, streaming
 
 **Requirement:** The system MUST detect exact duplicate rows by computing a
-hash of each row's concatenated field values. Duplicate warnings MUST include
-the offending row number and a sample value.
+hash of each row's concatenated field values, **scoped per file**. Two identical
+rows in different files SHALL NOT be reported as duplicates. The hash key MUST
+include the filename to prevent cross-file collisions. Duplicate warnings MUST
+include the offending row number and a sample value.
 
 #### Scenarios
 
@@ -254,6 +256,14 @@ GIVEN a CSV where rows 17 and 42 are identical
 WHEN _check_duplicates() runs
 THEN the report SHALL have a warning
   AND the warning SHALL mention the duplicate row numbers
+```
+
+**Identical rows in different files are NOT duplicates**
+
+```
+GIVEN file_a.csv row 1 equals file_b.csv row 1
+WHEN QualityValidator.run() processes both files
+THEN no duplicate warning SHALL be produced for those rows
 ```
 
 ### 4.2 Empty rows — all fields empty/NA/null
@@ -282,7 +292,9 @@ THEN a warning SHALL be appended mentioning row 33
 ### 4.3 Empty columns — all values empty/NA/null across sample
 
 **Requirement:** The system MUST detect columns where every value in the
-sampled rows is empty, `NA`, `NULL`, or `N/A`. These are structural defects.
+sampled rows is empty, `NA`, `NULL`, or `N/A`. Files with zero data rows
+(header-only) SHALL be excluded from this check to avoid false positives
+where `_col_nonempty` has no entries.
 
 #### Scenarios
 
@@ -301,6 +313,14 @@ GIVEN a CSV where column "notes" is entirely empty
 WHEN _check_empty_columns() runs
 THEN a warning SHALL mention column "notes"
   AND the severity SHALL be warn
+```
+
+**Header-only file (zero data rows)**
+
+```
+GIVEN a CSV with a header but zero data rows
+WHEN _check_empty_columns() runs
+THEN no warning SHALL be appended for that file
 ```
 
 ### 4.4 Null profiling — per-column null percentage threshold
@@ -416,7 +436,9 @@ THEN the check SHALL be skipped entirely
 
 **Requirement:** When the same column name appears in multiple CSV files, the
 system MUST verify that inferred types are compatible (both numeric, both text,
-etc.). Default severity: `warn`.
+etc.). Files with zero data rows SHALL be excluded from comparison to avoid
+`"unknown"` type mismatches against files with real data. Default severity:
+`warn`.
 
 #### Scenarios
 
@@ -435,6 +457,15 @@ GIVEN file_a.csv with column "year" typed as numeric
   AND file_b.csv with column "year" typed as text
 WHEN _check_cross_file_types() runs
 THEN a warning SHALL mention the column and both files
+```
+
+**Zero-row file excluded from type comparison**
+
+```
+GIVEN CPV2010.csv with header only (0 data rows) and column "CPV2010_REF_ID"
+  AND PROV.csv with data and column "CPV2010_REF_ID" typed as numeric
+WHEN _check_cross_file_types() runs
+THEN no cross-file type mismatch SHALL be reported for "CPV2010_REF_ID"
 ```
 
 ### 4.9 Encoding validation — detect non-UTF-8 files
@@ -500,12 +531,14 @@ report = validator.run_all()           ← structural checks (unchanged)
 quality = QualityValidator(cfg)              ← NEW
 quality_report = quality.run()               ← NEW
 report.quality_results = quality_report.quality_results  ← NEW
+report.ran_checks = quality_report.ran_checks            ← NEW
 
 report.print_summary()
 return 0 if report.passed else 1       ← unchanged
 ```
 
-**`_cmd_upload` changes:** Same merge pattern. Upload SHALL be blocked when
+**`_cmd_upload` changes:** Same merge pattern, including the
+`report.ran_checks = quality_report.ran_checks` line. Upload SHALL be blocked when
 quality checks produce any `fail`-severity result.
 
 #### Scenarios
@@ -529,6 +562,15 @@ GIVEN a TOML config with no [[quality]] section
 WHEN _cmd_upload(args) is called
 THEN report.passed SHALL be True
   AND upload SHALL proceed
+```
+
+**Validate reports non-zero passed checks**
+
+```
+GIVEN a valid dataset TOML
+WHEN `_cmd_validate(args)` is called
+THEN the quality summary SHALL report `> 0 passed`
+  AND the summary SHALL NOT say "0 passed, 6 skipped" when checks executed
 ```
 
 ### 5.2 `ValidationReport` extension — `checks.py`

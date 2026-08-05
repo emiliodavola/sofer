@@ -5,6 +5,7 @@ filesystem state, so they are integration-level.  Here we test everything
 that can be verified without network calls or real data.
 """
 
+import csv
 import sys
 from argparse import Namespace
 
@@ -192,3 +193,47 @@ class TestScanParser:
         assert args.dry_run is True
         assert args.force is True
         assert args.ext == [".csv"]
+
+
+# ── Fix 1: ran_checks propagation ─────────────────────────────────────────
+
+
+class TestValidateRanChecks:
+    """RED — ran_checks NOT propagated yet, _count_passed_quality returns 0."""
+
+    def test_validate_reports_passed_gt_zero(self, tmp_path, monkeypatch, capsys):
+        """After validate with real data, the summary shows passed > 0."""
+        monkeypatch.chdir(tmp_path)
+
+        csv_path = tmp_path / "data.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f, delimiter=";")
+            # Row 2 is completely empty → triggers empty_rows finding.
+            # All other checks (duplicates, format_consistency, corrupt_records,
+            # encoding_validation, cross_file_types) should pass.
+            # With ran_checks populated: 8 checks run - 1 finding = 7 passed.
+            # Without ran_checks (the bug): passed = 0.
+            writer.writerows([["id", "name"], ["1", "Alice"], ["", ""], ["2", "Bob"]])
+
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_validate(Namespace(config=str(toml_path)))
+        assert rc == 0
+        captured = capsys.readouterr()
+        # The quality section must be printed because empty_rows produced a finding
+        assert "Quality checks" in captured.out, f"Quality section missing:\n{captured.out}"
+        # Key assertion: "passed" should appear with a number > 0
+        import re
+
+        m = re.search(r"(\d+)\s+passed", captured.out)
+        assert m is not None, f"No 'N passed' found in output:\n{captured.out}"
+        passed_count = int(m.group(1))
+        assert passed_count > 0, (
+            f"Expected passed > 0 but got {passed_count}. "
+            f"ran_checks is likely empty (bug).\nOutput:\n{captured.out}"
+        )
