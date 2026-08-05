@@ -66,3 +66,9 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Format registry: `_formats.py`
 - Each command gets its own domain module: `scanner.py`, `codebook.py`, `uploader.py`
 - Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`
+
+### 11. PR template
+- All pull requests must use the template in `.github/PULL_REQUEST_TEMPLATE.md`.
+- Fill every section — don't leave placeholders or `<!-- comments -->`.
+- Verification section must contain **actual command output**, not placeholders.
+- SDD artifacts section is mandatory when the change followed the SDD workflow; for ad-hoc fixes it can be omitted but the change description must still be thorough.
