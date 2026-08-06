@@ -10,10 +10,6 @@ This module is the single home for remote-path validation, planned-remote
 derivation, and dir-aware mirror copies — including the ``recursive=true``
 staging fix (RC-R04, where ``shutil.copy2`` on a directory raised
 PermissionError/IsADirectoryError).
-
-Known intermediate state (PR 1): ``uploader.py`` keeps private copies of
-``_validate_remote_paths`` and its inline planned-remote logic until PR 4
-retargets the uploader onto this module.
 """
 
 from __future__ import annotations
@@ -57,8 +53,8 @@ def _validate_remote_paths(cfg: DatasetConfig) -> list[str]:
 def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
     """Return the remote paths a publish would deliver for *cfg*.
 
-    Derived from the data-file planning logic of ``uploader._repo_diff_summary``
-    (and the equivalent inline list in ``upload()``):
+    Derived from the data-file planning logic of ``publish._repo_diff_summary``
+    (and the equivalent list in :func:`sofer.publish.publish`):
 
     - recursive directory entries resolve to their path with the trailing
       slash stripped — a copyable path, unlike the ``*`` marker used in the

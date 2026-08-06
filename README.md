@@ -11,8 +11,9 @@ sofer init my-dataset           # create a .toml template
 sofer scan my-dataset.toml      # discover & register data files
 sofer codebook data.csv         # generate a codebook for one file
 sofer codebook --all-files      # generate codebooks for all tables
+sofer prepare my-dataset.toml   # generate the package locally (build/)
+sofer publish my-dataset.toml   # deliver to HF Hub or a local directory
 sofer validate my-dataset.toml  # check data integrity + quality
-sofer upload my-dataset.toml    # upload to Hugging Face
 ```
 
 ## Why
@@ -25,8 +26,11 @@ the gap between your local files and a well-documented HF dataset.
 **Key principles:**
 
 - **Confidential by default.** Repos are private unless you say otherwise.
-- **Validate before uploading.** Never ship a broken dataset.
+- **Validate before publishing.** Never ship a broken dataset.
 - **Self-documenting.** Every dataset gets a codebook and a README.
+- **Two-step workflow.** `prepare` generates everything offline; `publish`
+  delivers the prepared package. Inspect and edit artifacts before they go
+  anywhere.
 - **Domain-agnostic.** Works for census data, survey exports, shapefiles,
   document collections — anything you'd put in a HF dataset repo.
 
@@ -50,14 +54,32 @@ sofer scan my-dataset.toml
 
 # 3. Edit my-dataset.toml (repo_id, description, tags, etc.)
 
-# 4. Generate codebooks for all registered tables
-sofer codebook --all-files --config my-dataset.toml
+# 4. Generate the dataset package locally — zero network calls:
+#    Parquet conversion, Dataset Card (README.md), LICENSE, schema report
+sofer prepare my-dataset.toml
+
+#    (optionally with per-file codebooks)
+sofer prepare my-dataset.toml --all-files
 
 # 5. Validate locally — no network calls
 sofer validate my-dataset.toml
 
-# 6. Upload to Hugging Face (auto-creates the repo if missing)
-sofer upload my-dataset.toml
+# 6. Publish to Hugging Face (auto-creates the repo if missing)
+sofer publish my-dataset.toml
+
+#    ...or copy the package to a local directory (no network)
+sofer publish my-dataset.toml --target local --output ./out/
+```
+
+`publish` re-runs `prepare` automatically whenever the package is missing or
+stale (the TOML or any declared source file is newer than the newest Parquet).
+
+## Directory layout
+
+```
+data/           source files only (declared in dataset.toml [[file]] local=) — never written by sofer
+cache/          sofer artifact cache: codebook --all-files writes cache/codebooks/
+build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
 ```
 
 ## TOML reference
@@ -67,13 +89,14 @@ sofer upload my-dataset.toml
 name = "my-dataset"
 repo_id = "your-username/my-dataset"
 private = true
+build_dir = "build"   # prepare output directory (default: "build")
 
 [meta]
 description = "Short description"
 license = "MIT"
 tags = ["tag1", "tag2"]
 
-# Every file or directory to upload gets its own [[file]] section.
+# Every file or directory to publish gets its own [[file]] section.
 [[file]]
 local = "data/file.csv"
 remote = "file.csv"
@@ -83,7 +106,7 @@ local = "data/documents/"
 remote = "docs/"
 recursive = true
 
-# Validation checks: run before every upload.
+# Validation checks: run before every publish.
 [[check]]
 min_files = 2
 
@@ -107,12 +130,16 @@ expected = ["column_a", "column_b"]
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
-| `scan [config.toml]` | Discover supported files, flatten first path segment (`raw/DPTO.csv` → `data/DPTO.csv`), register in TOML, copy to `data/`. Use `--dry-run` to preview. |
+| `scan [config.toml]` | Discover supported files, flatten first path segment (`raw/DPTO.csv` → `cache/DPTO.csv`), register in TOML, copy to `cache/`. Use `--dry-run` to preview. |
+| `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. |
+| `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
-| `upload <config.toml>` | Validate + quality gate + upload data files, generated codebooks, and root index to HF. Supports `--dry-run`, `--force`, `--verify-load`, `--keep-csv`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
-| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `data/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
+| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
 | `--help` | Detailed help for any command. |
+
+> `sofer upload` was removed in favor of `prepare` + `publish` — the
+> generation half (offline, inspectable) and the delivery half (network).
 
 ## Data format support
 
@@ -126,11 +153,11 @@ expected = ["column_a", "column_b"]
 
 ## Validation & quality checks (automatic)
 
-Every dataset is checked before upload:
+Every dataset is checked before publish:
 
 ### Integrity checks
 
-| Check | What it does | Blocks upload? |
+| Check | What it does | Blocks publish? |
 |---|---|---|
 | File existence | Every declared path must exist on disk | Yes |
 | Min file count | Configurable via `[[check]] min_files` | Yes |
@@ -170,22 +197,23 @@ typed formats), unique values, missing percentage, and a sample value.
 sofer codebook --all-files --config my-dataset.toml
 ```
 
-Generates one codebook per registered file under `data/codebooks/<rel-stem>.md`,
+Generates one codebook per registered file under `cache/codebooks/<rel-stem>.md`,
 plus a root `codebook.md` index with a table of contents and relative links to
 all per-table codebooks.  Files from the same source directory that would
 resolve to the same output stem (collision) are detected before writing — the
 non-colliding files still get their codebook written; the run fails with an
 error listing the colliding sources.
 
-### Upload with codebooks
+### Codebooks in the package
 
-When you run `sofer upload`, the uploader automatically includes any generated
-codebooks after the data files:
-- Per-file codebooks from `data/codebooks/` are uploaded under the `codebooks/`
-  prefix (e.g., `data/codebooks/DPTO.md` → `codebooks/DPTO.md`).
-- The root index `codebook.md` is uploaded to the repo root.
-- If neither the directory nor the root index exists, the step is skipped
-  silently — the upload still succeeds.
+`prepare --all-files` writes codebooks directly into the output directory
+(Option B) instead of the shared `cache/`:
+
+- Per-file codebooks land under `build/codebooks/` mirroring their relative
+  paths (e.g., `data/DPTO.csv` → `build/codebooks/DPTO.md`).
+- The root index `codebook.md` is written to the output root.
+- `publish` stages these codebooks after the data files, so the repo ends up
+  with `codebooks/**/*.md` plus the root `codebook.md`.
 
 ## Architecture
 
@@ -195,13 +223,15 @@ src/sofer/
 ├── _formats.py         # Supported file extension registry
 ├── _sentinels.py       # Shared sentinel value sets
 ├── _csv_reader.py      # CSV/TSV streaming reader
-├── cli.py              # argparse CLI with 6 subcommands
+├── _mirror.py          # Remote-path validation + dir-aware mirror copies
+├── cli.py              # argparse CLI with 6 subcommands (init, scan, validate, prepare, publish, codebook)
 ├── model.py            # DatasetConfig — loads & validates TOML
 ├── checks.py           # DatasetValidator — data integrity checks
 ├── quality.py          # QualityValidator — 9 quality checks (single-pass)
 ├── codebook.py         # Multi-format codebook generator
-├── scanner.py          # File discovery, TOML merge, copy-to-data
-├── uploader.py         # HF upload engine (huggingface_hub API + Parquet conversion)
+├── scanner.py          # File discovery, TOML merge, copy-to-cache
+├── prepare.py          # Offline generation: Parquet conversion, card, LICENSE, codebooks
+├── publish.py          # Delivery: HF upload_folder / local copy, auto-prepare, dry-run
 ├── repo_compliance.py  # Dataset Card & schema compliance
 ├── splits.py           # Split detection (train/test/validation)
 └── verification.py     # load_dataset() end-to-end verification

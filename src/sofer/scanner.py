@@ -64,7 +64,7 @@ def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
     for flat, sources in sorted(collisions.items()):
         if len(sources) > 1:
             src_list = " and ".join(s.as_posix() for s in sorted(sources))
-            errors.append(f"Collision in data/: {flat.as_posix()} from {src_list}")
+            errors.append(f"Collision in cache/: {flat.as_posix()} from {src_list}")
 
     if errors:
         raise ValueError("\n".join(errors))
@@ -143,7 +143,7 @@ def merge_entries(
     """
     # Strip template entries left over from ``sofer init`` (their local
     # path is a placeholder that starts with ``TODO:`` and would cause
-    # spurious errors downstream in validate / upload).
+    # spurious errors downstream in validate / prepare / publish).
     raw_toml["file"] = [
         e for e in raw_toml.get("file", []) if not str(e.get("local", "")).startswith("TODO:")
     ]

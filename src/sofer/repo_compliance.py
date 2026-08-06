@@ -2,7 +2,7 @@
 HF Dataset Compliance — Dataset Card, LICENSE, and schema report generation.
 
 All public functions are *pure*: they take config/schema data and return strings
-or structured data.  No file I/O, no network calls — the orchestrator (``upload``)
+or structured data.  No file I/O, no network calls — the orchestrator (``prepare``)
 handles reading and writing.
 """
 

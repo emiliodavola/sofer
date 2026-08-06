@@ -13,11 +13,14 @@ from pathlib import Path
 
 from . import __version__
 from ._formats import SUPPORTED_FORMATS
-from .checks import DatasetValidator
+from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
 from .config import DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
+from .prepare import prepare as run_prepare
+from .prepare import resolve_output_dir
+from .publish import publish as run_publish
 from .quality import QualityValidator
 from .scanner import (
     EXCLUSIONS,
@@ -28,80 +31,127 @@ from .scanner import (
     merge_entries,
     write_toml,
 )
-from .uploader import upload as run_upload
 
 # ── command implementations ────────────────────────────────────────────
+
+
+def _load_and_validate(
+    args: argparse.Namespace,
+    verb: str,
+    *,
+    run_checks: bool = True,
+) -> tuple[DatasetConfig | None, ValidationReport | None]:
+    """Load the TOML config and run the structural + quality checks (shared).
+
+    This is the common prologue of ``validate``, ``prepare``, and
+    ``publish``: it loads the :class:`DatasetConfig`, validates the
+    configuration itself, runs :class:`DatasetValidator`, and (unless
+    *run_checks* is ``False``) runs :class:`QualityValidator`, merging its
+    results into the report.
+
+    Args:
+        args:        Parsed CLI arguments (must expose ``config``).
+        verb:        Gerund used in the configuration-error message
+                     (e.g. ``"preparing"`` -> "fix before preparing").
+        run_checks:  When ``False``, skip the validators entirely
+                     (``--no-checks``).
+
+    Returns:
+        ``(cfg, report)`` — ``cfg`` is ``None`` (and ``report`` is ``None``)
+        when the configuration itself has errors and the caller should exit 1.
+    """
+    cfg = DatasetConfig.from_toml(args.config)
+
+    config_errors = cfg.validate()
+    if config_errors:
+        print(f"\n  \u2717  Configuration errors \u2014 fix before {verb}:")
+        for e in config_errors:
+            print(f"     \u2717  {e}")
+        return None, None
+
+    if not run_checks:
+        return cfg, None
+
+    validator = DatasetValidator(cfg)
+    report = validator.run_all()
+
+    quality = QualityValidator(cfg)
+    quality_report = quality.run()
+    report.quality_results = quality_report.quality_results
+    report.ran_checks = quality_report.ran_checks
+
+    return cfg, report
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     """Validate the local dataset against its TOML configuration and quality checks.
 
-    Runs :class:`DatasetValidator` (file existence, size, columns) followed
-    by :class:`QualityValidator` (streaming content checks: duplicates,
-    nulls, encoding, etc.).  Prints a summary report and returns 0 when
-    all checks pass, 1 otherwise.
+    Runs the shared :func:`_load_and_validate` prologue (config load,
+    :class:`DatasetValidator`, :class:`QualityValidator`), prints the
+    summary report, and returns 0 when all checks pass, 1 otherwise.
     """
-    cfg = DatasetConfig.from_toml(args.config)
-
-    # validate the configuration itself
-    config_errors = cfg.validate()
-    if config_errors:
-        print("\n  X  Configuration errors:")
-        for e in config_errors:
-            print(f"     X  {e}")
+    cfg, report = _load_and_validate(args, verb="checking")
+    if cfg is None or report is None:
         return 1
-
-    # validate the actual data on disk
-    validator = DatasetValidator(cfg)
-    report = validator.run_all()
-
-    # quality checks
-    quality = QualityValidator(cfg)
-    quality_report = quality.run()
-    report.quality_results = quality_report.quality_results
-    report.ran_checks = quality_report.ran_checks
 
     report.print_summary()
     return 0 if report.passed else 1
 
 
-def _cmd_upload(args: argparse.Namespace) -> int:
-    """Validate, quality-check, and upload the dataset to Hugging Face Hub.
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    """Validate the config, then generate the full dataset package locally.
 
     Full flow:
-        1. Validate the TOML configuration itself.
-        2. Run :class:`DatasetValidator` (file existence, size, columns).
-        3. Run :class:`QualityValidator` (content-quality checks).
-        4. If the quality gate passes, upload every declared file to the
-           HF repository — creating it if it doesn't exist.
-
-    The ``--dry-run`` flag skips the actual upload and prints what would
-    be pushed.
+        1. Run the shared :func:`_load_and_validate` prologue
+           (``--no-checks`` skips the validators — the checks inside
+           :func:`sofer.prepare.prepare` are gated by the same flag).
+        2. Resolve the output directory (``--output`` or ``[dataset] build_dir``).
+        3. Run :func:`sofer.prepare.prepare` — CSV→Parquet conversion,
+           cross-file schema assertion, schema report, Dataset Card + LICENSE,
+           codebooks (``--all-files``), NOT FOUND report, optional
+           ``--verify``.  Zero network calls; ``--force`` allows overwriting
+           existing artifacts.
     """
-    cfg = DatasetConfig.from_toml(args.config)
-
-    config_errors = cfg.validate()
-    if config_errors:
-        print("\n  \u2717  Configuration errors \u2014 fix before uploading:")
-        for e in config_errors:
-            print(f"     \u2717  {e}")
+    cfg, _report = _load_and_validate(args, verb="preparing", run_checks=not args.no_checks)
+    if cfg is None:
         return 1
 
-    validator = DatasetValidator(cfg)
-    report = validator.run_all()
-
-    # quality checks
-    quality = QualityValidator(cfg)
-    quality_report = quality.run()
-    report.quality_results = quality_report.quality_results
-    report.ran_checks = quality_report.ran_checks
-
-    return run_upload(
+    output_dir = resolve_output_dir(cfg, args.output)
+    return run_prepare(
         cfg,
-        keep_csv=args.keep_csv,
+        output_dir,
+        all_files=args.all_files,
+        no_checks=args.no_checks,
         force=args.force,
+        verify=args.verify,
+    )
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    """Validate the config, then deliver the prepared package to a target.
+
+    Full flow:
+        1. Run the shared :func:`_load_and_validate` prologue — the quality
+           report it produces is the publish quality gate.
+        2. Deliver the prepared package: ``--target hf`` ensures the HF
+           repository, gates on the quality report, prints a diff summary,
+           and pushes the package in a single ``upload_folder`` call;
+           ``--target local`` copies the package to ``--output`` with no
+           network access.  Stale or missing artifacts trigger ``prepare``
+           automatically; ``--dry-run`` only prints the diff and split
+           report.
+    """
+    cfg, report = _load_and_validate(args, verb="publishing")
+    if cfg is None or report is None:
+        return 1
+
+    return run_publish(
+        cfg,
+        target=args.target,
+        output_dir=args.output,
+        force=args.force,
+        keep_csv=args.keep_csv,
         dry_run=args.dry_run,
-        verify_load=args.verify_load,
         quality_report=report,
     )
 
@@ -250,8 +300,9 @@ _INIT_TEMPLATE = """\
 # Generated by ``sofer init {name}``
 #
 # Usage:
-#   sofer validate {name}.toml
-#   sofer upload   {name}.toml
+#   sofer prepare {name}.toml   # generate the package locally (build/)
+#   sofer publish {name}.toml   # deliver to HF Hub or a local dir
+#   sofer validate {name}.toml  # check data integrity + quality
 
 [dataset]
 name = "{name}"
@@ -267,7 +318,7 @@ confidential = false
 source = "TODO: organisation name"
 tags = ["TODO: tag1", "TODO: tag2"]
 
-# Repeat [[file]] sections for every file/directory you want to upload.
+# Repeat [[file]] sections for every file/directory you want to publish.
 [[file]]
 local = "TODO: path/to/file.csv"
 remote = "file.csv"
@@ -329,8 +380,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
     output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
     print(f"  OK  Created {output}")
     print("     Edit the file and run:")
-    print(f"       sofer validate {output.name}")
-    print(f"       sofer upload   {output.name}")
+    print(f"       sofer prepare {output.name}")
+    print(f"       sofer publish {output.name}")
     return 0
 
 
@@ -341,12 +392,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sofer",
         description=(
-            "Publish datasets to Hugging Face Hub with built-in validation.\n"
+            "Prepare and publish datasets to Hugging Face Hub with built-in "
+            "validation.\n"
             "\n"
             "Every dataset is configured via a TOML file.  Run:\n"
-            "  sofer init my-dataset     # create a template\n"
-            "  sofer validate dataset.toml  # check data locally\n"
-            "  sofer upload dataset.toml    # upload to HF"
+            "  sofer init my-dataset      # create a template\n"
+            "  sofer prepare dataset.toml # generate the package locally (build/)\n"
+            "  sofer publish dataset.toml # deliver to HF Hub or a local dir"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -373,39 +425,104 @@ def _build_parser() -> argparse.ArgumentParser:
     v.add_argument("config", help="Path to the .toml configuration file.")
     v.set_defaults(func=_cmd_validate)
 
-    # ── upload ────────────────────────────────────────────────────
-    u = sub.add_parser(
-        "upload",
-        help="Validate, quality-check, then upload everything to HF.",
+    # ── prepare ───────────────────────────────────────────────────
+    p = sub.add_parser(
+        "prepare",
+        help="Generate the full dataset package locally (Parquet, card, LICENSE, codebooks).",
         description=(
-            "Run all validations and quality checks first; abort if any "
-            "failure blocks the quality gate. On success, upload every "
-            "declared file to the HF repository. The repository is "
-            "created automatically if it doesn't exist."
+            "Generate every artifact that makes up a dataset package on the "
+            "local machine: CSV-to-Parquet conversion, cross-file schema "
+            "checks, a schema report, the Dataset Card (README.md) and "
+            "LICENSE, and - with --all-files - codebooks.  This command "
+            "never contacts Hugging Face and needs no credentials.\n"
+            "\n"
+            "Artifacts are written to --output DIR (default: the dataset's "
+            "[dataset] build_dir, usually build/).  Existing generated "
+            "artifacts block the run unless --force is given."
         ),
     )
-    u.add_argument("config", help="Path to the .toml configuration file.")
-    u.add_argument(
-        "--keep-csv",
-        action="store_true",
-        help="Upload the original CSV alongside the converted Parquet",
+    p.add_argument("config", help="Path to the .toml configuration file.")
+    p.add_argument(
+        "--output",
+        help="Output directory (default: [dataset] build_dir from the TOML, usually build/).",
     )
-    u.add_argument(
+    p.add_argument(
+        "--all-files",
+        action="store_true",
+        help="Also generate per-file codebooks directly into the output directory.",
+    )
+    p.add_argument(
+        "--no-checks",
+        action="store_true",
+        help=(
+            "Skip the structural and quality validation report "
+            "(checks run by default, non-blocking)."
+        ),
+    )
+    p.add_argument(
         "--force",
         action="store_true",
-        help="Skip README.md / LICENSE overwrite confirmation and overwrite unconditionally.",
+        help="Overwrite existing generated artifacts in the output directory.",
     )
-    u.add_argument(
+    p.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run datasets.load_dataset() against the generated package and "
+            "print PASSED/FAILED (non-blocking)."
+        ),
+    )
+    p.set_defaults(func=_cmd_prepare)
+
+    # ── publish ───────────────────────────────────────────────────
+    pb = sub.add_parser(
+        "publish",
+        help="Deliver a prepared dataset package to Hugging Face Hub or a local directory.",
+        description=(
+            "Deliver the prepared dataset package to --target.  The default "
+            "target 'hf' ensures the repository exists, gates on the quality "
+            "report, prints a diff summary, and pushes the package in a "
+            "single upload_folder call.  The 'local' target copies the "
+            "package to --output with no network access (default: the "
+            "package stays in place).  Missing or stale artifacts trigger "
+            "prepare first; --dry-run prints the diff and split report "
+            "without preparing, copying, or touching the network."
+        ),
+    )
+    pb.add_argument("config", help="Path to the .toml configuration file.")
+    pb.add_argument(
+        "--target",
+        choices=["hf", "local"],
+        default="hf",
+        help=(
+            "Delivery target: 'hf' (Hugging Face Hub, default) or 'local' "
+            "(copy the package to --output)."
+        ),
+    )
+    pb.add_argument(
+        "--output",
+        help=(
+            "hf: override the prepare output directory (default: the "
+            "dataset's [dataset] build_dir).  local: destination directory "
+            "for the package copy."
+        ),
+    )
+    pb.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip overwrite protection and overwrite remote files unconditionally.",
+    )
+    pb.add_argument(
+        "--keep-csv",
+        action="store_true",
+        help="Upload the original CSV alongside the converted Parquet (hf target only).",
+    )
+    pb.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show repo diff and split report without uploading any files.",
+        help="Show the repo diff and split report without preparing or uploading.",
     )
-    u.add_argument(
-        "--verify-load",
-        action="store_true",
-        help="Test end-to-end loadability with datasets.load_dataset() after staging.",
-    )
-    u.set_defaults(func=_cmd_upload)
+    pb.set_defaults(func=_cmd_publish)
 
     # ── codebook ──────────────────────────────────────────────────
     c = sub.add_parser(
