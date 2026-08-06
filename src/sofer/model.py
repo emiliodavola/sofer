@@ -142,6 +142,10 @@ class DatasetConfig:
         skip_cross_file_schema:
                            When ``True``, skip schema consistency checks across
                            files that share the same column names.
+        build_dir:         Default output directory for ``prepare`` /
+                           ``publish`` artifacts, relative to the config
+                           directory (default ``"build"``). ``--output``
+                           overrides it per run without touching the TOML.
 
         description:       One-liner shown on the HF repo page.
         license:           SPDX identifier or ``"restricted"``.
@@ -210,6 +214,7 @@ class DatasetConfig:
     repo_type: str = "dataset"
     private: bool = True
     skip_cross_file_schema: bool = False
+    build_dir: str = "build"
 
     # -- metadata ----------------------------------------------------------
     description: str = ""
@@ -386,6 +391,7 @@ class DatasetConfig:
             repo_type=ds.get("repo_type", "dataset"),
             private=ds.get("private", True),
             skip_cross_file_schema=ds.get("skip_cross_file_schema", False),
+            build_dir=ds.get("build_dir", "build"),
             description=meta.get("description", ""),
             license=meta.get("license", ""),
             confidential=meta.get("confidential", False),

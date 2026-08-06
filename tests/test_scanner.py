@@ -32,6 +32,11 @@ class TestConfigConstants:
         assert isinstance(config.CODEBOOKS_DIR, str)
         assert config.CODEBOOKS_DIR == "codebooks"
 
+    def test_output_dir_default_is_cache(self) -> None:
+        """OUTPUT_DIR defaults to ``cache`` — sofer artifacts live under
+        ``cache/``, while ``data/`` stays reserved for raw source files."""
+        assert config.OUTPUT_DIR == "cache"
+
 
 # ------------------------------------------------------------------
 # TestFlattenFirstLevel
@@ -259,6 +264,18 @@ class TestMergeEntries:
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
         assert len(raw["file"]) == 1  # no duplicate added
 
+    def test_dedup_by_remote_migration_from_data_to_cache(self, tmp_path: Path) -> None:
+        """A pre-cache TOML (local='data/a.csv') re-scanned into cache/ must
+        not duplicate — dedup keys on the remote, not just the resolved local
+        path, so the cache/ rename is migration-safe."""
+        _touch(tmp_path / "a.csv")
+        # Old-layout entry: local under data/ (pre-cache), remote a.csv.
+        raw = self._raw_toml(file=[{"local": "data/a.csv", "remote": "a.csv"}])
+        discovered = [tmp_path / "a.csv"]
+
+        merge_entries(discovered, raw, tmp_path, tmp_path / "cache")
+        assert len(raw["file"]) == 1  # same remote → skipped despite data/ local
+
     def test_section_preservation(self, tmp_path: Path) -> None:
         """Non-[[file]] sections ([dataset], [meta], [[check]], [[quality])
         are left untouched."""
@@ -485,12 +502,12 @@ class TestIntegration:
         cfg = DatasetConfig.from_toml(config)
         assert len(cfg.files) == 2
 
-        # Validate — all files should exist under data/ now.
+        # Validate — all files should exist under cache/ now.
         errors = cfg.validate()
         assert errors == [], f"Validation errors: {errors}"
 
     def test_dry_run_no_disk_changes(self, tmp_path: Path, monkeypatch) -> None:
-        """dry_run reports but modifies neither TOML nor data/."""
+        """dry_run reports but modifies neither TOML nor cache/."""
         from sofer.cli import _cmd_scan
 
         _touch(tmp_path / "a.csv")
@@ -508,8 +525,8 @@ class TestIntegration:
 
         # TOML unchanged.
         assert config.read_text(encoding="utf-8") == original_toml
-        # data/ never created.
-        assert not (tmp_path / "data").exists()
+        # cache/ never created.
+        assert not (tmp_path / "cache").exists()
 
     def test_idempotent_scan(self, tmp_path: Path, monkeypatch) -> None:
         """Running scan twice with same files produces identical TOML [[file]] count."""
@@ -530,7 +547,7 @@ class TestIntegration:
         first_cfg = DatasetConfig.from_toml(config)
         first_count = len(first_cfg.files)
 
-        # Second scan — idempotent (use --force since data/ files already exist).
+        # Second scan — idempotent (use --force since cache/ files already exist).
         args2 = Namespace(config=str(config), dry_run=False, force=True, ext=None)
         rc2 = _cmd_scan(args2)
         assert rc2 == 0
@@ -594,7 +611,7 @@ class TestIntegration:
         args = Namespace(config=str(config), dry_run=False, force=False, ext=None)
         rc = _cmd_scan(args)
         assert rc == 0
-        assert (tmp_path / "data" / "a.csv").exists()
+        assert (tmp_path / "cache" / "a.csv").exists()
 
     def test_confirmation_no_aborts(self, tmp_path: Path, monkeypatch) -> None:
         """Prompting 'n' aborts without copying."""
@@ -611,7 +628,7 @@ class TestIntegration:
         args = Namespace(config=str(config), dry_run=False, force=False, ext=None)
         rc = _cmd_scan(args)
         assert rc == 0
-        assert not (tmp_path / "data").exists()
+        assert not (tmp_path / "cache").exists()
 
     def test_scan_collision_exits_1_no_copy(self, tmp_path: Path, monkeypatch) -> None:
         """Flatten collision across source dirs → exit 1, no files copied."""
@@ -628,8 +645,8 @@ class TestIntegration:
         args = Namespace(config=str(config), dry_run=False, force=True, ext=None)
         rc = _cmd_scan(args)
         assert rc == 1
-        # No data/ files should have been created.
-        assert not (tmp_path / "data").exists()
+        # No cache/ files should have been created.
+        assert not (tmp_path / "cache").exists()
 
     def test_scan_dry_run_reports_flattened_paths(
         self, tmp_path: Path, monkeypatch, capsys
@@ -649,10 +666,10 @@ class TestIntegration:
         assert rc == 0
 
         captured = capsys.readouterr().out
-        # The dry-run report shows flattened paths: "data/a.csv", not "data/raw/a.csv"
+        # The dry-run report shows flattened paths: "cache/a.csv", not "cache/raw/a.csv"
         assert "a.csv" in captured
         # Should NOT show the raw/ prefix — the first segment was dropped.
-        assert "data/raw/" not in captured
+        assert "cache/raw/" not in captured
 
     def test_scan_preview_shows_flattened_paths(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """Interactive preview before copy shows flattened paths."""
@@ -673,6 +690,6 @@ class TestIntegration:
         assert rc == 0
 
         captured = capsys.readouterr().out
-        # The preview lists flattened paths: "→ data/a.csv", not "→ data/raw/a.csv"
-        assert "data/a.csv" in captured
-        assert "data/raw/" not in captured
+        # The preview lists flattened paths: "→ cache/a.csv", not "→ cache/raw/a.csv"
+        assert "cache/a.csv" in captured
+        assert "cache/raw/" not in captured

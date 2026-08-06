@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from sofer._mirror import _validate_remote_paths
 from sofer.model import DatasetConfig, FileEntry
 from sofer.splits import (
     SplitInfo,
@@ -23,7 +24,6 @@ from sofer.splits import (
 from sofer.uploader import (
     _check_overwrite_protection,
     _repo_diff_summary,
-    _validate_remote_paths,
 )
 from sofer.verification import VerificationReport, verify_load_dataset
 
@@ -382,7 +382,7 @@ class TestOverwriteProtection:
         assert "license" not in protected
 
     def test_codebook_missing_advisory(self, tmp_path, monkeypatch, capsys):
-        """No data/codebooks/ dir and no codebook.md → advisory printed to stderr."""
+        """No cache/codebooks/ dir and no codebook.md → advisory printed to stderr."""
         from sofer import uploader
 
         csv = tmp_path / "data.csv"
@@ -1056,7 +1056,7 @@ class TestCodebookUpload:
         assert (staging_root / "DPTO.csv").is_file(), "Data file missing from staging"
 
     def test_no_codebooks_generated_skips(self, tmp_path, monkeypatch, capsys):
-        """No data/codebooks/ directory or codebook.md → advisory on stderr, no codebook staged."""
+        """No cache/codebooks/ directory or codebook.md → advisory on stderr, no codebook staged."""
         from sofer import uploader
 
         csv = tmp_path / "data.csv"

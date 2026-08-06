@@ -95,6 +95,20 @@ class TestInitCommand:
         content = (tmp_path / "ds.toml").read_text(encoding="utf-8")
         assert "TODO" in content
 
+    def test_init_template_has_build_dir(self, tmp_path, monkeypatch):
+        """The template declares ``[dataset] build_dir = "build"`` so the
+        default prepare/publish output directory is explicit."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="build-ds"))
+        content = (tmp_path / "build-ds.toml").read_text(encoding="utf-8")
+        parsed = _tomli.loads(content)
+        assert parsed["dataset"]["build_dir"] == "build"
+
 
 # ─── Entry point smoke test ────────────────────────────────────────────────────
 

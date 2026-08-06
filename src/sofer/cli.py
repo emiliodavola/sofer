@@ -112,7 +112,7 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     Without ``--all-files``: analyse *FILE* and print the codebook to
     stdout (or write to ``--output``).  With ``--all-files``: read every
     ``[[file]]`` entry from the TOML and write one codebook per file
-    under ``data/codebooks/``, plus a root index.
+    under ``cache/codebooks/``, plus a root index.
     """
     if args.all_files:
         if args.csv:
@@ -156,7 +156,7 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
-    """Discover data files, register them in TOML, and copy to ``data/``."""
+    """Discover data files, register them in TOML, and copy to ``cache/``."""
     config_path = Path(args.config).resolve()
 
     if not config_path.exists():
@@ -179,7 +179,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     base_dir = config_path.parent.resolve()
     data_dir = base_dir / OUTPUT_DIR
 
-    # 2. Discover supported files (exclude data/ destination directory).
+    # 2. Discover supported files (exclude cache/ destination directory).
     extensions = args.ext if args.ext else None
     exclude = EXCLUSIONS | frozenset({OUTPUT_DIR})
     discovered = discover_files(base_dir, extensions, exclude_dirs=exclude)
@@ -209,16 +209,16 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     # 4. Confirm with the user before copying (unless --force or --dry-run).
     if not args.dry_run and not args.force:
-        print("\n  The following files will be copied to data/:")
+        print(f"\n  The following files will be copied to {OUTPUT_DIR}/:")
         for f in discovered:
             flat = flatten_first_level(f.relative_to(base_dir))
-            print(f"     → data/{flat.as_posix()}")
+            print(f"     → {OUTPUT_DIR}/{flat.as_posix()}")
         answer = input("\n  Continue? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("  OK  Aborted.")
             return 0
 
-    # 5. Copy files to data/.
+    # 5. Copy files to cache/.
     try:
         copied = copy_files(discovered, base_dir, data_dir, dry_run=args.dry_run, force=args.force)
     except FileExistsError as exc:
@@ -258,6 +258,7 @@ name = "{name}"
 repo_id = "YOUR_USER/{name}"
 repo_type = "dataset"
 private = true
+build_dir = "build"
 
 [meta]
 description = "TODO: short description"
@@ -417,7 +418,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "and a sample value.\n"
             "\n"
             "Use --all-files to generate one codebook per [[file]] entry "
-            "in the TOML configuration, written under data/codebooks/."
+            "in the TOML configuration, written under cache/codebooks/."
         ),
     )
     c.add_argument(
@@ -472,9 +473,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Recursively scan the config file's directory for supported "
             "data formats (.csv, .tsv, .parquet, .xlsx, .jsonl), flatten "
-            "the first path segment (raw/DPTO.csv → data/DPTO.csv), register "
+            "the first path segment (raw/DPTO.csv → cache/DPTO.csv), register "
             "new files as [[file]] entries in the TOML, and copy them into "
-            "the data/ directory.\n"
+            "the cache/ directory.\n"
             "\n"
             "Running scan twice is safe — already-registered files are "
             "skipped."
@@ -494,7 +495,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing files in data/ without raising an error.",
+        help="Overwrite existing files in cache/ without raising an error.",
     )
     s.add_argument(
         "--ext",
