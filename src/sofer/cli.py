@@ -20,6 +20,7 @@ from .config import DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
+from .publish import publish as run_publish
 from .quality import QualityValidator
 from .scanner import (
     EXCLUSIONS,
@@ -137,6 +138,50 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         no_checks=args.no_checks,
         force=args.force,
         verify=args.verify,
+    )
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    """Validate the config, then deliver the prepared package to a target.
+
+    Full flow:
+        1. Validate the TOML configuration itself.
+        2. Run :class:`DatasetValidator` (file existence, size, columns).
+        3. Run :class:`QualityValidator` (content-quality checks).
+        4. Deliver the prepared package: ``--target hf`` ensures the HF
+           repository, gates on the quality report, prints a diff summary,
+           and pushes the package in a single ``upload_folder`` call;
+           ``--target local`` copies the package to ``--output`` with no
+           network access.  Stale or missing artifacts trigger ``prepare``
+           automatically; ``--dry-run`` only prints the diff and split
+           report.
+    """
+    cfg = DatasetConfig.from_toml(args.config)
+
+    config_errors = cfg.validate()
+    if config_errors:
+        print("\n  \u2717  Configuration errors \u2014 fix before publishing:")
+        for e in config_errors:
+            print(f"     \u2717  {e}")
+        return 1
+
+    validator = DatasetValidator(cfg)
+    report = validator.run_all()
+
+    # quality checks
+    quality = QualityValidator(cfg)
+    quality_report = quality.run()
+    report.quality_results = quality_report.quality_results
+    report.ran_checks = quality_report.ran_checks
+
+    return run_publish(
+        cfg,
+        target=args.target,
+        output_dir=args.output,
+        force=args.force,
+        keep_csv=args.keep_csv,
+        dry_run=args.dry_run,
+        quality_report=report,
     )
 
 
@@ -489,6 +534,56 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_prepare)
+
+    # ── publish ───────────────────────────────────────────────────
+    pb = sub.add_parser(
+        "publish",
+        help="Deliver a prepared dataset package to Hugging Face Hub or a local directory.",
+        description=(
+            "Deliver the prepared dataset package to --target.  The default "
+            "target 'hf' ensures the repository exists, gates on the quality "
+            "report, prints a diff summary, and pushes the package in a "
+            "single upload_folder call.  The 'local' target copies the "
+            "package to --output with no network access (default: the "
+            "package stays in place).  Missing or stale artifacts trigger "
+            "prepare first; --dry-run prints the diff and split report "
+            "without preparing, copying, or touching the network."
+        ),
+    )
+    pb.add_argument("config", help="Path to the .toml configuration file.")
+    pb.add_argument(
+        "--target",
+        choices=["hf", "local"],
+        default="hf",
+        help=(
+            "Delivery target: 'hf' (Hugging Face Hub, default) or 'local' "
+            "(copy the package to --output)."
+        ),
+    )
+    pb.add_argument(
+        "--output",
+        help=(
+            "hf: override the prepare output directory (default: the "
+            "dataset's [dataset] build_dir).  local: destination directory "
+            "for the package copy."
+        ),
+    )
+    pb.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip overwrite protection and overwrite remote files unconditionally.",
+    )
+    pb.add_argument(
+        "--keep-csv",
+        action="store_true",
+        help="Upload the original CSV alongside the converted Parquet (hf target only).",
+    )
+    pb.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the repo diff and split report without preparing or uploading.",
+    )
+    pb.set_defaults(func=_cmd_publish)
 
     # ── codebook ──────────────────────────────────────────────────
     c = sub.add_parser(

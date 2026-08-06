@@ -192,6 +192,53 @@ class TestPrepareParser:
         assert args.verify is True
 
 
+# ── publish subparser ───────────────────────────────────────────────
+
+
+class TestPublishParser:
+    """Argument parsing for the ``publish`` subcommand (PR 3 scope)."""
+
+    def test_publish_command_defaults(self):
+        """`publish config.toml` parses with all flags defaulting."""
+        args = cli._build_parser().parse_args(["publish", "config.toml"])
+        assert args.command == "publish"
+        assert args.config == "config.toml"
+        assert args.target == "hf"
+        assert args.output is None
+        assert args.force is False
+        assert args.keep_csv is False
+        assert args.dry_run is False
+        assert callable(args.func)
+
+    def test_publish_flags_parse(self):
+        """All publish flags parse together."""
+        args = cli._build_parser().parse_args(
+            [
+                "publish",
+                "c.toml",
+                "--target",
+                "local",
+                "--output",
+                "out/",
+                "--force",
+                "--keep-csv",
+                "--dry-run",
+            ]
+        )
+        assert args.target == "local"
+        assert args.output == "out/"
+        assert args.force is True
+        assert args.keep_csv is True
+        assert args.dry_run is True
+
+    def test_publish_invalid_target_rejected(self):
+        """An unsupported --target value raises SystemExit."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["publish", "c.toml", "--target", "s3"])
+
+
 # ── codebook placeholder validation ──────────────────────────────────────────
 
 
