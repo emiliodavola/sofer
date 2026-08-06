@@ -23,6 +23,7 @@ from .config import (
     CARD_FALLBACK_ROWS_PER_FILE,
     CARD_MODALITY_TAGS,
     PROBE_CHUNK_BYTES,
+    SCHEMA_DUP_THRESHOLD,
 )
 from .model import DatasetConfig
 
@@ -420,10 +421,17 @@ def build_schema_report(
     csv_encoding = csv_encoding or cfg.csv_encoding
     columns: list[ColumnSchema] = []
     seen_names: dict[str, tuple[str, int]] = {}
+    _dup_map: dict[str, list[str]] = {}
+    _had_potential_csv_entries = False
 
     for entry in cfg.files:
         remote = entry.remote.lower()
         if entry.recursive or not remote.endswith(".csv"):
+            continue
+
+        _had_potential_csv_entries = True
+
+        if not entry.include_in_schema:
             continue
 
         local = entry.resolve(base)
@@ -460,11 +468,7 @@ def build_schema_report(
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
                     prev_origin, _ = seen_names[col_name]
-                    print(
-                        f"  [!] Duplicate column '{col_name}' across files "
-                        f"({prev_origin}, {origin_name}); "
-                        f"using first occurrence."
-                    )
+                    _dup_map.setdefault(col_name, [prev_origin]).append(origin_name)
                     continue
                 else:
                     seen_names[col_name] = (origin_name, len(columns))
@@ -523,11 +527,7 @@ def build_schema_report(
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
                     prev_origin, _ = seen_names[col_name]
-                    print(
-                        f"  [!] Duplicate column '{col_name}' across files "
-                        f"({prev_origin}, {local.name}); "
-                        f"using first occurrence."
-                    )
+                    _dup_map.setdefault(col_name, [prev_origin]).append(local.name)
                     continue
                 else:
                     seen_names[col_name] = (local.name, len(columns))
@@ -573,6 +573,33 @@ def build_schema_report(
                         hf_dtype=hf_dtype,
                     )
                 )
+
+    if not columns and _had_potential_csv_entries:
+        print("  [!] All files excluded from schema (include_in_schema = false on every entry).")
+
+    if _dup_map:
+        n_dups = len(_dup_map)
+        if n_dups <= SCHEMA_DUP_THRESHOLD:
+            for col_name, origins in _dup_map.items():
+                prev_origin = origins[0]
+                for other_origin in origins[1:]:
+                    print(
+                        f"  [!] Duplicate column '{col_name}' across files "
+                        f"({prev_origin}, {other_origin}); "
+                        f"using first occurrence."
+                    )
+        else:
+            # Sort by frequency (most duplicated first), take top 5
+            top5 = sorted(_dup_map, key=lambda k: len(_dup_map[k]), reverse=True)[:5]
+            top5_str = ", ".join(top5)
+            print(
+                f"  [i] {n_dups} columns appear in multiple files. "
+                f"Most duplicated: {top5_str}.\n"
+                f"      This is normal for relational datasets where label/lookup tables "
+                f"share column names with data tables.\n"
+                f"      Tip: add `include_in_schema = false` to label file entries "
+                f"in dataset.toml to exclude them from the schema report."
+            )
 
     return columns
 

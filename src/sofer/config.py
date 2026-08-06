@@ -47,6 +47,7 @@ _DEFAULTS: dict[str, Any] = {
         "3d",
     ],
     "card_boolean_values": ["true", "false", "1", "0", "yes", "no"],
+    "schema_dup_threshold": 3,
 }
 
 
@@ -133,3 +134,5 @@ SNIFF_DELIMITERS: list[str] = _tool["sniff_delimiters"]
 CARD_FALLBACK_ROWS_PER_FILE: int = _tool["card_fallback_rows_per_file"]
 CARD_MODALITY_TAGS: list[str] = _tool["card_modality_tags"]
 CARD_BOOLEAN_VALUES: list[str] = _tool["card_boolean_values"]
+
+SCHEMA_DUP_THRESHOLD: int = _tool["schema_dup_threshold"]
