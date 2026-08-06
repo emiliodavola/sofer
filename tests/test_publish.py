@@ -21,7 +21,12 @@ import pyarrow.parquet as pq
 from sofer import publish as publish_mod
 from sofer.model import DatasetConfig, FileEntry
 from sofer.prepare import prepare
-from sofer.publish import _needs_prepare, publish
+from sofer.publish import (
+    _check_overwrite_protection,
+    _needs_prepare,
+    _repo_diff_summary,
+    publish,
+)
 
 # Fixed timestamps (seconds since epoch) with wide gaps so mtime comparisons
 # are immune to filesystem timestamp granularity.
@@ -474,3 +479,403 @@ class TestHfPublish:
         assert (staging_root / "assets" / "a.txt").is_file()
         assert (staging_root / "assets" / "nested" / "b.txt").is_file()
         assert (staging_root / "empty").is_dir()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Repo diff summary (moved from test_uploader, PR 4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRepoDiffSummary:
+    """_repo_diff_summary: planned files shown as ADDED or OVERWRITTEN."""
+
+    def test_empty_repo(self, tmp_path):
+        """An empty repo should show all files as new."""
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=data, remote="data.csv")])
+        summary = _repo_diff_summary(cfg, [], keep_csv=False)
+        assert "ADDED" in summary
+        assert "data.parquet" in summary
+        assert "README.md" in summary
+        assert "LICENSE" in summary
+
+    def test_existing_files_show_as_modified(self, tmp_path):
+        """Files already in the repo should show as OVERWRITTEN."""
+        cfg = _cfg(tmp_path, [])
+        summary = _repo_diff_summary(
+            cfg,
+            existing_files=["README.md", "LICENSE", "data.parquet"],
+            keep_csv=False,
+        )
+        assert "OVERWRITTEN" in summary
+        assert "README.md" in summary
+        assert "LICENSE" in summary
+
+    def test_repo_diff_summary_lists_codebook_remotes(self, tmp_path):
+        """_repo_diff_summary includes codebook remotes when provided (RC-C01)."""
+        cfg = _cfg(tmp_path, [FileEntry(local=tmp_path / "data.csv", remote="data.csv")])
+        codebook_remotes = ["codebooks/data.md", "codebook.md"]
+        summary = _repo_diff_summary(
+            cfg, existing_files=[], keep_csv=False, codebook_remotes=codebook_remotes
+        )
+        assert "codebooks/data.md" in summary
+        assert "codebook.md" in summary
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Overwrite protection (moved from test_uploader, PR 4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestOverwriteProtection:
+    """_check_overwrite_protection: README/LICENSE are auto-generated (PUB-05)."""
+
+    def test_force_skips_protection(self):
+        """With force=True, nothing is protected."""
+        protected = _check_overwrite_protection(
+            existing_files=["README.md", "LICENSE"],
+            force=True,
+        )
+        assert protected == set()
+
+    def test_not_force_but_no_existing(self):
+        """When files don't exist yet, nothing is protected."""
+        protected = _check_overwrite_protection(
+            existing_files=[],
+            force=False,
+        )
+        assert protected == set()
+
+    def test_not_force_non_interactive(self, monkeypatch):
+        """Auto-generated files bypass protection even in non-interactive mode."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["README.md", "LICENSE"],
+            force=False,
+        )
+        assert "readme.md" not in protected
+        assert "license" not in protected
+
+    def test_not_force_one_file_each(self, monkeypatch):
+        """README.md is auto-generated — never protected."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["README.md"],
+            force=False,
+        )
+        assert "readme.md" not in protected
+        assert "license" not in protected
+
+    def test_readme_always_uploaded_even_when_in_repo(self, monkeypatch):
+        """README.md in existing_files → never protected (auto-generated)."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["README.md"],
+            force=False,
+        )
+        assert "readme.md" not in protected
+
+    def test_license_always_uploaded_even_when_in_repo(self, monkeypatch):
+        """LICENSE in existing_files → never protected (auto-generated)."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["LICENSE"],
+            force=False,
+        )
+        assert "license" not in protected
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Batch staging (moved from test_uploader, PR 4) — PUB-01 staging contract
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBatchStaging:
+    """hf staging: mirror layout, single upload_folder call, NOT FOUND skip."""
+
+    def test_parquet_placed_in_remote_subdirs(self, tmp_path, monkeypatch):
+        """Converted Parquet files are staged at their remote-relative path,
+        not flat in the staging root."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data/PROV/data.csv")])
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        expected = staging_root / "data" / "PROV" / "data.parquet"
+        assert expected.is_file(), (
+            f"Expected {expected}, found files: {list(staging_root.rglob('*'))}"
+        )
+        assert not (staging_root / "data.parquet").exists(), (
+            "Parquet should NOT be flat in the staging root — it must mirror "
+            "the remote path"
+        )
+
+    def test_codebooks_staged_in_staging(self, tmp_path, monkeypatch):
+        """Codebooks from the prepared package + root index are staged."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out, all_files=True)  # parquet + codebooks/data.md + codebook.md
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert (staging_root / "codebooks" / "data.md").is_file()
+        assert (staging_root / "codebook.md").is_file()
+
+    def test_upload_folder_called_once(self, tmp_path, monkeypatch):
+        """_hf_upload_folder is called exactly once; _hf_upload is NOT."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        upload_folder_calls: list[tuple[Any, ...]] = []
+        upload_file_calls: list[tuple[Any, ...]] = []
+        orig_folder = publish_mod._hf_upload_folder
+        orig_file = publish_mod._hf_upload
+
+        def _track_folder(*args, **kwargs):
+            upload_folder_calls.append(args)
+            return orig_folder(*args, **kwargs)
+
+        def _track_file(*args, **kwargs):
+            upload_file_calls.append(args)
+            return orig_file(*args, **kwargs)
+
+        monkeypatch.setattr(publish_mod, "_hf_upload_folder", _track_folder)
+        monkeypatch.setattr(publish_mod, "_hf_upload", _track_file)
+
+        exit_code = publish(cfg, target="hf")
+        assert exit_code == 0
+        assert len(upload_folder_calls) == 1, (
+            f"Expected 1 upload_folder call, got {len(upload_folder_calls)}"
+        )
+        staging_root = Path(td) / "repo"
+        call_path = Path(upload_folder_calls[0][1]) if len(upload_folder_calls) > 0 else None
+        assert call_path == staging_root, f"Called with {call_path}, expected {staging_root}"
+        assert len(upload_file_calls) == 0, (
+            f"_hf_upload was called {len(upload_file_calls)} times — should be 0"
+        )
+
+    def test_not_found_files_skipped_in_staging(self, tmp_path, monkeypatch):
+        """Declared files missing on disk are reported, never staged."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        missing = tmp_path / "missing.csv"
+
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=csv, remote="data.csv"),
+                FileEntry(local=missing, remote="missing.csv"),
+            ],
+        )
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        data_files = [
+            str(f.relative_to(staging_root))
+            for f in staging_root.rglob("*")
+            if f.is_file()
+        ]
+        assert any("data" in f for f in data_files), f"data file not staged: {data_files}"
+        missing_files = [f for f in data_files if "missing" in f]
+        assert missing_files == [], f"NOT FOUND file was staged: {missing_files}"
+
+    def test_non_csv_files_copied_to_staging(self, tmp_path, monkeypatch):
+        """Non-CSV files (e.g. .parquet) keep their remote path in staging."""
+        parquet_file = tmp_path / "direct.parquet"
+        pq.write_table(pa.table({"x": [1, 2, 3]}), parquet_file)
+
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=parquet_file, remote="subdir/direct.parquet")],
+        )
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        expected = staging_root / "subdir" / "direct.parquet"
+        assert expected.is_file(), (
+            f"Expected {expected}, found: {list(staging_root.rglob('*'))}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  README override end-to-end (moved from test_uploader, PR 4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReadmeOverride:
+    """cfg.readme flows prepare → publish: the custom card is delivered."""
+
+    def test_readme_file_used_when_set(self, tmp_path, monkeypatch):
+        """Custom README content is generated by prepare and staged by publish."""
+        custom_readme = tmp_path / "CUSTOM_README.md"
+        custom_readme.write_text("# My Custom Dataset\n\nCustom content.", encoding="utf-8")
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="data.csv")],
+            readme=str(custom_readme),
+        )
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        readme = staging_root / "README.md"
+        assert readme.is_file(), "README.md missing from staging_root"
+        content = readme.read_text(encoding="utf-8")
+        assert "My Custom Dataset" in content
+        assert "Custom content" in content
+
+    def test_readme_fallback_when_file_missing(self, tmp_path, monkeypatch):
+        """A missing cfg.readme falls back to the generated Dataset Card."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="data.csv")],
+            readme="nonexistent.md",
+        )
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        readme = staging_root / "README.md"
+        assert readme.is_file(), "README.md missing from staging_root"
+        assert "Dataset Card for test" in readme.read_text(encoding="utf-8")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Codebook upload (moved from test_uploader, PR 4) — RC-C01 / PUB-05
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCodebookUpload:
+    """Codebooks from the prepared package are staged under codebooks/."""
+
+    def test_codebook_uploaded_to_codebook_subpath(self, tmp_path, monkeypatch):
+        """Per-file codebooks and root index staged with correct paths."""
+        csv = tmp_path / "DPTO.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="DPTO.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out, all_files=True)  # generates codebooks/DPTO.md + codebook.md
+        (out / "codebooks" / "PROV.md").write_text("# PROV codebook", encoding="utf-8")
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert staging_root.is_dir()
+        assert (staging_root / "codebooks" / "DPTO.md").is_file()
+        assert (staging_root / "codebooks" / "PROV.md").is_file()
+        assert (staging_root / "codebook.md").is_file()
+        assert (staging_root / "DPTO.parquet").is_file(), "data file missing from staging"
+
+    def test_legacy_codebook_not_uploaded(self, tmp_path, monkeypatch):
+        """cfg.codebook declared in TOML is ignored; RC-C01 supersedes it."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        legacy_cb = tmp_path / "old_codebook.md"
+        legacy_cb.write_text("# Legacy — should be ignored", encoding="utf-8")
+
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="data.csv")],
+            codebook=str(legacy_cb),  # legacy path — RC-C01 ignores it
+        )
+        out = tmp_path / "build"
+        prepare(cfg, out, all_files=True)
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert (staging_root / "codebooks" / "data.md").is_file()
+        assert (staging_root / "codebook.md").is_file()
+        assert not (staging_root / "old_codebook.md").exists()
+        assert not (staging_root / "codebook" / "old_codebook.md").exists()
+
+    def test_codebook_upload_order_data_first(self, tmp_path, monkeypatch):
+        """Data and codebooks are staged together (single upload_folder call)."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out, all_files=True)
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert (staging_root / "data.parquet").is_file(), "Data file missing from staging"
+        assert (staging_root / "codebooks" / "data.md").is_file(), "Codebook missing"
+        assert (staging_root / "codebook.md").is_file(), "Root index missing"
+
+    def test_root_index_uploaded_as_codebook_md(self, tmp_path, monkeypatch):
+        """The prepared codebook.md is staged as codebook.md in the repo root."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out, all_files=True)
+        (out / "codebook.md").write_text("# Root index content", encoding="utf-8")
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        root_idx = staging_root / "codebook.md"
+        assert root_idx.is_file(), f"Missing: {root_idx}"
+        assert root_idx.read_text(encoding="utf-8") == "# Root index content"
