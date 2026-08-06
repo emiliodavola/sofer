@@ -7,6 +7,7 @@ import yaml
 
 from sofer.config import SCHEMA_DUP_THRESHOLD
 from sofer.model import DatasetConfig, FileEntry
+from sofer.publish import publish
 from sofer.repo_compliance import (
     _SIZE_CATEGORIES,
     ColumnSchema,
@@ -361,22 +362,39 @@ class TestBuildDatasetCard:
         assert "@article{key}" in result
 
 
-# ── TestUploadCompliance (mocked integration) ─────────────────────────────────
+# ── TestPublishCompliance (mocked integration) ────────────────────────────────
 
 
-class TestUploadCompliance:
-    """Upload orchestration — compliance call order, tempdir cleanup, error prop."""
+class TestPublishCompliance:
+    """Publish orchestration — compliance staging, tempdir cleanup, error prop."""
 
     def _mock_hf_api(self, monkeypatch):
-        """Mock huggingface_hub API calls used by uploader."""
-        from sofer import uploader
+        """Mock huggingface_hub API calls used by publish."""
+        from sofer import publish as publish_mod
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
-    def test_compliance_called_before_upload(self, tmp_path, monkeypatch):
-        """Compliance functions should be called — verify via mocked tracking."""
-        from sofer import uploader
+    def _staging(self, tmp_path, monkeypatch, keep: bool = False):
+        """Point tempfile.mkdtemp at tmp_path/_staging.
+
+        With *keep* = True, rmtree is a no-op so the staged tree can be
+        asserted after publish returns; otherwise the real cleanup runs.
+        """
+        import shutil as _shutil
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        if keep:
+            monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+        return td
+
+    def test_publish_completes_and_cleans_tempdir(self, tmp_path, monkeypatch):
+        """publish returns 0 and the staging tempdir is cleaned up."""
+        from sofer.prepare import prepare as run_prepare
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -388,15 +406,13 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
+        out = tmp_path / "build"
+        run_prepare(cfg, out)  # build first so auto-prepare stays quiet
+
         self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        result = uploader.upload(cfg)
+        result = publish(cfg, target="hf")
         assert result == 0
         # Tempdir was cleaned up (success path)
         assert not td.exists()
@@ -404,9 +420,7 @@ class TestUploadCompliance:
     def test_upload_order_readme_license_data(self, tmp_path, monkeypatch):
         """All files (README, LICENSE, data) are staged together in staging_root
         for batch upload."""
-        import shutil
-
-        from sofer import uploader
+        from sofer.prepare import prepare as run_prepare
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -418,17 +432,13 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
-        monkeypatch.setattr(shutil, "rmtree", lambda p, **kw: None)
+        out = tmp_path / "build"
+        run_prepare(cfg, out)
 
-        import tempfile
+        self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch, keep=True)
 
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
+        publish(cfg, target="hf")
 
         staging_root = td / "repo"
         assert (staging_root / "README.md").is_file(), "README.md missing"
@@ -439,8 +449,8 @@ class TestUploadCompliance:
         assert len(parquet_files) >= 1, "No .parquet file found in staging"
 
     def test_tempdir_cleanup_on_success(self, tmp_path, monkeypatch):
-        """Temp directory should be cleaned up after successful upload."""
-        from sofer import uploader
+        """Temp directory should be cleaned up after successful publish."""
+        from sofer.prepare import prepare as run_prepare
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -452,20 +462,19 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
+        out = tmp_path / "build"
+        run_prepare(cfg, out)
+
         self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
+        publish(cfg, target="hf")
         assert not td.exists()
 
     def test_tempdir_cleanup_on_exception(self, tmp_path, monkeypatch):
-        """Temp directory should be cleaned up even when compliance raises."""
-        from sofer import uploader
+        """Temp directory should be cleaned up even when prepare raises
+        during auto-prepare (the exception propagates through publish)."""
+        from sofer import prepare as prepare_mod
 
         cfg = DatasetConfig(
             name="test",
@@ -475,29 +484,24 @@ class TestUploadCompliance:
         )
 
         self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        # Make build_license_file raise (happens AFTER tempdir is created)
+        # Make build_license_file raise (happens AFTER the temp dir is created)
         def _raise_boom(_lic):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(uploader, "build_license_file", _raise_boom)
+        monkeypatch.setattr(prepare_mod, "build_license_file", _raise_boom)
 
         try:
-            uploader.upload(cfg)
+            publish(cfg, target="hf")
         except RuntimeError:
             pass
 
         assert not td.exists()
 
     def test_schema_exception_propagates(self, tmp_path, monkeypatch):
-        """Exception from build_schema_report should propagate to caller."""
-        from sofer import uploader
+        """Exception from build_schema_report propagates to the caller."""
+        from sofer import prepare as prepare_mod
 
         cfg = DatasetConfig(
             name="test",
@@ -509,17 +513,12 @@ class TestUploadCompliance:
         def failing_schema(*a, **kw):
             raise ValueError("bad csv")
 
-        monkeypatch.setattr(uploader, "build_schema_report", failing_schema)
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        monkeypatch.setattr(prepare_mod, "build_schema_report", failing_schema)
+        self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
         with pytest.raises(ValueError, match="bad csv"):
-            uploader.upload(cfg)
+            publish(cfg, target="hf")
 
         assert not td.exists()
 
