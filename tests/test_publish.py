@@ -633,6 +633,25 @@ class TestBatchStaging:
         assert (staging_root / "codebooks" / "data.md").is_file()
         assert (staging_root / "codebook.md").is_file()
 
+    def test_no_codebooks_means_nothing_codebook_staged(self, tmp_path, monkeypatch):
+        """Negative path: when prepare ran without --all-files, publish stages
+        no codebook files at all (no codebooks/ dir, no root index)."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)  # no --all-files → no codebooks generated
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert not (staging_root / "codebooks").exists()
+        assert not (staging_root / "codebook.md").exists()
+
     def test_upload_folder_called_once(self, tmp_path, monkeypatch):
         """_hf_upload_folder is called exactly once; _hf_upload is NOT."""
         csv = tmp_path / "data.csv"

@@ -64,7 +64,6 @@ from .checks import DatasetValidator
 from .codebook import generate_all as generate_all_codebooks
 from .config import (
     CODEBOOKS_DIR,
-    DEFAULT_CONFIG_NAME,
     OUTPUT_ENCODING,
     PARQUET_COMPRESSION,
     PARQUET_ROW_GROUP_SIZE,
@@ -792,8 +791,7 @@ def prepare(
                 return 1
         else:
             print(
-                f"  i  Run `sofer codebook --all-files --config {DEFAULT_CONFIG_NAME}` "
-                f"to generate codebooks.",
+                "  i  Re-run with --all-files to generate codebooks into the output directory.",
                 file=sys.stderr,
             )
 

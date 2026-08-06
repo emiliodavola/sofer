@@ -253,7 +253,7 @@ class TestPrepareCodebooks:
         assert not (tmp_path / "cache").exists()
 
     def test_no_codebooks_without_all_files(self, tmp_path: Path, capsys) -> None:
-        """Without --all-files: no codebooks dir + advisory to run codebook cmd."""
+        """Without --all-files: no codebooks dir + advisory to re-run with flag."""
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
         cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
@@ -263,7 +263,7 @@ class TestPrepareCodebooks:
         captured = capsys.readouterr()
         assert rc == 0
         assert not (out / "codebooks").exists()
-        assert "sofer codebook" in captured.err
+        assert "--all-files" in captured.err
         assert not (tmp_path / "cache").exists()
 
 
