@@ -18,6 +18,8 @@ from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
 from .config import DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
+from .prepare import prepare as run_prepare
+from .prepare import resolve_output_dir
 from .quality import QualityValidator
 from .scanner import (
     EXCLUSIONS,
@@ -103,6 +105,38 @@ def _cmd_upload(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         verify_load=args.verify_load,
         quality_report=report,
+    )
+
+
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    """Validate the config, then generate the full dataset package locally.
+
+    Full flow:
+        1. Validate the TOML configuration itself.
+        2. Resolve the output directory (``--output`` or ``[dataset] build_dir``).
+        3. Run :func:`sofer.prepare.prepare` — CSV→Parquet conversion,
+           cross-file schema assertion, schema report, Dataset Card + LICENSE,
+           codebooks (``--all-files``), NOT FOUND report, optional
+           ``--verify``.  Zero network calls; ``--no-checks`` skips the
+           validators; ``--force`` allows overwriting existing artifacts.
+    """
+    cfg = DatasetConfig.from_toml(args.config)
+
+    config_errors = cfg.validate()
+    if config_errors:
+        print("\n  \u2717  Configuration errors \u2014 fix before preparing:")
+        for e in config_errors:
+            print(f"     \u2717  {e}")
+        return 1
+
+    output_dir = resolve_output_dir(cfg, args.output)
+    return run_prepare(
+        cfg,
+        output_dir,
+        all_files=args.all_files,
+        no_checks=args.no_checks,
+        force=args.force,
+        verify=args.verify,
     )
 
 
@@ -406,6 +440,55 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Test end-to-end loadability with datasets.load_dataset() after staging.",
     )
     u.set_defaults(func=_cmd_upload)
+
+    # ── prepare ───────────────────────────────────────────────────
+    p = sub.add_parser(
+        "prepare",
+        help="Generate the full dataset package locally (Parquet, card, LICENSE, codebooks).",
+        description=(
+            "Generate every artifact that makes up a dataset package on the "
+            "local machine: CSV-to-Parquet conversion, cross-file schema "
+            "checks, a schema report, the Dataset Card (README.md) and "
+            "LICENSE, and - with --all-files - codebooks.  This command "
+            "never contacts Hugging Face and needs no credentials.\n"
+            "\n"
+            "Artifacts are written to --output DIR (default: the dataset's "
+            "[dataset] build_dir, usually build/).  Existing generated "
+            "artifacts block the run unless --force is given."
+        ),
+    )
+    p.add_argument("config", help="Path to the .toml configuration file.")
+    p.add_argument(
+        "--output",
+        help="Output directory (default: [dataset] build_dir from the TOML, usually build/).",
+    )
+    p.add_argument(
+        "--all-files",
+        action="store_true",
+        help="Also generate per-file codebooks directly into the output directory.",
+    )
+    p.add_argument(
+        "--no-checks",
+        action="store_true",
+        help=(
+            "Skip the structural and quality validation report "
+            "(checks run by default, non-blocking)."
+        ),
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing generated artifacts in the output directory.",
+    )
+    p.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run datasets.load_dataset() against the generated package and "
+            "print PASSED/FAILED (non-blocking)."
+        ),
+    )
+    p.set_defaults(func=_cmd_prepare)
 
     # ── codebook ──────────────────────────────────────────────────
     c = sub.add_parser(

@@ -122,7 +122,7 @@ def test_main_help_prints(monkeypatch):
         assert e.code == 0
 
 
-# ── Force flag ─────────────────────────────────────────────────────────────────
+# ── upload subparser ─────────────────────────────────────────────────
 
 
 class TestUploadForceFlag:
@@ -153,6 +153,45 @@ class TestUploadForceFlag:
         assert args.keep_csv is True
 
 
+# ── prepare subparser ───────────────────────────────────────────────
+
+
+class TestPrepareParser:
+    """Argument parsing for the ``prepare`` subcommand (PR 2 scope)."""
+
+    def test_prepare_command_defaults(self):
+        """`prepare config.toml` parses with all flags defaulting."""
+        args = cli._build_parser().parse_args(["prepare", "config.toml"])
+        assert args.command == "prepare"
+        assert args.config == "config.toml"
+        assert args.output is None
+        assert args.all_files is False
+        assert args.no_checks is False
+        assert args.force is False
+        assert args.verify is False
+        assert callable(args.func)
+
+    def test_prepare_flags_parse(self):
+        """All prepare flags parse together."""
+        args = cli._build_parser().parse_args(
+            [
+                "prepare",
+                "c.toml",
+                "--output",
+                "out/",
+                "--all-files",
+                "--no-checks",
+                "--force",
+                "--verify",
+            ]
+        )
+        assert args.output == "out/"
+        assert args.all_files is True
+        assert args.no_checks is True
+        assert args.force is True
+        assert args.verify is True
+
+
 # ── codebook placeholder validation ──────────────────────────────────────────
 
 
@@ -173,9 +212,7 @@ class TestCodebookPlaceholderValidation:
             encoding="utf-8",
         )
 
-        rc = cli._cmd_codebook(
-            Namespace(all_files=True, config=str(toml_path), csv=None)
-        )
+        rc = cli._cmd_codebook(Namespace(all_files=True, config=str(toml_path), csv=None))
         assert rc == 1
         captured = capsys.readouterr()
         assert "placeholder" in captured.err.lower()
