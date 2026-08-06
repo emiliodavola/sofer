@@ -477,7 +477,7 @@ for the Dataset Card's Codebook table.
 
 ```
 GIVEN a DatasetConfig with one CSV file entry "survey.csv"
-  AND upload(cfg) is called
+  AND prepare(cfg) is called, producing the staging directory
   AND conversion succeeds (survey.parquet is in staging_dir)
 WHEN build_schema_report(cfg, staging_dir=tmpdir) is called
 THEN the function SHALL read survey.parquet from staging_dir
@@ -597,291 +597,6 @@ When all configured files have `include_in_schema = false`, `build_schema_report
 
 ## 4. Pipeline orchestration
 
-### 4.1 `uploader.upload()` changes
-
-The `upload()` function in `src/sofer/uploader.py` SHALL be modified to
-call the compliance module **after** validation passes and **before** pushing any
-files to Hugging Face Hub. When Parquet conversion is enabled, the conversion
-step SHALL run **before** compliance so `build_schema_report` reads the
-converted Parquet files.
-
-New sequence inside `upload()`:
-
-```
-1. _ensure_repo(cfg)             # same as today
-2. VALIDATION:                   # remote paths, overwrite protection, diff summary
-3. CONVERSION:                   # runs before compliance
-   convert CSVs to Parquet in tmpdir
-4. COMPLIANCE:                   # reads Parquet when available
-   a. schema = build_schema_report(cfg, staging_dir=tmpdir)
-   b. readme  = build_dataset_card(cfg, schema)
-   c. license = build_license_file(cfg.license)
-5. STAGING:                      # mirror HF repo layout under staging_root/
-   a. Copy converted Parquet files to staging_root/<remote-path>/
-   b. Copy non-converted files to staging_root/<remote>/
-   c. Move compliance files (README.md, LICENSE) to staging_root/
-   d. Copy codebooks to staging_root/codebooks/ and staging_root/codebook.md
-6. BATCH UPLOAD:                 # single atomic upload
-   HfApi.upload_folder(staging_root, ...)
-```
-
-#### 4.1.1 Staging strategy — mirror HF repository structure
-
-The staging directory `tmpdir` SHALL contain a subdirectory `repo/` (staging_root)
-that mirrors the HF repository layout. ALL files — data (.parquet), compliance
-(README.md, LICENSE), codebooks, and original CSVs (keep_csv mode) — SHALL be
-staged under `staging_root/` with their exact remote-relative paths before the
-single `upload_folder()` call.
-
-| File type | Staging path | Example |
-|-----------|-------------|---------|
-| Converted Parquet | `staging_root/<remote-path>/*.parquet` | `staging_root/data/PROV/train.parquet` |
-| Non-converted files | `staging_root/<remote>` | `staging_root/data/direct.parquet` |
-| Compliance | `staging_root/README.md`, `staging_root/LICENSE` | (root) |
-| Codebooks | `staging_root/codebooks/<relative-path>.md` | `staging_root/codebooks/DPTO.md` |
-| Root codebook index | `staging_root/codebook.md` | (root) |
-| Original CSVs (keep_csv) | `staging_root/<original-remote>` | `staging_root/data/PROV/train.csv` |
-
-The temporary directory SHALL be cleaned up after upload regardless of success
-or failure (use `try/finally` with `shutil.rmtree`).
-
-##### Requirement: tmpdir mirrors the HF repository structure
-
-The staging directory `tmpdir` SHALL contain ALL files to be uploaded, organized
-with the same directory structure they will have on the Hugging Face Hub. Data
-files go in their remote-relative paths, compliance files at root, and codebooks
-under `codebooks/`.
-
-###### Scenario: tmpdir structure matches remote layout
-
-- GIVEN a DatasetConfig with `remote = "data/PROV/train.csv"` and `remote = "data/DPTO/train.csv"`
-- AND both CSV files are converted to .parquet
-- WHEN staging is complete
-- THEN `tmpdir/repo/data/PROV/train.parquet` SHALL exist
-- AND `tmpdir/repo/data/DPTO/train.parquet` SHALL exist
-- AND `tmpdir/repo/README.md` SHALL exist
-- AND `tmpdir/repo/LICENSE` SHALL exist
-
-#### 4.1.2 Batch upload via `upload_folder`
-
-Instead of uploading files individually via `HfApi.upload_file()`, all staged
-files SHALL be uploaded in a single `HfApi.upload_folder(staging_root,
-repo_id=cfg.repo_id, repo_type=cfg.repo_type, path_in_repo="")` call. The
-`upload_folder` function is resumable — interrupted uploads skip already-uploaded
-files on retry. A built-in progress bar (via `hf_xet`) replaces individual
-per-file progress lines.
-
-#### 4.1.3 User feedback
-
-The pre-upload diff summary and post-upload split report SHALL remain unchanged.
-During upload, `upload_folder`'s built-in progress bar provides the status.
-Counters SHALL report the number of staged files:
-- On success: `ok = N` (files staged), `fail = 0`, return 0
-- On failure: `ok = 0`, `fail = N`, return 1
-- On zero staged files (`N = 0`): return 0
-
-```
-  ...
-  ↑  repo/  →  (root)
-  ✓  repo/
-  ...
-  ============================================================
-  Result: 132 uploaded, 0 failed
-  ============================================================
-```
-
-Files that do not exist on disk at staging time SHALL be reported as NOT FOUND
-and skipped — they are never uploaded.
-
-#### 4.1.4 Scenarios
-
-**Normal upload with batch staging**
-
-```
-GIVEN a valid DatasetConfig with license="cc0-1.0" and
-      two CSV file entries
-WHEN upload(cfg) is called
-THEN build_schema_report SHALL be called first
-  AND build_dataset_card SHALL be called with the schema
-  AND build_license_file SHALL be called with "cc0-1.0"
-  AND all files SHALL be staged in staging_root mirroring HF layout
-  AND HfApi.upload_folder(staging_root, …) SHALL be called exactly once
-  AND NO individual HfApi.upload_file() calls SHALL be made for staged files
-  AND the function SHALL return 0
-```
-
-**Batch upload failure**
-
-```
-GIVEN staged files are ready in staging_root/
-WHEN HfApi.upload_folder() raises an exception
-THEN the error SHALL be printed
-  AND fail counter SHALL be set to staged file count
-  AND the function SHALL return 1
-  AND the tmpdir SHALL be cleaned up
-```
-
-**Dry-run does NOT stage or upload**
-
-```
-GIVEN a valid DatasetConfig and dry_run=True
-WHEN upload(cfg, dry_run=True) is called
-THEN _repo_diff_summary and _check_overwrite_protection SHALL run as before
-  AND NO files SHALL be uploaded
-  AND NO upload_folder() or upload_file() calls SHALL be made
-  AND the function SHALL return 0
-```
-
-**Compliance failure — schema raises**
-
-```
-GIVEN a DatasetConfig pointing to a CSV with an unreadable encoding
-WHEN upload(cfg) is called
-THEN the exception SHALL propagate to the caller
-  AND no files SHALL be uploaded to HF
-  AND the temp directory SHALL be cleaned up
-```
-
-**Compliance with no license declared**
-
-```
-GIVEN a DatasetConfig with license="" (empty)
-WHEN upload(cfg) is called
-THEN build_license_file("") SHALL return a fallback message
-  AND that message SHALL be written to LICENSE
-  AND the upload SHALL proceed normally (no error)
-```
-
-**Parquet conversion before compliance**
-
-```
-GIVEN a DatasetConfig with one CSV file entry
-WHEN upload(cfg) is called
-THEN conversion SHALL run BEFORE build_schema_report
-  AND build_schema_report SHALL receive staging_dir=tmpdir
-  AND the schema SHALL be read from the converted Parquet file
-```
-
----
-
-### 4.2 Codebook Batch Staging (RC-C01)
-
-The `upload()` orchestration SHALL copy generated codebook artifacts into
-`staging_root/` preserving their remote path structure. The root index
-`codebook.md` in the config directory SHALL be copied to
-`staging_root/codebook.md`. Every per-file codebook under `data/codebooks/`
-SHALL be copied mirroring its relative path under a `codebooks/` prefix
-(e.g. `data/codebooks/DPTO.md` → `staging_root/codebooks/DPTO.md`;
-`data/codebooks/Labels/etiquetas_a.md` → `staging_root/codebooks/Labels/etiquetas_a.md`).
-Codebooks SHALL be uploaded as part of the single `HfApi.upload_folder()` call,
-NOT via individual `HfApi.upload_file()` calls.
-
-A missing root index or missing `data/codebooks/` directory SHALL be skipped
-without failing the upload. When no codebooks exist, an advisory message to
-run `sofer codebook --all-files` SHALL be printed to stderr, but the upload
-SHALL proceed normally for all other files.
-
-The legacy single-file `cfg.codebook` upload (to `codebook/{name}`) is
-superseded: when per-file codebooks are present, they SHALL be staged and
-uploaded using this new batch convention.
-
-#### 4.2.1 Scenarios
-
-**Codebooks staged and uploaded in batch**
-
-```
-GIVEN generated `codebook.md` and `data/codebooks/DPTO.md` on disk
-WHEN upload(cfg) is called
-THEN codebook.md SHALL be copied to staging_root/codebook.md
-  AND data/codebooks/DPTO.md SHALL be copied to staging_root/codebooks/DPTO.md
-  AND HfApi.upload_folder(staging_root, …) SHALL include both codebook files
-  AND NO individual HfApi.upload_file() calls SHALL be made for codebooks
-  AND upload(cfg) SHALL return 0
-```
-
-**No codebooks generated — upload proceeds**
-
-```
-GIVEN no `codebook.md` and no `data/codebooks/` directory on disk
-WHEN upload(cfg) is called
-THEN the advisory message to run `sofer codebook --all-files` SHALL print
-  AND the upload SHALL proceed with only data and compliance files staged
-  AND upload(cfg) SHALL return 0
-```
-
-**Declared single codebook is superseded**
-
-```
-GIVEN cfg.codebook = "codebook.md" in the TOML
-WHEN upload(cfg) is called with generated codebooks present
-THEN the generated root index and per-file codebooks SHALL be staged and
-  uploaded per the RC-C01 batch convention
-  AND the legacy `codebook/{name}` single-file upload SHALL NOT occur
-```
-
----
-
-### 4.3 Overwrite Protection Bypass for Auto-Generated Files (RC-C02)
-
-The upload pipeline SHALL always overwrite auto-generated compliance files on the
-Hugging Face Hub without interactive confirmation. These files are programmatically
-produced by `upload()` and are never hand-authored, so protecting them from overwrite
-adds friction with no user benefit.
-
-The auto-generated set SHALL consist of:
-
-| File / Pattern | Check |
-|----------------|-------|
-| `README.md` | Exact match (lowercased) |
-| `LICENSE` | Exact match (lowercased) |
-| `codebook.md` (root index) | Exact match (lowercased) |
-| `codebooks/**/*.md` (per-file RC-C01) | Path prefix `codebooks/` |
-
-When any of these files already exist on the Hub, the upload SHALL proceed without
-prompting the user, even when `force=False`.
-
-#### 4.3.1 Scenarios
-
-**README.md always uploaded even when it already exists on Hub**
-
-- GIVEN `existing_files` on Hub includes `README.md`
-- AND `force=False`
-- WHEN `upload(cfg)` is called
-- THEN `_check_overwrite_protection` SHALL NOT include `readme.md` in its protected set
-- AND `README.md` SHALL be uploaded unconditionally
-
-**LICENSE always uploaded even when it already exists on Hub**
-
-- GIVEN `existing_files` on Hub includes `LICENSE`
-- AND `force=False`
-- WHEN `upload(cfg)` is called
-- THEN `_check_overwrite_protection` SHALL NOT include `license` in its protected set
-- AND `LICENSE` SHALL be uploaded unconditionally
-
-**Root codebook index always uploaded when it exists on Hub**
-
-- GIVEN `existing_files` on Hub includes `codebook.md`
-- AND the local `codebook.md` exists on disk
-- WHEN `upload(cfg)` is called
-- THEN `codebook.md` SHALL be uploaded without overwrite protection
-
-**Per-file codebooks always uploaded when they exist on Hub**
-
-- GIVEN `existing_files` on Hub includes `codebooks/DPTO.md`
-- AND `data/codebooks/DPTO.md` exists locally
-- WHEN `upload(cfg)` is called
-- THEN `codebooks/DPTO.md` SHALL be uploaded without overwrite protection
-
-**Advisory printed when codebooks are missing locally**
-
-- GIVEN `codebook.md` does NOT exist on disk
-- AND `data/codebooks/` directory is absent or empty
-- WHEN `upload(cfg)` is called
-- THEN the function SHALL print a message advising to run `sofer codebook --all-files`
-- AND the upload SHALL proceed normally for all other files (no error)
-
----
-
 ### 4.4 Placeholder Rejection in Validation (RC-R01)
 
 The `validate()` function SHALL reject `repo_id` values containing known
@@ -926,6 +641,38 @@ match any placeholder pattern SHALL continue to pass validation unchanged.
 - THEN `validate()` SHALL be called before `generate_all_codebooks()`
 - AND the command SHALL exit with code 1
 - AND the error message SHALL print to stderr
+
+---
+
+### 4.5 Recursive entries stage correctly (RC-R04)
+
+Staging SHALL handle `recursive = true` entries without crashing. A
+`recursive` entry pointing to a directory SHALL have its tree staged under the
+entry's remote prefix by copying each file individually (or via
+`shutil.copytree`); the directory itself SHALL NEVER be passed to
+`shutil.copy2`. Passing a directory to `shutil.copy2` raises `PermissionError`
+on Windows and `IsADirectoryError` on POSIX — this MUST NOT occur. Empty
+directories SHALL stage zero files without error.
+
+#### Scenario: Recursive directory stages its files
+
+- GIVEN a `[[file]]` entry with `recursive = true` pointing to a directory containing `train.csv` and `test.csv`
+- WHEN the staging step runs
+- THEN both files SHALL be staged under the entry's remote prefix
+- AND no exception SHALL be raised
+
+#### Scenario: Nested subdirectories preserved
+
+- GIVEN a recursive directory containing `Labels/etiquetas_a.csv`
+- WHEN the staging step runs
+- THEN `Labels/etiquetas_a.csv` SHALL be staged under the remote prefix
+
+#### Scenario: Empty recursive directory is a no-op
+
+- GIVEN a `recursive` entry pointing to an empty directory
+- WHEN the staging step runs
+- THEN zero files SHALL be staged
+- AND no exception SHALL be raised
 
 ---
 
