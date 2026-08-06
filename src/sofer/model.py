@@ -26,6 +26,10 @@ QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
     }
 )
 
+_PLACEHOLDERS: frozenset[str] = frozenset(
+    {"your_user", "your_org", "your_organization", "your_username", "your-username"}
+)
+
 
 @dataclass
 class FileEntry:
@@ -437,6 +441,16 @@ class DatasetConfig:
             A list of error messages (empty = valid).
         """
         errors: list[str] = []
+
+        # placeholder detection
+        repo_user = self.repo_id.split("/")[0] if "/" in self.repo_id else ""
+        for placeholder in _PLACEHOLDERS:
+            if repo_user.lower() == placeholder:
+                errors.append(
+                    f"repo_id contains placeholder '{repo_user}'. "
+                    f"Replace it with your Hugging Face username."
+                )
+                break
 
         # repo_id format
         if not re.match(r"^[\w\-]+/[\w\-]+$", self.repo_id):
