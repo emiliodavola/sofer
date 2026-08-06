@@ -78,7 +78,7 @@ class TestCheckFlattenCollisions:
     def test_collision_raises_naming_sources(self) -> None:
         """Two files from different source dirs colliding on the same dest raise ValueError."""
         discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
-        with pytest.raises(ValueError, match="Collision in data/"):
+        with pytest.raises(ValueError, match="Collision in cache/"):
             check_flatten_collisions(discovered, Path("."))
 
     def test_collision_error_names_both_sources(self) -> None:

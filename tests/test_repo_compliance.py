@@ -2089,8 +2089,7 @@ class TestDuplicateWarningRouting:
         for i in range(3):
             f = tmp_path / f"f{i}.csv"
             f.write_text(
-                f"col_a;col_b;col_c;col_d;col_e;col_f;unique_{i}\n"
-                f"1;2;3;4;5;6;{i}\n",
+                f"col_a;col_b;col_c;col_d;col_e;col_f;unique_{i}\n1;2;3;4;5;6;{i}\n",
                 encoding="utf-8-sig",
             )
             files.append(FileEntry(local=f, remote=f"f{i}.csv"))

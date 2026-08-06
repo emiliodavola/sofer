@@ -20,7 +20,7 @@ def _cfg(files: list[FileEntry]) -> DatasetConfig:
 
 class TestPlannedRemotes:
     def test_csv_maps_to_parquet_without_keep_csv(self) -> None:
-        """An eligible CSV maps to its .parquet remote (mirror of uploader)."""
+        """An eligible CSV maps to its .parquet remote (mirror of publish)."""
         cfg = _cfg([FileEntry(local=Path("a.csv"), remote="a.csv")])
         assert planned_remotes(cfg, keep_csv=False) == ["a.parquet"]
 

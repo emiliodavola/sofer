@@ -439,6 +439,7 @@ class TestPrepareRecursiveStaging:
         assert (out / "subdir" / "top.csv").is_file()
         assert (out / "subdir" / "empty").is_dir()
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Cross-file schema assertion + card dtype sanity (moved from test_uploader, PR 4)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -673,7 +674,6 @@ class TestAssertCrossFileSchema:
         assert any("differ in dtypes" in e for e in errors)
 
 
-
 class TestSchemaAssertion:
     """_assert_card_dtypes_match_parquet should flag float64 vs int64 mismatches."""
 
@@ -794,4 +794,3 @@ class TestSchemaAssertion:
             sys.stdout = old_stdout
 
         assert "SCHEMA ASSERTION" not in output
-
