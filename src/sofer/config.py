@@ -16,7 +16,9 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: dict[str, Any] = {
-    "output_dir": "data",
+    # sofer artifact cache — ``data/`` stays reserved for raw source files
+    # (user decision for the prepare/publish split).
+    "output_dir": "cache",
     "default_config_name": "dataset.toml",
     "parquet_row_group_size": 100_000,
     "parquet_compression": "zstd",

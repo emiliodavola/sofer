@@ -130,8 +130,12 @@ def merge_entries(
     New entries are shaped as::
 
         [[file]]
-        local = "data/<flattened>"
+        local = "<output-dir>/<flattened>"
         remote = "<Posix flattened>"
+
+    where ``<output-dir>`` is *data_dir* expressed relative to *base_dir*
+    (e.g. ``cache/`` with the default OUTPUT_DIR), so the registered local
+    path always resolves back to the copy destination.
 
     The *raw_toml* dict is mutated in-place and also returned for convenience.
     All non-``[[file]]`` top-level keys (``[dataset]``, ``[meta]``, ``[[check]]``,
@@ -167,9 +171,16 @@ def merge_entries(
         if dest in existing:
             continue
 
+        # The registered local path mirrors the copy destination (data_dir /
+        # flat), expressed relative to base_dir so it survives relocation.
+        try:
+            local = (data_dir.relative_to(base_dir) / flat).as_posix()
+        except ValueError:  # data_dir outside base_dir → fall back to its name
+            local = f"{data_dir.name}/{flat.as_posix()}"
+
         file_entries.append(
             {
-                "local": "data/" + str(PurePosixPath(flat)),
+                "local": local,
                 "remote": str(PurePosixPath(flat)),
             }
         )

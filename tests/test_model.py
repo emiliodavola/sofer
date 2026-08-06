@@ -108,6 +108,24 @@ class TestFromToml:
         assert cfg.column_checks == []
         assert cfg.description == ""
 
+    def test_build_dir_defaults_to_build(self, tmp_path):
+        """A TOML without ``[dataset] build_dir`` defaults to ``"build"``."""
+        p = tmp_path / "minimal.toml"
+        p.write_text(SAMPLE_TOML_MINIMAL)
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.build_dir == "build"
+
+    def test_build_dir_custom_from_toml(self, tmp_path):
+        """``[dataset] build_dir`` is parsed into ``DatasetConfig.build_dir``."""
+        p = tmp_path / "custom.toml"
+        p.write_text(
+            '[dataset]\nname = "custom"\nrepo_id = "user/custom"\n'
+            'build_dir = "staging"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n'
+        )
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.build_dir == "staging"
+
     def test_file_entry_resolve_absolute(self):
         """An absolute local path should be returned as-is."""
         # Cross-platform absolute path: filesystem root + relative path

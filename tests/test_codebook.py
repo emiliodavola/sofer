@@ -523,7 +523,7 @@ class TestGenerateAll:
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
-        codebooks_dir = tmp_path / "data" / "codebooks"
+        codebooks_dir = tmp_path / "cache" / "codebooks"
         assert len(results) >= 3  # 2 per-file + root index
         assert (codebooks_dir / "a.md").exists()
         assert (codebooks_dir / "b.md").exists()
@@ -536,17 +536,17 @@ class TestGenerateAll:
     def test_root_index_has_correct_links(self, tmp_path):
         from sofer.model import DatasetConfig
 
-        sub = tmp_path / "data"
+        sub = tmp_path / "cache"
         sub.mkdir()
         (sub / "f.csv").write_text("col\n1\n", encoding="utf-8")
 
-        toml_path = _write_toml(tmp_path, ["data/f.csv"])
+        toml_path = _write_toml(tmp_path, ["cache/f.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
         generate_all(cfg)
 
         root = tmp_path / "codebook.md"
         content = root.read_text(encoding="utf-8")
-        # After fix: root index links are relative to data/, not base_dir
+        # Root index links are relative to the artifact cache, not base_dir
         assert "[`codebooks/f.md`](codebooks/f.md)" in content
         assert "1 columns" in content
 
@@ -554,11 +554,11 @@ class TestGenerateAll:
         """Root index should use codebooks/ prefix for nested subdirectories."""
         from sofer.model import DatasetConfig
 
-        sub = tmp_path / "data" / "Labels"
+        sub = tmp_path / "cache" / "Labels"
         sub.mkdir(parents=True)
         (sub / "etiquetas_a.csv").write_text("k;v\n1;2\n", encoding="utf-8")
 
-        toml_path = _write_toml(tmp_path, ["data/Labels/etiquetas_a.csv"])
+        toml_path = _write_toml(tmp_path, ["cache/Labels/etiquetas_a.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
         generate_all(cfg)
 
@@ -605,6 +605,55 @@ class TestGenerateAll:
         assert "directory" in captured.err.lower()
 
 
+class TestGenerateAllOutputDir:
+    """Option B (PRP-04): prepare writes codebooks directly into the output
+    directory, never mutating the shared cache/codebooks/."""
+
+    def _cfg_with(self, tmp_path, *rel_paths):
+        from sofer.model import DatasetConfig
+
+        for rel in rel_paths:
+            local = tmp_path / rel
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_text("col;val\n1;2\n", encoding="utf-8")
+        return DatasetConfig.from_toml(_write_toml(tmp_path, list(rel_paths)))
+
+    def test_output_dir_receives_codebooks_and_root_index(self, tmp_path):
+        """Codebooks land in output_dir/codebooks/ + output_dir/codebook.md;
+        cache/codebooks/ is never created (Option B isolation)."""
+        cfg = self._cfg_with(tmp_path, "cache/DPTO.csv", "cache/PROV.csv")
+
+        results = generate_all(cfg, output_dir=tmp_path / "build")
+
+        assert (tmp_path / "build" / "codebooks" / "DPTO.md").is_file()
+        assert (tmp_path / "build" / "codebooks" / "PROV.md").is_file()
+        root = tmp_path / "build" / "codebook.md"
+        assert root.is_file()
+        assert str(root) in results
+        # Shared cache untouched by the Option B path.
+        assert not (tmp_path / "cache" / "codebooks").exists()
+
+    def test_output_dir_root_index_links_are_build_relative(self, tmp_path):
+        """Root index links are relative to the output dir, not the cache."""
+        cfg = self._cfg_with(tmp_path, "cache/DPTO.csv", "cache/Labels/etiquetas_a.csv")
+
+        generate_all(cfg, output_dir=tmp_path / "build")
+
+        content = (tmp_path / "build" / "codebook.md").read_text(encoding="utf-8")
+        assert "[`codebooks/DPTO.md`](codebooks/DPTO.md)" in content
+        assert "[`codebooks/Labels/etiquetas_a.md`](codebooks/Labels/etiquetas_a.md)" in content
+
+    def test_default_mode_still_writes_cache(self, tmp_path):
+        """Without output_dir, codebooks still go to cache/codebooks/ + root index."""
+        cfg = self._cfg_with(tmp_path, "cache/DPTO.csv")
+
+        results = generate_all(cfg)
+
+        assert (tmp_path / "cache" / "codebooks" / "DPTO.md").is_file()
+        assert (tmp_path / "codebook.md").is_file()
+        assert len(results) == 2  # 1 per-file + root index
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Phase 4.5 — Edge case tests
 # ══════════════════════════════════════════════════════════════════════════════
@@ -615,7 +664,7 @@ class TestEdgeCases:
         """Two files with different extensions but same stem → ValueError, exit 1."""
         from sofer.model import DatasetConfig
 
-        sub = tmp_path / "data"
+        sub = tmp_path / "cache"
         sub.mkdir()
         (sub / "PROV.csv").write_text("a;b\n1;2\n", encoding="utf-8")
         (sub / "PROV.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
@@ -626,11 +675,11 @@ class TestEdgeCases:
             'repo_id = "u/test"',
             "",
             "[[file]]",
-            'local = "data/PROV.csv"',
+            'local = "cache/PROV.csv"',
             'remote = "PROV.csv"',
             "",
             "[[file]]",
-            'local = "data/PROV.tsv"',
+            'local = "cache/PROV.tsv"',
             'remote = "PROV.tsv"',
             "",
         ]
@@ -645,13 +694,13 @@ class TestEdgeCases:
         assert "PROV.csv" in captured.err
         assert "PROV.tsv" in captured.err
         # No codebook written for colliding files
-        assert not (tmp_path / "data" / "codebooks" / "PROV.md").exists()
+        assert not (tmp_path / "cache" / "codebooks" / "PROV.md").exists()
 
     def test_collision_partial_write_non_colliding(self, tmp_path, capsys):
         """Non-colliding codebooks are written; colliding ones are not; exit 1."""
         from sofer.model import DatasetConfig
 
-        sub = tmp_path / "data"
+        sub = tmp_path / "cache"
         sub.mkdir()
         (sub / "A.csv").write_text("x;y\n1;2\n", encoding="utf-8")
         (sub / "B.csv").write_text("p;q\n10;20\n", encoding="utf-8")
@@ -664,26 +713,26 @@ class TestEdgeCases:
             'repo_id = "u/test"',
             "",
             "[[file]]",
-            'local = "data/A.csv"',
+            'local = "cache/A.csv"',
             'remote = "A.csv"',
             "",
             "[[file]]",
-            'local = "data/B.csv"',
+            'local = "cache/B.csv"',
             'remote = "B.csv"',
             "",
             "[[file]]",
-            'local = "data/PROV.csv"',
+            'local = "cache/PROV.csv"',
             'remote = "PROV.csv"',
             "",
             "[[file]]",
-            'local = "data/PROV.tsv"',
+            'local = "cache/PROV.tsv"',
             'remote = "PROV.tsv"',
             "",
         ]
         (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
 
         cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
-        codebooks_dir = tmp_path / "data" / "codebooks"
+        codebooks_dir = tmp_path / "cache" / "codebooks"
 
         with pytest.raises(ValueError, match="Collision"):
             generate_all(cfg)
@@ -703,7 +752,7 @@ class TestEdgeCases:
         """Root codebook.md index is NOT generated when collision occurs."""
         from sofer.model import DatasetConfig
 
-        sub = tmp_path / "data"
+        sub = tmp_path / "cache"
         sub.mkdir()
         (sub / "DUP.csv").write_text("a;b\n1;2\n", encoding="utf-8")
         (sub / "DUP.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
@@ -714,11 +763,11 @@ class TestEdgeCases:
             'repo_id = "u/test"',
             "",
             "[[file]]",
-            'local = "data/DUP.csv"',
+            'local = "cache/DUP.csv"',
             'remote = "DUP.csv"',
             "",
             "[[file]]",
-            'local = "data/DUP.tsv"',
+            'local = "cache/DUP.tsv"',
             'remote = "DUP.tsv"',
             "",
         ]
@@ -730,35 +779,35 @@ class TestEdgeCases:
 
         assert not (tmp_path / "codebook.md").exists()
 
-    def test_rel_stem_under_data(self, tmp_path):
-        """rel-stem preserves nested directory structure under data/."""
+    def test_rel_stem_under_cache(self, tmp_path):
+        """rel-stem preserves nested directory structure under cache/."""
         from sofer.model import DatasetConfig
 
-        sub = tmp_path / "data" / "Labels"
+        sub = tmp_path / "cache" / "Labels"
         sub.mkdir(parents=True)
         (sub / "etiquetas.csv").write_text("k;v\n1;2\n", encoding="utf-8")
 
-        toml_path = _write_toml(tmp_path, ["data/Labels/etiquetas.csv"])
+        toml_path = _write_toml(tmp_path, ["cache/Labels/etiquetas.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
-        codebook_path = tmp_path / "data" / "codebooks" / "Labels" / "etiquetas.md"
+        codebook_path = tmp_path / "cache" / "codebooks" / "Labels" / "etiquetas.md"
         assert codebook_path.exists()
         assert str(codebook_path) in results
 
-    def test_rel_stem_outside_data(self, tmp_path):
-        """Files outside data/ fall back to relative_to(base_dir) for rel-stem."""
+    def test_rel_stem_outside_cache(self, tmp_path):
+        """Files outside cache/ fall back to relative_to(base_dir) for rel-stem."""
         from sofer.model import DatasetConfig
 
-        # File at project root, not under data/
+        # File at project root, not under cache/
         (tmp_path / "root_file.csv").write_text("x;y\n1;2\n", encoding="utf-8")
 
         toml_path = _write_toml(tmp_path, ["root_file.csv"])
         cfg = DatasetConfig.from_toml(toml_path)
         results = generate_all(cfg)
 
-        # Falls back to rel to base_dir → codebooks placed under data/codebooks/
-        codebook_path = tmp_path / "data" / "codebooks" / "root_file.md"
+        # Falls back to rel to base_dir → codebooks placed under cache/codebooks/
+        codebook_path = tmp_path / "cache" / "codebooks" / "root_file.md"
         assert codebook_path.exists()
         assert str(codebook_path) in results
 
@@ -913,7 +962,7 @@ class TestCodebookCLI:
 
     def test_codebook_cli_collision_exits_1(self, tmp_path, monkeypatch, capsys):
         """CLI catches ValueError from generate_all and exits 1 on collision."""
-        sub = tmp_path / "data"
+        sub = tmp_path / "cache"
         sub.mkdir()
         (sub / "DUP.csv").write_text("a;b\n1;2\n", encoding="utf-8")
         (sub / "DUP.tsv").write_text("x\ty\n10\t20\n", encoding="utf-8")
@@ -924,11 +973,11 @@ class TestCodebookCLI:
             'repo_id = "u/test"',
             "",
             "[[file]]",
-            'local = "data/DUP.csv"',
+            'local = "cache/DUP.csv"',
             'remote = "DUP.csv"',
             "",
             "[[file]]",
-            'local = "data/DUP.tsv"',
+            'local = "cache/DUP.tsv"',
             'remote = "DUP.tsv"',
             "",
         ]

@@ -59,7 +59,7 @@ python_functions = ["test_*"]
 
 [tool.sofer]
 # ── Scan defaults ──
-output_dir = "data"
+output_dir = "cache"
 default_config_name = "dataset.toml"
 
 # ── Parquet defaults ──
