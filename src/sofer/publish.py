@@ -1,0 +1,359 @@
+"""
+Delivery pipeline for a prepared dataset package (network + local).
+
+``publish`` takes the mirror-layout package produced by
+:func:`sofer.prepare.prepare` (the dataset's build directory) and delivers
+it to a target:
+
+- ``target="hf"`` (default): gates on the CLI-computed quality report
+  (failures block delivery before any network call), ensures the HF
+  repository exists, inspects it, prints a diff summary, applies overwrite
+  protection, stages the *planned artifacts only* from the output directory,
+  and pushes the whole tree with a single ``HfApi.upload_folder`` call
+  (PUB-01).  A post-upload split report is printed.
+- ``target="local"``: copies the package to ``--output`` with zero network
+  access; without ``--output``, prints an in-place package summary without
+  mutating anything (PUB-02).
+
+When the output directory has no Parquet files, or the TOML / any declared
+source file is newer than the newest Parquet, ``publish`` runs
+:func:`sofer.prepare.prepare` automatically first (PUB-03) — always with
+``force=True``, since regenerating into the same directory is expected.
+``--dry-run`` prints the diff and split report from the planned remotes and
+never prepares, copies, or touches the network (PUB-04).
+
+Orchestration flow (delivery half of the legacy ``uploader.upload``):
+
+    1. Resolve the source package directory (``prepare.resolve_output_dir``).
+    2. Auto-prepare when artifacts are stale or missing (PUB-03) — skipped
+       under ``--dry-run`` (PUB-04).
+    3. ``--dry-run``: diff summary + split-mapping validation + split report
+       from the planned remotes, then stop.
+    4. ``target="local"``: copy planned artifacts + compliance + codebooks
+       from the build directory to ``--output`` (or print the in-place
+       summary when ``--output`` is omitted).
+    5. ``target="hf"``: quality gate -> ``_ensure_repo`` -> ``_inspect_repo``
+       -> diff summary -> overwrite protection -> split-mapping validation
+       -> stage planned artifacts from the output directory -> single
+       ``_hf_upload_folder`` call -> post-upload split report.
+
+Delivery helpers (``_ensure_repo``, ``_inspect_repo``, ``_repo_diff_summary``,
+``_check_overwrite_protection``, ``_hf_upload_folder``, ``_print_split_report``,
+``_print_split_mapping_validation``) are imported unchanged from
+``uploader.py`` and will be moved here when the uploader is retired (PR 4).
+"""
+
+from __future__ import annotations
+
+import shutil
+import sys
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .checks import ValidationReport
+    from .model import DatasetConfig
+
+from ._mirror import copy_to_mirror, planned_remotes
+from .config import CODEBOOKS_DIR, DEFAULT_CONFIG_NAME
+from .prepare import prepare, resolve_output_dir
+from .splits import detect_splits
+from .uploader import (
+    _check_overwrite_protection,
+    _ensure_repo,
+    _hf_upload_folder,
+    _inspect_repo,
+    _print_split_mapping_validation,
+    _print_split_report,
+    _repo_diff_summary,
+)
+
+
+def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
+    """Return ``True`` when the package in *output_dir* is stale or missing.
+
+    The signal keys on *inputs*, never on hand-edited artifacts (PUB-03):
+    the package needs regenerating when
+
+    - the output directory has no ``.parquet`` files (existence fallback), or
+    - ``dataset.toml`` was modified after the newest Parquet, or
+    - any declared source file (all supported formats: CSV, TSV, Parquet,
+      Excel, JSONL) was modified after the newest Parquet.
+
+    Args:
+        cfg:        Dataset configuration.
+        output_dir: Prepared package directory being checked.
+
+    Returns:
+        ``True`` when ``prepare`` should regenerate the package.
+    """
+    parquets = sorted(output_dir.rglob("*.parquet"))
+    if not parquets:
+        return True
+    newest = max(p.stat().st_mtime for p in parquets)
+
+    base = cfg._base_dir if cfg._base_dir else Path.cwd()
+    toml_path = base / DEFAULT_CONFIG_NAME
+    if toml_path.is_file() and toml_path.stat().st_mtime > newest:
+        return True
+
+    sources = [e.resolve(base) for e in cfg.files if e.resolve(base).exists()]
+    if sources and max(s.stat().st_mtime for s in sources) > newest:
+        return True
+
+    return False
+
+
+def _collect_codebook_remotes(output_dir: Path) -> list[str]:
+    """Return the codebook remote paths present in *output_dir*.
+
+    Codebooks follow the mirror layout: per-file pages under
+    ``codebooks/**/*.md`` plus the root ``codebook.md`` index (RC-C01).
+    Used for the hf diff summary and the staged package.
+
+    Args:
+        output_dir: Prepared package directory (mirror layout root).
+
+    Returns:
+        Codebook remote paths, sorted.
+    """
+    remotes: list[str] = []
+    codebooks_dir = output_dir / CODEBOOKS_DIR
+    if codebooks_dir.is_dir():
+        for cb in sorted(codebooks_dir.rglob("*.md")):
+            remotes.append(cb.relative_to(output_dir).as_posix())
+    if (output_dir / "codebook.md").is_file():
+        remotes.append("codebook.md")
+    return remotes
+
+
+def _copy_package(
+    cfg: DatasetConfig,
+    source: Path,
+    dest: Path,
+    *,
+    keep_csv: bool,
+    protected: set[str] | None = None,
+) -> None:
+    """Copy the planned package from *source* to *dest*.
+
+    Stages only the planned artifacts (never a blanket copy): converted
+    Parquet mirror paths, non-converted / recursive trees, original CSVs at
+    their remote paths when *keep_csv* is ``True`` (PUB-07 — hf target only),
+    compliance files not skipped by overwrite protection, and any codebooks.
+
+    Args:
+        cfg:       Dataset configuration.
+        source:    Prepared package directory (mirror layout root).
+        dest:      Destination directory (staging root or local ``--output``).
+        keep_csv:  When ``True``, also copy original CSVs for converted
+                   entries at their remote paths.
+        protected: Lowercased remote names skipped by overwrite protection
+                   (``None`` = nothing skipped).
+    """
+    base = cfg._base_dir if cfg._base_dir else Path.cwd()
+    for entry in cfg.files:
+        if entry.recursive:
+            src = source / PurePosixPath(entry.remote.rstrip("/\\"))
+            if src.exists():
+                copy_to_mirror(src, dest, entry.remote)
+        elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
+            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            src = source / PurePosixPath(parquet_remote)
+            if src.exists():
+                copy_to_mirror(src, dest, parquet_remote)
+            if keep_csv:
+                csv_src = entry.resolve(base)
+                if csv_src.exists():
+                    copy_to_mirror(csv_src, dest, entry.remote)
+        else:
+            src = source / PurePosixPath(entry.remote)
+            if src.exists():
+                copy_to_mirror(src, dest, entry.remote)
+
+    skip = protected or set()
+    if "readme.md" not in skip:
+        src = source / "README.md"
+        if src.exists():
+            copy_to_mirror(src, dest, "README.md")
+    if "license" not in skip:
+        src = source / "LICENSE"
+        if src.exists():
+            copy_to_mirror(src, dest, "LICENSE")
+
+    codebooks_dir = source / CODEBOOKS_DIR
+    if codebooks_dir.is_dir():
+        for cb in sorted(codebooks_dir.rglob("*.md")):
+            copy_to_mirror(cb, dest, cb.relative_to(source).as_posix())
+    if (source / "codebook.md").is_file():
+        copy_to_mirror(source / "codebook.md", dest, "codebook.md")
+
+
+def _print_local_package_summary(cfg: DatasetConfig, source: Path) -> None:
+    """Print an in-place package summary without mutating anything (PUB-02).
+
+    When ``--target local`` is used without ``--output``, the package is
+    already assembled in the build directory — this reports what is there
+    and does not copy.
+
+    Args:
+        cfg:    Dataset configuration.
+        source: Prepared package directory (mirror layout root).
+    """
+    parquet_count = len(list(source.rglob("*.parquet")))
+    codebooks = _collect_codebook_remotes(source)
+    print("\n  Local target: package is already assembled in place:")
+    print(f"    {source}")
+    print(f"    Parquet files: {parquet_count}")
+    print(f"    README.md: {'yes' if (source / 'README.md').is_file() else 'no'}")
+    print(f"    LICENSE: {'yes' if (source / 'LICENSE').is_file() else 'no'}")
+    print(f"    Codebooks: {len(codebooks)}")
+    print()
+
+
+def publish(
+    cfg: DatasetConfig,
+    target: str = "hf",
+    output_dir: str | None = None,
+    force: bool = False,
+    verify: bool = False,
+    keep_csv: bool = False,
+    dry_run: bool = False,
+    quality_report: ValidationReport | None = None,
+) -> int:
+    """Deliver the prepared dataset package for *cfg* to *target*.
+
+    Full flow — see the module docstring for the orchestration walk-through.
+
+    Args:
+        cfg:           Dataset configuration.
+        target:        Delivery target: ``"hf"`` (Hugging Face Hub, default)
+                       or ``"local"`` (copy to ``--output``).
+        output_dir:    ``hf``: override the prepare output directory
+                       (default ``[dataset] build_dir``).  ``local``:
+                       destination directory for the package copy.
+        force:         When ``True``, skip overwrite protection on the hf
+                       target.
+        verify:        Accepted for signature compatibility; verification
+                       belongs to ``prepare`` (``prepare --verify``) and is
+                       never re-run after delivery.
+        keep_csv:      When ``True`` and a CSV was converted to Parquet, also
+                       deliver the original CSV at its remote path (hf
+                       target only — PUB-07).
+        dry_run:       When ``True``, print the diff and split report from the
+                       planned remotes only; never prepares, copies, or
+                       touches the network (PUB-04).
+        quality_report: Optional pre-computed quality validation report.
+                        When provided and failing, hf delivery is blocked
+                        before any network call (PUB-01).
+
+    Returns:
+        Exit code (``0`` success, ``1`` quality-gate failure, prepare
+        failure, or hf upload failure).
+    """
+    # For the hf target this is the prepare-output / staging source; for the
+    # local target it is the *destination* of the package copy.
+    source = resolve_output_dir(cfg, output_dir if target == "hf" else None)
+
+    print(f"\n{'=' * 60}")
+    print(f"  Dataset:   {cfg.name}")
+    print(f"  Target:    {target}")
+    print(f"  Output:    {source}")
+    print(f"  File entries: {len(cfg.files)}")
+    print(f"{'=' * 60}\n")
+
+    # Ensure UTF-8 output for Unicode characters on Windows.
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    # ── 1. Auto-prepare (PUB-03) — never under --dry-run (PUB-04) ────────
+    if not dry_run and _needs_prepare(cfg, source):
+        print("  [i] Output is stale or missing - running prepare first ...")
+        rc = prepare(cfg, source, force=True)
+        if rc != 0:
+            return rc
+
+    planned = planned_remotes(cfg, keep_csv)
+
+    # ── 2. Dry-run: diff + split report, no network, no mutation ─────────
+    if dry_run:
+        codebook_remotes = _collect_codebook_remotes(source)
+        diff = _repo_diff_summary(cfg, [], keep_csv, codebook_remotes)
+        print(diff)
+        print()
+        _print_split_mapping_validation(planned)
+        report = detect_splits(planned)
+        _print_split_report(report)
+        print(f"\n{'=' * 60}")
+        print("  Dry-run complete - no files uploaded.")
+        print(f"{'=' * 60}\n")
+        return 0
+
+    # ── 3. Local target: copy to --output or in-place summary (PUB-02) ───
+    if target == "local":
+        if output_dir is None:
+            _print_local_package_summary(cfg, source)
+            return 0
+        dest = resolve_output_dir(cfg, output_dir)
+        print(f"  [i] Copying package from {source} to {dest} ...")
+        # --keep-csv has no effect on the local target (PUB-07).
+        _copy_package(cfg, source, dest, keep_csv=False)
+        print(f"\n{'=' * 60}")
+        print(f"  Result: package copied to {dest}")
+        print(f"{'=' * 60}\n")
+        return 0
+
+    # ── 4. hf target: quality gate, repo, diff, protection (PUB-01) ──────
+    if quality_report is not None and not quality_report.passed:
+        print("\n  \u26a0  Quality checks failed - fix errors before publishing.\n")
+        quality_report.print_summary()
+        return 1
+
+    _ensure_repo(cfg)
+    existing_files = _inspect_repo(cfg)
+
+    codebook_remotes = _collect_codebook_remotes(source)
+    diff = _repo_diff_summary(cfg, existing_files, keep_csv, codebook_remotes)
+    print(diff)
+    print()
+
+    protected = _check_overwrite_protection(existing_files, force)
+    _print_split_mapping_validation(planned)
+
+    # ── 5. Staging + single upload_folder call ───────────────────────────
+    tmpdir = Path(tempfile.mkdtemp())
+    try:
+        staging_root = tmpdir / "repo"
+        staging_root.mkdir()
+        _copy_package(cfg, source, staging_root, keep_csv=keep_csv, protected=protected)
+
+        # Report NOT FOUND declared sources (advisory, never uploaded).
+        base = cfg._base_dir if cfg._base_dir else Path.cwd()
+        for entry in cfg.files:
+            local = entry.resolve(base)
+            if not local.exists():
+                print(f"  \u2717  NOT FOUND: {local}")
+
+        staged_count = sum(1 for _ in staging_root.rglob("*") if _.is_file())
+        try:
+            _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type)
+            ok = staged_count
+            fail = 0
+        except Exception as exc:
+            print(f"  \u2717  upload_folder failed: {exc}")
+            ok = 0
+            fail = staged_count
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ── 6. Post-upload split report ──────────────────────────────────────
+    updated_files = _inspect_repo(cfg)
+    if updated_files:
+        report = detect_splits(updated_files)
+        _print_split_report(report)
+
+    print(f"\n{'=' * 60}")
+    print(f"  Result: {ok} uploaded, {fail} failed")
+    print(f"{'=' * 60}\n")
+    return 0 if fail == 0 else 1
