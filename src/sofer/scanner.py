@@ -148,8 +148,12 @@ def merge_entries(
         e for e in raw_toml.get("file", []) if not str(e.get("local", "")).startswith("TODO:")
     ]
 
-    # Build the set of already-registered resolved destination paths.
+    # Build the set of already-registered resolved destination paths and
+    # their remotes. Dedup keys on BOTH: the resolved local path (new layout)
+    # and the remote (migration-safe — a pre-cache TOML with local="data/a.csv"
+    # still carries remote="a.csv", so a re-scan won't duplicate it).
     existing: set[Path] = set()
+    existing_remotes: set[str] = set()
     for entry in raw_toml.get("file", []):
         try:
             fe = _file_entry_from_raw(entry)
@@ -158,6 +162,8 @@ def merge_entries(
             # preserved in the TOML but won't block new discoveries.
             continue
         existing.add(fe.resolve(base_dir))
+        if fe.remote:
+            existing_remotes.add(PurePosixPath(fe.remote).as_posix())
 
     # Ensure the "file" key exists (it's an array-of-tables in TOML).
     file_entries: list[dict[str, Any]] = raw_toml.setdefault("file", [])
@@ -169,6 +175,8 @@ def merge_entries(
         dest = data_dir / flat
 
         if dest in existing:
+            continue
+        if PurePosixPath(flat).as_posix() in existing_remotes:
             continue
 
         # The registered local path mirrors the copy destination (data_dir /

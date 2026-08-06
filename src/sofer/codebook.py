@@ -398,7 +398,12 @@ def generate_all(cfg: DatasetConfig, output_dir: str | Path | None = None) -> li
         write_root = data_dir
         root_path = base_dir / "codebook.md"
     else:
-        write_root = Path(output_dir).resolve()
+        # Anchor relative output dirs to the config dir (PRP-06), matching
+        # how every other artifact path resolves — never the process CWD.
+        out = Path(output_dir)
+        if not out.is_absolute():
+            out = base_dir / out
+        write_root = out.resolve()
         root_path = write_root / "codebook.md"
     codebooks_dir = write_root / CODEBOOKS_DIR
 

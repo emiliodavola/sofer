@@ -264,6 +264,18 @@ class TestMergeEntries:
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
         assert len(raw["file"]) == 1  # no duplicate added
 
+    def test_dedup_by_remote_migration_from_data_to_cache(self, tmp_path: Path) -> None:
+        """A pre-cache TOML (local='data/a.csv') re-scanned into cache/ must
+        not duplicate — dedup keys on the remote, not just the resolved local
+        path, so the cache/ rename is migration-safe."""
+        _touch(tmp_path / "a.csv")
+        # Old-layout entry: local under data/ (pre-cache), remote a.csv.
+        raw = self._raw_toml(file=[{"local": "data/a.csv", "remote": "a.csv"}])
+        discovered = [tmp_path / "a.csv"]
+
+        merge_entries(discovered, raw, tmp_path, tmp_path / "cache")
+        assert len(raw["file"]) == 1  # same remote → skipped despite data/ local
+
     def test_section_preservation(self, tmp_path: Path) -> None:
         """Non-[[file]] sections ([dataset], [meta], [[check]], [[quality])
         are left untouched."""
