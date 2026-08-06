@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from sofer.config import SCHEMA_DUP_THRESHOLD
 from sofer.model import DatasetConfig, FileEntry
 from sofer.repo_compliance import (
     _SIZE_CATEGORIES,
@@ -1890,3 +1891,225 @@ class TestStudyDesign:
         assert "Survey methodology details." in result
         # The stripped content should not cause multiple blank lines
         assert "\n\n\n" not in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema Warnings Summary — SCHEMA_DUP_THRESHOLD config
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSchemaDupThreshold:
+    """SCHEMA_DUP_THRESHOLD — default value, type, importability."""
+
+    def test_default_value_is_3(self):
+        """Default schema_dup_threshold should be 3."""
+        assert SCHEMA_DUP_THRESHOLD == 3
+
+    def test_is_int(self):
+        """SCHEMA_DUP_THRESHOLD must be an int."""
+        assert isinstance(SCHEMA_DUP_THRESHOLD, int)
+
+    def test_constant_is_importable(self):
+        """SCHEMA_DUP_THRESHOLD should be importable from sofer.config."""
+        from sofer.config import SCHEMA_DUP_THRESHOLD as T
+
+        assert T >= 1  # threshold must be at least 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema Warnings Summary — include_in_schema opt-out
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIncludeInSchema:
+    """build_schema_report respects FileEntry.include_in_schema."""
+
+    def test_file_excluded_from_schema(self, tmp_path):
+        """File with include_in_schema=False should not contribute columns."""
+        csv1 = tmp_path / "data.csv"
+        csv1.write_text("val\n1\n2\n", encoding="utf-8-sig")
+        csv2 = tmp_path / "labels.csv"
+        csv2.write_text("code\nA\nB\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv1, remote="data.csv", include_in_schema=True),
+                FileEntry(local=csv2, remote="labels.csv", include_in_schema=False),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        names = [s.name for s in schema]
+        # Only data.csv's column appears
+        assert names == ["val"]
+        assert "code" not in names
+
+    def test_field_absent_defaults_included(self, tmp_path):
+        """When include_in_schema is absent, file should contribute normally."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("val\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+        # FileEntry default include_in_schema=True
+        schema = build_schema_report(cfg)
+        assert len(schema) == 1
+        assert schema[0].name == "val"
+
+    def test_mixed_inclusion_only_true_files_contribute(self, tmp_path):
+        """Mixed include_in_schema: only true files contribute."""
+        csv1 = tmp_path / "a.csv"
+        csv1.write_text("x\n1\n", encoding="utf-8-sig")
+        csv2 = tmp_path / "b.csv"
+        csv2.write_text("y\n2\n", encoding="utf-8-sig")
+        csv3 = tmp_path / "c.csv"
+        csv3.write_text("z\n3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv1, remote="a.csv", include_in_schema=True),
+                FileEntry(local=csv2, remote="b.csv", include_in_schema=False),
+                FileEntry(local=csv3, remote="c.csv", include_in_schema=True),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        names = [s.name for s in schema]
+        assert names == ["x", "z"]
+        assert "y" not in names
+
+    def test_all_files_excluded_returns_empty_and_warns(self, tmp_path, capsys):
+        """All include_in_schema=False → empty list + warning."""
+        csv1 = tmp_path / "labels1.csv"
+        csv1.write_text("code\nA\n", encoding="utf-8-sig")
+        csv2 = tmp_path / "labels2.csv"
+        csv2.write_text("label\nB\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv1, remote="labels1.csv", include_in_schema=False),
+                FileEntry(local=csv2, remote="labels2.csv", include_in_schema=False),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema == []
+        captured = capsys.readouterr()
+        assert "All files excluded from schema" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema Warnings Summary — duplicate warning routing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDuplicateWarningRouting:
+    """build_schema_report duplicate warnings: individual vs summary routing."""
+
+    def test_one_duplicate_individual_warning(self, tmp_path, capsys):
+        """1 duplicate (≤ threshold 3) → individual [!] warning."""
+        a = tmp_path / "a.csv"
+        a.write_text("value\n1\n2\n", encoding="utf-8-sig")
+        b = tmp_path / "b.csv"
+        b.write_text("value\n3\n4\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=a, remote="a.csv"),
+                FileEntry(local=b, remote="b.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert len(schema) == 1  # only first occurrence kept
+        captured = capsys.readouterr()
+        assert "[!] Duplicate column" in captured.out
+        assert "value" in captured.out
+        assert "a.csv" in captured.out
+        assert "b.csv" in captured.out
+
+    def test_four_duplicates_summary(self, tmp_path, capsys):
+        """4 duplicate columns (> threshold 3) → single [i] summary."""
+        # Create 5 files sharing columns "a", "b", "c", "d"
+        files = []
+        for i in range(5):
+            f = tmp_path / f"f{i}.csv"
+            f.write_text(f"a;b;c;d;unique_{i}\n1;2;3;4;{i}\n", encoding="utf-8-sig")
+            files.append(FileEntry(local=f, remote=f"f{i}.csv"))
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=files,
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        # Only the first file's a, b, c, d → 4 columns + 5 unique columns = 9
+        assert len(schema) == 9
+        captured = capsys.readouterr()
+        # Summary mode because 4 > threshold 3
+        assert "[i]" in captured.out
+        assert "columns appear in multiple files" in captured.out
+        assert "Most duplicated:" in captured.out
+        assert "include_in_schema" in captured.out  # tip is present
+        # Individual [!] warnings should NOT appear
+        assert "[!]" not in captured.out
+
+    def test_zero_duplicates_silent(self, tmp_path, capsys):
+        """No duplicate columns → no warnings emitted."""
+        a = tmp_path / "a.csv"
+        a.write_text("x\n1\n", encoding="utf-8-sig")
+        b = tmp_path / "b.csv"
+        b.write_text("y\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=a, remote="a.csv"),
+                FileEntry(local=b, remote="b.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert len(schema) == 2
+        captured = capsys.readouterr()
+        assert "[!] Duplicate column" not in captured.out
+        assert "[i]" not in captured.out
+
+    def test_summary_includes_top_five_columns(self, tmp_path, capsys):
+        """Summary lists top 5 most duplicated column names."""
+        # 6 shared columns → >3 → summary mode
+        files = []
+        for i in range(3):
+            f = tmp_path / f"f{i}.csv"
+            f.write_text(
+                f"col_a;col_b;col_c;col_d;col_e;col_f;unique_{i}\n"
+                f"1;2;3;4;5;6;{i}\n",
+                encoding="utf-8-sig",
+            )
+            files.append(FileEntry(local=f, remote=f"f{i}.csv"))
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=files,
+            _base_dir=tmp_path,
+        )
+        build_schema_report(cfg)
+        captured = capsys.readouterr()
+        assert "[i]" in captured.out
+        # Top 5 columns mentioned
+        assert "col_a" in captured.out
+        assert "col_b" in captured.out
+        assert "col_c" in captured.out
+        assert "col_d" in captured.out
+        assert "col_e" in captured.out
+        # Tip for include_in_schema
+        assert "include_in_schema" in captured.out

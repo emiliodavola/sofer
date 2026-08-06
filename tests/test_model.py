@@ -313,3 +313,86 @@ class TestValidate:
         cfg = DatasetConfig.from_toml(p)
         errors = cfg.validate()
         assert errors == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FileEntry.include_in_schema — schema opt-out feature
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFileEntryIncludeInSchema:
+    """FileEntry.include_in_schema default, TOML parse, and from_toml behaviour."""
+
+    def test_default_value_is_true(self):
+        """include_in_schema should default to True when not specified."""
+        entry = FileEntry(local=Path("data.csv"), remote="data.csv")
+        assert entry.include_in_schema is True
+
+    def test_explicit_false_in_dataclass(self):
+        """include_in_schema=False should be supported at construction."""
+        entry = FileEntry(local=Path("labels.csv"), remote="labels.csv", include_in_schema=False)
+        assert entry.include_in_schema is False
+
+    def test_explicit_true_in_dataclass(self):
+        """include_in_schema=True should be supported at construction."""
+        entry = FileEntry(local=Path("data.csv"), remote="data.csv", include_in_schema=True)
+        assert entry.include_in_schema is True
+
+    def test_toml_field_absent_defaults_true(self, tmp_path):
+        """When include_in_schema is absent from TOML, default to True."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[[file]]
+local = "labels.csv"
+remote = "labels.csv"
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "data.csv").touch()
+        (tmp_path / "labels.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        # First file has no include_in_schema → True
+        assert cfg.files[0].include_in_schema is True
+        # Second file also defaults True
+        assert cfg.files[1].include_in_schema is True
+
+    def test_toml_explicit_false(self, tmp_path):
+        """include_in_schema = false in TOML should parse as False."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[[file]]
+local = "labels.csv"
+remote = "labels.csv"
+include_in_schema = false
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "data.csv").touch()
+        (tmp_path / "labels.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        # First file defaults True
+        assert cfg.files[0].include_in_schema is True
+        # Second file explicitly False
+        assert cfg.files[1].include_in_schema is False
+
+    def test_toml_explicit_true(self, tmp_path):
+        """include_in_schema = true in TOML should parse as True."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[[file]]
+local = "labels.csv"
+remote = "labels.csv"
+include_in_schema = true
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "data.csv").touch()
+        (tmp_path / "labels.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[1].include_in_schema is True
