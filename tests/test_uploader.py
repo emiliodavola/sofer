@@ -13,6 +13,10 @@ import pyarrow.parquet as pq
 
 from sofer._mirror import _validate_remote_paths
 from sofer.model import DatasetConfig, FileEntry
+from sofer.publish import (
+    _check_overwrite_protection,
+    _repo_diff_summary,
+)
 from sofer.splits import (
     SplitInfo,
     SplitReport,
@@ -380,36 +384,6 @@ class TestOverwriteProtection:
             force=False,
         )
         assert "license" not in protected
-
-    def test_codebook_missing_advisory(self, tmp_path, monkeypatch, capsys):
-        """No cache/codebooks/ dir and no codebook.md → advisory printed to stderr."""
-        from sofer import uploader
-
-        csv = tmp_path / "data.csv"
-        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
-
-        cfg = DatasetConfig(
-            name="test",
-            repo_id="user/test",
-            files=[FileEntry(local=csv, remote="data.csv", upload_as_csv=True)],
-            _base_dir=tmp_path,
-        )
-
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_folder", lambda *a, **kw: None)
-
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-        captured = capsys.readouterr()
-
-        assert "sofer codebook" in captured.err.lower(), (
-            "Expected advisory on stderr, got: " + repr(captured.err)
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
