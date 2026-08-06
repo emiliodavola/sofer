@@ -1,10 +1,11 @@
-"""Tests for sofer.publish — delivery of a prepared package (PUB-01..04, PUB-07).
+"""Tests for sofer.publish — delivery of a prepared package (PUB-01..05, PUB-07).
 
 Covers the delivery half of the prepare/publish split: the auto-prepare
 signal (PUB-03), hf staging + single upload_folder call (PUB-01), the
 quality gate, the local target's offline copy and in-place summary
 (PUB-02), --dry-run which never prepares and never touches the network
-(PUB-04), and --keep-csv (PUB-07).
+(PUB-04), overwrite protection that only guards non-auto-generated data
+files unless --force (PUB-05), and --keep-csv (PUB-07).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from sofer.model import DatasetConfig, FileEntry
 from sofer.prepare import prepare
 from sofer.publish import (
     _check_overwrite_protection,
+    _copy_package,
     _needs_prepare,
     _repo_diff_summary,
     publish,
@@ -391,6 +393,7 @@ class TestHfPublish:
         )
         monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
         _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
         calls: list[tuple[Any, ...]] = []
         orig = publish_mod._hf_upload_folder
@@ -408,7 +411,9 @@ class TestHfPublish:
         assert rc == 0
         assert len(calls) == 1, f"expected 1 upload_folder call, got {len(calls)}"
         staging_root = Path(calls[0][1])
-        assert (staging_root / "data.parquet").is_file()
+        assert not (staging_root / "data.parquet").exists(), (
+            "existing data file is protected without --force (PUB-05)"
+        )
         assert (staging_root / "README.md").is_file()
         assert (staging_root / "LICENSE").is_file()
         assert (out / "data.parquet").is_file(), "auto-prepare must have run first"
@@ -528,7 +533,8 @@ class TestRepoDiffSummary:
 
 
 class TestOverwriteProtection:
-    """_check_overwrite_protection: README/LICENSE are auto-generated (PUB-05)."""
+    """_check_overwrite_protection: auto-generated files pass; data files need
+    --force unless planned_files narrows the candidates (PUB-05)."""
 
     def test_force_skips_protection(self):
         """With force=True, nothing is protected."""
@@ -583,6 +589,59 @@ class TestOverwriteProtection:
             force=False,
         )
         assert "license" not in protected
+
+    def test_data_file_existing_skipped_without_force(self, monkeypatch):
+        """A planned data file already in the repo is protected (non-interactive)."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["data.parquet"],
+            force=False,
+            planned_files=["data.parquet"],
+        )
+        assert protected == {"data.parquet"}
+
+    def test_data_file_overwritten_with_force(self, monkeypatch):
+        """With force=True, an existing data file is NOT protected."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["data.parquet"],
+            force=True,
+            planned_files=["data.parquet"],
+        )
+        assert protected == set()
+
+    def test_auto_generated_never_protected(self, monkeypatch):
+        """Auto-generated files are never protected, even without --force."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=[
+                "README.md",
+                "LICENSE",
+                "codebook.md",
+                "codebooks/x.md",
+                "data.parquet",
+            ],
+            force=False,
+            planned_files=[
+                "README.md",
+                "LICENSE",
+                "codebook.md",
+                "codebooks/x.md",
+                "data.parquet",
+            ],
+        )
+        for name in ("readme.md", "license", "codebook.md", "codebooks/x.md"):
+            assert name not in protected, f"auto-generated {name!r} must never be protected"
+        assert "data.parquet" in protected, "the loop must still protect data files"
+
+    def test_no_planned_files_preserves_legacy_behavior(self, monkeypatch):
+        """planned_files=None keeps the legacy README/LICENSE-only behavior."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["README.md", "LICENSE"],
+            force=False,
+        )
+        assert protected == set()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -736,6 +795,87 @@ class TestBatchStaging:
         staging_root = Path(td) / "repo"
         expected = staging_root / "subdir" / "direct.parquet"
         assert expected.is_file(), f"Expected {expected}, found: {list(staging_root.rglob('*'))}"
+
+    def test_existing_data_file_not_staged_without_force(self, tmp_path, monkeypatch):
+        """PUB-05: a data file already on the Hub is skipped without --force."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: ["data.parquet"])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        td = _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert not (staging_root / "data.parquet").exists(), (
+            f"protected data file must not be staged, found: {list(staging_root.rglob('*'))}"
+        )
+        assert (staging_root / "README.md").is_file(), "auto-generated files still stage"
+
+    def test_existing_data_file_staged_with_force(self, tmp_path, monkeypatch):
+        """PUB-05: --force overwrites a data file already on the Hub."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: ["data.parquet"])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        td = _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        rc = publish(cfg, target="hf", force=True)
+        assert rc == 0
+
+        staging_root = Path(td) / "repo"
+        assert (staging_root / "data.parquet").is_file(), (
+            f"--force must stage the data file, found: {list(staging_root.rglob('*'))}"
+        )
+
+
+class TestCopyPackageProtection:
+    """_copy_package honors the protected set for data remotes (PUB-05)."""
+
+    def test_protected_data_remote_not_staged(self, tmp_path: Path) -> None:
+        """A data remote in protected is skipped during staging."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data/PROV/data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        _copy_package(cfg, out, dest, keep_csv=False, protected={"data/prov/data.parquet"})
+
+        assert not (dest / "data" / "PROV" / "data.parquet").exists(), (
+            f"protected remote was staged: {list(dest.rglob('*'))}"
+        )
+
+    def test_unprotected_data_remote_staged(self, tmp_path: Path) -> None:
+        """Without a protected entry the data remote is staged as usual."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data/PROV/data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        dest = tmp_path / "dest2"
+        dest.mkdir()
+        _copy_package(cfg, out, dest, keep_csv=False)
+
+        assert (dest / "data" / "PROV" / "data.parquet").is_file(), (
+            f"data remote missing from staging: {list(dest.rglob('*'))}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

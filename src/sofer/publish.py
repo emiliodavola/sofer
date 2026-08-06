@@ -276,12 +276,17 @@ def _repo_diff_summary(
 def _check_overwrite_protection(
     existing_files: list[str],
     force: bool,
+    planned_files: list[str] | None = None,
 ) -> set[str]:
-    """Check whether compliance files already exist and gate overwrites.
+    """Check whether planned files already exist and gate overwrites.
 
     Auto-generated files (:data:`_AUTO_GENERATED`, matched by
     :func:`_is_auto_generated`) always pass through unprotected — they are
     regenerated on every run (PUB-05).
+
+    When *planned_files* is provided, only those files are candidates for
+    protection (the data files ``publish`` is about to deliver); without it,
+    the legacy README/LICENSE pair is checked for backward compatibility.
 
     When *force* is ``True``, skip the check entirely.
 
@@ -291,6 +296,10 @@ def _check_overwrite_protection(
     Args:
         existing_files: Remote paths already present in the repository.
         force:          When ``True``, skip the check entirely.
+        planned_files:  Remote paths that would be delivered; a file in this
+                        list that already exists and is not auto-generated is
+                        protected.  ``None`` keeps the legacy
+                        README/LICENSE-only behavior.
 
     Returns:
         Set of filenames that SHOULD be skipped (protected).
@@ -302,7 +311,9 @@ def _check_overwrite_protection(
     existing_set = {f.lower() for f in existing_files}
     interactive = sys.stdin.isatty()
 
-    for filename in ("README.md", "LICENSE"):
+    candidates = planned_files if planned_files is not None else ("README.md", "LICENSE")
+
+    for filename in candidates:
         if _is_auto_generated(filename):
             continue
         if filename.lower() in existing_set:
@@ -448,7 +459,7 @@ def _copy_package(
     Stages only the planned artifacts (never a blanket copy): converted
     Parquet mirror paths, non-converted / recursive trees, original CSVs at
     their remote paths when *keep_csv* is ``True`` (PUB-07 — hf target only),
-    compliance files not skipped by overwrite protection, and any codebooks.
+    remotes not skipped by overwrite protection (PUB-05), and any codebooks.
 
     Args:
         cfg:       Dataset configuration.
@@ -460,26 +471,33 @@ def _copy_package(
                    (``None`` = nothing skipped).
     """
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
+    skip = protected or set()
     for entry in cfg.files:
         if entry.recursive:
-            src = source / PurePosixPath(entry.remote.rstrip("/\\"))
+            remote = entry.remote.rstrip("/\\")
+            if remote.lower() in skip:
+                continue
+            src = source / PurePosixPath(remote)
             if src.exists():
                 copy_to_mirror(src, dest, entry.remote)
         elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
             parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
-            src = source / PurePosixPath(parquet_remote)
-            if src.exists():
-                copy_to_mirror(src, dest, parquet_remote)
-            if keep_csv:
+            if parquet_remote.lower() not in skip:
+                src = source / PurePosixPath(parquet_remote)
+                if src.exists():
+                    copy_to_mirror(src, dest, parquet_remote)
+            if keep_csv and entry.remote.lower() not in skip:
                 csv_src = entry.resolve(base)
                 if csv_src.exists():
                     copy_to_mirror(csv_src, dest, entry.remote)
         else:
-            src = source / PurePosixPath(entry.remote)
+            remote = entry.remote
+            if remote.lower() in skip:
+                continue
+            src = source / PurePosixPath(remote)
             if src.exists():
                 copy_to_mirror(src, dest, entry.remote)
 
-    skip = protected or set()
     if "readme.md" not in skip:
         src = source / "README.md"
         if src.exists():
@@ -625,7 +643,7 @@ def publish(
     print(diff)
     print()
 
-    protected = _check_overwrite_protection(existing_files, force)
+    protected = _check_overwrite_protection(existing_files, force, planned_files=planned)
     _print_split_mapping_validation(planned)
 
     # ── 5. Staging + single upload_folder call ───────────────────────────
