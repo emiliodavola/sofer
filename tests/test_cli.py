@@ -28,11 +28,24 @@ class TestParser:
         assert args.command == "validate"
         assert args.config == "config.toml"
 
-    def test_upload_command(self):
-        """`sofer upload config.toml` should parse correctly."""
-        args = cli._build_parser().parse_args(["upload", "some.toml"])
-        assert args.command == "upload"
-        assert args.config == "some.toml"
+    def test_upload_command_removed(self):
+        """`sofer upload config.toml` should be rejected with exit code 2 (CLI-R01)."""
+        import pytest
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._build_parser().parse_args(["upload", "some.toml"])
+        assert excinfo.value.code == 2
+
+    def test_help_shows_prepare_publish_not_upload(self, capsys):
+        """`sofer --help` lists prepare + publish and never mentions upload."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["--help"])
+        out = capsys.readouterr().out
+        assert "prepare" in out
+        assert "publish" in out
+        assert "upload" not in out
 
     def test_codebook_command_no_output(self):
         """`sofer codebook data.csv` (stdout) should parse."""
@@ -122,35 +135,77 @@ def test_main_help_prints(monkeypatch):
         assert e.code == 0
 
 
-# ── upload subparser ─────────────────────────────────────────────────
+# ── init template: prepare/publish, no upload (CLI-R02) ───────────────────────
 
 
-class TestUploadForceFlag:
-    def test_force_flag_defaults_to_false(self):
-        """--force should default to False when not passed."""
-        args = cli._build_parser().parse_args(["upload", "config.toml"])
-        assert args.force is False
+class TestInitTemplateCommands:
+    def test_init_template_uses_prepare_publish(self, tmp_path, monkeypatch):
+        """_INIT_TEMPLATE usage comments reference prepare/publish, never upload."""
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="ds"))
+        content = (tmp_path / "ds.toml").read_text(encoding="utf-8")
+        assert "sofer upload" not in content
+        assert "sofer prepare" in content
+        assert "sofer publish" in content
 
-    def test_force_flag_explicit(self):
-        """--force should be True when passed."""
-        args = cli._build_parser().parse_args(["upload", "config.toml", "--force"])
-        assert args.force is True
+    def test_init_prints_prepare_publish(self, tmp_path, monkeypatch, capsys):
+        """_cmd_init success prints prepare + publish hints, never upload."""
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="ds"))
+        captured = capsys.readouterr()
+        assert "sofer upload" not in captured.out
+        assert "sofer prepare" in captured.out
+        assert "sofer publish" in captured.out
 
-    def test_dry_run_flag_defaults_to_false(self):
-        """--dry-run should default to False when not passed."""
-        args = cli._build_parser().parse_args(["upload", "config.toml"])
-        assert args.dry_run is False
 
-    def test_dry_run_flag_explicit(self):
-        """--dry-run should be True when passed."""
-        args = cli._build_parser().parse_args(["upload", "config.toml", "--dry-run"])
-        assert args.dry_run is True
+# ── shared _load_and_validate prologue (Phase 5.2) ────────────────────────────
 
-    def test_force_and_keep_csv_together(self):
-        """--force and --keep-csv can be combined."""
-        args = cli._build_parser().parse_args(["upload", "config.toml", "--force", "--keep-csv"])
-        assert args.force is True
-        assert args.keep_csv is True
+
+class TestLoadAndValidate:
+    """The shared validate/prepare/publish prologue rejects invalid configs."""
+
+    def _placeholder_toml(self, tmp_path):
+        """A TOML whose repo_id still carries the YOUR_USER placeholder."""
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "YOUR_USER/test-ds"\n\n'
+            '[[file]]\nlocal = "missing.csv"\nremote = "missing.csv"\n',
+            encoding="utf-8",
+        )
+        return str(toml_path)
+
+    def test_validate_config_errors_return_1(self, tmp_path, capsys):
+        rc = cli._cmd_validate(Namespace(config=self._placeholder_toml(tmp_path)))
+        assert rc == 1
+        assert "Configuration errors" in capsys.readouterr().out
+
+    def test_prepare_config_errors_return_1(self, tmp_path, capsys):
+        rc = cli._cmd_prepare(
+            Namespace(
+                config=self._placeholder_toml(tmp_path),
+                output=None,
+                all_files=False,
+                no_checks=False,
+                force=False,
+                verify=False,
+            )
+        )
+        assert rc == 1
+        assert "fix before preparing" in capsys.readouterr().out
+
+    def test_publish_config_errors_return_1(self, tmp_path, capsys):
+        rc = cli._cmd_publish(
+            Namespace(
+                config=self._placeholder_toml(tmp_path),
+                target="hf",
+                output=None,
+                force=False,
+                keep_csv=False,
+                dry_run=False,
+            )
+        )
+        assert rc == 1
+        assert "fix before publishing" in capsys.readouterr().out
 
 
 # ── prepare subparser ───────────────────────────────────────────────

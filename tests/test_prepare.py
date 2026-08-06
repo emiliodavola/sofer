@@ -682,8 +682,8 @@ class TestSchemaAssertion:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from sofer.repo_compliance import ColumnSchema
         from sofer.prepare import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
 
         parquet_path = tmp_path / "test.parquet"
         table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
@@ -721,8 +721,8 @@ class TestSchemaAssertion:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from sofer.repo_compliance import ColumnSchema
         from sofer.prepare import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
 
         parquet_path = tmp_path / "test.parquet"
         table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
@@ -762,8 +762,8 @@ class TestSchemaAssertion:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        from sofer.repo_compliance import ColumnSchema
         from sofer.prepare import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
 
         parquet_path = tmp_path / "test.parquet"
         table = pa.table({"age": pa.array([25, 30, 35], type=pa.int64())})
