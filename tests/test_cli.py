@@ -139,6 +139,56 @@ class TestUploadForceFlag:
         assert args.keep_csv is True
 
 
+# ── codebook placeholder validation ──────────────────────────────────────────
+
+
+class TestCodebookPlaceholderValidation:
+    """RED — placeholder validation not yet wired in _cmd_codebook."""
+
+    def test_placeholder_toml_exits_with_error(self, tmp_path, monkeypatch, capsys):
+        """TOML with YOUR_USER placeholder should exit 1 with error message."""
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "f.csv").write_text("col\n1\n", encoding="utf-8")
+
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "YOUR_USER/test-ds"\n\n'
+            '[[file]]\nlocal = "data/f.csv"\nremote = "data/f.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml_path), csv=None)
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "placeholder" in captured.err.lower()
+        assert "YOUR_USER" in captured.err
+
+    def test_valid_toml_generates_codebook(self, tmp_path, monkeypatch):
+        """Valid TOML with real user should generate codebook successfully."""
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "f.csv").write_text("col\n1\n", encoding="utf-8")
+
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "alice/my-dataset"\n\n'
+            '[[file]]\nlocal = "data/f.csv"\nremote = "data/f.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml_path), csv=None, output=None)
+        )
+        assert rc == 0
+        root = tmp_path / "codebook.md"
+        assert root.exists()
+
+
 # ── scan subparser ──────────────────────────────────────────────────────────────
 
 

@@ -236,6 +236,51 @@ class TestValidate:
         errors = cfg.validate()
         assert any("not found" in e.lower() for e in errors)
 
+    # ── Placeholder rejection ───────────────────────────────────────────
+
+    def test_rejects_your_user_placeholder(self):
+        """repo_id with YOUR_USER placeholder should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_USER/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_your_org_placeholder(self):
+        """repo_id with YOUR_ORG placeholder should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_ORG/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_your_username_placeholder_case_insensitive(self):
+        """repo_id with 'your-username' (case-insensitive) should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="your-username/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_your_organization_placeholder(self):
+        """repo_id with YOUR_ORGANIZATION placeholder should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_ORGANIZATION/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_accepts_valid_user_repo(self):
+        """Valid 'alice/my-dataset' should pass placeholder check."""
+        cfg = DatasetConfig(name="test", repo_id="alice/my-dataset")
+        errors = cfg.validate()
+        assert not any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_placeholder_in_multisegment(self):
+        """repo_id with placeholder in multi-segment path should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="your-username/sub/project")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_placeholder_error_message_names_placeholder(self, tmp_path):
+        """Error message should name the specific placeholder found."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_USER/dataset")
+        (tmp_path / "data.csv").touch()
+        errors = cfg.validate()
+        assert any("YOUR_USER" in e for e in errors)
+
     def test_all_files_exist(self, tmp_path):
         """When all declared files exist, validation should pass."""
         p = tmp_path / "t.toml"

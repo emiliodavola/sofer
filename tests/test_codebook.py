@@ -546,8 +546,25 @@ class TestGenerateAll:
 
         root = tmp_path / "codebook.md"
         content = root.read_text(encoding="utf-8")
-        assert "data/codebooks/f.md" in content
+        # After fix: root index links are relative to data/, not base_dir
+        assert "[`codebooks/f.md`](codebooks/f.md)" in content
         assert "1 columns" in content
+
+    def test_root_index_links_for_nested_subdirs(self, tmp_path):
+        """Root index should use codebooks/ prefix for nested subdirectories."""
+        from sofer.model import DatasetConfig
+
+        sub = tmp_path / "data" / "Labels"
+        sub.mkdir(parents=True)
+        (sub / "etiquetas_a.csv").write_text("k;v\n1;2\n", encoding="utf-8")
+
+        toml_path = _write_toml(tmp_path, ["data/Labels/etiquetas_a.csv"])
+        cfg = DatasetConfig.from_toml(toml_path)
+        generate_all(cfg)
+
+        root = tmp_path / "codebook.md"
+        content = root.read_text(encoding="utf-8")
+        assert "[`codebooks/Labels/etiquetas_a.md`](codebooks/Labels/etiquetas_a.md)" in content
 
     def test_skips_unsupported_format(self, tmp_path, capsys):
         from sofer.model import DatasetConfig

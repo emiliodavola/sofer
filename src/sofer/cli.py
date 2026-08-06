@@ -126,6 +126,11 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"Error: Failed to read TOML: {exc}", file=sys.stderr)
             return 1
+        validation_errors = cfg.validate()
+        if validation_errors:
+            for err in validation_errors:
+                print(f"Error: {err}", file=sys.stderr)
+            return 1
         try:
             generate_all_codebooks(cfg)
         except ValueError as exc:
