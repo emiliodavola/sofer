@@ -107,7 +107,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is not None
@@ -129,7 +129,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         table = pq.read_table(result)
@@ -144,7 +144,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         table = pq.read_table(result)
@@ -158,7 +158,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         table = pq.read_table(result)
@@ -178,7 +178,7 @@ class TestConvertToParquetFallback:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is None
@@ -189,7 +189,7 @@ class TestConvertToParquetFallback:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is None
@@ -202,7 +202,7 @@ class TestConvertToParquetFallback:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is None
@@ -475,7 +475,7 @@ class TestSniffCsvDelimiter:
         """Semicolon-heavy first line should pick semicolon."""
         csv = tmp_path / "data.csv"
         csv.write_text("a;b;c;d\n1;2;3;4", encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -483,7 +483,7 @@ class TestSniffCsvDelimiter:
         """Comma-heavy first line should pick comma."""
         csv = tmp_path / "data.csv"
         csv.write_text("a,b,c,d\n1,2,3,4", encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ","
 
@@ -491,7 +491,7 @@ class TestSniffCsvDelimiter:
         """Tab-separated first line should pick tab."""
         csv = tmp_path / "data.tsv"
         csv.write_text("a\tb\tc\n1\t2\t3", encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == "\t"
 
@@ -499,7 +499,7 @@ class TestSniffCsvDelimiter:
         """Commas inside double-quoted fields should not sway the count."""
         csv = tmp_path / "data.csv"
         csv.write_text('id;"name, with comma";age\n1;Alice;30', encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -507,7 +507,7 @@ class TestSniffCsvDelimiter:
         """Semicolons inside double-quoted fields should not sway the count."""
         csv = tmp_path / "data.csv"
         csv.write_text('id,name,"desc; with semicolons"\n1,Alice,ok', encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ","
 
@@ -515,7 +515,7 @@ class TestSniffCsvDelimiter:
         """Unreadable file should fall back to semicolon default."""
         csv = tmp_path / "ghost.csv"
         # File does not exist
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -523,7 +523,7 @@ class TestSniffCsvDelimiter:
         """When every field is quoted, delimiter between quotes should still count."""
         csv = tmp_path / "data.csv"
         csv.write_text('"a";"b";"c"\n1;2;3', encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -531,7 +531,7 @@ class TestSniffCsvDelimiter:
         """An empty file should fall back to semicolon."""
         csv = tmp_path / "empty.csv"
         csv.write_text("", encoding="utf-8-sig")
-        from sofer.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -551,7 +551,7 @@ class TestConvertDelimiterHonoured:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging, delimiter=";")
         assert result is not None
@@ -565,7 +565,7 @@ class TestConvertDelimiterHonoured:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging, delimiter=",")
         assert result is not None
@@ -579,7 +579,7 @@ class TestConvertDelimiterHonoured:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging, delimiter=None)
         assert result is not None
@@ -604,7 +604,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None  # This should pass since row counts match
@@ -616,7 +616,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None  # Normal case: 3 cols, 1 row — should match
@@ -628,7 +628,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None  # Normal case: names match — should succeed
@@ -640,7 +640,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -664,7 +664,7 @@ class TestValueParityCheck:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -678,7 +678,7 @@ class TestValueParityCheck:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -692,7 +692,7 @@ class TestValueParityCheck:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -716,7 +716,7 @@ class TestAllNullColumnHandling:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -731,7 +731,7 @@ class TestAllNullColumnHandling:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from sofer.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None

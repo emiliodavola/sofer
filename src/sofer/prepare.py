@@ -36,13 +36,15 @@ Orchestration flow (mirrors the generation half of the legacy
        regardless (PRP-08).
 
 This module performs ZERO network calls: it never imports ``huggingface_hub``
-and never requires an ``HF_TOKEN``.  Conversion helpers are imported from
-``uploader.py`` unchanged and will be moved here when the uploader is
-retired (PR 4).
+and never requires an ``HF_TOKEN``.  The conversion / schema helpers that the
+legacy ``uploader`` used to own now live here (PR 4): CSV→Parquet conversion
+with parity checks, delimiter sniffing, cross-file schema assertion, large
+value warnings, and the card-dtype sanity check.
 """
 
 from __future__ import annotations
 
+import csv as csv_module
 import shutil
 import sys
 import tempfile
@@ -52,25 +54,488 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .model import DatasetConfig
 
+import pyarrow as pa
+import pyarrow.csv as pc
+import pyarrow.parquet as pq
+
 from ._mirror import copy_to_mirror
+from ._parquet_helpers import _parquet_to_hf_dtype
 from .checks import DatasetValidator
 from .codebook import generate_all as generate_all_codebooks
-from .config import CODEBOOKS_DIR, DEFAULT_CONFIG_NAME, OUTPUT_ENCODING
+from .config import (
+    CODEBOOKS_DIR,
+    DEFAULT_CONFIG_NAME,
+    OUTPUT_ENCODING,
+    PARQUET_COMPRESSION,
+    PARQUET_ROW_GROUP_SIZE,
+    PARQUET_SHARD_WARNING_MB,
+    REPORT_MAX_ITEMS,
+    SNIFF_DELIMITERS,
+)
 from .quality import QualityValidator
 from .repo_compliance import (
+    ColumnSchema,
     build_dataset_card,
     build_license_file,
     build_schema_report,
 )
-from .uploader import (
-    _assert_cross_file_schema,
-    _check_large_values,
-    _convert_to_parquet,
-)
+from .splits import detect_splits
 from .verification import _print_verification_report, verify_load_dataset
 
 # Files that count as "generated artifacts" for the PRP-07 overwrite check.
 _GENERATED_ROOT_FILES: tuple[str, ...] = ("README.md", "LICENSE", "codebook.md")
+
+
+# ── CSV → Parquet conversion helpers (moved from uploader.py, PR 4) ────────────
+
+
+def _sniff_csv_delimiter(csv_path: Path) -> str:
+    """Heuristic delimiter detection from the first line.
+
+    Counts ``;``, ``,``, and ``\\t`` **outside double-quoted fields** so that
+    quoted values like ``"a,b"`` do not sway the count.  Falls back to ``;``
+    when the file cannot be read.
+
+    Args:
+        csv_path: Path to the CSV file.
+
+    Returns:
+        The detected delimiter (``";"``, ``","``, or ``"\\t"``).
+    """
+    try:
+        first = csv_path.read_text(encoding="utf-8-sig").splitlines()[0]
+        counts = _count_delimiters_outside_quotes(first)
+        semi = counts.get(";", 0)
+        comma = counts.get(",", 0)
+        tab = counts.get("\t", 0)
+        best = max(semi, comma, tab)
+        if best == 0:
+            return ";"
+        # Prefer whichever delimiter appears most often
+        if semi == best:
+            return ";"
+        if tab == best:
+            return "\t"
+        return ","
+    except Exception:
+        return ";"
+
+
+def _count_delimiters_outside_quotes(line: str) -> dict[str, int]:
+    """Count occurrences of ``;``, ``,``, and ``\\t`` outside double-quoted spans.
+
+    Args:
+        line: A single line of CSV text.
+
+    Returns:
+        ``{delimiter: count}`` for every delimiter in :data:`SNIFF_DELIMITERS`.
+    """
+    counts: dict[str, int] = {d: 0 for d in SNIFF_DELIMITERS}
+    in_quotes = False
+    for ch in line:
+        if ch == '"':
+            in_quotes = not in_quotes
+            continue
+        if in_quotes:
+            continue
+        if ch in counts:
+            counts[ch] += 1
+    return counts
+
+
+def _cast_null_columns_to_string(table: pa.Table) -> pa.Table:
+    """Cast any column whose Arrow type is ``null`` to ``string``.
+
+    pyarrow infers the ``null`` type when a column contains only missing
+    values.  Downstream consumers (the schema report, Hugging Face Dataset
+    Viewer) handle ``string`` gracefully; ``null`` confuses them.
+
+    Args:
+        table: Table produced by ``pyarrow.csv.read_csv``.
+
+    Returns:
+        A copy of *table* with all-null columns cast to ``string``.
+    """
+    for field_idx, field in enumerate(table.schema):
+        if pa.types.is_null(field.type):
+            col = table.column(field_idx)
+            table = table.set_column(field_idx, field.name, col.cast(pa.string()))
+    return table
+
+
+def _read_csv_raw_values(
+    csv_path: Path,
+    delimiter: str,
+) -> tuple[list[str], list[list[str]]] | None:
+    """Read a CSV file into header and rows using Python's csv module.
+
+    Args:
+        csv_path:  Path to the CSV file.
+        delimiter: Field delimiter (e.g. ``";"``).
+
+    Returns:
+        ``(header, rows)`` where *rows* is a list of lists of raw strings,
+        or ``None`` if the file cannot be read.
+    """
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+            reader = csv_module.reader(fh, delimiter=delimiter)
+            try:
+                header = next(reader)
+            except StopIteration:
+                return ([], [])
+            rows = [row for row in reader]
+            return (header, rows)
+    except Exception:
+        return None
+
+
+def _check_conversion_parity(
+    csv_path: Path,
+    delimiter: str,
+    table: pa.Table,
+) -> tuple[bool, list[str]]:
+    """Assert row count, column count, and column names match CSV ↔ Parquet.
+
+    Args:
+        csv_path:  Original CSV file.
+        delimiter: Field delimiter used to read *csv_path*.
+        table:     Parquet table produced from *csv_path*.
+
+    Returns:
+        ``(ok, warnings)`` where *ok* is ``False`` when a hard parity
+        violation is detected (conversion should fail), and *warnings* is a
+        list of human-readable messages about value alterations
+        (non-blocking).
+    """
+    raw = _read_csv_raw_values(csv_path, delimiter)
+    if raw is None:
+        return (False, ["Cannot read CSV for parity check"])
+
+    csv_header, csv_rows = raw
+    csv_row_count = len(csv_rows)
+    csv_col_count = len(csv_header)
+    parquet_row_count = table.num_rows
+    parquet_col_names = table.column_names
+
+    # ── Hard parity checks (fail conversion on mismatch) ─────────────────
+    if csv_row_count != parquet_row_count:
+        print(
+            f"  \u26a0  PARITY FAIL: row count mismatch — "
+            f"CSV={csv_row_count}, Parquet={parquet_row_count}"
+        )
+        return (False, [])
+
+    if csv_col_count != len(parquet_col_names):
+        print(
+            f"  \u26a0  PARITY FAIL: column count mismatch — "
+            f"CSV={csv_col_count}, Parquet={len(parquet_col_names)}"
+        )
+        return (False, [])
+
+    if csv_header != parquet_col_names:
+        print(
+            f"  \u26a0  PARITY FAIL: column names diverge — "
+            f"CSV={csv_header}, Parquet={parquet_col_names}"
+        )
+        return (False, [])
+
+    # ── Soft value parity check (warning only) ───────────────────────────
+    warnings: list[str] = []
+    for col_idx, col_name in enumerate(csv_header):
+        # Build CSV value set (string-normalized)
+        csv_values: set[str] = set()
+        for row in csv_rows:
+            if col_idx < len(row):
+                csv_values.add(row[col_idx].strip())
+
+        # Build Parquet value set (string-ified)
+        parquet_col = table.column(col_idx)
+        parquet_values: set[str] = set()
+        for i in range(parquet_col.length()):
+            val = parquet_col[i].as_py()
+            if val is None:
+                parquet_values.add("")
+            else:
+                parquet_values.add(str(val).strip())
+
+        # Detect any value present in CSV but missing from Parquet after
+        # stringification — this catches leading-zero stripping, comma
+        # decimals, and other type-coercion artefacts.
+        altered = csv_values - parquet_values
+        if altered:
+            first = sorted(altered)[0]
+            warnings.append(
+                f"  [!] VALUE ALTERED: column '{col_name}' — "
+                f"e.g. '{first}' changed after type inference"
+            )
+
+    for w in warnings:
+        print(w)
+
+    return (True, warnings)
+
+
+def _convert_to_parquet(
+    csv_path: Path,
+    staging_dir: Path,
+    delimiter: str | None = None,
+) -> Path | None:
+    """Convert a CSV file to Parquet in *staging_dir*.
+
+    Args:
+        csv_path:    Path to the original CSV file.
+        staging_dir: Temporary directory for the converted file.
+        delimiter:   Explicit CSV delimiter.  When ``None`` (default), the
+                     delimiter is sniffed from the first line via
+                     :func:`_sniff_csv_delimiter`.
+
+    Returns:
+        Path to the converted Parquet file on success,
+        ``None`` on conversion failure (warning already printed).
+    """
+    try:
+        if delimiter is None:
+            delimiter = _sniff_csv_delimiter(csv_path)
+        parse_opts = pc.ParseOptions(delimiter=delimiter)
+        table = pc.read_csv(csv_path, parse_options=parse_opts)
+        parquet_path = staging_dir / f"{csv_path.stem}.parquet"
+
+        # ── Row / column / value parity ───────────────────────────────────
+        parity_ok, _parity_warnings = _check_conversion_parity(csv_path, delimiter, table)
+        if not parity_ok:
+            return None
+
+        # ── All-null column handling ──────────────────────────────────────
+        # pyarrow infers `null` type for columns where every value is missing;
+        # cast those to `string` so the schema report renders them correctly.
+        table = _cast_null_columns_to_string(table)
+
+        pq.write_table(
+            table,
+            parquet_path,
+            compression=PARQUET_COMPRESSION,
+            write_page_index=True,
+            row_group_size=PARQUET_ROW_GROUP_SIZE,
+        )
+
+        # ── Size check: warn when the shard exceeds the threshold ─────────
+        size_mb = parquet_path.stat().st_size / (1024 * 1024)
+        if size_mb > PARQUET_SHARD_WARNING_MB:
+            print(
+                f"  \u26a0  {parquet_path.name}: {size_mb:.1f} MB "
+                f"(> {PARQUET_SHARD_WARNING_MB} MB). Consider sharding into "
+                f"smaller files for better Dataset Viewer performance."
+            )
+
+        return parquet_path
+    except Exception as exc:
+        print(f"  \u26a0  {csv_path.name}: conversion failed \u2014 uploading as CSV")
+        print(f"       ({exc})")
+        return None
+
+
+def _assert_cross_file_schema(
+    converted: dict[str, tuple[Path, Path, str]],
+    cfg: DatasetConfig,
+) -> list[str]:
+    """Assert every file in a split has identical column names and dtypes.
+
+    Groups converted Parquet files by detected split and compares schemas
+    within each split.  Files that share the exact same column names are
+    assumed to be the same logical table (e.g. train/test splits) and are
+    checked for dtype consistency; standalone tables with unique column sets
+    are skipped.
+
+    Args:
+        converted: Map ``remote_key → (parquet_path, csv_path, original_remote)``
+                   from the conversion step.
+        cfg:       Dataset configuration (honours ``skip_cross_file_schema``).
+
+    Returns:
+        A list of human-readable error messages (empty = all splits are
+        consistent).
+    """
+    errors: list[str] = []
+
+    # ── Honour skip flag for multi-table / relational datasets ────────────
+    if cfg.skip_cross_file_schema:
+        print("  [i] Skipping cross-file schema check (skip_cross_file_schema=true)")
+        return errors
+
+    # ── Build (parquet_remote, parquet_path) pairs, de-duped by remote_key ──
+    seen: set[str] = set()
+    parquet_specs: list[tuple[str, Path]] = []
+    for entry in cfg.files:
+        remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
+        if remote_key in converted and remote_key not in seen:
+            seen.add(remote_key)
+            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            parquet_specs.append((parquet_remote, converted[remote_key][0]))
+
+    if len(parquet_specs) < 2:
+        return errors  # nothing to compare
+
+    # ── Detect splits from planned remote paths ───────────────────────────
+    remotes = [spec[0] for spec in parquet_specs]
+    report = detect_splits(remotes)
+
+    if not report.splits:
+        return errors
+
+    # ── Build split → file mapping ────────────────────────────────────────
+    split_files: dict[str, list[tuple[str, Path]]] = {}
+    for remote, path in parquet_specs:
+        for s in report.splits:
+            if remote in s.files:
+                split_files.setdefault(s.name, []).append((remote, path))
+                break
+
+    if not split_files:
+        return errors
+
+    # ── Group files by column name sets; only check groups with 2+ files ──
+    for split_name, files in split_files.items():
+        if len(files) < 2:
+            continue
+
+        # Read schemas and group by sorted column names.
+        from collections import defaultdict
+
+        col_groups: dict[tuple[str, ...], list[tuple[str, dict[str, object]]]] = defaultdict(list)
+        for remote, path in files:
+            try:
+                schema = pq.read_schema(path)
+            except Exception as exc:
+                errors.append(f"Failed to read schema of '{remote}': {exc}")
+                continue
+            cols_key = tuple(sorted(schema.names))
+            types = {name: schema.field(name).type for name in schema.names}
+            col_groups[cols_key].append((remote, types))
+
+        # Only validate groups with 2+ files (same-table variants).
+        for cols_key, group in col_groups.items():
+            if len(group) < 2:
+                continue
+
+            ref_remote, ref_types = group[0]
+            for remote, types in group[1:]:
+                diffs = []
+                for col in cols_key:
+                    if str(types[col]) != str(ref_types[col]):
+                        diffs.append(f"{col}: {ref_types[col]} vs {types[col]}")
+                if diffs:
+                    cols_list = sorted(cols_key)
+                    errors.append(
+                        f"Schema mismatch in split '{split_name}': "
+                        f"'{ref_remote}' and '{remote}' differ in dtypes "
+                        f"({' ; '.join(diffs)}) — shared columns: {cols_list}"
+                    )
+
+    return errors
+
+
+def _check_large_values(
+    parquet_path: Path,
+    max_bytes: int = 10_240,
+) -> list[str]:
+    """Emit warnings for string columns whose first-row values exceed *max_bytes*.
+
+    Values above the threshold can trigger ``TooBigContentError`` in the
+    Hugging Face Dataset Viewer.
+
+    Args:
+        parquet_path: Path to the Parquet file.
+        max_bytes:    Byte-size threshold (default 10 KB).
+
+    Returns:
+        A list of ``"[!] …"`` warning strings (empty = no large values found).
+    """
+    warnings: list[str] = []
+    fname = parquet_path.name
+
+    try:
+        table = pq.read_table(parquet_path)
+    except Exception:
+        return warnings  # can't read — skip silently
+
+    first_rows = table.slice(0, min(REPORT_MAX_ITEMS, table.num_rows))
+
+    for col_idx in range(first_rows.num_columns):
+        field = first_rows.schema.field(col_idx)
+        if not (pa.types.is_string(field.type) or pa.types.is_large_string(field.type)):
+            continue
+
+        col_data = first_rows.column(col_idx)
+        for row_idx in range(col_data.length()):
+            val = col_data[row_idx].as_py()
+            if val is None:
+                continue
+            byte_len = len(val.encode("utf-8"))
+            if byte_len > max_bytes:
+                warnings.append(
+                    f"{fname}: column '{field.name}' row {row_idx} is "
+                    f"{byte_len} bytes (>10 KB). Consider moving large "
+                    f"payloads to separate files to avoid "
+                    f"TooBigContentError in the Dataset Viewer."
+                )
+                break  # one warning per column is enough
+
+    return warnings
+
+
+def _assert_card_dtypes_match_parquet(
+    schema: list[ColumnSchema],
+    converted: dict[str, tuple[Path, Path, str]],
+) -> None:
+    """Sanity-check that the schema report's hf_dtype matches the Parquet files.
+
+    At minimum: no ``float64`` in the card when the actual Parquet column
+    is ``int64`` (or any integral type).  This catches drift where the card
+    falls back to a loose ``float64`` default even though the Parquet
+    schema carries a precise integer type.
+
+    Args:
+        schema:    The schema report from :func:`build_schema_report`.
+        converted: Map ``remote_key → (parquet_path, csv_path, original_remote)``
+                   from the conversion step.
+    """
+    _integral_types = frozenset({"int8", "int16", "int32", "int64"})
+
+    # Build remote_key→parquet_path lookup
+    parquet_by_key: dict[str, Path] = {key: p for key, (p, _c, _r) in converted.items()}
+
+    mismatches: list[str] = []
+
+    for col in schema:
+        if "::" in col.name:
+            continue  # skip disambiguated pseudo-columns
+        if col.hf_dtype is None or col.hf_dtype != "float64":
+            continue  # only flag suspect float64 entries
+
+        # Find which Parquet file this column belongs to
+        for remote_key, parquet_path in parquet_by_key.items():
+            try:
+                pf = pq.ParquetFile(parquet_path)
+                names = pf.schema_arrow.names
+                if col.name not in names:
+                    continue
+                field_idx = names.index(col.name)
+                pa_type = pf.schema_arrow.field(field_idx).type
+                actual = _parquet_to_hf_dtype(pa_type)
+                if actual is not None and actual in _integral_types:
+                    mismatches.append(
+                        f"Column '{col.name}' card dtype=float64 but "
+                        f"Parquet '{remote_key}.parquet' has {actual} — "
+                        f"mismatch may indicate schema-source drift."
+                    )
+                    break  # one mismatch per column is enough
+            except Exception:
+                continue
+
+    if mismatches:
+        for m in mismatches:
+            print(f"  \u26a0  SCHEMA ASSERTION: {m}")
 
 
 def resolve_output_dir(cfg: DatasetConfig, override: str | None) -> Path:
