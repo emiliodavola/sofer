@@ -20,8 +20,10 @@ from .config import DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
+from .profile import profile as run_profile
 from .publish import publish as run_publish
 from .quality import QualityValidator
+from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
     check_flatten_collisions,
@@ -203,6 +205,55 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     if not args.output:
         print(codebook)
     return 0
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    """Profile a dataset read-only and write a ``metadata.yaml`` document.
+
+    Orchestration (delegated to :func:`sofer.profile.profile`):
+
+        1. Detect the dataset format from its extension
+           (``sofer._formats.SUPPORTED_FORMATS``).
+        2. Read the dataset: CSV/TSV via ``stream_csv`` (bounded, encoding
+           fallback, config delimiter/encoding); Parquet/XLSX/JSONL via
+           ``codebook._read_file``.
+        3. Infer a coarse storage type, a semantic type (email), and a PII
+           flag per column.
+        4. Assemble and write ``metadata.yaml`` next to the dataset (or to
+           ``--output`` DIR when given).
+        5. Report the missing human-input fields (description, license,
+           source, column descriptions).
+
+    The source dataset is never modified (PRF-03). Returns the exit code from
+    :func:`sofer.profile.profile` (0 on success, 1 on unsupported format).
+    """
+    return run_profile(
+        Path(args.dataset),
+        output_dir=Path(args.output) if args.output else None,
+    )
+
+
+def _cmd_render(args: argparse.Namespace) -> int:
+    """Render a status-annotated ``README.md`` from a ``metadata.yaml`` document.
+
+    Orchestration (delegated to :func:`sofer.render.render`):
+
+        1. Resolve ``metadata.yaml`` from the ``<package>`` argument — either
+           the file itself or the directory containing it (RND-01).
+        2. Load the document and project it into ``README.md`` markdown
+           without recomputing any inference (RND-02).
+        3. Write ``README.md`` next to ``metadata.yaml`` (or to ``--output``
+           DIR when given).
+
+    Inference states are rendered distinctly (RND-03): ``confirmed`` as a plain
+    label, ``inferred`` as ``<type> (inferred, NN%)``, and ``unknown`` as
+    ``unknown``. Returns the exit code from :func:`sofer.render.render`
+    (0 on success, 1 when no ``metadata.yaml`` is found).
+    """
+    return run_render(
+        Path(args.package),
+        output_dir=Path(args.output) if args.output else None,
+    )
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -566,6 +617,58 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the TOML config file (used with --all-files, default: dataset.toml).",
     )
     c.set_defaults(func=_cmd_codebook)
+
+    # ── profile ──────────────────────────────────────────────────
+    prf = sub.add_parser(
+        "profile",
+        help="Profile a dataset read-only and write a metadata.yaml document.",
+        description=(
+            "Introspect a dataset file (CSV, TSV, Parquet, Excel, or JSON "
+            "Lines) read-only and generate a metadata.yaml document that "
+            "records the detected schema, per-column semantic types, and "
+            "possible PII findings.  The source dataset is never modified.\n"
+            "\n"
+            "metadata.yaml is written next to the dataset by default, or to "
+            "--output DIR when given.  Missing human-input fields "
+            "(description, license, source, and column descriptions) are "
+            "reported after the document is written."
+        ),
+    )
+    prf.add_argument(
+        "dataset",
+        help="Path to the dataset file to profile (CSV, TSV, Parquet, Excel, or JSON Lines).",
+    )
+    prf.add_argument(
+        "--output",
+        help="Output directory for metadata.yaml (default: the dataset's directory).",
+    )
+    prf.set_defaults(func=_cmd_profile)
+
+    # ── render ──────────────────────────────────────────────────
+    rnd = sub.add_parser(
+        "render",
+        help="Render a README.md from a metadata.yaml document.",
+        description=(
+            "Read a metadata.yaml document and render a status-annotated "
+            "README.md from its contents.  The <package> argument is either "
+            "the metadata.yaml file itself or the directory containing it.\n"
+            "\n"
+            "Inference states are rendered distinctly: confirmed as a plain "
+            "label, inferred as '<type> (inferred, NN%)' with the confidence "
+            "percentage, and unknown as 'unknown'.  README.md is written next "
+            "to metadata.yaml by default, or to --output DIR when given.  The "
+            "metadata.yaml is never modified."
+        ),
+    )
+    rnd.add_argument(
+        "package",
+        help="Path to metadata.yaml, or the directory containing it.",
+    )
+    rnd.add_argument(
+        "--output",
+        help="Output directory for README.md (default: the metadata.yaml directory).",
+    )
+    rnd.set_defaults(func=_cmd_render)
 
     # ── init ──────────────────────────────────────────────────────
     i = sub.add_parser(
