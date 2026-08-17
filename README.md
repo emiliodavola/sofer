@@ -3,38 +3,45 @@
 > **Sofer** (Hebrew: סופר, "scribe") — a person who meticulously transcribes
 > sacred texts. This tool brings the same care to dataset documentation.
 
-**Publish any dataset to Hugging Face Hub with built-in validation and
-data-sharing standards.**
+**A command-line tool that turns a raw dataset into a documented, profiled,
+and quality-assessed package — combining automatic inference with human
+knowledge, and publishable to Hugging Face Hub or any local directory.**
 
 ```plaintext
 sofer init my-dataset           # create a .toml template
 sofer scan my-dataset.toml      # discover & register data files
+sofer profile data.csv          # introspect a dataset → metadata.yaml (read-only)
+sofer render metadata.yaml      # render a status-annotated README.md
 sofer codebook data.csv         # generate a codebook for one file
 sofer codebook --all-files      # generate codebooks for all tables
 sofer prepare my-dataset.toml   # generate the package locally (build/)
 sofer publish my-dataset.toml   # deliver to HF Hub or a local directory
 sofer validate my-dataset.toml  # check data integrity + quality
-sofer profile data.csv          # introspect a dataset → metadata.yaml (read-only)
-sofer render metadata.yaml      # render a status-annotated README.md
 ```
 
 ## Why
 
 Sharing data for analysis is hard. The [Leek group guide](https://github.com/jtleek/datasharing)
 defines the gold standard: ship (1) raw data, (2) tidy data, (3) a codebook,
-and (4) a recipe.  Hugging Face Hub provides the storage — this tool fills
-the gap between your local files and a well-documented HF dataset.
+and (4) a recipe. sofer fills the gap between your local files and a
+well-documented, reusable dataset — whether it ends up on Hugging Face Hub,
+in an object store, or in a local directory.
 
 **Key principles:**
 
+- **Automatizar observaciones; no inventar conocimiento semántico.**
+  sofer infers what is reliably inferable and marks everything else as a
+  guess — it never presents an inference as a fact.
 - **Confidential by default.** Repos are private unless you say otherwise.
 - **Validate before publishing.** Never ship a broken dataset.
-- **Self-documenting.** Every dataset gets a codebook and a README.
+- **Self-documenting.** Every dataset gets structured metadata, a codebook,
+  and a README.
 - **Two-step workflow.** `prepare` generates everything offline; `publish`
   delivers the prepared package. Inspect and edit artifacts before they go
   anywhere.
+- **Read-only profiling.** `profile` never modifies the source dataset.
 - **Domain-agnostic.** Works for census data, survey exports, shapefiles,
-  document collections — anything you'd put in a HF dataset repo.
+  document collections — anything you'd put in a dataset repository.
 
 ## Setup
 
@@ -94,14 +101,45 @@ sofer render data/metadata.yaml   # ...or the file directly
 projection of it — it never recomputes inference. Inference states are always
 rendered distinctly so a reader can tell a fact from a guess:
 
-| Status | Rendered |
-|---|---|
-| `confirmed` | `email` |
-| `inferred` | `email (inferred, 78%)` |
-| `unknown` | `unknown` |
+| Status | Meaning | Rendered |
+|---|---|---|
+| `confirmed` | high-confidence, corroborated inference | `email` |
+| `inferred` | plausible but unverified guess | `email (inferred, 78%)` |
+| `unknown` | not reliably inferable | `unknown` |
 
 Unknown human-input fields (description, license, source) render as `unknown`
 too — never blank, never fabricated.
+
+### Semantic types & PII detection
+
+`profile` distinguishes **what a column is** (semantic type) from **whether it
+is sensitive** (possible PII) — two independent, extensible detector sets:
+
+- **Semantic type** — the *meaning* of a column beyond its storage type
+  (`integer` → `identifier`, a value matching an email pattern → `email`).
+  Each detection carries a confidence score: `match_rate × prior`, where the
+  prior reflects how reliable the pattern itself is.
+- **Possible PII** — heuristic detection of potentially sensitive data
+  (email, phone, …). Always reported as **`possible_pii`**, never as a
+  categorical verdict: a pattern match is an observation, not a legal or
+  ethical conclusion.
+
+```yaml
+# excerpt from metadata.yaml
+schema:
+  - name: email
+    storage_type: categorical/text
+    semantic_type:
+      type: email
+      status: confirmed          # confirmed | inferred | unknown
+      confidence: 0.98
+    pii:
+      - label: email
+        note: possible_pii
+```
+
+Detectors are pluggable — adding a new semantic type or PII pattern is a new
+detector class, no changes to the pipeline.
 
 ## Directory layout
 
@@ -154,19 +192,45 @@ expected = ["column_a", "column_b"]
 # max_null_pct = 15.0
 ```
 
+### Metadata inference tuning (`[tool.sofer]`)
+
+The inference pipeline (used by `profile`) is fully configurable in
+`pyproject.toml` — no magic numbers in code:
+
+```toml
+[tool.sofer]
+# Confidence prior per semantic detector (pattern reliability).
+# Higher = the pattern alone is more trustworthy.
+semantic_priors = { email = 0.98 }
+
+# Status thresholds (confidence bands).
+confirm_threshold = 0.8   # >= this → confirmed
+min_threshold = 0.5       # >= this → inferred; below → unknown
+detect_threshold = 0.5    # match_rate below this → no detection at all
+
+# Profiling sample size (statistics are computed over a bounded sample, never
+# a full in-memory load — and reported as such).
+profile_max_sample = 100000
+
+# Confidence is rounded to this many decimal places before it is stored.
+confidence_round_digits = 4
+```
+
+Every value has a sensible default — the whole section is optional.
+
 ## Command reference
 
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
 | `scan [config.toml]` | Discover supported files, flatten first path segment (`raw/DPTO.csv` → `cache/DPTO.csv`), register in TOML, copy to `cache/`. Use `--dry-run` to preview. |
+| `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`. |
+| `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`. |
+| `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
+| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
 | `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. |
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
-| `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`. |
-| `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Inference states render distinctly: `confirmed` as a plain label, `inferred` as `<type> (inferred, NN%)`, `unknown` as `unknown`. Flags: `--output DIR`. |
-| `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
-| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
 | `--help` | Detailed help for any command. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
@@ -174,13 +238,13 @@ expected = ["column_a", "column_b"]
 
 ## Data format support
 
-| Format | `scan` | `codebook` |
-|---|---|---|
-| CSV (`.csv`) | ✅ | ✅ |
-| TSV (`.tsv`) | ✅ | ✅ |
-| Parquet (`.parquet`) | ✅ | ✅ |
-| Excel (`.xlsx`) | ✅ | ✅ |
-| JSON Lines (`.jsonl`) | ✅ | ✅ |
+| Format | `scan` | `codebook` | `profile` |
+|---|---|---|---|
+| CSV (`.csv`) | ✅ | ✅ | ✅ |
+| TSV (`.tsv`) | ✅ | ✅ | ✅ |
+| Parquet (`.parquet`) | ✅ | ✅ | ✅ |
+| Excel (`.xlsx`) | ✅ | ✅ | ✅ |
+| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ |
 
 ## Validation & quality checks (automatic)
 
