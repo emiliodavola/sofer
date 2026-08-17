@@ -94,6 +94,17 @@ card_fallback_rows_per_file = 100
 card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d"]
 card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
 
+# ── Metadata core (profile / render) ──
+# All keys optional — these mirror the code defaults in src/sofer/config.py.
+# Prior probability per semantic detector name (email prior 0.98: the @ + TLD
+# structure is distinctive, so a regex match-rate near 1.0 is highly reliable).
+semantic_priors = { email = 0.98 }
+confirm_threshold = 0.8   # confidence >= this -> status "confirmed"
+min_threshold = 0.5       # confidence >= this -> status "inferred"
+detect_threshold = 0.5    # match_rate below this -> no detection (None)
+profile_max_sample = 100000
+confidence_round_digits = 4
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
