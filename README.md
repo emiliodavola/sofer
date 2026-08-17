@@ -14,6 +14,8 @@ sofer codebook --all-files      # generate codebooks for all tables
 sofer prepare my-dataset.toml   # generate the package locally (build/)
 sofer publish my-dataset.toml   # deliver to HF Hub or a local directory
 sofer validate my-dataset.toml  # check data integrity + quality
+sofer profile data.csv          # introspect a dataset → metadata.yaml (read-only)
+sofer render metadata.yaml      # render a status-annotated README.md
 ```
 
 ## Why
@@ -73,6 +75,33 @@ sofer publish my-dataset.toml --target local --output ./out/
 
 `publish` re-runs `prepare` automatically whenever the package is missing or
 stale (the TOML or any declared source file is newer than the newest Parquet).
+
+## Profiling & rendering (metadata workflow)
+
+`profile` and `render` form a lightweight, read-only documentation pipeline
+that works on a dataset file alone — no TOML needed:
+
+```bash
+# 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
+sofer profile data/contacts.csv
+
+# 2. Render a status-annotated README.md from that metadata
+sofer render data/            # directory containing metadata.yaml
+sofer render data/metadata.yaml   # ...or the file directly
+```
+
+`metadata.yaml` is the machine-readable source of truth; `render` is a pure
+projection of it — it never recomputes inference. Inference states are always
+rendered distinctly so a reader can tell a fact from a guess:
+
+| Status | Rendered |
+|---|---|
+| `confirmed` | `email` |
+| `inferred` | `email (inferred, 78%)` |
+| `unknown` | `unknown` |
+
+Unknown human-input fields (description, license, source) render as `unknown`
+too — never blank, never fabricated.
 
 ## Directory layout
 
@@ -134,6 +163,8 @@ expected = ["column_a", "column_b"]
 | `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. |
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
+| `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`. |
+| `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Inference states render distinctly: `confirmed` as a plain label, `inferred` as `<type> (inferred, NN%)`, `unknown` as `unknown`. Flags: `--output DIR`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
 | `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
 | `--help` | Detailed help for any command. |
@@ -224,14 +255,20 @@ src/sofer/
 ├── _sentinels.py       # Shared sentinel value sets
 ├── _csv_reader.py      # CSV/TSV streaming reader
 ├── _mirror.py          # Remote-path validation + dir-aware mirror copies
-├── cli.py              # argparse CLI with 6 subcommands (init, scan, validate, prepare, publish, codebook)
-├── model.py            # DatasetConfig — loads & validates TOML
+├── _patterns.py        # Shared regexes (EMAIL_PATTERN)
+├── cli.py              # argparse CLI with 8 subcommands (init, scan, validate, prepare, publish, codebook, profile, render)
+├── model.py            # DatasetConfig + InferenceStatus
 ├── checks.py           # DatasetValidator — data integrity checks
 ├── quality.py          # QualityValidator — 9 quality checks (single-pass)
 ├── codebook.py         # Multi-format codebook generator
 ├── scanner.py          # File discovery, TOML merge, copy-to-cache
 ├── prepare.py          # Offline generation: Parquet conversion, card, LICENSE, codebooks
 ├── publish.py          # Delivery: HF upload_folder / local copy, auto-prepare, dry-run
+├── semantic.py         # Semantic type inference detectors (email)
+├── pii.py              # Possible-PII detection detectors (email)
+├── metadata.py         # metadata.yaml schema + deterministic (de)serialization
+├── profile.py          # Read-only profile orchestrator → metadata.yaml
+├── render.py           # Render status-annotated README.md from metadata.yaml
 ├── repo_compliance.py  # Dataset Card & schema compliance
 ├── splits.py           # Split detection (train/test/validation)
 └── verification.py     # load_dataset() end-to-end verification
