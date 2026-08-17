@@ -210,6 +210,13 @@ class TestProfileCli:
             cli._build_parser().parse_args(["--help"])
         assert "profile" in capsys.readouterr().out
 
+    def test_profile_help_accurate(self, capsys):
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["profile", "--help"])
+        out = capsys.readouterr().out
+        assert "metadata.yaml" in out
+        assert "--output" in out
+
     def test_cmd_profile_dispatches(self, tmp_path):
         csv_path = tmp_path / "data.csv"
         _write_email_csv(csv_path)
