@@ -50,6 +50,17 @@ _DEFAULTS: dict[str, Any] = {
     ],
     "card_boolean_values": ["true", "false", "1", "0", "yes", "no"],
     "schema_dup_threshold": 3,
+    # Metadata-core (profile/render) inference knobs.
+    # ``semantic_priors["email"] = 0.98``: an email column's ``@`` + TLD
+    # structure is distinctive, so a regex match-rate near 1.0 is highly
+    # reliable — the prior reflects that. Kept in config (not a class
+    # attribute) so recalibration is a TOML edit, not a code change.
+    "semantic_priors": {"email": 0.98},
+    "confirm_threshold": 0.8,
+    "min_threshold": 0.5,
+    "detect_threshold": 0.5,
+    "profile_max_sample": 100_000,
+    "confidence_round_digits": 4,
 }
 
 
@@ -99,6 +110,16 @@ def _load_tool_config() -> dict[str, Any]:
             else:
                 merged[key] = val
 
+    # ``semantic_priors`` maps a detector name to a prior probability. A
+    # non-dict value (e.g. a stray string) is a user config error — reject it
+    # loudly rather than silently keeping the default (AGENTS.md rule 3: never
+    # bypass a user-provided config value).
+    if "semantic_priors" in tool_section and not isinstance(tool_section["semantic_priors"], dict):
+        raise ValueError(
+            "'semantic_priors' in [tool.sofer] must be a table mapping detector "
+            "names to prior probabilities, e.g. semantic_priors = { email = 0.98 }"
+        )
+
     return merged
 
 
@@ -138,3 +159,11 @@ CARD_MODALITY_TAGS: list[str] = _tool["card_modality_tags"]
 CARD_BOOLEAN_VALUES: list[str] = _tool["card_boolean_values"]
 
 SCHEMA_DUP_THRESHOLD: int = _tool["schema_dup_threshold"]
+
+# Metadata-core (profile/render) inference knobs.
+SEMANTIC_PRIORS: dict[str, float] = _tool["semantic_priors"]
+CONFIRM_THRESHOLD: float = _tool["confirm_threshold"]
+MIN_THRESHOLD: float = _tool["min_threshold"]
+DETECT_THRESHOLD: float = _tool["detect_threshold"]
+PROFILE_MAX_SAMPLE: int = _tool["profile_max_sample"]
+CONFIDENCE_ROUND_DIGITS: int = _tool["confidence_round_digits"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
@@ -29,6 +30,26 @@ QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
 _PLACEHOLDERS: frozenset[str] = frozenset(
     {"your_user", "your_org", "your_organization", "your_username", "your-username"}
 )
+
+
+class InferenceStatus(str, Enum):
+    """Frozen vocabulary describing how a value was inferred.
+
+    A semantic detector reports one of three states:
+
+    - ``confirmed``: the confidence is at or above the confirm threshold.
+    - ``inferred``: the confidence is below confirm but at or above the minimum.
+    - ``unknown``: no detector produced a result (or confidence is too low).
+
+    Lives in ``model.py`` alongside :data:`QUALITY_CHECK_NAMES` so that the
+    semantic, metadata, and render modules can consume the same vocabulary
+    without importing one another. Subclassing ``str`` keeps members directly
+    serializable (e.g. into ``metadata.yaml``).
+    """
+
+    CONFIRMED = "confirmed"
+    INFERRED = "inferred"
+    UNKNOWN = "unknown"
 
 
 @dataclass

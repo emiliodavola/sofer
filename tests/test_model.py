@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from sofer.model import DatasetConfig, FileEntry
+from sofer.model import DatasetConfig, FileEntry, InferenceStatus
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -414,3 +414,31 @@ include_in_schema = true
         (tmp_path / "labels.csv").touch()
         cfg = DatasetConfig.from_toml(p)
         assert cfg.files[1].include_in_schema is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  InferenceStatus — metadata-core status vocabulary (MTA-04)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestInferenceStatus:
+    """InferenceStatus must be a frozen 3-value vocabulary."""
+
+    def test_exactly_three_values(self):
+        """The vocabulary is exactly confirmed, inferred, unknown."""
+        values = {member.value for member in InferenceStatus}
+        assert values == {"confirmed", "inferred", "unknown"}
+
+    def test_members_are_string_comparable(self):
+        """Members behave as strings, enabling plain serialization."""
+        assert InferenceStatus.CONFIRMED == "confirmed"
+        assert InferenceStatus.INFERRED == "inferred"
+        assert InferenceStatus.UNKNOWN == "unknown"
+
+    def test_member_names_match_values(self):
+        """Each member name maps to its lowercase value."""
+        assert {m.name for m in InferenceStatus} == {
+            "CONFIRMED",
+            "INFERRED",
+            "UNKNOWN",
+        }
