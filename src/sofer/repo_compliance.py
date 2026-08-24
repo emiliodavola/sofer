@@ -380,6 +380,29 @@ def _read_parquet_sample(
         return None
 
 
+def _warn_duplicate_remotes(cfg: DatasetConfig) -> None:
+    """Emit one ``[!]`` warning per remote declared by 2+ ``[[file]]`` entries.
+
+    Exact row counts are keyed by verbatim :attr:`FileEntry.remote`; when two
+    entries declare the same remote they would overwrite one another's count.
+    This pre-pass makes the resulting first-wins overwrite visible instead of
+    silent.  It guards the keying invariant only — it never aborts the run.
+
+    Deterministic: iterates ``cfg.files`` in declaration order, so warnings
+    are emitted in first-declaration order of each duplicated remote.
+    Never raises.
+    """
+    seen: dict[str, int] = {}
+    for entry in cfg.files:
+        seen[entry.remote] = seen.get(entry.remote, 0) + 1
+    for remote, n in seen.items():
+        if n > 1:
+            print(
+                f"  [!] Duplicate remote '{remote}' declared by multiple "
+                f"[[file]] entries; keeping the first entry's row count."
+            )
+
+
 def _build_schema_report_impl(
     cfg: DatasetConfig,
     csv_delimiter: str | None,
@@ -398,12 +421,21 @@ def _build_schema_report_impl(
                        entry before falling back to CSV reading.
 
     Returns:
-        ``(columns, row_counts)`` where *row_counts* maps each sampled file's
-        origin basename (``"x.parquet"`` / ``"x.csv"``) to its EXACT row count
-        (Parquet metadata vs. fully-read CSV rows).  Files that cannot be read
-        contribute no entry.  Same-basename collisions overwrite each other —
-        a documented MVP limitation.
+        ``(columns, row_counts)`` where *row_counts* maps each counted file's
+        verbatim remote path (``entry.remote``, POSIX-style — identical to how
+        ``planned_remotes`` and ``configs.data_files`` render remotes) to its
+        EXACT row count (Parquet metadata vs. fully-read CSV rows).  Remotes
+        are unique per well-formed dataset; if duplicates are declared anyway,
+        the FIRST entry's count is kept (``setdefault``) after a ``[!]``
+        warning from :func:`_warn_duplicate_remotes`.  Files that cannot be
+        read contribute no entry.
+
+        Gate-review note: because unreadable files contribute no entry, if the
+        first-declared entry's file cannot be read while a later same-remote
+        entry's file can, the later entry stores its count under the shared
+        remote key.
     """
+    _warn_duplicate_remotes(cfg)
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
     delimiter = csv_delimiter or cfg.csv_delimiter
     csv_encoding = csv_encoding or cfg.csv_encoding
@@ -450,7 +482,9 @@ def _build_schema_report_impl(
             assert parquet_result is not None
             headers, rows, pf = parquet_result
             sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
-            row_counts[origin_name] = pf.metadata.num_rows
+            # Key by verbatim remote (first-wins via setdefault) — NOT the
+            # flat-stem parquet origin, which collides across subdirectories.
+            row_counts.setdefault(entry.remote, pf.metadata.num_rows)
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -511,7 +545,9 @@ def _build_schema_report_impl(
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
             sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
-            row_counts[local.name] = len(rows)
+            # Key by verbatim remote (first-wins via setdefault) — local
+            # filenames collide across subdirectories with the same basename.
+            row_counts.setdefault(entry.remote, len(rows))
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -648,10 +684,13 @@ def build_schema_report_with_rows(
 
     Returns:
         ``(columns, row_counts)`` — the same schema report as
-        :func:`build_schema_report`, plus a dict mapping each sampled file's
-        origin basename to its EXACT row count (Parquet:
-        ``pf.metadata.num_rows``; CSV: ``len(rows)`` on the fully read file).
-        Row counts are never capped by the schema sample size.
+        :func:`build_schema_report`, plus a dict mapping each counted file's
+        verbatim remote path (``entry.remote``, POSIX-style) to its EXACT
+        row count (Parquet: ``pf.metadata.num_rows``; CSV: ``len(rows)`` on
+        the fully read file).  Remotes are unique per well-formed dataset;
+        duplicate declarations keep the FIRST entry's count and emit a
+        ``[!]`` warning.  Row counts are never capped by the schema sample
+        size.
     """
     return _build_schema_report_impl(cfg, csv_delimiter, csv_encoding, staging_dir)
 
@@ -700,12 +739,16 @@ def build_dataset_card(
         study_design_content:  Pre-loaded study design content, or ``None``.
         empty_columns:         Optional list of column names that are entirely empty.
         duplicate_rows:        Optional dict mapping filenames to duplicate row counts.
-        row_counts:            Optional dict mapping each file's origin basename to
-                               its exact data-row count (from
-                               :func:`build_schema_report_with_rows`).  When given,
-                               the train split's ``num_examples`` is their sum;
-                               otherwise it falls back to
-                               ``CARD_FALLBACK_ROWS_PER_FILE`` per declared file.
+        row_counts:            Optional dict mapping each file's verbatim
+                               remote path (``entry.remote``, POSIX-style —
+                               keys are unique per well-formed dataset; the
+                               sole consumer sums VALUES only) to its exact
+                               data-row count (from
+                               :func:`build_schema_report_with_rows`).  When
+                               given, the train split's ``num_examples`` is
+                               their sum; otherwise it falls back to
+                               ``CARD_FALLBACK_ROWS_PER_FILE`` per declared
+                               file.
         keep_csv:              Whether converted CSVs are also delivered at their
                                original remote (the publish ``--keep-csv`` flag).
                                Governs the Dataset Structure listing only.
@@ -788,6 +831,10 @@ def build_dataset_card(
 
         # splits — single train split; num_examples from exact row counts
         # when available, else the conservative per-file fallback (D7).
+        # NOTE (partial counts undercount): when only SOME declared files
+        # yield exact counts (mixed schema/excluded/recursive datasets), the
+        # sum silently undercounts the dataset — the fallback product below
+        # applies only when NO file yields an exact count (RC-R12).
         if cfg.files:
             if row_counts:
                 approx_rows = sum(row_counts.values())
