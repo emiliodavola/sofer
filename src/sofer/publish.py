@@ -593,9 +593,11 @@ def publish(
         sys.stdout.reconfigure(encoding="utf-8")
 
     # ── 1. Auto-prepare (PUB-03) — never under --dry-run (PUB-04) ────────
+    # all_files=True: the delivered package must include codebooks even when
+    # the user never ran `prepare --all-files` themselves.
     if not dry_run and _needs_prepare(cfg, source):
         print("  [i] Output is stale or missing - running prepare first ...")
-        rc = prepare(cfg, source, force=True)
+        rc = prepare(cfg, source, force=True, all_files=True)
         if rc != 0:
             return rc
 
@@ -639,6 +641,16 @@ def publish(
     existing_files = _inspect_repo(cfg)
 
     codebook_remotes = _collect_codebook_remotes(source)
+
+    # ── PUB-08: warn (never block) when the package carries no codebooks ─
+    # A fresh bare-`prepare` build is up-to-date, so auto-prepare skipped and
+    # nothing regenerated the codebooks; advise, then deliver anyway.
+    if not codebook_remotes:
+        print(
+            "  [!] No codebooks found in this package - it will be delivered without them.\n"
+            "     Run `sofer prepare --all-files` to generate per-file codebooks first."
+        )
+
     diff = _repo_diff_summary(cfg, existing_files, keep_csv, codebook_remotes)
     print(diff)
     print()
