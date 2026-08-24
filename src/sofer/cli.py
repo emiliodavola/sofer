@@ -11,12 +11,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, config
 from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
-from .config import CODEBOOK_MAX_SAMPLE, DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
@@ -197,10 +196,14 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Resolve the --max-sample default through the config module at call
+    # time (post-reload), never from a frozen argparse default.
+    max_sample = args.max_sample if args.max_sample is not None else config.CODEBOOK_MAX_SAMPLE
+
     codebook = generate_codebook(
         args.csv,
         output_path=args.output,
-        max_sample=args.max_sample,
+        max_sample=max_sample,
     )
     if not args.output:
         print(codebook)
@@ -278,11 +281,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     base_dir = config_path.parent.resolve()
-    data_dir = base_dir / OUTPUT_DIR
+    data_dir = base_dir / config.OUTPUT_DIR
 
     # 2. Discover supported files (exclude cache/ destination directory).
     extensions = args.ext if args.ext else None
-    exclude = EXCLUSIONS | frozenset({OUTPUT_DIR})
+    exclude = EXCLUSIONS | frozenset({config.OUTPUT_DIR})
     discovered = discover_files(base_dir, extensions, exclude_dirs=exclude)
 
     if not discovered:
@@ -310,10 +313,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     # 4. Confirm with the user before copying (unless --force or --dry-run).
     if not args.dry_run and not args.force:
-        print(f"\n  The following files will be copied to {OUTPUT_DIR}/:")
+        print(f"\n  The following files will be copied to {config.OUTPUT_DIR}/:")
         for f in discovered:
             flat = flatten_first_level(f.relative_to(base_dir))
-            print(f"     → {OUTPUT_DIR}/{flat.as_posix()}")
+            print(f"     → {config.OUTPUT_DIR}/{flat.as_posix()}")
         answer = input("\n  Continue? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("  OK  Aborted.")
@@ -603,8 +606,10 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument(
         "--max-sample",
         type=int,
-        default=CODEBOOK_MAX_SAMPLE,
-        help=f"Maximum rows to sample for analysis (default: {CODEBOOK_MAX_SAMPLE:,}).",
+        default=None,
+        help=(
+            "Maximum rows to sample for analysis (default: codebook_max_sample from [tool.sofer])."
+        ),
     )
     c.add_argument(
         "--all-files",
@@ -613,8 +618,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument(
         "--config",
-        default=DEFAULT_CONFIG_NAME,
-        help="Path to the TOML config file (used with --all-files, default: dataset.toml).",
+        default=config.DEFAULT_CONFIG_NAME,
+        help=(
+            "Path to the TOML config file used with --all-files (default: "
+            "default_config_name from [tool.sofer])."
+        ),
     )
     c.set_defaults(func=_cmd_codebook)
 
@@ -704,8 +712,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "config",
         nargs="?",
-        default=DEFAULT_CONFIG_NAME,
-        help="Path to the .toml configuration file (default: dataset.toml).",
+        default=config.DEFAULT_CONFIG_NAME,
+        help=(
+            "Path to the .toml configuration file (default: default_config_name from [tool.sofer])."
+        ),
     )
     s.add_argument(
         "--dry-run",
@@ -730,7 +740,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Entry point (installed via ``pyproject.toml [project.scripts]``)."""
+    """Entry point (installed via ``pyproject.toml [project.scripts]``).
+
+    Orchestration:
+
+        1. Phase-0 bootstrap: resolve ``[tool.sofer]`` anchored on the
+           current working directory (``config.reload(None)``) so argparse
+           defaults such as ``default_config_name`` reflect cwd-tree
+           overrides before the parser is built (TC-07).
+        2. Build the parser and dispatch; dataset commands re-resolve via
+           ``DatasetConfig.from_toml`` (dataset-dir anchor, TC-04/TC-05).
+    """
+    config.reload(None)
     parser = _build_parser()
     args = parser.parse_args()
     sys.exit(args.func(args))

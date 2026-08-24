@@ -4,24 +4,24 @@ Covers the Phase 1 (WU1) additions: semantic priors, inference thresholds,
 profile sample cap, and confidence rounding precision. Each new key must be
 readable from ``[tool.sofer]`` in ``pyproject.toml`` and fall back to a sane
 default when absent.
+
+Config values are always read through attribute access on the ``config``
+module (``config.X``), never via frozen ``from .config import X`` bindings —
+mirroring the consumer contract enforced since the #56 discovery fix.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from sofer.config import (
-    CONFIDENCE_ROUND_DIGITS,
-    CONFIRM_THRESHOLD,
-    DETECT_THRESHOLD,
-    MIN_THRESHOLD,
-    PROFILE_MAX_SAMPLE,
-    SEMANTIC_PRIORS,
-    _load_tool_config,
-)
+import sofer.config as config
+from sofer._csv_reader import stream_csv
+from sofer.codebook import generate as generate_codebook
+from sofer.model import DatasetConfig
 
 
 class TestMetadataCoreDefaults:
@@ -29,51 +29,51 @@ class TestMetadataCoreDefaults:
 
     def test_semantic_priors_default(self):
         """SEMANTIC_PRIORS defaults to the email prior of 0.98."""
-        assert SEMANTIC_PRIORS == {"email": 0.98}
+        assert config.SEMANTIC_PRIORS == {"email": 0.98}
 
     def test_semantic_priors_is_dict(self):
         """SEMANTIC_PRIORS must be a dict (mapping detector name -> prior)."""
-        assert isinstance(SEMANTIC_PRIORS, dict)
+        assert isinstance(config.SEMANTIC_PRIORS, dict)
 
     def test_confirm_threshold_default(self):
         """CONFIRM_THRESHOLD defaults to 0.8."""
-        assert CONFIRM_THRESHOLD == 0.8
+        assert config.CONFIRM_THRESHOLD == 0.8
 
     def test_min_threshold_default(self):
         """MIN_THRESHOLD defaults to 0.5."""
-        assert MIN_THRESHOLD == 0.5
+        assert config.MIN_THRESHOLD == 0.5
 
     def test_detect_threshold_default(self):
         """DETECT_THRESHOLD defaults to 0.5."""
-        assert DETECT_THRESHOLD == 0.5
+        assert config.DETECT_THRESHOLD == 0.5
 
     def test_confidence_round_digits_default(self):
         """CONFIDENCE_ROUND_DIGITS defaults to 4."""
-        assert CONFIDENCE_ROUND_DIGITS == 4
+        assert config.CONFIDENCE_ROUND_DIGITS == 4
 
     def test_profile_max_sample_default(self):
         """PROFILE_MAX_SAMPLE defaults to 100_000 (matches codebook_max_sample)."""
-        assert PROFILE_MAX_SAMPLE == 100_000
+        assert config.PROFILE_MAX_SAMPLE == 100_000
 
     def test_thresholds_are_floats(self):
         """The three thresholds must be floats for the confidence comparison."""
-        assert isinstance(CONFIRM_THRESHOLD, float)
-        assert isinstance(MIN_THRESHOLD, float)
-        assert isinstance(DETECT_THRESHOLD, float)
+        assert isinstance(config.CONFIRM_THRESHOLD, float)
+        assert isinstance(config.MIN_THRESHOLD, float)
+        assert isinstance(config.DETECT_THRESHOLD, float)
 
     def test_round_digits_is_int(self):
         """CONFIDENCE_ROUND_DIGITS must be an int."""
-        assert isinstance(CONFIDENCE_ROUND_DIGITS, int)
+        assert isinstance(config.CONFIDENCE_ROUND_DIGITS, int)
 
 
 class TestMetadataCoreTomlOverride:
     """New keys must be overridable from ``[tool.sofer]`` in pyproject.toml."""
 
     def _load_with_toml(self, monkeypatch, tmp_path: Path, toml: str) -> dict[str, Any]:
-        """Point config at a temp pyproject.toml and load the tool section."""
+        """Point config discovery at a temp pyproject.toml and load the section."""
         (tmp_path / "pyproject.toml").write_text(toml, encoding="utf-8")
-        monkeypatch.setattr("sofer.config._find_project_root", lambda: tmp_path)
-        return _load_tool_config()
+        monkeypatch.setattr("sofer.config._find_project_root", lambda start=None: tmp_path)
+        return config._load_tool_config()
 
     def test_toml_overrides_semantic_priors(self, monkeypatch, tmp_path):
         """A custom semantic_priors dict should replace the default."""
@@ -110,8 +110,8 @@ class TestSemanticPriorsValidation:
 
     def _load_with_toml(self, monkeypatch, tmp_path: Path, toml: str) -> dict[str, Any]:
         (tmp_path / "pyproject.toml").write_text(toml, encoding="utf-8")
-        monkeypatch.setattr("sofer.config._find_project_root", lambda: tmp_path)
-        return _load_tool_config()
+        monkeypatch.setattr("sofer.config._find_project_root", lambda start=None: tmp_path)
+        return config._load_tool_config()
 
     def test_semantic_priors_rejects_non_dict(self, monkeypatch, tmp_path):
         """A non-dict semantic_priors value must raise a clear ValueError."""
@@ -124,3 +124,391 @@ class TestSemanticPriorsValidation:
         toml = "[tool.sofer]\nsemantic_priors = { email = 0.98 }\n"
         cfg = self._load_with_toml(monkeypatch, tmp_path, toml)
         assert cfg["semantic_priors"] == {"email": 0.98}
+
+
+class TestImportTimeIsolation:
+    """Import binds constants from _DEFAULTS only — no filesystem access."""
+
+    def test_constants_equal_defaults_at_import(self):
+        """Every module constant mirrors its _DEFAULTS entry until reload runs."""
+        for key, default in config._DEFAULTS.items():
+            assert getattr(config, key.upper()) == default
+
+    def test_source_path_none_before_reload(self):
+        """SOURCE_PATH starts as None (built-in defaults) in a fresh process state.
+
+        This asserts the module-level declaration; reload() rebinds it.
+        """
+        assert hasattr(config, "SOURCE_PATH")
+
+
+class TestFindProjectRoot:
+    """Walk-up discovery contract (TC-01/TC-03 unit layer)."""
+
+    def test_finds_pyproject_in_start_dir_itself(self, pytree):
+        """A pyproject.toml IN the start directory is found (start is included)."""
+        root = pytree("[tool.sofer]\ncsv_delimiter = ','\n")
+        assert config._find_project_root(root) == root
+
+    def test_walks_up_to_nearest_pyproject(self, pytree):
+        """Nearest ancestor pyproject.toml wins over farther ones."""
+        root = pytree('[project]\nname = "outer"\n')
+        inner = root / "a" / "b"
+        inner.mkdir(parents=True)
+        assert config._find_project_root(inner) == root
+
+    def test_returns_none_when_exhausted(self, pytree):
+        """No pyproject.toml anywhere up the tree -> None (never cwd fallback)."""
+        bare = pytree()  # tmp tree without any pyproject.toml
+        nested = bare / "deep" / "deeper"
+        nested.mkdir(parents=True)
+        assert config._find_project_root(nested) is None
+
+    def test_start_none_anchors_on_cwd(self, monkeypatch, pytree):
+        """start=None anchors on Path.cwd()."""
+        root = pytree("[tool.sofer]\n")
+        monkeypatch.chdir(root)
+        assert config._find_project_root(None) == root
+
+
+class TestReload:
+    """reload(start) rebinding contract (TC-01 unit layer)."""
+
+    def test_reload_selects_temp_tree(self, restore_tool_config, pytree):
+        """reload(subdir) selects the temp pyproject without touching user dirs."""
+        root = pytree("[tool.sofer]\nschema_sample_size = 500\n")
+        subdir = root / "sub"
+        subdir.mkdir()
+        config.reload(subdir)
+        assert config.SCHEMA_SAMPLE_SIZE == 500
+        assert config.SOURCE_PATH == root / "pyproject.toml"
+
+    def test_reload_no_hit_restores_defaults(self, restore_tool_config, monkeypatch, pytree):
+        """Nothing found -> all values equal _DEFAULTS and SOURCE_PATH is None."""
+        # Sibling trees under a common parent with no pyproject.toml of its
+        # own; chdir into the bare tree so the cwd fallback also finds nothing.
+        config.reload(pytree("[tool.sofer]\nschema_sample_size = 500\n", at="with"))
+        assert config.SCHEMA_SAMPLE_SIZE == 500
+        bare = pytree(None, at="without")  # no pyproject.toml anywhere above
+        monkeypatch.chdir(bare)
+        config.reload(bare)
+        for key, default in config._DEFAULTS.items():
+            assert getattr(config, key.upper()) == default
+        assert config.SOURCE_PATH is None
+
+    def test_cwd_fallback_when_dataset_anchor_misses(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """Dataset-anchor miss falls back to the cwd tree (precedence step 2)."""
+        cwd_tree = pytree("[tool.sofer]\nschema_sample_size = 1000\n", at="cwd")
+        monkeypatch.chdir(cwd_tree)
+        dataset_dir = pytree(None, at="dataset")  # nothing above it but tmp root
+        config.reload(dataset_dir)
+        assert config.SCHEMA_SAMPLE_SIZE == 1000
+        assert config.SOURCE_PATH == cwd_tree / "pyproject.toml"
+
+    def test_sectionless_pyproject_yields_defaults(self, restore_tool_config, pytree):
+        """A found pyproject.toml without [tool.sofer] stops the walk -> defaults."""
+        root = pytree('[project]\nname = "section-less"\n')
+        config.reload(root)
+        for key, default in config._DEFAULTS.items():
+            assert getattr(config, key.upper()) == default
+        # The section-less file is still the selected source (AD-1).
+        assert config.SOURCE_PATH == root / "pyproject.toml"
+
+
+# ---------------------------------------------------------------------------
+#  Phase 4 — one test class per spec requirement (TC-01 … TC-08)
+# ---------------------------------------------------------------------------
+
+
+class TestTc01DatasetDirAnchoring:
+    """Discovery anchors on the dataset TOML directory."""
+
+    def test_pyproject_two_levels_above_dataset_honored(self, restore_tool_config, pytree):
+        """A pyproject.toml two levels above the dataset dir sets the value."""
+        root = pytree("[tool.sofer]\nschema_sample_size = 500\n")
+        dataset_dir = root / "lvl1" / "mydata"
+        dataset_dir.mkdir(parents=True)
+        (dataset_dir / "dataset.toml").write_text(
+            '[dataset]\nname = "x"\nrepo_id = "u/x"\nlicense = "mit"\n',
+            encoding="utf-8",
+        )
+        config.reload(dataset_dir)  # anchor = the dataset TOML's directory
+        assert config.SCHEMA_SAMPLE_SIZE == 500
+
+    def test_start_dir_itself_included_in_walk(self, pytree):
+        """The start directory itself is part of the walk-up search."""
+        root = pytree("[tool.sofer]\n")
+        assert config._find_project_root(root) == root
+
+    def test_reload_selects_temp_tree_without_user_dirs(self, restore_tool_config, pytree):
+        """reload(temp_tree) never consults real user directories."""
+        root = pytree("[tool.sofer]\ncsv_delimiter = ','\n")
+        subdir = root / "deep" / "deeper"
+        subdir.mkdir(parents=True)
+        config.reload(subdir)
+        assert config.SOURCE_PATH == root / "pyproject.toml"
+        assert config.CSV_DELIMITER == ","
+
+
+class TestTc02Precedence:
+    """Dataset-dir result beats cwd; nothing found falls back to defaults."""
+
+    def test_dataset_dir_wins_over_cwd(self, restore_tool_config, monkeypatch, pytree):
+        """schema_sample_size: dataset tree (500) beats cwd tree (1000)."""
+        cwd_tree = pytree("[tool.sofer]\nschema_sample_size = 1000\n", at="cwd")
+        monkeypatch.chdir(cwd_tree)
+        dataset_tree = pytree("[tool.sofer]\nschema_sample_size = 500\n", at="proj")
+        dataset_dir = dataset_tree / "mydata"
+        dataset_dir.mkdir()
+        config.reload(dataset_dir)
+        assert config.SCHEMA_SAMPLE_SIZE == 500
+
+    def test_nothing_found_falls_back_to_defaults(self, restore_tool_config, monkeypatch, tmp_path):
+        """No pyproject above dataset dir or cwd -> all values equal _DEFAULTS."""
+        bare_cwd = tmp_path / "empty"
+        bare_cwd.mkdir()
+        monkeypatch.chdir(bare_cwd)
+        dataset_dir = tmp_path / "ds"
+        dataset_dir.mkdir()
+        config.reload(dataset_dir)
+        for key, default in config._DEFAULTS.items():
+            assert getattr(config, key.upper()) == default
+
+
+class TestTc03RuntimeIsolation:
+    """sofer's own package/repo location is never consulted at runtime."""
+
+    def test_editable_install_simulation(self, restore_tool_config, monkeypatch, pytree):
+        """Package dir outside the user tree is never selected as source."""
+        import sofer
+
+        pkg_dir = Path(sofer.__file__).resolve().parent
+        user_tree = pytree("[tool.sofer]\ncodebook_max_sample = 42\n", at="user")
+        user_leaf = user_tree / "sub"
+        user_leaf.mkdir()
+
+        # The discovered source must be inside the user tree, never near the
+        # installed package (editable-install simulation).
+        root = config._find_project_root(user_leaf)
+        assert root == user_tree
+        assert not Path(sofer.__file__).is_relative_to(user_tree)
+
+        config.reload(user_leaf)
+        assert config.CODEBOOK_MAX_SAMPLE == 42
+        assert config.SOURCE_PATH == user_tree / "pyproject.toml"
+        assert pkg_dir.name != "user"
+
+    def test_package_anchor_removed_from_source(self):
+        """_find_project_root's source contains no Path(__file__) anchor."""
+        import inspect
+
+        source = inspect.getsource(config._find_project_root)
+        assert "__file__" not in source
+
+
+def _invoke_main(argv: list[str], monkeypatch) -> SystemExit | None:
+    """Run ``sofer.cli.main()`` with *argv* and swallow SystemExit.
+
+    Returns:
+        The caught :class:`SystemExit` instance, or ``None`` if main returned
+        without raising (should not happen — main always sys.exit()s).
+    """
+    import sofer.cli
+
+    monkeypatch.setattr(sys, "argv", ["sofer", *argv])
+    exc: SystemExit | None = None
+    try:
+        sofer.cli.main()
+    except SystemExit as e:
+        exc = e
+    return exc
+
+
+class TestTc04CliReloadHooks:
+    """One reload per CLI invocation after the config path resolves."""
+
+    def test_exactly_one_phase1_reload_per_invocation(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """main([...]) fires one Phase-0 (cwd) and one Phase-1 (dataset) reload."""
+        root = pytree("[tool.sofer]\nreport_line_width = 77\n")
+        csv_path = root / "d.csv"
+        csv_path.write_text("k\n1\n2\n", encoding="utf-8-sig")
+        toml_path = root / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\nlicense = "mit"\n'
+            '\n[[file]]\nlocal = "d.csv"\nremote = "d.csv"\n',
+            encoding="utf-8",
+        )
+
+        calls: list[Path | None] = []
+        real_reload = config.reload
+
+        def counting_reload(start=None):
+            calls.append(Path(start).resolve() if start is not None else None)
+            return real_reload(start)
+
+        monkeypatch.setattr(config, "reload", counting_reload)
+
+        exc = _invoke_main(["codebook", "--all-files", "--config", str(toml_path)], monkeypatch)
+        assert exc is not None and exc.code == 0
+
+        phase1 = [c for c in calls if c == root.resolve()]
+        phase0 = [c for c in calls if c is None]
+        assert len(phase1) == 1, f"expected exactly one Phase-1 reload, got {calls}"
+        assert len(phase0) == 1, f"expected exactly one Phase-0 reload, got {calls}"
+
+    def test_single_file_codebook_without_config_anchors_cwd(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """`sofer codebook FILE` with no --config anchors discovery on cwd."""
+        root = pytree("[tool.sofer]\ncodebook_max_sample = 7\n")
+        rows = "\n".join(str(i) for i in range(20))
+        csv_path = root / "t.csv"
+        csv_path.write_text(f"v\n{rows}\n", encoding="utf-8")
+        monkeypatch.chdir(root)
+
+        exc = _invoke_main(["codebook", str(csv_path)], monkeypatch)
+        assert exc is not None and exc.code == 0
+        # Phase-0 reload(None) picked up the cwd-tree override.
+        assert config.CODEBOOK_MAX_SAMPLE == 7
+
+    def test_csv_delimiter_override_effective_same_invocation(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """Sibling-tree csv_delimiter=',' is honored within the same invocation.
+
+        Note: prepare/validate read CSVs with the DATASET-level
+        ``cfg.csv_delimiter`` ([meta] key), so the tool-wide consumer exercised
+        here is ``sofer profile`` via :func:`stream_csv` defaults.
+        """
+        root = pytree("[tool.sofer]\ncsv_delimiter = ','\n")
+        csv_path = root / "data.csv"
+        csv_path.write_text("a,b\n1,2\n3,4\n", encoding="utf-8")
+        monkeypatch.chdir(root)
+
+        exc = _invoke_main(["profile", str(csv_path)], monkeypatch)
+        assert exc is not None and exc.code == 0
+
+        metadata_path = root / "metadata.yaml"
+        assert metadata_path.exists()
+        content = metadata_path.read_text(encoding="utf-8")
+        # With ';' (unreloaded default) the header would stay a single column.
+        assert ", b" in content or "\n  b" in content or '"b"' in content or "- b" in content
+
+
+class TestTc05LibraryFromToml:
+    """Library callers resolve via DatasetConfig.from_toml."""
+
+    def test_from_toml_triggers_dataset_anchored_reload(self, restore_tool_config, pytree):
+        """from_toml on a tmp tree sets SCHEMA_SAMPLE_SIZE from sibling pyproject."""
+        root = pytree("[tool.sofer]\nschema_sample_size = 250\n")
+        data_dir = root / "proj" / "data"
+        data_dir.mkdir(parents=True)
+        toml_path = data_dir / "dataset.toml"
+        toml_path.write_text('[dataset]\nname = "x"\nrepo_id = "u/x"\n', encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path)  # library call, no CLI involved
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == 250
+
+
+class TestTc06PostReloadVisibility:
+    """Consumers see reloaded values — no stale import-time copies."""
+
+    def test_generate_sentinel_follows_reload(self, restore_tool_config, pytree):
+        """generate(max_sample omitted) resolves through config at call time."""
+        rows = "\n".join(str(i) for i in range(10))
+        csv_path = pytree() / "t.csv"
+        csv_path.write_text(f"v\n{rows}\n", encoding="utf-8")
+
+        root = pytree("[tool.sofer]\ncodebook_max_sample = 5\n", at="cfg5")
+        config.reload(root)
+        md = generate_codebook(str(csv_path))
+        assert "**Analysed rows:** 5" in md
+
+        # Sequential operation after a second reload sees the new value too.
+        (root / "pyproject.toml").write_text(
+            "[tool.sofer]\ncodebook_max_sample = 3\n", encoding="utf-8"
+        )
+        config.reload(root)
+        md2 = generate_codebook(str(csv_path))
+        assert "**Analysed rows:** 3" in md2
+
+    def test_stream_csv_reader_sentinel_follows_reload(self, restore_tool_config, pytree):
+        """stream_csv with no max_sample yields at most the reloaded cap."""
+        rows = "\n".join(str(i) for i in range(10))
+        csv_path = pytree() / "t.csv"
+        csv_path.write_text(f"v\n{rows}\n", encoding="utf-8")
+
+        root = pytree("[tool.sofer]\ncodebook_max_sample = 4\n", at="cfg4")
+        config.reload(root)
+        results = list(stream_csv(csv_path))
+        assert len(results) == 1 + 4  # header row + capped data rows
+
+    def test_repeated_reads_consistent_after_reload(self, restore_tool_config, pytree):
+        """Two sequential reads of the same constant agree post-reload."""
+        root = pytree("[tool.sofer]\nreport_sub_line_width = 11\n")
+        config.reload(root)
+        first = config.REPORT_SUB_LINE_WIDTH
+        second = config.REPORT_SUB_LINE_WIDTH
+        assert first == second == 11
+
+
+class TestTc07BootstrapKeys:
+    """Bootstrap keys anchor on cwd until a dataset config exists."""
+
+    def test_cwd_pyproject_supplies_default_config_name(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """cwd-tree default_config_name flows into parser defaults after reload."""
+        from sofer.cli import _build_parser
+
+        tree = pytree('[tool.sofer]\ndefault_config_name = "my.toml"\n', at="proj")
+        monkeypatch.chdir(tree)
+        config.reload(None)
+
+        scan_args = _build_parser().parse_args(["scan"])
+        assert scan_args.config == "my.toml"
+        codebook_args = _build_parser().parse_args(["codebook"])
+        assert codebook_args.config == "my.toml"
+
+
+class TestTc08SourceVisibility:
+    """SOFER_VERBOSE reports the resolved source on stderr; silent by default."""
+
+    def test_verbose_reports_absolute_source_path(
+        self, restore_tool_config, monkeypatch, capsys, pytree
+    ):
+        monkeypatch.setenv("SOFER_VERBOSE", "1")
+        root = pytree("[tool.sofer]\n")
+        config.reload(root)
+        captured = capsys.readouterr()
+        assert str((root / "pyproject.toml").resolve()) in captured.err
+        assert captured.out == ""
+
+    def test_verbose_reports_built_in_defaults(
+        self, restore_tool_config, monkeypatch, capsys, pytree
+    ):
+        monkeypatch.setenv("SOFER_VERBOSE", "1")
+        bare = pytree(None, at="bare")
+        monkeypatch.chdir(bare)
+        config.reload(bare)
+        captured = capsys.readouterr()
+        assert "built-in defaults" in captured.err
+        assert captured.out == ""
+
+    @pytest.mark.parametrize("value", ["0", "", None])
+    def test_silent_by_default(self, restore_tool_config, monkeypatch, capsys, pytree, value):
+        """Without truthy SOFER_VERBOSE no source line appears anywhere."""
+        if value is None:
+            monkeypatch.delenv("SOFER_VERBOSE", raising=False)
+        else:
+            monkeypatch.setenv("SOFER_VERBOSE", value)
+        root = pytree("[tool.sofer]\nreport_line_width = 9\n")
+        config.reload(root)
+        captured = capsys.readouterr()
+        assert "[tool.sofer] source:" not in captured.err
+        assert "[tool.sofer] source:" not in captured.out

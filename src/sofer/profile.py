@@ -17,11 +17,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import config
 from ._csv_reader import stream_csv
 from ._formats import SUPPORTED_FORMATS
 from ._sentinels import count_unique_non_missing
 from .codebook import _read_file, infer_column_type
-from .config import CSV_DELIMITER, CSV_ENCODING, PROFILE_MAX_SAMPLE
 from .metadata import (
     ColumnMetadata,
     DocumentationMetadata,
@@ -95,9 +95,9 @@ def profile(dataset_path: Path, output_dir: Path | None = None) -> int:
         return 1
 
     if suffix in _STREAMED_FORMATS:
-        delimiter = "\t" if suffix == ".tsv" else CSV_DELIMITER
+        delimiter = "\t" if suffix == ".tsv" else config.CSV_DELIMITER
         headers, columns, rows = _stream_columns(dataset_path, delimiter)
-        encoding = CSV_ENCODING
+        encoding = config.CSV_ENCODING
     else:
         headers, columns, _dtypes = _read_file(str(dataset_path))
         rows = len(columns[0]) if columns else 0
@@ -158,8 +158,8 @@ def _stream_columns(
     for header, row in stream_csv(
         path,
         delimiter=delimiter,
-        encoding=CSV_ENCODING,
-        max_sample=PROFILE_MAX_SAMPLE,
+        encoding=config.CSV_ENCODING,
+        max_sample=config.PROFILE_MAX_SAMPLE,
     ):
         if row is None:
             headers = list(header)
