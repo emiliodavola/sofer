@@ -1,8 +1,8 @@
-"""Tests for data_uploader.model — TOML loading, config representation, validation."""
+"""Tests for sofer.model — TOML loading, config representation, validation."""
 
 from pathlib import Path
 
-from data_uploader.model import DatasetConfig, FileEntry
+from sofer.model import DatasetConfig, FileEntry, InferenceStatus
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -107,6 +107,24 @@ class TestFromToml:
         assert cfg.min_total_size_mb == 0.0  # default
         assert cfg.column_checks == []
         assert cfg.description == ""
+
+    def test_build_dir_defaults_to_build(self, tmp_path):
+        """A TOML without ``[dataset] build_dir`` defaults to ``"build"``."""
+        p = tmp_path / "minimal.toml"
+        p.write_text(SAMPLE_TOML_MINIMAL)
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.build_dir == "build"
+
+    def test_build_dir_custom_from_toml(self, tmp_path):
+        """``[dataset] build_dir`` is parsed into ``DatasetConfig.build_dir``."""
+        p = tmp_path / "custom.toml"
+        p.write_text(
+            '[dataset]\nname = "custom"\nrepo_id = "user/custom"\n'
+            'build_dir = "staging"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n'
+        )
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.build_dir == "staging"
 
     def test_file_entry_resolve_absolute(self):
         """An absolute local path should be returned as-is."""
@@ -236,6 +254,51 @@ class TestValidate:
         errors = cfg.validate()
         assert any("not found" in e.lower() for e in errors)
 
+    # ── Placeholder rejection ───────────────────────────────────────────
+
+    def test_rejects_your_user_placeholder(self):
+        """repo_id with YOUR_USER placeholder should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_USER/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_your_org_placeholder(self):
+        """repo_id with YOUR_ORG placeholder should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_ORG/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_your_username_placeholder_case_insensitive(self):
+        """repo_id with 'your-username' (case-insensitive) should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="your-username/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_your_organization_placeholder(self):
+        """repo_id with YOUR_ORGANIZATION placeholder should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_ORGANIZATION/dataset")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_accepts_valid_user_repo(self):
+        """Valid 'alice/my-dataset' should pass placeholder check."""
+        cfg = DatasetConfig(name="test", repo_id="alice/my-dataset")
+        errors = cfg.validate()
+        assert not any("placeholder" in e.lower() for e in errors)
+
+    def test_rejects_placeholder_in_multisegment(self):
+        """repo_id with placeholder in multi-segment path should be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="your-username/sub/project")
+        errors = cfg.validate()
+        assert any("placeholder" in e.lower() for e in errors)
+
+    def test_placeholder_error_message_names_placeholder(self, tmp_path):
+        """Error message should name the specific placeholder found."""
+        cfg = DatasetConfig(name="test", repo_id="YOUR_USER/dataset")
+        (tmp_path / "data.csv").touch()
+        errors = cfg.validate()
+        assert any("YOUR_USER" in e for e in errors)
+
     def test_all_files_exist(self, tmp_path):
         """When all declared files exist, validation should pass."""
         p = tmp_path / "t.toml"
@@ -268,3 +331,114 @@ class TestValidate:
         cfg = DatasetConfig.from_toml(p)
         errors = cfg.validate()
         assert errors == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FileEntry.include_in_schema — schema opt-out feature
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFileEntryIncludeInSchema:
+    """FileEntry.include_in_schema default, TOML parse, and from_toml behaviour."""
+
+    def test_default_value_is_true(self):
+        """include_in_schema should default to True when not specified."""
+        entry = FileEntry(local=Path("data.csv"), remote="data.csv")
+        assert entry.include_in_schema is True
+
+    def test_explicit_false_in_dataclass(self):
+        """include_in_schema=False should be supported at construction."""
+        entry = FileEntry(local=Path("labels.csv"), remote="labels.csv", include_in_schema=False)
+        assert entry.include_in_schema is False
+
+    def test_explicit_true_in_dataclass(self):
+        """include_in_schema=True should be supported at construction."""
+        entry = FileEntry(local=Path("data.csv"), remote="data.csv", include_in_schema=True)
+        assert entry.include_in_schema is True
+
+    def test_toml_field_absent_defaults_true(self, tmp_path):
+        """When include_in_schema is absent from TOML, default to True."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[[file]]
+local = "labels.csv"
+remote = "labels.csv"
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "data.csv").touch()
+        (tmp_path / "labels.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        # First file has no include_in_schema → True
+        assert cfg.files[0].include_in_schema is True
+        # Second file also defaults True
+        assert cfg.files[1].include_in_schema is True
+
+    def test_toml_explicit_false(self, tmp_path):
+        """include_in_schema = false in TOML should parse as False."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[[file]]
+local = "labels.csv"
+remote = "labels.csv"
+include_in_schema = false
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "data.csv").touch()
+        (tmp_path / "labels.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        # First file defaults True
+        assert cfg.files[0].include_in_schema is True
+        # Second file explicitly False
+        assert cfg.files[1].include_in_schema is False
+
+    def test_toml_explicit_true(self, tmp_path):
+        """include_in_schema = true in TOML should parse as True."""
+        toml = (
+            SAMPLE_TOML_MINIMAL
+            + """
+[[file]]
+local = "labels.csv"
+remote = "labels.csv"
+include_in_schema = true
+"""
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "data.csv").touch()
+        (tmp_path / "labels.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[1].include_in_schema is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  InferenceStatus — metadata-core status vocabulary (MTA-04)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestInferenceStatus:
+    """InferenceStatus must be a frozen 3-value vocabulary."""
+
+    def test_exactly_three_values(self):
+        """The vocabulary is exactly confirmed, inferred, unknown."""
+        values = {member.value for member in InferenceStatus}
+        assert values == {"confirmed", "inferred", "unknown"}
+
+    def test_members_are_string_comparable(self):
+        """Members behave as strings, enabling plain serialization."""
+        assert InferenceStatus.CONFIRMED == "confirmed"
+        assert InferenceStatus.INFERRED == "inferred"
+        assert InferenceStatus.UNKNOWN == "unknown"
+
+    def test_member_names_match_values(self):
+        """Each member name maps to its lowercase value."""
+        assert {m.name for m in InferenceStatus} == {
+            "CONFIRMED",
+            "INFERRED",
+            "UNKNOWN",
+        }

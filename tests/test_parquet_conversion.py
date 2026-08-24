@@ -1,12 +1,32 @@
 """Tests for CSV-to-Parquet conversion, keep-csv, pipeline integration, and model."""
 
+import shutil
 import tempfile
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from data_uploader.model import DatasetConfig, FileEntry
+from sofer import publish as publish_mod
+from sofer.model import DatasetConfig, FileEntry
+from sofer.publish import publish
+
+
+def _mock_hf_api(monkeypatch) -> None:
+    """Stub every HF API method publish could reach (offline tests)."""
+    monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+    monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+    monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+
+
+def _fixed_staging(tmp_path: Path, monkeypatch) -> Path:
+    """Point tempfile.mkdtemp at tmp_path/_staging and keep it (no rmtree)."""
+    td = tmp_path / "_staging"
+    td.mkdir()
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+    monkeypatch.setattr(shutil, "rmtree", lambda p, **kw: None)
+    return td
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FileEntry model — upload_as_csv field
@@ -107,7 +127,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is not None
@@ -129,7 +149,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         table = pq.read_table(result)
@@ -144,7 +164,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         table = pq.read_table(result)
@@ -158,7 +178,7 @@ class TestConvertToParquet:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         table = pq.read_table(result)
@@ -178,7 +198,7 @@ class TestConvertToParquetFallback:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is None
@@ -189,7 +209,7 @@ class TestConvertToParquetFallback:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is None
@@ -202,7 +222,7 @@ class TestConvertToParquetFallback:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv_path, staging)
         assert result is None
@@ -216,12 +236,11 @@ class TestConvertToParquetFallback:
 
 
 class TestConversionPipeline:
-    """Conversion loop in upload() — called for CSVs, skipped for overrides and .parquet."""
+    """Conversion loop in the prepare/publish flow — CSVs are converted,
+    upload_as_csv and .parquet entries are staged as-is."""
 
     def test_csv_converted_when_not_upload_as_csv(self, tmp_path, monkeypatch):
-        """A CSV entry without upload_as_csv should be converted to Parquet."""
-        from data_uploader import uploader
-
+        """upload_as_csv=False (default): CSV should be converted to Parquet."""
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n2\n", encoding="utf-8-sig")
 
@@ -232,28 +251,18 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append(path_in_repo)
+        publish(cfg, target="hf")
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-
-        # Verify that data.parquet was uploaded (not data.csv)
-        assert "data.parquet" in upload_targets
-        assert "data.csv" not in upload_targets
+        # Verify that data.parquet was staged (not data.csv)
+        staging_root = td / "repo"
+        assert (staging_root / "data.parquet").is_file()
+        assert not (staging_root / "data.csv").exists()
 
     def test_csv_not_converted_when_upload_as_csv(self, tmp_path, monkeypatch):
         """upload_as_csv=True should skip conversion, upload original CSV."""
-        from data_uploader import uploader
-
         csv = tmp_path / "raw.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
 
@@ -266,21 +275,18 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        publish(cfg, target="hf")
 
-        uploader.upload(cfg)
         # No .parquet should be created for this entry
-        assert not (td / "raw.parquet").exists()
+        staging_root = td / "repo"
+        assert (staging_root / "raw.csv").is_file()
+        assert not (staging_root / "raw.parquet").exists()
 
     def test_parquet_passthrough_skips_conversion(self, tmp_path, monkeypatch):
         """Existing .parquet files should be passed through without conversion."""
-        from data_uploader import uploader
-
         parquet_path = tmp_path / "existing.parquet"
         table = pa.table({"x": [1, 2]})
         pq.write_table(table, parquet_path)
@@ -294,21 +300,17 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        publish(cfg, target="hf")
 
-        uploader.upload(cfg)
-        # The original parquet file should still exist
+        # The original parquet file should still exist and be staged
         assert parquet_path.exists()
+        assert (td / "repo" / "existing.parquet").is_file()
 
     def test_non_csv_file_passthrough(self, tmp_path, monkeypatch):
         """Non-CSV, non-Parquet files should pass through without conversion."""
-        from data_uploader import uploader
-
         json_path = tmp_path / "meta.json"
         json_path.write_text('{"key": "value"}', encoding="utf-8")
 
@@ -319,24 +321,20 @@ class TestConversionPipeline:
             _base_dir=tmp_path,
         )
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        publish(cfg, target="hf")
 
-        uploader.upload(cfg)
         assert json_path.exists()
+        assert (td / "repo" / "meta.json").is_file()
 
 
 class TestKeepCsv:
-    """keep_csv flag behaviour — upload both Parquet and CSV, or just Parquet."""
+    """keep_csv flag behaviour — publish both Parquet and CSV, or just Parquet."""
 
     def test_keep_csv_false_uploads_only_parquet(self, tmp_path, monkeypatch):
-        """Without keep_csv, only the Parquet file should be uploaded."""
-        from data_uploader import uploader
-
+        """Without keep_csv, only the Parquet file should be staged."""
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
 
@@ -347,28 +345,18 @@ class TestKeepCsv:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append(path_in_repo)
+        publish(cfg, target="hf")
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-
-        # Should have README, LICENSE, and data.parquet (NOT data.csv)
-        assert "data.parquet" in upload_targets
-        assert "data.csv" not in upload_targets
+        # Should have data.parquet (NOT data.csv) in staging
+        staging_root = td / "repo"
+        assert (staging_root / "data.parquet").is_file()
+        assert not (staging_root / "data.csv").exists()
 
     def test_keep_csv_true_uploads_both(self, tmp_path, monkeypatch):
-        """With keep_csv=True, both Parquet and original CSV should be uploaded."""
-        from data_uploader import uploader
-
+        """With keep_csv=True, both Parquet and original CSV should be staged."""
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
 
@@ -379,32 +367,21 @@ class TestKeepCsv:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append(path_in_repo)
+        publish(cfg, target="hf", keep_csv=True)
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        # Call with keep_csv=True
-        uploader.upload(cfg, keep_csv=True)
-
-        assert "data.parquet" in upload_targets
-        assert "data.csv" in upload_targets
+        staging_root = td / "repo"
+        assert (staging_root / "data.parquet").is_file()
+        assert (staging_root / "data.csv").is_file()
 
 
 class TestUploadFileSelection:
     """Upload path and remote path are correct for converted files."""
 
     def test_converted_file_uses_staging_path(self, tmp_path, monkeypatch):
-        """Upload should use staging_dir path for converted Parquet, not original CSV."""
-        from data_uploader import uploader
-
+        """Converted Parquet should be staged in staging_root with correct remote path."""
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
 
@@ -415,33 +392,19 @@ class TestUploadFileSelection:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append((str(path_or_fileobj), path_in_repo))
+        publish(cfg, target="hf")
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-
-        # Find data uploads (not README/LICENSE)
-        data_uploads = [
-            (local, remote) for local, remote in upload_targets if remote.endswith(".parquet")
-        ]
-        assert len(data_uploads) > 0
-        # Local path should be inside staging dir
-        local_path = data_uploads[0][0]
-        assert str(td) in local_path or td.name in local_path
+        # Parquet should be in staging_root under repo/
+        staging_root = td / "repo"
+        parquet_files = list(staging_root.rglob("*.parquet"))
+        assert len(parquet_files) > 0
+        assert str(td) in str(parquet_files[0])
 
     def test_converted_file_parquet_remote(self, tmp_path, monkeypatch):
-        """Remote path should have .parquet extension for converted files."""
-        from data_uploader import uploader
-
+        """Staged file should have .parquet extension at correct relative path."""
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
 
@@ -452,27 +415,17 @@ class TestUploadFileSelection:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append((str(path_or_fileobj), path_in_repo))
+        publish(cfg, target="hf")
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-
-        # Find data uploads for parquet files
-        data_uploads = [
-            (local, remote) for local, remote in upload_targets if remote.endswith(".parquet")
-        ]
-        assert len(data_uploads) > 0
-        remote_path = data_uploads[0][1]
-        assert remote_path == "data.parquet"
+        staging_root = td / "repo"
+        parquet_files = list(staging_root.rglob("*.parquet"))
+        assert len(parquet_files) > 0
+        # Remote path is the file relative to staging_root
+        rel = str(parquet_files[0].relative_to(staging_root))
+        assert rel == "data.parquet"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -487,7 +440,7 @@ class TestSniffCsvDelimiter:
         """Semicolon-heavy first line should pick semicolon."""
         csv = tmp_path / "data.csv"
         csv.write_text("a;b;c;d\n1;2;3;4", encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -495,7 +448,7 @@ class TestSniffCsvDelimiter:
         """Comma-heavy first line should pick comma."""
         csv = tmp_path / "data.csv"
         csv.write_text("a,b,c,d\n1,2,3,4", encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ","
 
@@ -503,7 +456,7 @@ class TestSniffCsvDelimiter:
         """Tab-separated first line should pick tab."""
         csv = tmp_path / "data.tsv"
         csv.write_text("a\tb\tc\n1\t2\t3", encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == "\t"
 
@@ -511,7 +464,7 @@ class TestSniffCsvDelimiter:
         """Commas inside double-quoted fields should not sway the count."""
         csv = tmp_path / "data.csv"
         csv.write_text('id;"name, with comma";age\n1;Alice;30', encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -519,7 +472,7 @@ class TestSniffCsvDelimiter:
         """Semicolons inside double-quoted fields should not sway the count."""
         csv = tmp_path / "data.csv"
         csv.write_text('id,name,"desc; with semicolons"\n1,Alice,ok', encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ","
 
@@ -527,7 +480,7 @@ class TestSniffCsvDelimiter:
         """Unreadable file should fall back to semicolon default."""
         csv = tmp_path / "ghost.csv"
         # File does not exist
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -535,7 +488,7 @@ class TestSniffCsvDelimiter:
         """When every field is quoted, delimiter between quotes should still count."""
         csv = tmp_path / "data.csv"
         csv.write_text('"a";"b";"c"\n1;2;3', encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -543,7 +496,7 @@ class TestSniffCsvDelimiter:
         """An empty file should fall back to semicolon."""
         csv = tmp_path / "empty.csv"
         csv.write_text("", encoding="utf-8-sig")
-        from data_uploader.uploader import _sniff_csv_delimiter
+        from sofer.prepare import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -563,7 +516,7 @@ class TestConvertDelimiterHonoured:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging, delimiter=";")
         assert result is not None
@@ -577,7 +530,7 @@ class TestConvertDelimiterHonoured:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging, delimiter=",")
         assert result is not None
@@ -591,7 +544,7 @@ class TestConvertDelimiterHonoured:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging, delimiter=None)
         assert result is not None
@@ -616,7 +569,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None  # This should pass since row counts match
@@ -628,7 +581,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None  # Normal case: 3 cols, 1 row — should match
@@ -640,7 +593,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None  # Normal case: names match — should succeed
@@ -652,7 +605,7 @@ class TestConversionParityAssertion:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -676,7 +629,7 @@ class TestValueParityCheck:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -690,7 +643,7 @@ class TestValueParityCheck:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -704,7 +657,7 @@ class TestValueParityCheck:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -728,7 +681,7 @@ class TestAllNullColumnHandling:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -743,7 +696,7 @@ class TestAllNullColumnHandling:
 
         staging = tmp_path / "staging"
         staging.mkdir()
-        from data_uploader.uploader import _convert_to_parquet
+        from sofer.prepare import _convert_to_parquet
 
         result = _convert_to_parquet(csv, staging)
         assert result is not None
@@ -758,12 +711,10 @@ class TestAllNullColumnHandling:
 
 
 class TestDelimiterPlumbing:
-    """cfg.csv_delimiter is passed through to _convert_to_parquet via upload()."""
+    """cfg.csv_delimiter is passed through to the conversion via prepare()."""
 
     def test_custom_delimiter_used_via_upload(self, tmp_path, monkeypatch):
-        """When cfg.csv_delimiter is set, upload() should use it for conversion."""
-        from data_uploader import uploader
-
+        """When cfg.csv_delimiter is set, the conversion uses it."""
         csv = tmp_path / "data.csv"
         csv.write_text("col1|col2\nval1|val2", encoding="utf-8-sig")
 
@@ -775,26 +726,14 @@ class TestDelimiterPlumbing:
             _base_dir=tmp_path,
         )
 
-        upload_targets: list[str] = []
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
 
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append(path_in_repo)
+        publish(cfg, target="hf")
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-
-        # Conversion should succeed with custom delimiter — data.parquet
-        # uploaded, not data.csv. If _convert_to_parquet didn't receive the
-        # delimiter correctly, it would either fail (return None → CSV uploaded)
-        # or split on the wrong character.
-        assert "data.parquet" in upload_targets
-        assert "data.csv" not in upload_targets
+        staging_root = td / "repo"
+        assert (staging_root / "data.parquet").is_file()
+        assert not (staging_root / "data.csv").exists()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

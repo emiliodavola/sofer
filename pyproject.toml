@@ -1,18 +1,20 @@
 [project]
-name = "data-uploader"
+name = "sofer"
 version = "0.1.0"
 description = "Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards."
 requires-python = ">=3.10"
 dependencies = [
     "huggingface-hub>=0.26.0",
+    "openpyxl>=3.1",
     "pyarrow>=14.0",
     "python-dotenv>=1.0.0",
     "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
     "pyyaml>=6.0",
 ]
 
 [project.scripts]
-data-uploader = "data_uploader.cli:main"
+sofer = "sofer.cli:main"
 
 [dependency-groups]
 dev = [
@@ -52,6 +54,60 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+# ── sofer tool-wide defaults ──────────────────────────────────────
+
+[tool.sofer]
+# ── Scan defaults ──
+output_dir = "cache"
+default_config_name = "dataset.toml"
+
+# ── Parquet defaults ──
+parquet_row_group_size = 100_000
+parquet_compression = "zstd"
+parquet_shard_warning_mb = 500
+
+# ── Report defaults ──
+report_max_items = 10
+report_max_modified = 5
+report_max_corrupt_records = 20
+report_line_width = 50
+report_sub_line_width = 30
+
+# ── Codebook defaults ──
+codebooks_dir = "codebooks"
+codebook_max_sample = 100_000
+codebook_numeric_threshold = 0.9
+codebook_mixed_threshold = 0.5
+
+# ── Encoding / IO ──
+output_encoding = "utf-8"
+probe_chunk_bytes = 8192
+csv_delimiter = ";"
+csv_encoding = "utf-8-sig"
+
+# ── Sniffing ──
+sniff_delimiters = [";", ",", "\t"]
+
+# ── Dataset Card ──
+card_fallback_rows_per_file = 100
+card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d"]
+card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
+
+# ── Schema report ──
+# Rows sampled per file for schema inference (schema report + card footnote).
+# schema_sample_size = 10_000
+
+# ── Metadata core (profile / render) ──
+# All keys optional — these mirror the code defaults in src/sofer/config.py.
+# Prior probability per semantic detector name (email prior 0.98: the @ + TLD
+# structure is distinctive, so a regex match-rate near 1.0 is highly reliable).
+semantic_priors = { email = 0.98 }
+confirm_threshold = 0.8   # confidence >= this -> status "confirmed"
+min_threshold = 0.5       # confidence >= this -> status "inferred"
+detect_threshold = 0.5    # match_rate below this -> no detection (None)
+profile_max_sample = 100000
+confidence_round_digits = 4
 
 [build-system]
 requires = ["hatchling"]

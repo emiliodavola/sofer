@@ -26,7 +26,7 @@ assignees: []
 
 ## Environment
 
-- `data-uploader --version`:
+- `sofer --version`:
 - Python version (`python --version`):
 - OS:
 

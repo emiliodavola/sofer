@@ -1,8 +1,8 @@
-# Exploration: Data Quality Checks for data-uploader
+# Exploration: Data Quality Checks for sofer
 
 ## Current State
 
-The data-uploader already has a validation pipeline in `checks.py` that runs **before** any upload:
+The sofer already has a validation pipeline in `checks.py` that runs **before** any upload:
 
 - `DatasetValidator` checks file existence, minimum file count, total size threshold, and CSV column presence
 - Uses a `ValidationReport` model with two severity levels: `errors` (blocks upload) and `warnings` (advisory)
@@ -25,10 +25,10 @@ The data-uploader already has a validation pipeline in `checks.py` that runs **b
 
 ## Affected Areas
 
-- `src/data_uploader/model.py` — Add `QualityConfig` dataclass and `[[quality]]` TOML section
-- `src/data_uploader/checks.py` — Extend `DatasetValidator` with quality checks (or new `QualityValidator`)
-- `src/data_uploader/repo_compliance.py` — (minor) expose `_read_csv_sample` for reuse
-- `src/data_uploader/cli.py` — Wire quality checks into `validate` and `upload` commands
+- `src/sofer/model.py` — Add `QualityConfig` dataclass and `[[quality]]` TOML section
+- `src/sofer/checks.py` — Extend `DatasetValidator` with quality checks (or new `QualityValidator`)
+- `src/sofer/repo_compliance.py` — (minor) expose `_read_csv_sample` for reuse
+- `src/sofer/cli.py` — Wire quality checks into `validate` and `upload` commands
 - `tests/test_checks.py` — Add tests for all quality checks
 - `pyproject.toml` — Possibly add optional quality dependencies? (see analysis below)
 - `openspec/specs/data-quality/spec.md` — New spec domain for data quality
@@ -102,7 +102,7 @@ The existing `[[check]]` TOML section stays as-is for structural checks. Quality
 ### Architecture: New `quality.py` module
 
 ```
-src/data_uploader/
+src/sofer/
 ├── checks.py          # structural checks (file existence, size, columns)
 ├── quality.py         # NEW — data quality checks (duplicates, nulls, formats, ranges, etc.)
 ├── _csv_reader.py     # NEW — shared streaming CSV reader utility

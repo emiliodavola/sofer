@@ -81,10 +81,10 @@ The repo-compliance delta spec corrected the pipeline order: conversion runs bef
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/data_uploader/model.py` | Modify | Add `upload_as_csv: bool = False` to `FileEntry`; read in `from_toml()` |
-| `src/data_uploader/uploader.py` | Modify | Add `_convert_to_parquet()`; add conversion loop before compliance; reorder pipeline; wire `keep_csv` |
-| `src/data_uploader/repo_compliance.py` | Modify | Add `staging_dir` param to `build_schema_report`; add Parquet-reading path with type mapping |
-| `src/data_uploader/cli.py` | Modify | Add `--keep-csv` flag to `upload` subparser; pass to `upload()` |
+| `src/sofer/model.py` | Modify | Add `upload_as_csv: bool = False` to `FileEntry`; read in `from_toml()` |
+| `src/sofer/uploader.py` | Modify | Add `_convert_to_parquet()`; add conversion loop before compliance; reorder pipeline; wire `keep_csv` |
+| `src/sofer/repo_compliance.py` | Modify | Add `staging_dir` param to `build_schema_report`; add Parquet-reading path with type mapping |
+| `src/sofer/cli.py` | Modify | Add `--keep-csv` flag to `upload` subparser; pass to `upload()` |
 | `pyproject.toml` | Modify | Add `pyarrow>=14.0` to `dependencies` |
 | `tests/test_parquet_conversion.py` | Create | Conversion + keep-csv + pipeline + model tests |
 | `tests/test_repo_compliance.py` | Modify | Add Parquet-aware schema tests |

@@ -38,7 +38,7 @@ upload()                → HF push
 
 ### 2.1 `QualityCheck` dataclass
 
-Added to `src/data_uploader/model.py`:
+Added to `src/sofer/model.py`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -127,7 +127,7 @@ THEN a warning SHALL be reported (not a hard error)
 
 ## 3. Shared CSV Reader — `_csv_reader.py`
 
-A new module `src/data_uploader/_csv_reader.py` SHALL provide a single
+A new module `src/sofer/_csv_reader.py` SHALL provide a single
 generator:
 
 ```python
@@ -214,7 +214,7 @@ THEN no crash SHALL occur
 
 ## 4. P0 Quality Checks — `quality.py`
 
-A new module `src/data_uploader/quality.py` SHALL contain the
+A new module `src/sofer/quality.py` SHALL contain the
 `QualityValidator` class. Every check SHALL be implemented as a method
 `_check_<name>(self)` that accumulates state as rows are streamed by `run()`
 via a shared single pass of `stream_csv`. After all files are scanned, the
@@ -558,7 +558,7 @@ after `QualityValidator.run()` has been called).
 
 ### 5.3 `QualityResult` dataclass
 
-Added to `src/data_uploader/model.py`:
+Added to `src/sofer/model.py`:
 
 | Field | Type | Description |
 |-------|------|-------------|

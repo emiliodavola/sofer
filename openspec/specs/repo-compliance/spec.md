@@ -37,7 +37,7 @@ repository is compliant from the moment its first commit lands.
 ### 2.1 `DatasetConfig` additions
 
 The following fields SHALL be added to the `DatasetConfig` dataclass in
-`src/data_uploader/model.py`.  Every field MUST default to a value that produces
+`src/sofer/model.py`.  Every field MUST default to a value that produces
 sensible output when the field is absent from the TOML.
 
 | Field | Type | Default | YAML frontmatter key | Description |
@@ -97,7 +97,7 @@ continue to parse without error.
 
 ---
 
-## 3. Module: `src/data_uploader/repo_compliance.py`
+## 3. Module: `src/sofer/repo_compliance.py`
 
 ### 3.0 Module structure
 
@@ -477,7 +477,7 @@ for the Dataset Card's Codebook table.
 
 ```
 GIVEN a DatasetConfig with one CSV file entry "survey.csv"
-  AND upload(cfg) is called
+  AND prepare(cfg) is called, producing the staging directory
   AND conversion succeeds (survey.parquet is in staging_dir)
 WHEN build_schema_report(cfg, staging_dir=tmpdir) is called
 THEN the function SHALL read survey.parquet from staging_dir
@@ -530,113 +530,328 @@ THEN the returned list SHALL contain
   (filename prefix uses the Parquet filename)
 ```
 
+#### 3.3.7 Duplicate column summary threshold (RC-R02)
+
+`build_schema_report()` SHALL emit warnings for duplicate column names across files. A new `schema_dup_threshold` config key (default `3`) in `[tool.sofer]` SHALL govern the output format:
+
+- When duplicate count ≤ `schema_dup_threshold`: individual `[!]` warnings per duplicate.
+- When duplicate count > `schema_dup_threshold`: a single `[i]` summary with the top 5 most-duplicated columns, a contextual message, and a tip referencing `include_in_schema` as an opt-out.
+
+##### Scenario: Default threshold — 1 duplicate (below limit)
+- GIVEN `schema_dup_threshold = 3` and 1 duplicate column detected
+- WHEN `build_schema_report()` emits duplicate warnings
+- THEN a single `[!]` warning SHALL be printed
+
+##### Scenario: Default threshold — 3 duplicates (at limit)
+- GIVEN `schema_dup_threshold = 3` and 3 duplicate columns detected
+- WHEN `build_schema_report()` emits duplicate warnings
+- THEN 3 individual `[!]` warnings SHALL be printed
+
+##### Scenario: Default threshold — 4 duplicates (above limit)
+- GIVEN `schema_dup_threshold = 3` and 4 duplicate columns detected
+- WHEN `build_schema_report()` emits duplicate warnings
+- THEN a single `[i]` summary SHALL be printed with top 5 columns, a contextual message, and a tip referencing `include_in_schema`
+
+##### Scenario: Custom threshold — 8 duplicates (below limit)
+- GIVEN `schema_dup_threshold = 10` and 8 duplicate columns detected
+- THEN 8 individual `[!]` warnings SHALL be printed
+
+##### Scenario: Custom threshold — 11 duplicates (above limit)
+- GIVEN `schema_dup_threshold = 10` and 11 duplicate columns detected
+- THEN a single `[i]` summary SHALL be printed
+
+##### Scenario: No duplicates
+- GIVEN no duplicate column names across files
+- WHEN `build_schema_report()` completes
+- THEN no duplicate-related warnings SHALL be emitted
+
+#### 3.3.8 Per-file schema inclusion (RC-R03)
+
+Each `[[file]]` entry SHALL support an optional `include_in_schema` boolean, defaulting to `true`. When `false`, `build_schema_report()` SHALL skip that file — its columns SHALL NOT appear in the Dataset Card's Codebook table. The file SHALL still be uploaded and listed in `configs`/`data_files`.
+
+When all configured files have `include_in_schema = false`, `build_schema_report()` SHALL emit a warning and return an empty list.
+
+##### Scenario: File excluded from schema
+- GIVEN a `[[file]]` entry with `include_in_schema = false`
+- WHEN `build_schema_report()` processes the file list
+- THEN the file's columns SHALL NOT appear in the returned ColumnSchema list
+- AND the file SHALL still be uploaded
+
+##### Scenario: Field absent — default behavior preserved
+- GIVEN a `[[file]]` entry without an `include_in_schema` field
+- WHEN `build_schema_report()` processes the file list
+- THEN the file SHALL contribute columns normally (default `true`)
+
+##### Scenario: All files excluded from schema
+- GIVEN all `[[file]]` entries have `include_in_schema = false`
+- WHEN `build_schema_report()` processes the file list
+- THEN a warning "All files excluded from schema" SHALL be emitted
+- AND an empty list SHALL be returned
+
+##### Scenario: Mixed inclusion — only true files contribute
+- GIVEN some files with `include_in_schema = true` and some with `false`
+- WHEN `build_schema_report()` processes the file list
+- THEN only files with `include_in_schema = true` SHALL contribute columns
+
 ---
 
 ## 4. Pipeline orchestration
 
-### 4.1 `uploader.upload()` changes
+### 4.4 Placeholder Rejection in Validation (RC-R01)
 
-The `upload()` function in `src/data_uploader/uploader.py` SHALL be modified to
-call the compliance module **after** validation passes and **before** pushing any
-files to Hugging Face Hub. When Parquet conversion is enabled, the conversion
-step SHALL run **before** compliance so `build_schema_report` reads the
-converted Parquet files.
+The `validate()` function SHALL reject `repo_id` values containing known
+placeholder patterns that indicate the user has not configured a real Hugging
+Face repository. Rejected patterns include case-insensitive matches for
+`YOUR_USER`, `YOUR_ORG`, `your-username`, and `YOUR_ORGANIZATION`. The system
+MUST print a clear error message identifying the rejected placeholder to
+stderr and return with exit code 1. Valid `user/dataset` repo_ids that do not
+match any placeholder pattern SHALL continue to pass validation unchanged.
 
-New sequence inside `upload()`:
+#### 4.4.1 Scenarios
 
-```
-1. _ensure_repo(cfg)             # same as today
-2. CONVERSION:                   # NEW — runs before compliance
-   convert CSVs to Parquet in staging_dir
-3. COMPLIANCE:                   # reads Parquet when available
-   a. schema = build_schema_report(cfg, staging_dir=staging_dir)
-   b. readme  = build_dataset_card(cfg, schema)
-   c. license = build_license_file(cfg.license)
-4. Write compliance files to staging_dir
-5. Upload compliance files first (README.md, LICENSE)
-6. Upload data files (Parquet versions, unless upload_as_csv)
-```
+**YOUR_USER placeholder rejected**
 
-#### 4.1.1 Staging strategy
+- GIVEN a DatasetConfig with `repo_id = "YOUR_USER/dataset"`
+- WHEN `validate()` is called
+- THEN an error SHALL be returned identifying `YOUR_USER` as a placeholder
+- AND the message SHALL instruct the user to replace it with their actual HF username
 
-The compliance files SHALL be written to a temporary directory created via
-`tempfile.mkdtemp()`.  Each file is uploaded via the existing
-`huggingface-cli upload` mechanism.  The temporary directory SHALL be cleaned up
-after upload regardless of success or failure (use `try/finally`).
+**YOUR_ORG placeholder rejected**
 
-#### 4.1.2 Upload ordering
+- GIVEN a DatasetConfig with `repo_id = "YOUR_ORG/dataset"`
+- WHEN `validate()` is called
+- THEN an error SHALL be returned identifying `YOUR_ORG` as a placeholder
 
-1. `README.md` — uploaded first so the Dataset Card is visible immediately.
-2. `LICENSE` — uploaded second.
-3. Data files — uploaded in their declared order (existing loop).
+**Lowercase your-username placeholder rejected**
 
-This ordering ensures that the Hub recognises the repository as a dataset from the
-moment the first file lands.
+- GIVEN a DatasetConfig with `repo_id = "your-username/dataset"`
+- WHEN `validate()` is called
+- THEN an error SHALL be returned identifying `your-username` as a placeholder
 
-#### 4.1.3 User feedback
+**Valid user/dataset still passes**
 
-The `upload()` function SHALL print progress lines for each compliance step.
-When Parquet conversion is active, the log SHALL report whether schema was
-read from Parquet or CSV per file:
+- GIVEN a DatasetConfig with `repo_id = "alice/my-dataset"`
+- WHEN `validate()` is called
+- THEN validation SHALL pass without error
 
-```
-  📄  Generating Dataset Card …
-  📄  Generating LICENSE …
-  🔄  survey.csv → survey.parquet (converted)
-  📊  survey.parquet → schema (Parquet native types)
-  ↑  README.md  →  README.md
-  ✓  README.md
-  ↑  LICENSE  →  LICENSE
-  ✓  LICENSE
-  ↑  survey.parquet  →  survey.parquet
-  ✓  survey.parquet
-```
+**_cmd_codebook calls validate before generation**
 
-#### 4.1.4 Scenarios
+- GIVEN a TOML config with `repo_id = "YOUR_USER/dataset"`
+- WHEN `sofer codebook --config dataset.toml --all-files` executes
+- THEN `validate()` SHALL be called before `generate_all_codebooks()`
+- AND the command SHALL exit with code 1
+- AND the error message SHALL print to stderr
 
-**Normal upload with compliance**
+---
 
-```
-GIVEN a valid DatasetConfig with license="cc0-1.0" and
-      two CSV file entries
-WHEN upload(cfg) is called
-THEN build_schema_report SHALL be called first
-  AND build_dataset_card SHALL be called with the schema
-  AND build_license_file SHALL be called with "cc0-1.0"
-  AND README.md SHALL be uploaded before LICENSE
-  AND LICENSE SHALL be uploaded before data files
-  AND the function SHALL return 0
-```
+### 4.5 Recursive entries stage correctly (RC-R04)
 
-**Compliance failure — schema raises**
+Staging SHALL handle `recursive = true` entries without crashing. A
+`recursive` entry pointing to a directory SHALL have its tree staged under the
+entry's remote prefix by copying each file individually (or via
+`shutil.copytree`); the directory itself SHALL NEVER be passed to
+`shutil.copy2`. Passing a directory to `shutil.copy2` raises `PermissionError`
+on Windows and `IsADirectoryError` on POSIX — this MUST NOT occur. Empty
+directories SHALL stage zero files without error.
 
-```
-GIVEN a DatasetConfig pointing to a CSV with an unreadable encoding
-WHEN upload(cfg) is called
-THEN the exception SHALL propagate to the caller
-  AND no files SHALL be uploaded to HF
-  AND the temp directory SHALL be cleaned up
-```
+#### Scenario: Recursive directory stages its files
 
-**Compliance with no license declared**
+- GIVEN a `[[file]]` entry with `recursive = true` pointing to a directory containing `train.csv` and `test.csv`
+- WHEN the staging step runs
+- THEN both files SHALL be staged under the entry's remote prefix
+- AND no exception SHALL be raised
 
-```
-GIVEN a DatasetConfig with license="" (empty)
-WHEN upload(cfg) is called
-THEN build_license_file("") SHALL return a fallback message
-  AND that message SHALL be written to LICENSE
-  AND the upload SHALL proceed normally (no error)
-```
+#### Scenario: Nested subdirectories preserved
 
-**Parquet conversion before compliance**
+- GIVEN a recursive directory containing `Labels/etiquetas_a.csv`
+- WHEN the staging step runs
+- THEN `Labels/etiquetas_a.csv` SHALL be staged under the remote prefix
 
-```
-GIVEN a DatasetConfig with one CSV file entry
-WHEN upload(cfg) is called
-THEN conversion SHALL run BEFORE build_schema_report
-  AND build_schema_report SHALL receive staging_dir=tmpdir
-  AND the schema SHALL be read from the converted Parquet file
-```
+#### Scenario: Empty recursive directory is a no-op
+
+- GIVEN a `recursive` entry pointing to an empty directory
+- WHEN the staging step runs
+- THEN zero files SHALL be staged
+- AND no exception SHALL be raised
+
+---
+
+### 4.6 Column origin attribution (RC-R05)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24).
+
+`ColumnSchema` SHALL gain an optional `origin: str = ""` field holding the
+source file's basename (e.g. `"survey.csv"` or `"survey.parquet"`).
+`build_schema_report()` SHALL populate `origin` for every collected column, on both
+the Parquet and CSV paths. Duplicate-name resolution remains first-occurrence-wins:
+a column name appearing in several files SHALL yield ONE entry attributed to its
+first source file via `origin`, and the duplicate warnings of § 3.3.7 remain
+unchanged.
+
+(Previously: the flat list carried no provenance — duplicate cross-file columns were
+dropped silently with no way to tell which file a column came from.)
+
+#### Scenario: Multi-file dataset exposes origin
+
+- GIVEN a DatasetConfig with two CSV files, each contributing columns
+- WHEN `build_schema_report()` runs
+- THEN every returned ColumnSchema SHALL carry `origin` set to its source file's name
+
+#### Scenario: Duplicate name keeps first occurrence with its origin
+
+- GIVEN two files that both contain a column "value"
+- WHEN `build_schema_report()` runs
+- THEN exactly one "value" entry SHALL be returned
+- AND its `origin` SHALL be the first file that provided the column
+
+### 4.7 Data Fields renders per-file attribution (RC-R06)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24). Supersedes the
+> `file::` disambiguation prefixes described in § 3.3.3 step 3.
+
+The Dataset Card's "Data Fields" table SHALL include a **File** column whose cell
+contains the column's `origin`. The card MUST NOT drop any included column, and
+column names SHALL be displayed without the `file::` disambiguation prefix, since
+attribution is now structural.
+
+Design decision — File column over grouped-by-file sections: because duplicate
+names collapse to their first occurrence, at most one row exists per distinct
+column name, so one flat table with an explicit File column stays accurate;
+grouped sections would visually imply each file exclusively owns its rows and
+would repeat table headers per group.
+
+(Previously: one undifferentiated table mixing columns across files with no
+attribution.)
+
+#### Scenario: Multi-file card shows file attribution
+
+- GIVEN a schema built from two files
+- WHEN `build_dataset_card(cfg, schema)` runs
+- THEN every Data Fields row SHALL show its source file in the File column
+- AND the number of rows SHALL equal the number of schema entries (no silent drops)
+
+#### Scenario: Single-file card still attributes
+
+- GIVEN a schema built from one file
+- WHEN the card is rendered
+- THEN the File column SHALL be present and populated for every row
+
+### 4.8 Real num_examples in YAML splits (RC-R07)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24).
+
+The card's single train split's `num_examples` SHALL equal the actual number of
+data rows backing that split — the SUM of exact per-file row counts (Parquet:
+each file's Parquet metadata row count via `pf.metadata.num_rows`; CSV: counted
+data rows via `len(rows)` on the fully loaded file). Row counts are EXACT —
+they are NOT capped by any sample size. This replaces the previous value,
+which was the sum of `unique` values across columns.
+
+(Previously: `num_examples` was `sum(s.unique)` across all columns and files,
+producing absurd values like 13 for a 5-row dataset.)
+
+#### Scenario: num_examples equals actual rows
+
+- GIVEN a 5-row dataset whose columns hold 13 distinct values in total
+- WHEN the card's YAML frontmatter is generated
+- THEN `dataset_info.splits[0].num_examples` SHALL be 5
+
+#### Scenario: Multi-file splits sum per-file row counts
+
+- GIVEN two files with 30 and 40 rows respectively feeding one train split
+- WHEN splits are computed
+- THEN the single train split's `num_examples` SHALL equal the sum of per-file
+  row counts (30+40=70)
+
+### 4.9 Data Structure lists delivered repo-relative paths only (RC-R08)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24).
+
+The card's "Dataset Structure" section SHALL list ONLY repo-relative DELIVERED
+paths, derived from the SAME conversion/mirroring mapping the upload pipeline
+uses (reuse `planned_remotes` semantics — no duplicated logic):
+
+- eligible CSV entries → their converted `.parquet` remote path
+- the original CSV additionally listed only when `keep_csv` is set
+- `upload_as_csv` entries → their declared `.csv` remote path
+- `recursive` entries → the staged tree under the remote prefix
+
+The section MUST NOT contain local disk paths (`e.local`) or absolute paths.
+
+(Previously: rendered `{local disk path} -> {declared remote}` verbatim, ignoring
+conversion, `upload_as_csv`, `recursive`, and `keep_csv` — leaking the publisher's
+private filesystem into a public artifact.)
+
+#### Scenario: Converted CSV listed as .parquet
+
+- GIVEN a CSV entry eligible for Parquet conversion and `keep_csv` unset
+- WHEN the card is generated
+- THEN Dataset Structure SHALL list `data/x.parquet` and SHALL NOT list `data/x.csv`
+- AND no local path fragment SHALL appear anywhere in the card
+
+#### Scenario: keep_csv lists both artifacts
+
+- GIVEN the same entry published with `--keep-csv`
+- WHEN the card is generated
+- THEN both the `.parquet` and the original `.csv` repo-relative paths SHALL be listed
+
+#### Scenario: Recursive entry lists its staged tree
+
+- GIVEN a `recursive` directory entry staging `Labels/a.csv`
+- WHEN the card is generated
+- THEN the section SHALL list the staged remote path for `Labels/a.csv`
+  (recursive entries render the staged tree ROOT path)
+
+### 4.10 Config-driven schema sample size (RC-R09)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24). Replaces the
+> `_SCHEMA_SAMPLE_SIZE` module constant referenced in § 3.3.3.
+
+A new `[tool.sofer] schema_sample_size` key (default `10_000`), exposed through
+`config.py`, SHALL govern every sample-size limit in `build_schema_report()`
+(Parquet row-group slice and CSV slice). No numeric literal SHALL remain in the
+function bodies. The card's statistics footnote SHALL be GENERATED from the
+configured value and state it (e.g. "... based on a 10,000-row sample").
+
+(Previously: `_SCHEMA_SAMPLE_SIZE = 10_000` was hardcoded and the footnote was a
+literal string, diverging from the codebook's configurable `codebook_max_sample`.)
+
+#### Scenario: Custom sample size reflected in footnote
+
+- GIVEN `schema_sample_size = 5000` in `[tool.sofer]`
+- WHEN the card is generated
+- THEN the footnote SHALL state a 5,000-row sample
+- AND sampling SHALL cap at 5000 rows
+
+#### Scenario: Default applies when key is absent
+
+- GIVEN a TOML without `schema_sample_size`
+- WHEN the card is generated
+- THEN sampling SHALL cap at 10,000 rows and the footnote SHALL say 10,000
+
+### 4.11 Unique counts exclude missing sentinels everywhere (RC-R10)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24).
+
+In BOTH the Parquet and CSV paths, `ColumnSchema.unique` SHALL equal the count of
+DISTINCT NON-MISSING sample values (`len(set(non_missing))`). Missing-value
+sentinels ("", "NA", "NULL", "N/A", and null/None) MUST NOT be counted. This makes
+the code match the field's documented contract.
+
+(Previously: `unique = len(set(col_values))` counted sentinels/nulls as values,
+contradicting the docstring and the CSV-path scenario of § 3.3.4.)
+
+#### Scenario: Sentinels excluded on the CSV path
+
+- GIVEN a column whose sample values are ["A", "", "NA", "B", "NULL"]
+- WHEN `build_schema_report()` computes stats
+- THEN `unique` SHALL be 2
+
+#### Scenario: Nulls excluded on the Parquet path
+
+- GIVEN a Parquet string column with values ["x", null, "y"]
+- WHEN the Parquet path computes stats
+- THEN `unique` SHALL be 2
 
 ---
 
@@ -719,17 +934,17 @@ at least 80% coverage via mocked compliance calls.
 
 | File | Purpose |
 |------|---------|
-| `src/data_uploader/repo_compliance.py` | New module with `build_dataset_card`, `build_license_file`, `build_schema_report`, `ColumnSchema`. |
+| `src/sofer/repo_compliance.py` | New module with `build_dataset_card`, `build_license_file`, `build_schema_report`, `ColumnSchema`. |
 | `tests/test_repo_compliance.py` | Full test suite for the new module. |
 
 ### 7.2 Files to modify
 
 | File | Change |
 |------|--------|
-| `src/data_uploader/model.py` | Add new `[meta]` fields to `DatasetConfig` + update `from_toml()`. |
-| `src/data_uploader/codebook.py` | Rename `_infer_type` to public `infer_column_type` for cross-module reuse. |
-| `src/data_uploader/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic with type mapping. |
-| `src/data_uploader/uploader.py` | Add conversion loop before compliance; pass `staging_dir=tmpdir` to `build_schema_report`. |
+| `src/sofer/model.py` | Add new `[meta]` fields to `DatasetConfig` + update `from_toml()`. |
+| `src/sofer/codebook.py` | Rename `_infer_type` to public `infer_column_type` for cross-module reuse. |
+| `src/sofer/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic with type mapping. |
+| `src/sofer/uploader.py` | Add conversion loop before compliance; pass `staging_dir=tmpdir` to `build_schema_report`. |
 | `pyproject.toml` | Replace `tomli-w` dependency with `PyYAML`. |
 | `tests/test_repo_compliance.py` | Add Parquet-based schema tests (happy path, fallback, sampling, disambiguation). |
 
@@ -737,10 +952,10 @@ at least 80% coverage via mocked compliance calls.
 
 | File | Reason |
 |------|--------|
-| `src/data_uploader/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
-| `src/data_uploader/checks.py` | Compliance is not validation — separate concern. |
-| `src/data_uploader/__init__.py` | No public API changes for P0. |
-| `src/data_uploader/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
+| `src/sofer/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
+| `src/sofer/checks.py` | Compliance is not validation — separate concern. |
+| `src/sofer/__init__.py` | No public API changes for P0. |
+| `src/sofer/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
 
 ---
 

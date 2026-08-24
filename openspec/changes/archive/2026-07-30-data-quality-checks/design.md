@@ -40,11 +40,11 @@ config.validate() ──→ structural checks ──→ QualityValidator.run() �
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/data_uploader/_csv_reader.py` | Create | Generator `stream_csv()`: yields `(header, row)`, encoding fallback utf-8-sig→utf-8→latin-1→cp1252, `max_sample` cap, empty-file handling |
-| `src/data_uploader/quality.py` | Create | `QualityValidator` class with 9 `_check_*()` methods, `run()` → `ValidationReport` |
-| `src/data_uploader/model.py` | Modify | Add `QualityCheck`, `QualityConfig`, `QualityResult` dataclasses; `from_toml()` parses `[[quality]]` |
-| `src/data_uploader/checks.py` | Modify | Add `ValidationReport.quality_results: list[QualityResult]`. `print_summary()` iterates `quality_results` in a dedicated `─── Quality checks ───` section (only when non-empty) |
-| `src/data_uploader/cli.py` | Modify | `_cmd_validate` and `_cmd_upload` call `QualityValidator(cfg).run()`, assign `report.quality_results` from returned report |
+| `src/sofer/_csv_reader.py` | Create | Generator `stream_csv()`: yields `(header, row)`, encoding fallback utf-8-sig→utf-8→latin-1→cp1252, `max_sample` cap, empty-file handling |
+| `src/sofer/quality.py` | Create | `QualityValidator` class with 9 `_check_*()` methods, `run()` → `ValidationReport` |
+| `src/sofer/model.py` | Modify | Add `QualityCheck`, `QualityConfig`, `QualityResult` dataclasses; `from_toml()` parses `[[quality]]` |
+| `src/sofer/checks.py` | Modify | Add `ValidationReport.quality_results: list[QualityResult]`. `print_summary()` iterates `quality_results` in a dedicated `─── Quality checks ───` section (only when non-empty) |
+| `src/sofer/cli.py` | Modify | `_cmd_validate` and `_cmd_upload` call `QualityValidator(cfg).run()`, assign `report.quality_results` from returned report |
 | `tests/test_quality.py` | Create | Unit tests for every P0 check, following `test_checks.py` patterns |
 
 ## Interfaces / Contracts

@@ -313,15 +313,15 @@ unit-test coverage of at least 90 % (branch coverage).
 
 | File | Change |
 |------|--------|
-| `src/data_uploader/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic; add type-mapping function. |
-| `src/data_uploader/uploader.py` | Move conversion before compliance call; pass `staging_dir=tmpdir` to `build_schema_report`. |
+| `src/sofer/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic; add type-mapping function. |
+| `src/sofer/uploader.py` | Move conversion before compliance call; pass `staging_dir=tmpdir` to `build_schema_report`. |
 | `tests/test_repo_compliance.py` | Add Parquet-based schema tests. |
 
 ### 8.2 Files unchanged
 
 | File | Reason |
 |------|--------|
-| `src/data_uploader/model.py` | `FileEntry.upload_as_csv` is consumed by uploader, not by compliance. |
-| `src/data_uploader/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
-| `src/data_uploader/cli.py` | No CLI changes for compliance. |
+| `src/sofer/model.py` | `FileEntry.upload_as_csv` is consumed by uploader, not by compliance. |
+| `src/sofer/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
+| `src/sofer/cli.py` | No CLI changes for compliance. |
 | `pyproject.toml` | `pyarrow` dependency already declared by `parquet-conversion` spec. |

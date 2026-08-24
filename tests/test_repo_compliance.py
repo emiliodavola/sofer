@@ -1,12 +1,14 @@
-"""Tests for data_uploader.repo_compliance — Dataset Card, LICENSE, schema report."""
+"""Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
 from pathlib import Path
 
 import pytest
 import yaml
 
-from data_uploader.model import DatasetConfig, FileEntry
-from data_uploader.repo_compliance import (
+from sofer.config import SCHEMA_DUP_THRESHOLD
+from sofer.model import DatasetConfig, FileEntry
+from sofer.publish import publish
+from sofer.repo_compliance import (
     _SIZE_CATEGORIES,
     ColumnSchema,
     _csv_values_look_like_bool,
@@ -15,6 +17,7 @@ from data_uploader.repo_compliance import (
     build_dataset_card,
     build_license_file,
     build_schema_report,
+    build_schema_report_with_rows,
     normalize_header,
 )
 
@@ -360,22 +363,39 @@ class TestBuildDatasetCard:
         assert "@article{key}" in result
 
 
-# ── TestUploadCompliance (mocked integration) ─────────────────────────────────
+# ── TestPublishCompliance (mocked integration) ────────────────────────────────
 
 
-class TestUploadCompliance:
-    """Upload orchestration — compliance call order, tempdir cleanup, error prop."""
+class TestPublishCompliance:
+    """Publish orchestration — compliance staging, tempdir cleanup, error prop."""
 
     def _mock_hf_api(self, monkeypatch):
-        """Mock huggingface_hub API calls used by uploader."""
-        from data_uploader import uploader
+        """Mock huggingface_hub API calls used by publish."""
+        from sofer import publish as publish_mod
 
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
-    def test_compliance_called_before_upload(self, tmp_path, monkeypatch):
-        """Compliance functions should be called — verify via mocked tracking."""
-        from data_uploader import uploader
+    def _staging(self, tmp_path, monkeypatch, keep: bool = False):
+        """Point tempfile.mkdtemp at tmp_path/_staging.
+
+        With *keep* = True, rmtree is a no-op so the staged tree can be
+        asserted after publish returns; otherwise the real cleanup runs.
+        """
+        import shutil as _shutil
+        import tempfile
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        if keep:
+            monkeypatch.setattr(_shutil, "rmtree", lambda p, **kw: None)
+        return td
+
+    def test_publish_completes_and_cleans_tempdir(self, tmp_path, monkeypatch):
+        """publish returns 0 and the staging tempdir is cleaned up."""
+        from sofer.prepare import prepare as run_prepare
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -387,22 +407,21 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
+        out = tmp_path / "build"
+        run_prepare(cfg, out)  # build first so auto-prepare stays quiet
+
         self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        result = uploader.upload(cfg)
+        result = publish(cfg, target="hf")
         assert result == 0
         # Tempdir was cleaned up (success path)
         assert not td.exists()
 
     def test_upload_order_readme_license_data(self, tmp_path, monkeypatch):
-        """README.md should be uploaded first, then LICENSE, then data files."""
-        from data_uploader import uploader
+        """All files (README, LICENSE, data) are staged together in staging_root
+        for batch upload."""
+        from sofer.prepare import prepare as run_prepare
 
         csv = tmp_path / "data.csv"
         csv.write_text("x\n1\n", encoding="utf-8-sig")
@@ -414,62 +433,49 @@ class TestUploadCompliance:
             _base_dir=tmp_path,
         )
 
-        upload_targets = []
-
-        def _tracking_upload(path_or_fileobj="", path_in_repo="", **kw):
-            upload_targets.append(path_in_repo)
-
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-        monkeypatch.setattr(uploader._api, "upload_file", _tracking_upload)
-
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        uploader.upload(cfg)
-
-        # README.md should appear before LICENSE before data file
-        readme_idx = next(i for i, t in enumerate(upload_targets) if t == "README.md")
-        lic_idx = next(i for i, t in enumerate(upload_targets) if t == "LICENSE")
-        data_idx = next(
-            i for i, t in enumerate(upload_targets) if t.endswith(".parquet") or t.endswith(".csv")
-        )
-
-        assert readme_idx < lic_idx < data_idx, (
-            f"Upload order wrong: README.md at {readme_idx}, LICENSE at {lic_idx},"
-            f" data at {data_idx} ({upload_targets[data_idx]})"
-        )
-
-    def test_tempdir_cleanup_on_success(self, tmp_path, monkeypatch):
-        """Temp directory should be cleaned up after successful upload."""
-        from data_uploader import uploader
-
-        csv = tmp_path / "data.csv"
-        csv.write_text("x\n1\n", encoding="utf-8-sig")
-
-        cfg = DatasetConfig(
-            name="test",
-            repo_id="user/test",
-            files=[FileEntry(local=csv, remote="data.csv")],
-            _base_dir=tmp_path,
-        )
+        out = tmp_path / "build"
+        run_prepare(cfg, out)
 
         self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch, keep=True)
 
-        import tempfile
+        publish(cfg, target="hf")
 
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        staging_root = td / "repo"
+        assert (staging_root / "README.md").is_file(), "README.md missing"
+        assert (staging_root / "LICENSE").is_file(), "LICENSE missing"
 
-        uploader.upload(cfg)
+        # Data file (.parquet after conversion) is also staged
+        parquet_files = list(staging_root.rglob("*.parquet"))
+        assert len(parquet_files) >= 1, "No .parquet file found in staging"
+
+    def test_tempdir_cleanup_on_success(self, tmp_path, monkeypatch):
+        """Temp directory should be cleaned up after successful publish."""
+        from sofer.prepare import prepare as run_prepare
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        out = tmp_path / "build"
+        run_prepare(cfg, out)
+
+        self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
+
+        publish(cfg, target="hf")
         assert not td.exists()
 
     def test_tempdir_cleanup_on_exception(self, tmp_path, monkeypatch):
-        """Temp directory should be cleaned up even when compliance raises."""
-        from data_uploader import uploader
+        """Temp directory should be cleaned up even when prepare raises
+        during auto-prepare (the exception propagates through publish)."""
+        from sofer import prepare as prepare_mod
 
         cfg = DatasetConfig(
             name="test",
@@ -479,29 +485,24 @@ class TestUploadCompliance:
         )
 
         self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
-
-        # Make build_license_file raise (happens AFTER tempdir is created)
+        # Make build_license_file raise (happens AFTER the temp dir is created)
         def _raise_boom(_lic):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(uploader, "build_license_file", _raise_boom)
+        monkeypatch.setattr(prepare_mod, "build_license_file", _raise_boom)
 
         try:
-            uploader.upload(cfg)
+            publish(cfg, target="hf")
         except RuntimeError:
             pass
 
         assert not td.exists()
 
     def test_schema_exception_propagates(self, tmp_path, monkeypatch):
-        """Exception from build_schema_report should propagate to caller."""
-        from data_uploader import uploader
+        """Exception from build_schema_report propagates to the caller."""
+        from sofer import prepare as prepare_mod
 
         cfg = DatasetConfig(
             name="test",
@@ -513,17 +514,12 @@ class TestUploadCompliance:
         def failing_schema(*a, **kw):
             raise ValueError("bad csv")
 
-        monkeypatch.setattr(uploader, "build_schema_report", failing_schema)
-        monkeypatch.setattr(uploader._api, "create_repo", lambda *a, **kw: None)
-
-        import tempfile
-
-        td = tmp_path / "_staging"
-        td.mkdir()
-        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        monkeypatch.setattr(prepare_mod, "build_schema_report_with_rows", failing_schema)
+        self._mock_hf_api(monkeypatch)
+        td = self._staging(tmp_path, monkeypatch)
 
         with pytest.raises(ValueError, match="bad csv"):
-            uploader.upload(cfg)
+            publish(cfg, target="hf")
 
         assert not td.exists()
 
@@ -1695,12 +1691,12 @@ class TestNoColonPrefixedInCard:
 
         features = fm["dataset_info"]["features"]
         feature_names = [f["name"] for f in features]
-        assert feature_names == ["clean"]
-        assert "a.parquet::value" not in feature_names
-        assert "file.csv::value" not in feature_names
+        # RC-R06/D4 — no :: filtering: every schema entry renders as-is
+        assert feature_names == ["clean", "a.parquet::value", "file.csv::value"]
 
-    def test_colon_prefixed_filtered_from_data_fields_table(self):
-        """:: prefixed columns should not appear in the Data Fields table."""
+    def test_colon_prefixed_rendered_without_filtering(self):
+        """RC-R06 — every schema entry renders; names are shown as-is (no
+        ``::`` filtering: attribution is structural via the origin field)."""
         cfg = DatasetConfig(
             name="test",
             repo_id="user/test",
@@ -1727,9 +1723,7 @@ class TestNoColonPrefixedInCard:
             ),
         ]
         result = build_dataset_card(cfg, schema)
-        # The Data Fields table should only show 'good'
         assert "| `good` |" in result
-        assert "| `x::bad` |" not in result
 
 
 class TestSampleBasedFootnote:
@@ -1755,6 +1749,395 @@ class TestSampleBasedFootnote:
         cfg = DatasetConfig(name="test", repo_id="user/test")
         result = build_dataset_card(cfg, schema=[])
         assert "Statistics (unique, missing%) based on a 10,000-row sample" not in result
+
+
+class TestUniqueCountsExcludeSentinels:
+    """RC-R10 — ColumnSchema.unique counts DISTINCT NON-MISSING sample values."""
+
+    def test_csv_path_excludes_sentinels(self, tmp_path):
+        """Sentinels ("", NA, NULL) must not be counted as distinct values."""
+        csv_path = tmp_path / "sent.csv"
+        csv_path.write_text("val\nA\n\nNA\nB\nNULL\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="sent.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 2
+
+    def test_all_missing_column_has_zero_unique(self, tmp_path):
+        """A column of only sentinels has no distinct non-missing values."""
+        csv_path = tmp_path / "allna.csv"
+        csv_path.write_text("val\nNA\nNULL\n\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="allna.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 0
+
+    def test_parquet_path_excludes_nulls(self, tmp_path):
+        """Null Parquet values (rendered as "" in the sample) are excluded."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": ["x", None, "y"]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\nx\n\ny\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].unique == 2
+
+
+class TestColumnOriginAttribution:
+    """RC-R05 — ColumnSchema.origin carries the source file's basename."""
+
+    def test_csv_columns_carry_origin(self, tmp_path):
+        """CSV-path columns carry the local file's basename as origin."""
+        csv_path = tmp_path / "survey.csv"
+        csv_path.write_text("id;val\n1;a\n2;b\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="survey.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert len(schema) == 2
+        assert all(s.origin == "survey.csv" for s in schema)
+
+    def test_parquet_path_origin_is_parquet_name(self, tmp_path):
+        """Parquet-path columns carry the .parquet origin name."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": [1, 2]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].origin == "p.parquet"
+
+    def test_origin_defaults_to_empty_string(self):
+        """origin has a default so kwargs constructors stay valid."""
+        cs = ColumnSchema(
+            name="x", dtype="numeric", nullable=False, example="1", unique=1, missing=0.0
+        )
+        assert cs.origin == ""
+
+    def test_duplicate_name_keeps_first_occurrence_origin(self, tmp_path):
+        """A column name in two files yields ONE entry attributed to its first source."""
+        first = tmp_path / "first.csv"
+        first.write_text("value\na\n", encoding="utf-8-sig")
+        second = tmp_path / "second.csv"
+        second.write_text("other;value\n1;b\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=first, remote="first.csv"),
+                FileEntry(local=second, remote="second.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        value_cols = [s for s in schema if s.name == "value"]
+        assert len(value_cols) == 1
+        assert value_cols[0].origin == "first.csv"
+
+
+class TestDataFieldsFileColumn:
+    """RC-R06 — Data Fields table renders a File column with the origin."""
+
+    @staticmethod
+    def _schema() -> list[ColumnSchema]:
+        return [
+            ColumnSchema(
+                name="v",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=2,
+                missing=0.0,
+                origin="survey.parquet",
+            ),
+        ]
+
+    def test_card_renders_file_column(self):
+        """Every Data Fields row shows its source file in the File column."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, self._schema())
+        assert "| Column | Type | File | Nullable |" in result
+        assert "| `v` | numeric | survey.parquet | No |" in result
+
+    def test_row_count_matches_schema_entries(self):
+        """No silent drops: rendered data rows == schema entries."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name=f"c{i}",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=1,
+                missing=0.0,
+                origin=f"f{i}.csv",
+            )
+            for i in range(3)
+        ]
+        result = build_dataset_card(cfg, schema)
+        body_rows = [
+            line for line in result.splitlines() if line.startswith("| `c") and line.endswith("|")
+        ]
+        assert len(body_rows) == 3
+
+    def test_empty_origin_renders_placeholder(self):
+        """A schema entry without origin renders '-' instead of an empty cell."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="v", dtype="numeric", nullable=False, example="1", unique=1, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "| `v` | numeric | - | No |" in result
+
+
+class TestNumExamplesFromRowCounts:
+    """RC-R07 — num_examples equals real row counts, not sum-of-uniques."""
+
+    @staticmethod
+    def _card_num_examples(result: str) -> int:
+        frontmatter = yaml.safe_load(result.split("---\n")[1])
+        return frontmatter["dataset_info"]["splits"][0]["num_examples"]
+
+    def test_num_examples_equals_actual_rows_csv(self, tmp_path):
+        """5-row dataset whose columns hold 13 distinct values → num_examples == 5."""
+        csv_path = tmp_path / "d.csv"
+        csv_path.write_text(
+            "c1;c2;c3\n1;a;x\n2;b;y\n3;c;z\n4;d;x\n5;e;x\n",
+            encoding="utf-8-sig",
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="d.csv")],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        # Sanity: sum of uniques really is 13 (the old buggy value).
+        assert sum(s.unique for s in schema) == 13
+        assert row_counts == {"d.csv": 5}
+
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert self._card_num_examples(card) == 5
+
+    def test_multi_file_sums_row_counts(self, tmp_path):
+        """Two files with 30 and 40 rows feed one train split of 70."""
+        rows_a = "\n".join(f"a{i}" for i in range(30))
+        rows_b = "\n".join(f"b{i}" for i in range(40))
+        fa = tmp_path / "a.csv"
+        fa.write_text(f"val\n{rows_a}\n", encoding="utf-8-sig")
+        fb = tmp_path / "b.csv"
+        fb.write_text(f"val\n{rows_b}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=fa, remote="a.csv"), FileEntry(local=fb, remote="b.csv")],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        assert row_counts == {"a.csv": 30, "b.csv": 40}
+
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert self._card_num_examples(card) == 70
+
+    def test_parquet_row_count_not_capped_by_sample(self, tmp_path, monkeypatch):
+        """Row counts are exact (pf.metadata.num_rows) even when sampling caps at 2."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": [str(i) for i in range(5)]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\n1\n2\n3\n4\n5\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        _schema, row_counts = build_schema_report_with_rows(cfg, staging_dir=tmp_path)
+        assert row_counts == {"p.parquet": 5}
+
+    def test_fallback_when_no_row_counts(self):
+        """Without counts, num_examples falls back to files * CARD_FALLBACK_ROWS_PER_FILE."""
+        from sofer.config import CARD_FALLBACK_ROWS_PER_FILE
+
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        cfg.files = [
+            FileEntry(local=Path("a.csv"), remote="a.csv"),
+            FileEntry(local=Path("b.csv"), remote="b.csv"),
+        ]
+        schema = [
+            ColumnSchema(
+                name="v", dtype="numeric", nullable=False, example="1", unique=50, missing=0.0
+            ),
+        ]
+        card = build_dataset_card(cfg, schema)
+        assert self._card_num_examples(card) == 2 * CARD_FALLBACK_ROWS_PER_FILE
+
+
+class TestBuildSchemaReportWithRowsWrapper:
+    """D1 — wrapper returns (columns, row-counts); build_schema_report unchanged."""
+
+    def test_wrapper_returns_tuple_of_columns_and_counts(self, tmp_path):
+        csv_path = tmp_path / "w.csv"
+        csv_path.write_text("x;y\n1;a\n2;b\n3;c\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="w.csv")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg)
+        assert isinstance(columns, list)
+        assert all(isinstance(c, ColumnSchema) for c in columns)
+        assert len(columns) == 2
+        assert row_counts == {"w.csv": 3}
+
+    def test_plain_build_schema_report_still_returns_list(self, tmp_path):
+        """Backward compat: the original function still returns just the columns."""
+        csv_path = tmp_path / "w.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="w.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_schema_report(cfg)
+        assert isinstance(result, list)
+
+
+class TestDataStructureDeliveredPaths:
+    """RC-R08 — Data Structure lists repo-relative DELIVERED paths only."""
+
+    @staticmethod
+    def _csv(tmp_path: Path) -> Path:
+        csv_path = tmp_path / "survey.csv"
+        csv_path.write_text("v\n1\n", encoding="utf-8-sig")
+        return csv_path
+
+    def test_converted_csv_listed_as_parquet_only(self, tmp_path):
+        """A conversion-eligible CSV entry lists its .parquet remote, not the CSV."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "- `data/survey.parquet`" in result
+        assert "`data/survey.csv`" not in result
+
+    def test_keep_csv_lists_both_artifacts(self, tmp_path):
+        """With keep_csv=True both the .parquet and original .csv remotes are listed."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[], keep_csv=True)
+        assert "`data/survey.parquet`" in result
+        assert "`data/survey.csv`" in result
+
+    def test_upload_as_csv_lists_declared_csv(self, tmp_path):
+        """upload_as_csv entries keep their declared .csv remote (no parquet mapping)."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="raw/table.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "`raw/table.csv`" in result
+        assert "table.parquet" not in result
+
+    def test_recursive_lists_staged_tree_prefix(self, tmp_path):
+        """A recursive directory entry lists its staged tree root path."""
+        tree = tmp_path / "labels_src"
+        tree.mkdir()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=tree, remote="Labels/", recursive=True)],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "`Labels`" in result
+        assert str(tree) not in result
+
+    def test_no_local_disk_paths_anywhere(self, tmp_path):
+        """The card never leaks local filesystem paths."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert str(tmp_path) not in result
+
+
+class TestSchemaSampleSizeFromConfig:
+    """RC-R09 — schema_sample_size from [tool.sofer] drives sampling + footnote."""
+
+    def test_footnote_uses_configured_value(self, monkeypatch):
+        """The footnote states the configured sample size, not a literal."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 5000)
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "based on a 5,000-row sample" in result
+
+    def test_sampling_caps_at_configured_value(self, tmp_path, monkeypatch):
+        """Sampling reads at most SCHEMA_SAMPLE_SIZE rows."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        rows = "\n".join(f"v{i}" for i in range(5))
+        csv_path = tmp_path / "cap.csv"
+        csv_path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="cap.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 2
 
 
 class TestDataQualityNotes:
@@ -1827,8 +2210,8 @@ class TestDataQualityNotes:
         assert "3" in result
         assert "7" in result
 
-    def test_colon_prefixed_not_duplicated_in_empty_columns(self):
-        """:: prefixed columns should not be reported as empty even if at 100%."""
+    def test_all_missing_column_reported_regardless_of_name(self):
+        """D4 — a 100%-missing column is reported as empty; no :: name filtering."""
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         schema = [
             ColumnSchema(
@@ -1844,9 +2227,9 @@ class TestDataQualityNotes:
             ),
         ]
         result = build_dataset_card(cfg, schema)
-        # "ghost" should NOT appear in empty columns because it's ::-prefixed
-        # x is not empty, so no Data Quality section at all
-        assert "### Data Quality Notes" not in result
+        # The ghost column IS empty (missing=100%), so Data Quality Notes appear
+        assert "### Data Quality Notes" in result
+        assert "`a.parquet::ghost`" in result
 
 
 # ── 10. Study design content in Dataset Card ──────────────────────────────────
@@ -1895,3 +2278,224 @@ class TestStudyDesign:
         assert "Survey methodology details." in result
         # The stripped content should not cause multiple blank lines
         assert "\n\n\n" not in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema Warnings Summary — SCHEMA_DUP_THRESHOLD config
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSchemaDupThreshold:
+    """SCHEMA_DUP_THRESHOLD — default value, type, importability."""
+
+    def test_default_value_is_3(self):
+        """Default schema_dup_threshold should be 3."""
+        assert SCHEMA_DUP_THRESHOLD == 3
+
+    def test_is_int(self):
+        """SCHEMA_DUP_THRESHOLD must be an int."""
+        assert isinstance(SCHEMA_DUP_THRESHOLD, int)
+
+    def test_constant_is_importable(self):
+        """SCHEMA_DUP_THRESHOLD should be importable from sofer.config."""
+        from sofer.config import SCHEMA_DUP_THRESHOLD as T
+
+        assert T >= 1  # threshold must be at least 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema Warnings Summary — include_in_schema opt-out
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIncludeInSchema:
+    """build_schema_report respects FileEntry.include_in_schema."""
+
+    def test_file_excluded_from_schema(self, tmp_path):
+        """File with include_in_schema=False should not contribute columns."""
+        csv1 = tmp_path / "data.csv"
+        csv1.write_text("val\n1\n2\n", encoding="utf-8-sig")
+        csv2 = tmp_path / "labels.csv"
+        csv2.write_text("code\nA\nB\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv1, remote="data.csv", include_in_schema=True),
+                FileEntry(local=csv2, remote="labels.csv", include_in_schema=False),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        names = [s.name for s in schema]
+        # Only data.csv's column appears
+        assert names == ["val"]
+        assert "code" not in names
+
+    def test_field_absent_defaults_included(self, tmp_path):
+        """When include_in_schema is absent, file should contribute normally."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("val\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+        # FileEntry default include_in_schema=True
+        schema = build_schema_report(cfg)
+        assert len(schema) == 1
+        assert schema[0].name == "val"
+
+    def test_mixed_inclusion_only_true_files_contribute(self, tmp_path):
+        """Mixed include_in_schema: only true files contribute."""
+        csv1 = tmp_path / "a.csv"
+        csv1.write_text("x\n1\n", encoding="utf-8-sig")
+        csv2 = tmp_path / "b.csv"
+        csv2.write_text("y\n2\n", encoding="utf-8-sig")
+        csv3 = tmp_path / "c.csv"
+        csv3.write_text("z\n3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv1, remote="a.csv", include_in_schema=True),
+                FileEntry(local=csv2, remote="b.csv", include_in_schema=False),
+                FileEntry(local=csv3, remote="c.csv", include_in_schema=True),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        names = [s.name for s in schema]
+        assert names == ["x", "z"]
+        assert "y" not in names
+
+    def test_all_files_excluded_returns_empty_and_warns(self, tmp_path, capsys):
+        """All include_in_schema=False → empty list + warning."""
+        csv1 = tmp_path / "labels1.csv"
+        csv1.write_text("code\nA\n", encoding="utf-8-sig")
+        csv2 = tmp_path / "labels2.csv"
+        csv2.write_text("label\nB\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv1, remote="labels1.csv", include_in_schema=False),
+                FileEntry(local=csv2, remote="labels2.csv", include_in_schema=False),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema == []
+        captured = capsys.readouterr()
+        assert "All files excluded from schema" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema Warnings Summary — duplicate warning routing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDuplicateWarningRouting:
+    """build_schema_report duplicate warnings: individual vs summary routing."""
+
+    def test_one_duplicate_individual_warning(self, tmp_path, capsys):
+        """1 duplicate (≤ threshold 3) → individual [!] warning."""
+        a = tmp_path / "a.csv"
+        a.write_text("value\n1\n2\n", encoding="utf-8-sig")
+        b = tmp_path / "b.csv"
+        b.write_text("value\n3\n4\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=a, remote="a.csv"),
+                FileEntry(local=b, remote="b.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert len(schema) == 1  # only first occurrence kept
+        captured = capsys.readouterr()
+        assert "[!] Duplicate column" in captured.out
+        assert "value" in captured.out
+        assert "a.csv" in captured.out
+        assert "b.csv" in captured.out
+
+    def test_four_duplicates_summary(self, tmp_path, capsys):
+        """4 duplicate columns (> threshold 3) → single [i] summary."""
+        # Create 5 files sharing columns "a", "b", "c", "d"
+        files = []
+        for i in range(5):
+            f = tmp_path / f"f{i}.csv"
+            f.write_text(f"a;b;c;d;unique_{i}\n1;2;3;4;{i}\n", encoding="utf-8-sig")
+            files.append(FileEntry(local=f, remote=f"f{i}.csv"))
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=files,
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        # Only the first file's a, b, c, d → 4 columns + 5 unique columns = 9
+        assert len(schema) == 9
+        captured = capsys.readouterr()
+        # Summary mode because 4 > threshold 3
+        assert "[i]" in captured.out
+        assert "columns appear in multiple files" in captured.out
+        assert "Most duplicated:" in captured.out
+        assert "include_in_schema" in captured.out  # tip is present
+        # Individual [!] warnings should NOT appear
+        assert "[!]" not in captured.out
+
+    def test_zero_duplicates_silent(self, tmp_path, capsys):
+        """No duplicate columns → no warnings emitted."""
+        a = tmp_path / "a.csv"
+        a.write_text("x\n1\n", encoding="utf-8-sig")
+        b = tmp_path / "b.csv"
+        b.write_text("y\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=a, remote="a.csv"),
+                FileEntry(local=b, remote="b.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert len(schema) == 2
+        captured = capsys.readouterr()
+        assert "[!] Duplicate column" not in captured.out
+        assert "[i]" not in captured.out
+
+    def test_summary_includes_top_five_columns(self, tmp_path, capsys):
+        """Summary lists top 5 most duplicated column names."""
+        # 6 shared columns → >3 → summary mode
+        files = []
+        for i in range(3):
+            f = tmp_path / f"f{i}.csv"
+            f.write_text(
+                f"col_a;col_b;col_c;col_d;col_e;col_f;unique_{i}\n1;2;3;4;5;6;{i}\n",
+                encoding="utf-8-sig",
+            )
+            files.append(FileEntry(local=f, remote=f"f{i}.csv"))
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=files,
+            _base_dir=tmp_path,
+        )
+        build_schema_report(cfg)
+        captured = capsys.readouterr()
+        assert "[i]" in captured.out
+        # Top 5 columns mentioned
+        assert "col_a" in captured.out
+        assert "col_b" in captured.out
+        assert "col_c" in captured.out
+        assert "col_d" in captured.out
+        assert "col_e" in captured.out
+        # Tip for include_in_schema
+        assert "include_in_schema" in captured.out
