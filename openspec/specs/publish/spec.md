@@ -83,6 +83,16 @@ TSV, Parquet, Excel, JSONL) is newer than the newest Parquet file. The TOML and
 source files SHALL be the source of truth; Parquet existence is the fallback
 check.
 
+Auto-prepare SHALL run with the all-files behavior ENABLED (equivalent to
+`prepare --all-files`): the prepared package SHALL include per-file codebooks
+(`codebooks/**/*.md`) and the root `codebook.md` index, so that a bare
+`sofer publish dataset.toml` delivers a complete package — data + README +
+LICENSE + codebooks.
+
+(Previously: auto-prepare ran plain `prepare(cfg, source, force=True)` with
+all-files disabled, so published packages never contained codebooks and nothing
+warned about it.)
+
 #### Scenario: Parquet missing triggers prepare
 
 - GIVEN a config whose output directory contains no `.parquet` files
@@ -109,6 +119,13 @@ check.
 - WHEN `publish` executes
 - THEN no `prepare` SHALL run
 - AND the existing package SHALL be delivered
+
+#### Scenario: Auto-prepare generates codebooks
+
+- GIVEN a stale build directory (sources newer than Parquet)
+- WHEN `publish` executes and auto-prepare runs
+- THEN the delivered package SHALL include `codebooks/**/*.md` and root `codebook.md`
+- AND the pinned test asserting "bare prepare stages no codebooks" SHALL be reversed
 
 ---
 
@@ -168,3 +185,30 @@ CSV in the upload at its original remote path, alongside the Parquet. For the
 - GIVEN `sofer publish dataset.toml --target local --keep-csv`
 - WHEN the command executes
 - THEN the local package SHALL contain only the default artifacts
+
+---
+
+### Requirement: Codebook-absence warning before delivery (PUB-08)
+
+> Added by change `publish-readme-bugs` (archived 2026-08-24).
+
+When delivering to the `hf` target, if the build directory contains NO codebooks
+(neither `codebook.md` nor `codebooks/**/*.md`) at delivery time, `publish`
+SHALL print a warning advising how to generate them. The warning MUST NOT block
+delivery — the upload SHALL proceed for all other files.
+
+(Previously: absence was silent — the repo diff simply omitted the codebook
+entries.)
+
+#### Scenario: Build without codebooks warns but delivers
+
+- GIVEN an up-to-date build directory containing no codebook files
+- WHEN `publish` executes against hf
+- THEN a codebook-missing warning SHALL be printed before upload
+- AND the remaining package SHALL still be delivered (exit 0)
+
+#### Scenario: Complete package does not warn
+
+- GIVEN a build directory that includes codebooks
+- WHEN `publish` executes
+- THEN no codebook-missing warning SHALL be printed

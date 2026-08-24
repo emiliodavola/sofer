@@ -225,3 +225,19 @@ class TestProfileCli:
 
         assert rc == 0
         assert (tmp_path / "metadata.yaml").exists()
+
+
+class TestProfileUniqueExcludesSentinels:
+    """PRF-02 — the coarse schema's unique counts distinct non-missing values."""
+
+    def test_unique_statistic_excludes_sentinels(self, tmp_path):
+        """Sentinels ("", NA, NULL) must not count as distinct values."""
+        csv_path = tmp_path / "vals.csv"
+        _write_csv(csv_path, [["val"], ["A"], [""], ["NA"], ["B"], ["NULL"]])
+
+        rc = profile(csv_path)
+
+        assert rc == 0
+        data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        col = next(c for c in data["structure"]["schema"] if c["name"] == "val")
+        assert col["unique"] == 2

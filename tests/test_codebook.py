@@ -473,6 +473,31 @@ class TestBuildMarkdown:
         assert "**Rows:** 0" in result
         assert "**Columns:** 2" in result
 
+    def test_unique_counts_exclude_sentinels(self):
+        """CB-R07 — the Unique cell counts distinct non-missing values only."""
+        result = _build_markdown(
+            headers=["val"],
+            columns=[["A", "", "NA", "B", "NULL"]],
+            dtypes=None,
+            file_path="f.csv",
+        )
+        data_row = next(line for line in result.splitlines() if line.startswith("| 1 |"))
+        cells = [c.strip() for c in data_row.split("|")]
+        # cells: ['', '1', '`val`', type, unique, missing%, example, '']
+        assert cells[4] == "2", f"expected unique=2 in row: {data_row}"
+
+    def test_unique_counts_distinct_values(self):
+        """Duplicate non-missing values collapse into one distinct value."""
+        result = _build_markdown(
+            headers=["val"],
+            columns=[["x", "x", "y"]],
+            dtypes=None,
+            file_path="f.csv",
+        )
+        data_row = next(line for line in result.splitlines() if line.startswith("| 1 |"))
+        cells = [c.strip() for c in data_row.split("|")]
+        assert cells[4] == "2", f"expected unique=2 in row: {data_row}"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Helper

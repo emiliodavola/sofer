@@ -16,7 +16,7 @@ from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
-from .config import DEFAULT_CONFIG_NAME, OUTPUT_DIR
+from .config import CODEBOOK_MAX_SAMPLE, DEFAULT_CONFIG_NAME, OUTPUT_DIR
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
@@ -603,8 +603,8 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument(
         "--max-sample",
         type=int,
-        default=100_000,
-        help="Maximum rows to sample for analysis (default: 100 000).",
+        default=CODEBOOK_MAX_SAMPLE,
+        help=f"Maximum rows to sample for analysis (default: {CODEBOOK_MAX_SAMPLE:,}).",
     )
     c.add_argument(
         "--all-files",

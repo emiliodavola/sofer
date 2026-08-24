@@ -76,7 +76,7 @@ from .repo_compliance import (
     ColumnSchema,
     build_dataset_card,
     build_license_file,
-    build_schema_report,
+    build_schema_report_with_rows,
 )
 from .splits import detect_splits
 from .verification import _print_verification_report, verify_load_dataset
@@ -507,8 +507,6 @@ def _assert_card_dtypes_match_parquet(
     mismatches: list[str] = []
 
     for col in schema:
-        if "::" in col.name:
-            continue  # skip disambiguated pseudo-columns
         if col.hf_dtype is None or col.hf_dtype != "float64":
             continue  # only flag suspect float64 entries
 
@@ -721,7 +719,7 @@ def prepare(
 
         # ── 6. Schema report + Dataset Card + LICENSE (PRP-03) ─────────
         print("  [i] Building schema report \u2026")
-        schema = build_schema_report(
+        schema, row_counts = build_schema_report_with_rows(
             cfg,
             csv_delimiter=cfg.csv_delimiter,
             csv_encoding=cfg.csv_encoding,
@@ -755,6 +753,7 @@ def prepare(
                     schema,
                     recipe_content=recipe_content,
                     study_design_content=study_design_content,
+                    row_counts=row_counts,
                 )
         else:
             print("  [i] Generating Dataset Card \u2026")
@@ -763,6 +762,7 @@ def prepare(
                 schema,
                 recipe_content=recipe_content,
                 study_design_content=study_design_content,
+                row_counts=row_counts,
             )
 
         print("  [i] Generating LICENSE \u2026")

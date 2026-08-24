@@ -692,14 +692,19 @@ class TestBatchStaging:
         assert (staging_root / "codebooks" / "data.md").is_file()
         assert (staging_root / "codebook.md").is_file()
 
-    def test_no_codebooks_means_nothing_codebook_staged(self, tmp_path, monkeypatch):
-        """Negative path: when prepare ran without --all-files, publish stages
-        no codebook files at all (no codebooks/ dir, no root index)."""
+    def test_autoprepare_generates_codebooks(self, tmp_path, monkeypatch):
+        """PUB-03: a stale build triggers auto-prepare WITH all-files behavior,
+        so the delivered package includes per-file codebooks + root index."""
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
         cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
         out = tmp_path / "build"
-        prepare(cfg, out)  # no --all-files → no codebooks generated
+        out.mkdir()
+        # Stale build: parquet exists but the source is newer (os.utime pinning
+        # removes filesystem timestamp-granularity flakiness).
+        pq.write_table(pa.table({"a": [1]}), out / "data.parquet")
+        os.utime(out / "data.parquet", (_OLD, _OLD))
+        os.utime(csv, (_NEW, _NEW))
 
         _mock_hf_api(monkeypatch)
         td = _fixed_staging(tmp_path, monkeypatch)
@@ -708,8 +713,65 @@ class TestBatchStaging:
         assert rc == 0
 
         staging_root = Path(td) / "repo"
+        assert (staging_root / "codebooks" / "data.md").is_file()
+        assert (staging_root / "codebook.md").is_file()
+
+    def test_fresh_bare_prepare_build_warns_but_delivers(self, tmp_path, monkeypatch, capsys):
+        """PUB-08 (reversed test_no_codebooks_means_nothing_codebook_staged):
+        a FRESH bare-prepare build (no codebooks, up-to-date mtimes) skips
+        auto-prepare, prints the codebook-missing warning, and still delivers
+        everything else with exit 0."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)  # bare prepare → no codebooks generated
+
+        # Pin mtimes so the build counts as fresh: parquet newer than sources.
+        for p in out.rglob("*.parquet"):
+            os.utime(p, (_MID, _MID))
+        os.utime(csv, (_OLD, _OLD))
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "No codebooks found" in captured.out, (
+            "PUB-08 warning must be printed when the package has no codebooks"
+        )
+
+        staging_root = Path(td) / "repo"
         assert not (staging_root / "codebooks").exists()
         assert not (staging_root / "codebook.md").exists()
+
+    def test_complete_package_does_not_warn(self, tmp_path, monkeypatch, capsys):
+        """PUB-08 negative case: a complete build (codebooks present) delivers
+        WITHOUT printing the codebook-missing warning."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out, all_files=True)
+
+        # Fresh build: pin parquet newer than sources.
+        for p in out.rglob("*.parquet"):
+            os.utime(p, (_MID, _MID))
+        os.utime(csv, (_OLD, _OLD))
+
+        _mock_hf_api(monkeypatch)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+
+        assert rc == 0
+        assert "No codebooks found" not in capsys.readouterr().out
+
+        staging_root = Path(td) / "repo"
+        assert (staging_root / "codebooks" / "data.md").is_file()
+        assert (staging_root / "codebook.md").is_file()
 
     def test_upload_folder_called_once(self, tmp_path, monkeypatch):
         """_hf_upload_folder is called exactly once; _hf_upload is NOT."""

@@ -1,23 +1,6 @@
-# Profile Specification
+# Delta for profile — sentinel-free unique statistic
 
-## Purpose
-
-The `profile` command introspects a dataset read-only and emits a `metadata.yaml`
-document. It is the entry point for sofer v2's documentation pipeline and never
-modifies its input.
-
-## Requirements
-
-### Requirement: profile command surface (PRF-01)
-
-The system SHALL register a `sofer profile <dataset>` subcommand accepting the
-dataset path as its positional argument.
-
-#### Scenario: profile accepts dataset path
-
-- GIVEN `sofer profile dataset.csv`
-- WHEN the command executes
-- THEN the profile handler SHALL run with `dataset.csv` as its input
+## MODIFIED Requirements
 
 ### Requirement: profile orchestration (PRF-02)
 
@@ -66,26 +49,3 @@ function.)
 - GIVEN a CSV dataset with a column whose values are ["A", "", "NA", "B"]
 - WHEN `sofer profile dataset.csv` executes
 - THEN that column's `unique` statistic in `metadata.yaml` SHALL be 2
-
-### Requirement: read-only (PRF-03)
-
-The `profile` command SHALL NOT modify its input dataset in any way.
-
-#### Scenario: Input dataset untouched
-
-- GIVEN a dataset file
-- WHEN `sofer profile` runs on it
-- THEN the input file's bytes SHALL be unchanged
-
-### Requirement: Unsupported format errors cleanly (PRF-04)
-
-The `profile` command SHALL fail with a clear, non-traceback error message and a
-non-zero exit code when the dataset format is unsupported.
-
-#### Scenario: Unsupported format
-
-- GIVEN a dataset file with an unsupported extension
-- WHEN `sofer profile file.xyz` executes
-- THEN a clear error message SHALL be printed
-- AND the exit code SHALL be non-zero
-- AND no `metadata.yaml` SHALL be written

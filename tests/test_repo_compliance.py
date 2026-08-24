@@ -17,6 +17,7 @@ from sofer.repo_compliance import (
     build_dataset_card,
     build_license_file,
     build_schema_report,
+    build_schema_report_with_rows,
     normalize_header,
 )
 
@@ -513,7 +514,7 @@ class TestPublishCompliance:
         def failing_schema(*a, **kw):
             raise ValueError("bad csv")
 
-        monkeypatch.setattr(prepare_mod, "build_schema_report", failing_schema)
+        monkeypatch.setattr(prepare_mod, "build_schema_report_with_rows", failing_schema)
         self._mock_hf_api(monkeypatch)
         td = self._staging(tmp_path, monkeypatch)
 
@@ -1690,12 +1691,12 @@ class TestNoColonPrefixedInCard:
 
         features = fm["dataset_info"]["features"]
         feature_names = [f["name"] for f in features]
-        assert feature_names == ["clean"]
-        assert "a.parquet::value" not in feature_names
-        assert "file.csv::value" not in feature_names
+        # RC-R06/D4 — no :: filtering: every schema entry renders as-is
+        assert feature_names == ["clean", "a.parquet::value", "file.csv::value"]
 
-    def test_colon_prefixed_filtered_from_data_fields_table(self):
-        """:: prefixed columns should not appear in the Data Fields table."""
+    def test_colon_prefixed_rendered_without_filtering(self):
+        """RC-R06 — every schema entry renders; names are shown as-is (no
+        ``::`` filtering: attribution is structural via the origin field)."""
         cfg = DatasetConfig(
             name="test",
             repo_id="user/test",
@@ -1722,9 +1723,7 @@ class TestNoColonPrefixedInCard:
             ),
         ]
         result = build_dataset_card(cfg, schema)
-        # The Data Fields table should only show 'good'
         assert "| `good` |" in result
-        assert "| `x::bad` |" not in result
 
 
 class TestSampleBasedFootnote:
@@ -1750,6 +1749,395 @@ class TestSampleBasedFootnote:
         cfg = DatasetConfig(name="test", repo_id="user/test")
         result = build_dataset_card(cfg, schema=[])
         assert "Statistics (unique, missing%) based on a 10,000-row sample" not in result
+
+
+class TestUniqueCountsExcludeSentinels:
+    """RC-R10 — ColumnSchema.unique counts DISTINCT NON-MISSING sample values."""
+
+    def test_csv_path_excludes_sentinels(self, tmp_path):
+        """Sentinels ("", NA, NULL) must not be counted as distinct values."""
+        csv_path = tmp_path / "sent.csv"
+        csv_path.write_text("val\nA\n\nNA\nB\nNULL\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="sent.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 2
+
+    def test_all_missing_column_has_zero_unique(self, tmp_path):
+        """A column of only sentinels has no distinct non-missing values."""
+        csv_path = tmp_path / "allna.csv"
+        csv_path.write_text("val\nNA\nNULL\n\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="allna.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 0
+
+    def test_parquet_path_excludes_nulls(self, tmp_path):
+        """Null Parquet values (rendered as "" in the sample) are excluded."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": ["x", None, "y"]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\nx\n\ny\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].unique == 2
+
+
+class TestColumnOriginAttribution:
+    """RC-R05 — ColumnSchema.origin carries the source file's basename."""
+
+    def test_csv_columns_carry_origin(self, tmp_path):
+        """CSV-path columns carry the local file's basename as origin."""
+        csv_path = tmp_path / "survey.csv"
+        csv_path.write_text("id;val\n1;a\n2;b\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="survey.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert len(schema) == 2
+        assert all(s.origin == "survey.csv" for s in schema)
+
+    def test_parquet_path_origin_is_parquet_name(self, tmp_path):
+        """Parquet-path columns carry the .parquet origin name."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": [1, 2]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].origin == "p.parquet"
+
+    def test_origin_defaults_to_empty_string(self):
+        """origin has a default so kwargs constructors stay valid."""
+        cs = ColumnSchema(
+            name="x", dtype="numeric", nullable=False, example="1", unique=1, missing=0.0
+        )
+        assert cs.origin == ""
+
+    def test_duplicate_name_keeps_first_occurrence_origin(self, tmp_path):
+        """A column name in two files yields ONE entry attributed to its first source."""
+        first = tmp_path / "first.csv"
+        first.write_text("value\na\n", encoding="utf-8-sig")
+        second = tmp_path / "second.csv"
+        second.write_text("other;value\n1;b\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=first, remote="first.csv"),
+                FileEntry(local=second, remote="second.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        value_cols = [s for s in schema if s.name == "value"]
+        assert len(value_cols) == 1
+        assert value_cols[0].origin == "first.csv"
+
+
+class TestDataFieldsFileColumn:
+    """RC-R06 — Data Fields table renders a File column with the origin."""
+
+    @staticmethod
+    def _schema() -> list[ColumnSchema]:
+        return [
+            ColumnSchema(
+                name="v",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=2,
+                missing=0.0,
+                origin="survey.parquet",
+            ),
+        ]
+
+    def test_card_renders_file_column(self):
+        """Every Data Fields row shows its source file in the File column."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        result = build_dataset_card(cfg, self._schema())
+        assert "| Column | Type | File | Nullable |" in result
+        assert "| `v` | numeric | survey.parquet | No |" in result
+
+    def test_row_count_matches_schema_entries(self):
+        """No silent drops: rendered data rows == schema entries."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name=f"c{i}",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=1,
+                missing=0.0,
+                origin=f"f{i}.csv",
+            )
+            for i in range(3)
+        ]
+        result = build_dataset_card(cfg, schema)
+        body_rows = [
+            line for line in result.splitlines() if line.startswith("| `c") and line.endswith("|")
+        ]
+        assert len(body_rows) == 3
+
+    def test_empty_origin_renders_placeholder(self):
+        """A schema entry without origin renders '-' instead of an empty cell."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="v", dtype="numeric", nullable=False, example="1", unique=1, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "| `v` | numeric | - | No |" in result
+
+
+class TestNumExamplesFromRowCounts:
+    """RC-R07 — num_examples equals real row counts, not sum-of-uniques."""
+
+    @staticmethod
+    def _card_num_examples(result: str) -> int:
+        frontmatter = yaml.safe_load(result.split("---\n")[1])
+        return frontmatter["dataset_info"]["splits"][0]["num_examples"]
+
+    def test_num_examples_equals_actual_rows_csv(self, tmp_path):
+        """5-row dataset whose columns hold 13 distinct values → num_examples == 5."""
+        csv_path = tmp_path / "d.csv"
+        csv_path.write_text(
+            "c1;c2;c3\n1;a;x\n2;b;y\n3;c;z\n4;d;x\n5;e;x\n",
+            encoding="utf-8-sig",
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="d.csv")],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        # Sanity: sum of uniques really is 13 (the old buggy value).
+        assert sum(s.unique for s in schema) == 13
+        assert row_counts == {"d.csv": 5}
+
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert self._card_num_examples(card) == 5
+
+    def test_multi_file_sums_row_counts(self, tmp_path):
+        """Two files with 30 and 40 rows feed one train split of 70."""
+        rows_a = "\n".join(f"a{i}" for i in range(30))
+        rows_b = "\n".join(f"b{i}" for i in range(40))
+        fa = tmp_path / "a.csv"
+        fa.write_text(f"val\n{rows_a}\n", encoding="utf-8-sig")
+        fb = tmp_path / "b.csv"
+        fb.write_text(f"val\n{rows_b}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=fa, remote="a.csv"), FileEntry(local=fb, remote="b.csv")],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        assert row_counts == {"a.csv": 30, "b.csv": 40}
+
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert self._card_num_examples(card) == 70
+
+    def test_parquet_row_count_not_capped_by_sample(self, tmp_path, monkeypatch):
+        """Row counts are exact (pf.metadata.num_rows) even when sampling caps at 2."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": [str(i) for i in range(5)]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\n1\n2\n3\n4\n5\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        _schema, row_counts = build_schema_report_with_rows(cfg, staging_dir=tmp_path)
+        assert row_counts == {"p.parquet": 5}
+
+    def test_fallback_when_no_row_counts(self):
+        """Without counts, num_examples falls back to files * CARD_FALLBACK_ROWS_PER_FILE."""
+        from sofer.config import CARD_FALLBACK_ROWS_PER_FILE
+
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        cfg.files = [
+            FileEntry(local=Path("a.csv"), remote="a.csv"),
+            FileEntry(local=Path("b.csv"), remote="b.csv"),
+        ]
+        schema = [
+            ColumnSchema(
+                name="v", dtype="numeric", nullable=False, example="1", unique=50, missing=0.0
+            ),
+        ]
+        card = build_dataset_card(cfg, schema)
+        assert self._card_num_examples(card) == 2 * CARD_FALLBACK_ROWS_PER_FILE
+
+
+class TestBuildSchemaReportWithRowsWrapper:
+    """D1 — wrapper returns (columns, row-counts); build_schema_report unchanged."""
+
+    def test_wrapper_returns_tuple_of_columns_and_counts(self, tmp_path):
+        csv_path = tmp_path / "w.csv"
+        csv_path.write_text("x;y\n1;a\n2;b\n3;c\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="w.csv")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg)
+        assert isinstance(columns, list)
+        assert all(isinstance(c, ColumnSchema) for c in columns)
+        assert len(columns) == 2
+        assert row_counts == {"w.csv": 3}
+
+    def test_plain_build_schema_report_still_returns_list(self, tmp_path):
+        """Backward compat: the original function still returns just the columns."""
+        csv_path = tmp_path / "w.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="w.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_schema_report(cfg)
+        assert isinstance(result, list)
+
+
+class TestDataStructureDeliveredPaths:
+    """RC-R08 — Data Structure lists repo-relative DELIVERED paths only."""
+
+    @staticmethod
+    def _csv(tmp_path: Path) -> Path:
+        csv_path = tmp_path / "survey.csv"
+        csv_path.write_text("v\n1\n", encoding="utf-8-sig")
+        return csv_path
+
+    def test_converted_csv_listed_as_parquet_only(self, tmp_path):
+        """A conversion-eligible CSV entry lists its .parquet remote, not the CSV."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "- `data/survey.parquet`" in result
+        assert "`data/survey.csv`" not in result
+
+    def test_keep_csv_lists_both_artifacts(self, tmp_path):
+        """With keep_csv=True both the .parquet and original .csv remotes are listed."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[], keep_csv=True)
+        assert "`data/survey.parquet`" in result
+        assert "`data/survey.csv`" in result
+
+    def test_upload_as_csv_lists_declared_csv(self, tmp_path):
+        """upload_as_csv entries keep their declared .csv remote (no parquet mapping)."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="raw/table.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "`raw/table.csv`" in result
+        assert "table.parquet" not in result
+
+    def test_recursive_lists_staged_tree_prefix(self, tmp_path):
+        """A recursive directory entry lists its staged tree root path."""
+        tree = tmp_path / "labels_src"
+        tree.mkdir()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=tree, remote="Labels/", recursive=True)],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "`Labels`" in result
+        assert str(tree) not in result
+
+    def test_no_local_disk_paths_anywhere(self, tmp_path):
+        """The card never leaks local filesystem paths."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert str(tmp_path) not in result
+
+
+class TestSchemaSampleSizeFromConfig:
+    """RC-R09 — schema_sample_size from [tool.sofer] drives sampling + footnote."""
+
+    def test_footnote_uses_configured_value(self, monkeypatch):
+        """The footnote states the configured sample size, not a literal."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 5000)
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "based on a 5,000-row sample" in result
+
+    def test_sampling_caps_at_configured_value(self, tmp_path, monkeypatch):
+        """Sampling reads at most SCHEMA_SAMPLE_SIZE rows."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        rows = "\n".join(f"v{i}" for i in range(5))
+        csv_path = tmp_path / "cap.csv"
+        csv_path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="cap.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 2
 
 
 class TestDataQualityNotes:
@@ -1822,8 +2210,8 @@ class TestDataQualityNotes:
         assert "3" in result
         assert "7" in result
 
-    def test_colon_prefixed_not_duplicated_in_empty_columns(self):
-        """:: prefixed columns should not be reported as empty even if at 100%."""
+    def test_all_missing_column_reported_regardless_of_name(self):
+        """D4 — a 100%-missing column is reported as empty; no :: name filtering."""
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         schema = [
             ColumnSchema(
@@ -1839,9 +2227,9 @@ class TestDataQualityNotes:
             ),
         ]
         result = build_dataset_card(cfg, schema)
-        # "ghost" should NOT appear in empty columns because it's ::-prefixed
-        # x is not empty, so no Data Quality section at all
-        assert "### Data Quality Notes" not in result
+        # The ghost column IS empty (missing=100%), so Data Quality Notes appear
+        assert "### Data Quality Notes" in result
+        assert "`a.parquet::ghost`" in result
 
 
 # ── 10. Study design content in Dataset Card ──────────────────────────────────

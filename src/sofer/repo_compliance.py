@@ -15,8 +15,9 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import yaml
 
+from ._mirror import planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
-from ._sentinels import MISSING_VALUE_SENTINELS
+from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
 from .config import (
     CARD_BOOLEAN_VALUES,
@@ -24,15 +25,9 @@ from .config import (
     CARD_MODALITY_TAGS,
     PROBE_CHUNK_BYTES,
     SCHEMA_DUP_THRESHOLD,
+    SCHEMA_SAMPLE_SIZE,
 )
 from .model import DatasetConfig
-
-# Number of rows sampled per file for schema inference.
-# 10,000 balances statistical confidence (coverage of low-cardinality values,
-# reasonable missing-value estimates) against read-time cost — even for wide
-# Parquet files with hundreds of columns, the row-group read stays under a few
-# seconds on typical hardware.
-_SCHEMA_SAMPLE_SIZE = 10_000
 
 
 def normalize_header(col_name: str) -> str:
@@ -138,6 +133,9 @@ class ColumnSchema:
                   ``"bool"``).  Populated from the Parquet schema when available;
                   ``None`` when the type could not be determined from native
                   schema metadata.
+        origin:   Source file's basename as sampled (e.g. ``"survey.csv"`` or
+                  ``"survey.parquet"``).  ``""`` when constructed without
+                  provenance (e.g. hand-built test fixtures).
     """
 
     name: str
@@ -147,6 +145,7 @@ class ColumnSchema:
     unique: int
     missing: float
     hf_dtype: str | None = None
+    origin: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -368,7 +367,7 @@ def _read_parquet_sample(
         # Read first row group for sampling
         table = pf.read_row_groups([0])
         num_rows = table.num_rows
-        limit = min(num_rows, _SCHEMA_SAMPLE_SIZE)
+        limit = min(num_rows, SCHEMA_SAMPLE_SIZE)
 
         # Convert to list-of-lists for compatibility with CSV path
         rows: list[list[str]] = []
@@ -388,18 +387,13 @@ def _read_parquet_sample(
         return None
 
 
-def build_schema_report(
+def _build_schema_report_impl(
     cfg: DatasetConfig,
-    csv_delimiter: str | None = None,
-    csv_encoding: str | None = None,
-    staging_dir: Path | None = None,
-) -> list[ColumnSchema]:
-    """Analyse CSV / Parquet files declared in *cfg* and produce a typed schema report.
-
-    When *staging_dir* is provided and a matching ``.parquet`` file exists for a
-    CSV entry (and the entry is not marked ``upload_as_csv``), the function reads
-    column names and types from the Parquet schema instead of inferring from CSV
-    sample data.
+    csv_delimiter: str | None,
+    csv_encoding: str | None,
+    staging_dir: Path | None,
+) -> tuple[list[ColumnSchema], dict[str, int]]:
+    """Shared body of :func:`build_schema_report` and its *with_rows* variant.
 
     Args:
         cfg:           Dataset configuration.
@@ -411,15 +405,17 @@ def build_schema_report(
                        entry before falling back to CSV reading.
 
     Returns:
-        A list of :class:`ColumnSchema` entries — one per column across all
-        files.  Columns with the same name in different files are disambiguated
-        via a ``filename::`` prefix (``.parquet`` extension when read from
-        Parquet).
+        ``(columns, row_counts)`` where *row_counts* maps each sampled file's
+        origin basename (``"x.parquet"`` / ``"x.csv"``) to its EXACT row count
+        (Parquet metadata vs. fully-read CSV rows).  Files that cannot be read
+        contribute no entry.  Same-basename collisions overwrite each other —
+        a documented MVP limitation.
     """
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
     delimiter = csv_delimiter or cfg.csv_delimiter
     csv_encoding = csv_encoding or cfg.csv_encoding
     columns: list[ColumnSchema] = []
+    row_counts: dict[str, int] = {}
     seen_names: dict[str, tuple[str, int]] = {}
     _dup_map: dict[str, list[str]] = {}
     _had_potential_csv_entries = False
@@ -460,7 +456,8 @@ def build_schema_report(
         if use_parquet:
             assert parquet_result is not None
             headers, rows, pf = parquet_result
-            sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
+            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
+            row_counts[origin_name] = pf.metadata.num_rows
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -497,7 +494,7 @@ def build_schema_report(
                     if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
-                n_unique = len(set(col_values))
+                n_unique = count_unique_non_missing(col_values)
 
                 columns.append(
                     ColumnSchema(
@@ -508,6 +505,7 @@ def build_schema_report(
                         unique=n_unique,
                         missing=pct_missing,
                         hf_dtype=_parquet_to_hf_dtype(pa_field.type),
+                        origin=origin_name,
                     )
                 )
         else:
@@ -519,7 +517,8 @@ def build_schema_report(
             headers, rows = result
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
-            sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
+            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
+            row_counts[local.name] = len(rows)
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -560,7 +559,7 @@ def build_schema_report(
                     if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
-                n_unique = len(set(col_values))
+                n_unique = count_unique_non_missing(col_values)
 
                 columns.append(
                     ColumnSchema(
@@ -571,6 +570,7 @@ def build_schema_report(
                         unique=n_unique,
                         missing=pct_missing,
                         hf_dtype=hf_dtype,
+                        origin=local.name,
                     )
                 )
 
@@ -601,7 +601,66 @@ def build_schema_report(
                 f"in dataset.toml to exclude them from the schema report."
             )
 
+    return columns, row_counts
+
+
+def build_schema_report(
+    cfg: DatasetConfig,
+    csv_delimiter: str | None = None,
+    csv_encoding: str | None = None,
+    staging_dir: Path | None = None,
+) -> list[ColumnSchema]:
+    """Analyse CSV / Parquet files declared in *cfg* and produce a typed schema report.
+
+    When *staging_dir* is provided and a matching ``.parquet`` file exists for a
+    CSV entry (and the entry is not marked ``upload_as_csv``), the function reads
+    column names and types from the Parquet schema instead of inferring from CSV
+    sample data.
+
+    Args:
+        cfg:           Dataset configuration.
+        csv_delimiter: Delimiter override (``None`` = use ``cfg.csv_delimiter``,
+                       with Sniffer fallback).
+        csv_encoding:  File encoding (default ``"utf-8-sig"``).
+        staging_dir:   Directory containing converted Parquet files.  When set,
+                       the function checks for a ``.parquet`` file for each CSV
+                       entry before falling back to CSV reading.
+
+    Returns:
+        A list of :class:`ColumnSchema` entries — one per column across all
+        files, each carrying its source file in :attr:`ColumnSchema.origin`.
+        Duplicate names keep only their first occurrence (first-occurrence-wins;
+        see the duplicate warnings emitted below).  Callers that also need exact
+        per-file row counts should use :func:`build_schema_report_with_rows`.
+    """
+    columns, _row_counts = _build_schema_report_impl(cfg, csv_delimiter, csv_encoding, staging_dir)
     return columns
+
+
+def build_schema_report_with_rows(
+    cfg: DatasetConfig,
+    csv_delimiter: str | None = None,
+    csv_encoding: str | None = None,
+    staging_dir: Path | None = None,
+) -> tuple[list[ColumnSchema], dict[str, int]]:
+    """Like :func:`build_schema_report`, but also return exact per-file row counts.
+
+    Args:
+        cfg:           Dataset configuration.
+        csv_delimiter: Delimiter override (``None`` = use ``cfg.csv_delimiter``,
+                       with Sniffer fallback).
+        csv_encoding:  File encoding (default ``"utf-8-sig"``).
+        staging_dir:   Directory containing converted Parquet files (see
+                       :func:`build_schema_report`).
+
+    Returns:
+        ``(columns, row_counts)`` — the same schema report as
+        :func:`build_schema_report`, plus a dict mapping each sampled file's
+        origin basename to its EXACT row count (Parquet:
+        ``pf.metadata.num_rows``; CSV: ``len(rows)`` on the fully read file).
+        Row counts are never capped by the schema sample size.
+    """
+    return _build_schema_report_impl(cfg, csv_delimiter, csv_encoding, staging_dir)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -633,6 +692,8 @@ def build_dataset_card(
     study_design_content: str | None = None,
     empty_columns: list[str] | None = None,
     duplicate_rows: dict[str, int] | None = None,
+    row_counts: dict[str, int] | None = None,
+    keep_csv: bool = False,
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
@@ -646,6 +707,15 @@ def build_dataset_card(
         study_design_content:  Pre-loaded study design content, or ``None``.
         empty_columns:         Optional list of column names that are entirely empty.
         duplicate_rows:        Optional dict mapping filenames to duplicate row counts.
+        row_counts:            Optional dict mapping each file's origin basename to
+                               its exact data-row count (from
+                               :func:`build_schema_report_with_rows`).  When given,
+                               the train split's ``num_examples`` is their sum;
+                               otherwise it falls back to
+                               ``CARD_FALLBACK_ROWS_PER_FILE`` per declared file.
+        keep_csv:              Whether converted CSVs are also delivered at their
+                               original remote (the publish ``--keep-csv`` flag).
+                               Governs the Dataset Structure listing only.
 
     Returns:
         Complete ``README.md`` content as a single string.
@@ -711,12 +781,10 @@ def build_dataset_card(
 
     # -- dataset_info -------------------------------------------------------
     if schema:
-        # features — now a LIST of {name, dtype} (not a dict)
-        # Skip ::-prefixed pseudo-columns from duplicate disambiguation
+        # features — a LIST of {name, dtype}; every schema entry is included
+        # (attribution is structural via ColumnSchema.origin, RC-R06).
         features_list: list[dict[str, str]] = []
         for s in schema:
-            if "::" in s.name:
-                continue  # skip disambiguated pseudo-columns
             hf_dtype = s.hf_dtype if s.hf_dtype is not None else _hf_feature_type(s.dtype)
             features_list.append({"name": s.name, "dtype": hf_dtype})
 
@@ -725,13 +793,13 @@ def build_dataset_card(
         config_name = cfg.config_names[0] if cfg.config_names else (cfg.pretty_name or cfg.name)
         dataset_info["config_name"] = config_name
 
-        # splits — estimate from schema when file info is present
+        # splits — single train split; num_examples from exact row counts
+        # when available, else the conservative per-file fallback (D7).
         if cfg.files:
-            approx_rows = len(cfg.files) * CARD_FALLBACK_ROWS_PER_FILE  # conservative fallback
-            if schema:
-                # Use a rough estimate from the schema
-                total_unique = sum(s.unique for s in schema)
-                approx_rows = total_unique if total_unique > 0 else approx_rows
+            if row_counts:
+                approx_rows = sum(row_counts.values())
+            else:
+                approx_rows = len(cfg.files) * CARD_FALLBACK_ROWS_PER_FILE
             splits = [{"name": "train", "num_examples": approx_rows}]
             dataset_info["splits"] = splits
 
@@ -835,8 +903,11 @@ def build_dataset_card(
     lines.append("")
 
     if cfg.files:
-        file_list = "\n".join(f"  - `{e.local}` -> `{e.remote}`" for e in cfg.files)
-        lines.append(f"This dataset contains **{len(cfg.files)} file(s)**:")
+        # Delivered repo-relative paths — same mapping the upload pipeline
+        # uses (conversion, upload_as_csv, recursive, keep_csv), RC-R08.
+        delivered = planned_remotes(cfg, keep_csv)
+        file_list = "\n".join(f"  - `{remote}`" for remote in delivered)
+        lines.append(f"This dataset contains **{len(delivered)} file(s)**:")
         lines.append("")
         lines.append(file_list)
         lines.append("")
@@ -848,24 +919,27 @@ def build_dataset_card(
     if schema:
         lines.append("### Data Fields")
         lines.append("")
-        lines.append("| Column | Type | Nullable | Example | Unique (sample) | Missing (%) |")
-        lines.append("|--------|------|----------|---------|-----------------|-------------|")
+        lines.append(
+            "| Column | Type | File | Nullable | Example | Unique (sample) | Missing (%) |"
+        )
+        lines.append(
+            "|--------|------|------|----------|---------|-----------------|-------------|"
+        )
         for s in schema:
-            if "::" in s.name:
-                continue  # skip disambiguated pseudo-columns
+            file_cell = s.origin if s.origin else "-"
             lines.append(
-                f"| `{s.name}` | {s.dtype} | {'Yes' if s.nullable else 'No'} | "
+                f"| `{s.name}` | {s.dtype} | {file_cell} | {'Yes' if s.nullable else 'No'} | "
                 f"`{s.example}` | {s.unique} | {s.missing}% |"
             )
         lines.append("")
         lines.append(
-            "*Statistics (unique, missing%) based on a 10,000-row sample."
+            f"*Statistics (unique, missing%) based on a {SCHEMA_SAMPLE_SIZE:,}-row sample."
             " Exact counts may differ in the full dataset.*"
         )
         lines.append("")
 
     # ── Data Quality Notes (empty columns, duplicate rows) ──────────────────
-    schema_empty = [s.name for s in schema if s.missing == 100.0 and "::" not in s.name]
+    schema_empty = [s.name for s in schema if s.missing == 100.0]
     all_empty = schema_empty
     if empty_columns:
         for col in empty_columns:
