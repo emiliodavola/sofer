@@ -50,4 +50,4 @@ Per-task verification (Phases 1–2): `uv run pytest tests/test_repo_compliance.
 
 ## Phase 3: Final Regression
 
-- [ ] 3.1 Full gates: `uv run pytest tests/ -q` (baseline green, no skips added), `uv run ruff check .`, `uv run ruff format --check .`, mypy under Python 3.13 (`uv run mypy src/`). Confirm diff ≈110–130 lines; commit as reviewable work units (Unit 1 → Unit 2 → Unit 3).
+- [x] 3.1 Full gates: `uv run pytest tests/ -q` (baseline green, no skips added), `uv run ruff check .`, `uv run ruff format --check .`, mypy under Python 3.13 (`uv run mypy src/`). Confirm diff ≈110–130 lines; commit as reviewable work units (Unit 1 → Unit 2 → Unit 3).
