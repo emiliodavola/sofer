@@ -507,8 +507,6 @@ def _assert_card_dtypes_match_parquet(
     mismatches: list[str] = []
 
     for col in schema:
-        if "::" in col.name:
-            continue  # skip disambiguated pseudo-columns
         if col.hf_dtype is None or col.hf_dtype != "float64":
             continue  # only flag suspect float64 entries
 

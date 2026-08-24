@@ -15,6 +15,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import yaml
 
+from ._mirror import planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
@@ -692,6 +693,7 @@ def build_dataset_card(
     empty_columns: list[str] | None = None,
     duplicate_rows: dict[str, int] | None = None,
     row_counts: dict[str, int] | None = None,
+    keep_csv: bool = False,
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
@@ -711,6 +713,9 @@ def build_dataset_card(
                                the train split's ``num_examples`` is their sum;
                                otherwise it falls back to
                                ``CARD_FALLBACK_ROWS_PER_FILE`` per declared file.
+        keep_csv:              Whether converted CSVs are also delivered at their
+                               original remote (the publish ``--keep-csv`` flag).
+                               Governs the Dataset Structure listing only.
 
     Returns:
         Complete ``README.md`` content as a single string.
@@ -776,12 +781,10 @@ def build_dataset_card(
 
     # -- dataset_info -------------------------------------------------------
     if schema:
-        # features — now a LIST of {name, dtype} (not a dict)
-        # Skip ::-prefixed pseudo-columns from duplicate disambiguation
+        # features — a LIST of {name, dtype}; every schema entry is included
+        # (attribution is structural via ColumnSchema.origin, RC-R06).
         features_list: list[dict[str, str]] = []
         for s in schema:
-            if "::" in s.name:
-                continue  # skip disambiguated pseudo-columns
             hf_dtype = s.hf_dtype if s.hf_dtype is not None else _hf_feature_type(s.dtype)
             features_list.append({"name": s.name, "dtype": hf_dtype})
 
@@ -900,8 +903,11 @@ def build_dataset_card(
     lines.append("")
 
     if cfg.files:
-        file_list = "\n".join(f"  - `{e.local}` -> `{e.remote}`" for e in cfg.files)
-        lines.append(f"This dataset contains **{len(cfg.files)} file(s)**:")
+        # Delivered repo-relative paths — same mapping the upload pipeline
+        # uses (conversion, upload_as_csv, recursive, keep_csv), RC-R08.
+        delivered = planned_remotes(cfg, keep_csv)
+        file_list = "\n".join(f"  - `{remote}`" for remote in delivered)
+        lines.append(f"This dataset contains **{len(delivered)} file(s)**:")
         lines.append("")
         lines.append(file_list)
         lines.append("")
@@ -933,7 +939,7 @@ def build_dataset_card(
         lines.append("")
 
     # ── Data Quality Notes (empty columns, duplicate rows) ──────────────────
-    schema_empty = [s.name for s in schema if s.missing == 100.0 and "::" not in s.name]
+    schema_empty = [s.name for s in schema if s.missing == 100.0]
     all_empty = schema_empty
     if empty_columns:
         for col in empty_columns:

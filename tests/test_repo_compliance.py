@@ -1691,9 +1691,8 @@ class TestNoColonPrefixedInCard:
 
         features = fm["dataset_info"]["features"]
         feature_names = [f["name"] for f in features]
-        assert feature_names == ["clean"]
-        assert "a.parquet::value" not in feature_names
-        assert "file.csv::value" not in feature_names
+        # RC-R06/D4 — no :: filtering: every schema entry renders as-is
+        assert feature_names == ["clean", "a.parquet::value", "file.csv::value"]
 
     def test_colon_prefixed_rendered_without_filtering(self):
         """RC-R06 — every schema entry renders; names are shown as-is (no
@@ -2035,6 +2034,81 @@ class TestBuildSchemaReportWithRowsWrapper:
         assert isinstance(result, list)
 
 
+class TestDataStructureDeliveredPaths:
+    """RC-R08 — Data Structure lists repo-relative DELIVERED paths only."""
+
+    @staticmethod
+    def _csv(tmp_path: Path) -> Path:
+        csv_path = tmp_path / "survey.csv"
+        csv_path.write_text("v\n1\n", encoding="utf-8-sig")
+        return csv_path
+
+    def test_converted_csv_listed_as_parquet_only(self, tmp_path):
+        """A conversion-eligible CSV entry lists its .parquet remote, not the CSV."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "- `data/survey.parquet`" in result
+        assert "`data/survey.csv`" not in result
+
+    def test_keep_csv_lists_both_artifacts(self, tmp_path):
+        """With keep_csv=True both the .parquet and original .csv remotes are listed."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[], keep_csv=True)
+        assert "`data/survey.parquet`" in result
+        assert "`data/survey.csv`" in result
+
+    def test_upload_as_csv_lists_declared_csv(self, tmp_path):
+        """upload_as_csv entries keep their declared .csv remote (no parquet mapping)."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="raw/table.csv", upload_as_csv=True)],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "`raw/table.csv`" in result
+        assert "table.parquet" not in result
+
+    def test_recursive_lists_staged_tree_prefix(self, tmp_path):
+        """A recursive directory entry lists its staged tree root path."""
+        tree = tmp_path / "labels_src"
+        tree.mkdir()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=tree, remote="Labels/", recursive=True)],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert "`Labels`" in result
+        assert str(tree) not in result
+
+    def test_no_local_disk_paths_anywhere(self, tmp_path):
+        """The card never leaks local filesystem paths."""
+        csv_path = self._csv(tmp_path)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/survey.csv")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[])
+        assert str(tmp_path) not in result
+
+
 class TestSchemaSampleSizeFromConfig:
     """RC-R09 — schema_sample_size from [tool.sofer] drives sampling + footnote."""
 
@@ -2136,8 +2210,8 @@ class TestDataQualityNotes:
         assert "3" in result
         assert "7" in result
 
-    def test_colon_prefixed_not_duplicated_in_empty_columns(self):
-        """:: prefixed columns should not be reported as empty even if at 100%."""
+    def test_all_missing_column_reported_regardless_of_name(self):
+        """D4 — a 100%-missing column is reported as empty; no :: name filtering."""
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         schema = [
             ColumnSchema(
@@ -2153,9 +2227,9 @@ class TestDataQualityNotes:
             ),
         ]
         result = build_dataset_card(cfg, schema)
-        # "ghost" should NOT appear in empty columns because it's ::-prefixed
-        # x is not empty, so no Data Quality section at all
-        assert "### Data Quality Notes" not in result
+        # The ghost column IS empty (missing=100%), so Data Quality Notes appear
+        assert "### Data Quality Notes" in result
+        assert "`a.parquet::ghost`" in result
 
 
 # ── 10. Study design content in Dataset Card ──────────────────────────────────
