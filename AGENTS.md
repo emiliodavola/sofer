@@ -72,3 +72,18 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Fill every section — don't leave placeholders or `<!-- comments -->`.
 - Verification section must contain **actual command output**, not placeholders.
 - SDD artifacts section is mandatory when the change followed the SDD workflow; for ad-hoc fixes it can be omitted but the change description must still be thorough.
+
+### 12. Release process
+Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag runs lint + the full test matrix, then creates a GitHub Release with auto-generated notes. There is no PyPI publishing.
+
+Cutting a release:
+1. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev`. Note: `main` is **not** a fast-forward of `dev` (release PR merge commits live on `main`), so always use `--no-ff`.
+2. Bump `version` in `pyproject.toml` on `main` — it is the single source of truth for the version.
+3. Commit as `chore(release): bump version to X.Y.Z`, create an annotated tag (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`), and push with `git push origin main --follow-tags`.
+4. Verify: `gh run list --workflow=release.yml` must go green; the release appears under GitHub Releases with notes generated from commits/PRs since the previous tag.
+
+Rules:
+- Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the release notes (e.g. v0.2.0 removed the `upload` subcommand).
+- **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
+- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: under 3.10 the `import tomli as tomllib` fallback triggers `no-redef` errors (known latent issue in `model.py`, `config.py`, `cli.py`).
+- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time).
