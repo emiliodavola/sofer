@@ -1941,6 +1941,7 @@ class TestNumExamplesFromRowCounts:
         schema, row_counts = build_schema_report_with_rows(cfg)
         # Sanity: sum of uniques really is 13 (the old buggy value).
         assert sum(s.unique for s in schema) == 13
+        # Key is the verbatim remote ("d.csv" == filename here).
         assert row_counts == {"d.csv": 5}
 
         card = build_dataset_card(cfg, schema, row_counts=row_counts)
@@ -1961,10 +1962,65 @@ class TestNumExamplesFromRowCounts:
             _base_dir=tmp_path,
         )
         schema, row_counts = build_schema_report_with_rows(cfg)
+        # Keys are verbatim remotes ("a.csv"/"b.csv" == filenames here).
         assert row_counts == {"a.csv": 30, "b.csv": 40}
 
         card = build_dataset_card(cfg, schema, row_counts=row_counts)
         assert self._card_num_examples(card) == 70
+
+    def test_same_stem_subdirectory_remotes_keep_distinct_counts(self, tmp_path):
+        """Same-stem CSVs under different dirs get DISTINCT remote keys (RC-R07).
+
+        Basenames collide ("data.csv" twice) but remotes don't: the dict must
+        hold two entries and num_examples must be 70 (no silent overwrite).
+        """
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        rows_a = "\n".join(f"a{i}" for i in range(30))
+        rows_b = "\n".join(f"b{i}" for i in range(40))
+        fa = tmp_path / "a" / "data.csv"
+        fb = tmp_path / "b" / "data.csv"
+        fa.write_text(f"val\n{rows_a}\n", encoding="utf-8-sig")
+        fb.write_text(f"val\n{rows_b}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="a/data.csv"),
+                FileEntry(local=fb, remote="b/data.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        assert row_counts == {"a/data.csv": 30, "b/data.csv": 40}
+
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert self._card_num_examples(card) == 70
+
+    def test_parquet_and_csv_paths_both_key_by_remote(self, tmp_path):
+        """Staged-parquet and upload_as_csv entries both key by remote (RC-R07)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        pq.write_table(pa.table({"v": [str(i) for i in range(5)]}), stage / "x.parquet")
+        csv_x = tmp_path / "x.csv"
+        csv_x.write_text("v\n1\n2\n3\n4\n5\n", encoding="utf-8-sig")
+        csv_y = tmp_path / "y.csv"
+        csv_y.write_text("w\n1\n2\n3\n4\n5\n6\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_x, remote="data/x.csv"),
+                FileEntry(local=csv_y, remote="data/y.csv", upload_as_csv=True),
+            ],
+            _base_dir=tmp_path,
+        )
+        _schema, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        # Parquet-path count AND CSV-path count, each under its entry.remote.
+        assert row_counts == {"data/x.csv": 5, "data/y.csv": 6}
 
     def test_parquet_row_count_not_capped_by_sample(self, tmp_path, monkeypatch):
         """Row counts are exact (pf.metadata.num_rows) even when sampling caps at 2."""
@@ -1982,7 +2038,9 @@ class TestNumExamplesFromRowCounts:
             _base_dir=tmp_path,
         )
         _schema, row_counts = build_schema_report_with_rows(cfg, staging_dir=tmp_path)
-        assert row_counts == {"p.parquet": 5}
+        # Key is the verbatim remote ("p.csv") even though the data was read
+        # from the staged Parquet file — remotes, not parquet origins.
+        assert row_counts == {"p.csv": 5}
 
     def test_fallback_when_no_row_counts(self):
         """Without counts, num_examples falls back to files * CARD_FALLBACK_ROWS_PER_FILE."""
@@ -2001,6 +2059,127 @@ class TestNumExamplesFromRowCounts:
         assert self._card_num_examples(card) == 2 * config.CARD_FALLBACK_ROWS_PER_FILE
 
 
+class TestDuplicateRemoteWarning:
+    """RC-R11 — duplicate declared remote emits one [!] and keeps first count."""
+
+    @staticmethod
+    def _csv(tmp_path: Path, name: str, n_rows: int) -> Path:
+        rows = "\n".join(f"{name}{i}" for i in range(n_rows))
+        path = tmp_path / name
+        path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
+        return path
+
+    def test_duplicate_remote_warns_once_and_keeps_first(self, tmp_path, capsys):
+        """Two entries sharing a remote: exactly one [!], build completes,
+        first entry's count wins."""
+        fa = self._csv(tmp_path, "a.csv", 10)
+        fb = self._csv(tmp_path, "b.csv", 20)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="shared/data.csv"),
+                FileEntry(local=fb, remote="shared/data.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        out = capsys.readouterr().out
+        warnings = [
+            line for line in out.splitlines() if "[!]" in line and "shared/data.csv" in line
+        ]
+        assert len(warnings) == 1
+        assert "Duplicate remote 'shared/data.csv'" in warnings[0]
+        # First-declared entry's count is kept.
+        assert row_counts == {"shared/data.csv": 10}
+        # The build still completes end-to-end.
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert "---" in card
+
+    def test_duplicate_remote_warnings_in_declaration_order(self, tmp_path, capsys):
+        """Gate review — two distinct duplicated remotes warn in the order
+        their duplicates were first declared."""
+        fa = self._csv(tmp_path, "a.csv", 1)
+        fb = self._csv(tmp_path, "b.csv", 1)
+        fc = self._csv(tmp_path, "c.csv", 2)
+        fd = self._csv(tmp_path, "d.csv", 2)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="r1.csv"),
+                FileEntry(local=fb, remote="r2.csv"),
+                FileEntry(local=fc, remote="r1.csv"),
+                FileEntry(local=fd, remote="r2.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        build_schema_report_with_rows(cfg)
+        out = capsys.readouterr().out
+        idx_r1 = out.index("Duplicate remote 'r1.csv'")
+        idx_r2 = out.index("Duplicate remote 'r2.csv'")
+        assert idx_r1 < idx_r2
+
+    def test_unique_remotes_stay_silent(self, tmp_path, capsys):
+        """All-unique remotes → no duplicate-remote warning at all."""
+        fa = self._csv(tmp_path, "a.csv", 3)
+        fb = self._csv(tmp_path, "b.csv", 4)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="a/data.csv"),
+                FileEntry(local=fb, remote="b/data.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        _schema, row_counts = build_schema_report_with_rows(cfg)
+        out = capsys.readouterr().out
+        assert "Duplicate remote" not in out
+        assert row_counts == {"a/data.csv": 3, "b/data.csv": 4}
+
+
+class TestNonSchemaRowCountFallback:
+    """RC-R12 — non-schema entries never contribute exact counts; when NO
+    configured file yields one, num_examples falls back to the product of
+    CARD_FALLBACK_ROWS_PER_FILE and len(cfg.files)."""
+
+    @staticmethod
+    def _card_num_examples(result: str) -> int:
+        frontmatter = yaml.safe_load(result.split("---\n")[1])
+        return frontmatter["dataset_info"]["splits"][0]["num_examples"]
+
+    @staticmethod
+    def _schema() -> list[ColumnSchema]:
+        return [
+            ColumnSchema(
+                name="v", dtype="numeric", nullable=False, example="1", unique=9, missing=0.0
+            ),
+        ]
+
+    def test_recursive_only_dataset_uses_fallback(self):
+        """Only recursive directory entries → fallback product."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        cfg.files = [
+            FileEntry(local=Path("tree_a"), remote="tree_a/", recursive=True),
+            FileEntry(local=Path("tree_b"), remote="tree_b/", recursive=True),
+        ]
+        card = build_dataset_card(cfg, self._schema(), row_counts=None)
+        expected = config.CARD_FALLBACK_ROWS_PER_FILE * len(cfg.files)
+        assert self._card_num_examples(card) == expected
+
+    def test_excluded_files_fallback(self):
+        """Every entry include_in_schema=false with empty counts → fallback product."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        cfg.files = [
+            FileEntry(local=Path("a.csv"), remote="a.csv", include_in_schema=False),
+            FileEntry(local=Path("b.csv"), remote="b.csv", include_in_schema=False),
+        ]
+        card = build_dataset_card(cfg, self._schema(), row_counts={})
+        expected = config.CARD_FALLBACK_ROWS_PER_FILE * len(cfg.files)
+        assert self._card_num_examples(card) == expected
+
+
 class TestBuildSchemaReportWithRowsWrapper:
     """D1 — wrapper returns (columns, row-counts); build_schema_report unchanged."""
 
@@ -2017,6 +2196,7 @@ class TestBuildSchemaReportWithRowsWrapper:
         assert isinstance(columns, list)
         assert all(isinstance(c, ColumnSchema) for c in columns)
         assert len(columns) == 2
+        # Key is the verbatim remote ("w.csv" == filename here).
         assert row_counts == {"w.csv": 3}
 
     def test_plain_build_schema_report_still_returns_list(self, tmp_path):
