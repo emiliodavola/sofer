@@ -1752,6 +1752,84 @@ class TestSampleBasedFootnote:
         assert "Statistics (unique, missing%) based on a 10,000-row sample" not in result
 
 
+class TestUniqueCountsExcludeSentinels:
+    """RC-R10 — ColumnSchema.unique counts DISTINCT NON-MISSING sample values."""
+
+    def test_csv_path_excludes_sentinels(self, tmp_path):
+        """Sentinels ("", NA, NULL) must not be counted as distinct values."""
+        csv_path = tmp_path / "sent.csv"
+        csv_path.write_text("val\nA\n\nNA\nB\nNULL\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="sent.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 2
+
+    def test_all_missing_column_has_zero_unique(self, tmp_path):
+        """A column of only sentinels has no distinct non-missing values."""
+        csv_path = tmp_path / "allna.csv"
+        csv_path.write_text("val\nNA\nNULL\n\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="allna.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 0
+
+    def test_parquet_path_excludes_nulls(self, tmp_path):
+        """Null Parquet values (rendered as "" in the sample) are excluded."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"v": ["x", None, "y"]}), tmp_path / "p.parquet")
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("v\nx\n\ny\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="p.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        assert schema[0].unique == 2
+
+
+class TestSchemaSampleSizeFromConfig:
+    """RC-R09 — schema_sample_size from [tool.sofer] drives sampling + footnote."""
+
+    def test_footnote_uses_configured_value(self, monkeypatch):
+        """The footnote states the configured sample size, not a literal."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 5000)
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        schema = [
+            ColumnSchema(
+                name="x", dtype="numeric", nullable=False, example="1", unique=10, missing=0.0
+            ),
+        ]
+        result = build_dataset_card(cfg, schema)
+        assert "based on a 5,000-row sample" in result
+
+    def test_sampling_caps_at_configured_value(self, tmp_path, monkeypatch):
+        """Sampling reads at most SCHEMA_SAMPLE_SIZE rows."""
+        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        rows = "\n".join(f"v{i}" for i in range(5))
+        csv_path = tmp_path / "cap.csv"
+        csv_path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="cap.csv")],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert schema[0].unique == 2
+
+
 class TestDataQualityNotes:
     """Empty columns and duplicate rows should be documented in the card."""
 

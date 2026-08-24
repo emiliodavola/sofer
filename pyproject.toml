@@ -94,6 +94,10 @@ card_fallback_rows_per_file = 100
 card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d"]
 card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
 
+# ── Schema report ──
+# Rows sampled per file for schema inference (schema report + card footnote).
+# schema_sample_size = 10_000
+
 # ── Metadata core (profile / render) ──
 # All keys optional — these mirror the code defaults in src/sofer/config.py.
 # Prior probability per semantic detector name (email prior 0.98: the @ + TLD

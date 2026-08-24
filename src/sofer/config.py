@@ -50,6 +50,10 @@ _DEFAULTS: dict[str, Any] = {
     ],
     "card_boolean_values": ["true", "false", "1", "0", "yes", "no"],
     "schema_dup_threshold": 3,
+    # Rows sampled per file for schema inference in the schema report
+    # (repo_compliance.build_schema_report). Balances statistical confidence
+    # against read-time cost; also surfaced in the card's stats footnote.
+    "schema_sample_size": 10_000,
     # Metadata-core (profile/render) inference knobs.
     # ``semantic_priors["email"] = 0.98``: an email column's ``@`` + TLD
     # structure is distinctive, so a regex match-rate near 1.0 is highly
@@ -159,6 +163,7 @@ CARD_MODALITY_TAGS: list[str] = _tool["card_modality_tags"]
 CARD_BOOLEAN_VALUES: list[str] = _tool["card_boolean_values"]
 
 SCHEMA_DUP_THRESHOLD: int = _tool["schema_dup_threshold"]
+SCHEMA_SAMPLE_SIZE: int = _tool["schema_sample_size"]
 
 # Metadata-core (profile/render) inference knobs.
 SEMANTIC_PRIORS: dict[str, float] = _tool["semantic_priors"]

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._formats import SUPPORTED_FORMATS
-from ._sentinels import MISSING_VALUE_SENTINELS
+from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .config import (
     CODEBOOK_MAX_SAMPLE,
     CODEBOOK_MIXED_THRESHOLD,
@@ -288,7 +288,7 @@ def _build_markdown(
 
     for idx, col_name in enumerate(headers, 1):
         col_values = columns[idx - 1][:n_analysed]
-        n_unique = len(set(col_values))
+        n_unique = count_unique_non_missing(col_values)
         n_missing = sum(
             1 for v in col_values if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
         )

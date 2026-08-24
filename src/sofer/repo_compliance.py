@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from ._parquet_helpers import _parquet_to_hf_dtype
-from ._sentinels import MISSING_VALUE_SENTINELS
+from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
 from .config import (
     CARD_BOOLEAN_VALUES,
@@ -24,15 +24,9 @@ from .config import (
     CARD_MODALITY_TAGS,
     PROBE_CHUNK_BYTES,
     SCHEMA_DUP_THRESHOLD,
+    SCHEMA_SAMPLE_SIZE,
 )
 from .model import DatasetConfig
-
-# Number of rows sampled per file for schema inference.
-# 10,000 balances statistical confidence (coverage of low-cardinality values,
-# reasonable missing-value estimates) against read-time cost — even for wide
-# Parquet files with hundreds of columns, the row-group read stays under a few
-# seconds on typical hardware.
-_SCHEMA_SAMPLE_SIZE = 10_000
 
 
 def normalize_header(col_name: str) -> str:
@@ -368,7 +362,7 @@ def _read_parquet_sample(
         # Read first row group for sampling
         table = pf.read_row_groups([0])
         num_rows = table.num_rows
-        limit = min(num_rows, _SCHEMA_SAMPLE_SIZE)
+        limit = min(num_rows, SCHEMA_SAMPLE_SIZE)
 
         # Convert to list-of-lists for compatibility with CSV path
         rows: list[list[str]] = []
@@ -460,7 +454,7 @@ def build_schema_report(
         if use_parquet:
             assert parquet_result is not None
             headers, rows, pf = parquet_result
-            sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
+            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -497,7 +491,7 @@ def build_schema_report(
                     if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
-                n_unique = len(set(col_values))
+                n_unique = count_unique_non_missing(col_values)
 
                 columns.append(
                     ColumnSchema(
@@ -519,7 +513,7 @@ def build_schema_report(
             headers, rows = result
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
-            sample = rows[: min(len(rows), _SCHEMA_SAMPLE_SIZE)]
+            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -560,7 +554,7 @@ def build_schema_report(
                     if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
-                n_unique = len(set(col_values))
+                n_unique = count_unique_non_missing(col_values)
 
                 columns.append(
                     ColumnSchema(
@@ -859,7 +853,7 @@ def build_dataset_card(
             )
         lines.append("")
         lines.append(
-            "*Statistics (unique, missing%) based on a 10,000-row sample."
+            f"*Statistics (unique, missing%) based on a {SCHEMA_SAMPLE_SIZE:,}-row sample."
             " Exact counts may differ in the full dataset.*"
         )
         lines.append("")

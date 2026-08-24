@@ -1,6 +1,6 @@
 """Tests for sofer._sentinels — shared missing-value sentinel set."""
 
-from sofer._sentinels import MISSING_VALUE_SENTINELS
+from sofer._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 
 
 class TestMissingValueSentinels:
@@ -95,3 +95,23 @@ class TestSentinelModuleConsistency:
         from sofer.repo_compliance import MISSING_VALUE_SENTINELS as RC
 
         assert SRC is CB is Q is RC, "All modules must reference the same frozenset object"
+
+
+class TestCountUniqueNonMissing:
+    """count_unique_non_missing — distinct non-missing value count (RC-R10)."""
+
+    def test_excludes_empty_and_sentinels(self):
+        """Empty strings and NA/NULL markers must not count as distinct values."""
+        assert count_unique_non_missing(["A", "", "NA", "B", "NULL"]) == 2
+
+    def test_counts_distinct_values_and_whitespace_sentinel(self):
+        """Duplicates collapse; the bare-space sentinel is excluded."""
+        assert count_unique_non_missing(["a", "a", " ", "b"]) == 2
+
+    def test_empty_input_returns_zero(self):
+        """No values → zero unique values."""
+        assert count_unique_non_missing([]) == 0
+
+    def test_all_missing_returns_zero(self):
+        """A column of only sentinels has no distinct non-missing values."""
+        assert count_unique_non_missing(["NA", "", "NULL"]) == 0

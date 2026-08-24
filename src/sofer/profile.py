@@ -19,6 +19,7 @@ from pathlib import Path
 
 from ._csv_reader import stream_csv
 from ._formats import SUPPORTED_FORMATS
+from ._sentinels import count_unique_non_missing
 from .codebook import _read_file, infer_column_type
 from .config import CSV_DELIMITER, CSV_ENCODING, PROFILE_MAX_SAMPLE
 from .metadata import (
@@ -210,7 +211,7 @@ def _build_column(name: str, values: list[str]) -> ColumnMetadata:
         storage_type=infer_column_type(values),
         nullable=missing > 0,
         missing_pct=missing_pct,
-        unique=len(set(values)),
+        unique=count_unique_non_missing(values),
         example=example,
         semantic_type=semantic_type,
         pii=infer_pii_types(values),
