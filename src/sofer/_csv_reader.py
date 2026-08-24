@@ -11,8 +11,18 @@ from __future__ import annotations
 import csv
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
-from .config import CODEBOOK_MAX_SAMPLE, CSV_DELIMITER, CSV_ENCODING
+from . import config
+
+_UNSET: Any = object()
+"""Sentinel distinguishing "parameter not given" from an explicit ``None``.
+
+An explicit ``max_sample=None`` legitimately means "scan the entire file"
+(used by fail-severity quality checks, Issue #14), so the config-default
+resolution needs its own marker — a plain ``None`` default would conflate
+the two and silently cap full scans at ``codebook_max_sample``.
+"""
 
 ENCODING_FALLBACKS = ["utf-8-sig", "utf-8"]
 """Ordered list of UTF-8 encodings tried when opening a CSV file.
@@ -24,9 +34,9 @@ ENCODING_FALLBACKS = ["utf-8-sig", "utf-8"]
 
 def stream_csv(
     path: Path,
-    delimiter: str = CSV_DELIMITER,
-    encoding: str = CSV_ENCODING,
-    max_sample: int | None = CODEBOOK_MAX_SAMPLE,
+    delimiter: str | Any = _UNSET,
+    encoding: str | Any = _UNSET,
+    max_sample: int | None | Any = _UNSET,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Yield ``(header, row)`` tuples from a CSV file, one at a time.
 
@@ -38,10 +48,14 @@ def stream_csv(
 
     Args:
         path:       Path to the CSV file.
-        delimiter:  CSV field delimiter (default ``;``).
-        encoding:   Initial encoding to try (default ``utf-8-sig``).
-        max_sample: Maximum number of data rows to yield (default 100 000).
-                    Pass ``None`` to scan the entire file.
+        delimiter:  CSV field delimiter (default: ``csv_delimiter`` from
+                    ``[tool.sofer]``, resolved at call time).
+        encoding:   Initial encoding to try (default: ``csv_encoding`` from
+                    ``[tool.sofer]``, resolved at call time).
+        max_sample: Maximum number of data rows to yield. Omit for the
+                    ``codebook_max_sample`` value from ``[tool.sofer]``
+                    (resolved at call time); pass ``None`` explicitly to
+                    scan the entire file.
 
     Yields:
         ``(header, row)`` tuples. The first yield has ``row=None``.
@@ -49,6 +63,15 @@ def stream_csv(
     Raises:
         ValueError: When none of the encoding fallbacks succeed.
     """
+    # Resolve unset parameters through the config module at call time so a
+    # reload between import and call is honored (never freeze at def time).
+    if delimiter is _UNSET:
+        delimiter = config.CSV_DELIMITER
+    if encoding is _UNSET:
+        encoding = config.CSV_ENCODING
+    if max_sample is _UNSET:
+        max_sample = config.CODEBOOK_MAX_SAMPLE
+
     # Ensure encoding is the first in the chain
     fallbacks = _build_fallback_chain(encoding)
 

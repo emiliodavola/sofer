@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sofer.config import SCHEMA_DUP_THRESHOLD
+import sofer.config as config
 from sofer.model import DatasetConfig, FileEntry
 from sofer.publish import publish
 from sofer.repo_compliance import (
@@ -1968,7 +1968,7 @@ class TestNumExamplesFromRowCounts:
 
     def test_parquet_row_count_not_capped_by_sample(self, tmp_path, monkeypatch):
         """Row counts are exact (pf.metadata.num_rows) even when sampling caps at 2."""
-        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        monkeypatch.setattr("sofer.config.SCHEMA_SAMPLE_SIZE", 2)
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -1986,7 +1986,6 @@ class TestNumExamplesFromRowCounts:
 
     def test_fallback_when_no_row_counts(self):
         """Without counts, num_examples falls back to files * CARD_FALLBACK_ROWS_PER_FILE."""
-        from sofer.config import CARD_FALLBACK_ROWS_PER_FILE
 
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         cfg.files = [
@@ -1999,7 +1998,7 @@ class TestNumExamplesFromRowCounts:
             ),
         ]
         card = build_dataset_card(cfg, schema)
-        assert self._card_num_examples(card) == 2 * CARD_FALLBACK_ROWS_PER_FILE
+        assert self._card_num_examples(card) == 2 * config.CARD_FALLBACK_ROWS_PER_FILE
 
 
 class TestBuildSchemaReportWithRowsWrapper:
@@ -2114,7 +2113,7 @@ class TestSchemaSampleSizeFromConfig:
 
     def test_footnote_uses_configured_value(self, monkeypatch):
         """The footnote states the configured sample size, not a literal."""
-        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 5000)
+        monkeypatch.setattr("sofer.config.SCHEMA_SAMPLE_SIZE", 5000)
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         schema = [
             ColumnSchema(
@@ -2126,7 +2125,7 @@ class TestSchemaSampleSizeFromConfig:
 
     def test_sampling_caps_at_configured_value(self, tmp_path, monkeypatch):
         """Sampling reads at most SCHEMA_SAMPLE_SIZE rows."""
-        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        monkeypatch.setattr("sofer.config.SCHEMA_SAMPLE_SIZE", 2)
         rows = "\n".join(f"v{i}" for i in range(5))
         csv_path = tmp_path / "cap.csv"
         csv_path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
@@ -2290,17 +2289,16 @@ class TestSchemaDupThreshold:
 
     def test_default_value_is_3(self):
         """Default schema_dup_threshold should be 3."""
-        assert SCHEMA_DUP_THRESHOLD == 3
+        assert config.SCHEMA_DUP_THRESHOLD == 3
 
     def test_is_int(self):
         """SCHEMA_DUP_THRESHOLD must be an int."""
-        assert isinstance(SCHEMA_DUP_THRESHOLD, int)
+        assert isinstance(config.SCHEMA_DUP_THRESHOLD, int)
 
     def test_constant_is_importable(self):
-        """SCHEMA_DUP_THRESHOLD should be importable from sofer.config."""
-        from sofer.config import SCHEMA_DUP_THRESHOLD as T
+        """SCHEMA_DUP_THRESHOLD should be readable from sofer.config."""
 
-        assert T >= 1  # threshold must be at least 1
+        assert config.SCHEMA_DUP_THRESHOLD >= 1  # threshold must be at least 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

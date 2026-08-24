@@ -58,19 +58,11 @@ import pyarrow as pa
 import pyarrow.csv as pc
 import pyarrow.parquet as pq
 
+from . import config
 from ._mirror import copy_to_mirror
 from ._parquet_helpers import _parquet_to_hf_dtype
 from .checks import DatasetValidator
 from .codebook import generate_all as generate_all_codebooks
-from .config import (
-    CODEBOOKS_DIR,
-    OUTPUT_ENCODING,
-    PARQUET_COMPRESSION,
-    PARQUET_ROW_GROUP_SIZE,
-    PARQUET_SHARD_WARNING_MB,
-    REPORT_MAX_ITEMS,
-    SNIFF_DELIMITERS,
-)
 from .quality import QualityValidator
 from .repo_compliance import (
     ColumnSchema,
@@ -127,9 +119,9 @@ def _count_delimiters_outside_quotes(line: str) -> dict[str, int]:
         line: A single line of CSV text.
 
     Returns:
-        ``{delimiter: count}`` for every delimiter in :data:`SNIFF_DELIMITERS`.
+        ``{delimiter: count}`` for every delimiter in ``config.SNIFF_DELIMITERS``.
     """
-    counts: dict[str, int] = {d: 0 for d in SNIFF_DELIMITERS}
+    counts: dict[str, int] = {d: 0 for d in config.SNIFF_DELIMITERS}
     in_quotes = False
     for ch in line:
         if ch == '"':
@@ -313,17 +305,17 @@ def _convert_to_parquet(
         pq.write_table(
             table,
             parquet_path,
-            compression=PARQUET_COMPRESSION,
+            compression=config.PARQUET_COMPRESSION,
             write_page_index=True,
-            row_group_size=PARQUET_ROW_GROUP_SIZE,
+            row_group_size=config.PARQUET_ROW_GROUP_SIZE,
         )
 
         # ── Size check: warn when the shard exceeds the threshold ─────────
         size_mb = parquet_path.stat().st_size / (1024 * 1024)
-        if size_mb > PARQUET_SHARD_WARNING_MB:
+        if size_mb > config.PARQUET_SHARD_WARNING_MB:
             print(
                 f"  \u26a0  {parquet_path.name}: {size_mb:.1f} MB "
-                f"(> {PARQUET_SHARD_WARNING_MB} MB). Consider sharding into "
+                f"(> {config.PARQUET_SHARD_WARNING_MB} MB). Consider sharding into "
                 f"smaller files for better Dataset Viewer performance."
             )
 
@@ -458,7 +450,7 @@ def _check_large_values(
     except Exception:
         return warnings  # can't read — skip silently
 
-    first_rows = table.slice(0, min(REPORT_MAX_ITEMS, table.num_rows))
+    first_rows = table.slice(0, min(config.REPORT_MAX_ITEMS, table.num_rows))
 
     for col_idx in range(first_rows.num_columns):
         field = first_rows.schema.field(col_idx)
@@ -593,7 +585,7 @@ def _check_local_overwrite(cfg: DatasetConfig, output_dir: Path, all_files: bool
             existing.append(str(candidate))
 
     if all_files:
-        codebooks_dir = output_dir / CODEBOOKS_DIR
+        codebooks_dir = output_dir / config.CODEBOOKS_DIR
         if codebooks_dir.exists():
             existing.append(str(codebooks_dir))
 
@@ -768,8 +760,8 @@ def prepare(
         print("  [i] Generating LICENSE \u2026")
         license_text = build_license_file(cfg.license)
 
-        (output_dir / "README.md").write_text(card, encoding=OUTPUT_ENCODING)
-        (output_dir / "LICENSE").write_text(license_text, encoding=OUTPUT_ENCODING)
+        (output_dir / "README.md").write_text(card, encoding=config.OUTPUT_ENCODING)
+        (output_dir / "LICENSE").write_text(license_text, encoding=config.OUTPUT_ENCODING)
 
         # ── 7. Stage non-converted files (upload_as_csv, parquet, other)
         #       and recursive trees (RC-R04) ────────────────────────────

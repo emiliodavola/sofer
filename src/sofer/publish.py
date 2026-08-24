@@ -58,13 +58,8 @@ if TYPE_CHECKING:
 
 from huggingface_hub import HfApi
 
+from . import config
 from ._mirror import copy_to_mirror, planned_remotes
-from .config import (
-    CODEBOOKS_DIR,
-    DEFAULT_CONFIG_NAME,
-    REPORT_MAX_ITEMS,
-    REPORT_MAX_MODIFIED,
-)
 from .prepare import prepare, resolve_output_dir
 from .splits import detect_splits, validate_layout, validate_split_mapping
 
@@ -258,17 +253,17 @@ def _repo_diff_summary(
 
     if new:
         lines.append(f"    + {len(new)} file(s) will be ADDED:")
-        for f in new[:REPORT_MAX_ITEMS]:
+        for f in new[:config.REPORT_MAX_ITEMS]:
             lines.append(f"      + {f}")
-        if len(new) > REPORT_MAX_ITEMS:
-            lines.append(f"      … and {len(new) - REPORT_MAX_ITEMS} more")
+        if len(new) > config.REPORT_MAX_ITEMS:
+            lines.append(f"      … and {len(new) - config.REPORT_MAX_ITEMS} more")
 
     if modified:
         lines.append(f"    ~ {len(modified)} file(s) will be OVERWRITTEN:")
-        for f in modified[:REPORT_MAX_MODIFIED]:
+        for f in modified[:config.REPORT_MAX_MODIFIED]:
             lines.append(f"      ~ {f}")
-        if len(modified) > REPORT_MAX_MODIFIED:
-            lines.append(f"      … and {len(modified) - REPORT_MAX_MODIFIED} more")
+        if len(modified) > config.REPORT_MAX_MODIFIED:
+            lines.append(f"      … and {len(modified) - config.REPORT_MAX_MODIFIED} more")
 
     return "\n".join(lines)
 
@@ -356,10 +351,10 @@ def _print_split_report(report: object) -> None:
     print("\n  Split detection:")
     for s in report.splits:
         print(f"    [{s.name}] {len(s.files)} file(s)")
-        for f in s.files[:REPORT_MAX_MODIFIED]:
+        for f in s.files[:config.REPORT_MAX_MODIFIED]:
             print(f"      - {f}")
-        if len(s.files) > REPORT_MAX_MODIFIED:
-            print(f"      … and {len(s.files) - REPORT_MAX_MODIFIED} more")
+        if len(s.files) > config.REPORT_MAX_MODIFIED:
+            print(f"      … and {len(s.files) - config.REPORT_MAX_MODIFIED} more")
 
     if report.unclassified:
         print(f"    [?] {len(report.unclassified)} file(s) unclassified")
@@ -412,7 +407,7 @@ def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
     newest = max(p.stat().st_mtime for p in parquets)
 
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
-    toml_path = base / DEFAULT_CONFIG_NAME
+    toml_path = base / config.DEFAULT_CONFIG_NAME
     if toml_path.is_file() and toml_path.stat().st_mtime > newest:
         return True
 
@@ -437,7 +432,7 @@ def _collect_codebook_remotes(output_dir: Path) -> list[str]:
         Codebook remote paths, sorted.
     """
     remotes: list[str] = []
-    codebooks_dir = output_dir / CODEBOOKS_DIR
+    codebooks_dir = output_dir / config.CODEBOOKS_DIR
     if codebooks_dir.is_dir():
         for cb in sorted(codebooks_dir.rglob("*.md")):
             remotes.append(cb.relative_to(output_dir).as_posix())
@@ -507,7 +502,7 @@ def _copy_package(
         if src.exists():
             copy_to_mirror(src, dest, "LICENSE")
 
-    codebooks_dir = source / CODEBOOKS_DIR
+    codebooks_dir = source / config.CODEBOOKS_DIR
     if codebooks_dir.is_dir():
         for cb in sorted(codebooks_dir.rglob("*.md")):
             copy_to_mirror(cb, dest, cb.relative_to(source).as_posix())

@@ -14,7 +14,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from .config import REPORT_LINE_WIDTH, REPORT_SUB_LINE_WIDTH
+from . import config
 from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityResult
 from .repo_compliance import normalize_header
 
@@ -49,7 +49,7 @@ class ValidationReport:
     def print_summary(self) -> None:
         """Print a human-readable summary to stdout."""
         print(f"\n  Validation report: {self.name}")
-        print(f"  {'-' * REPORT_LINE_WIDTH}")
+        print(f"  {'-' * config.REPORT_LINE_WIDTH}")
         print(f"  Errors:   {len(self.errors)}")
         for e in self.errors:
             print(f"    X  {e}")
@@ -57,7 +57,7 @@ class ValidationReport:
         for w in self.warnings:
             print(f"    WARN  {w}")
         if self.quality_results:
-            print(f"  {'-' * REPORT_SUB_LINE_WIDTH}")
+            print(f"  {'-' * config.REPORT_SUB_LINE_WIDTH}")
             q_errors = [r for r in self.quality_results if r.severity == "fail"]
             q_warnings = [r for r in self.quality_results if r.severity == "warn"]
             q_passed, q_skipped = _count_passed_quality(self.quality_results, self.ran_checks)

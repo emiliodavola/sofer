@@ -15,18 +15,11 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import yaml
 
+from . import config
 from ._mirror import planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
-from .config import (
-    CARD_BOOLEAN_VALUES,
-    CARD_FALLBACK_ROWS_PER_FILE,
-    CARD_MODALITY_TAGS,
-    PROBE_CHUNK_BYTES,
-    SCHEMA_DUP_THRESHOLD,
-    SCHEMA_SAMPLE_SIZE,
-)
 from .model import DatasetConfig
 
 
@@ -99,7 +92,7 @@ def _validate_size_category(value: str) -> str | None:
 
 def _csv_values_look_like_bool(values: list[str]) -> bool:
     """Check if all non-null CSV values look like boolean literals."""
-    bool_vals = set(CARD_BOOLEAN_VALUES)
+    bool_vals = set(config.CARD_BOOLEAN_VALUES)
     non_null = [
         v.strip().lower()
         for v in values
@@ -291,7 +284,7 @@ def _read_csv_sample(
             if delimiter is None:
                 # First try ";", Sniffer fallback
                 try:
-                    sample = fh.read(PROBE_CHUNK_BYTES)
+                    sample = fh.read(config.PROBE_CHUNK_BYTES)
                     fh.seek(0)
                     dialect = csv.Sniffer().sniff(sample)
                     delimiter = dialect.delimiter
@@ -367,7 +360,7 @@ def _read_parquet_sample(
         # Read first row group for sampling
         table = pf.read_row_groups([0])
         num_rows = table.num_rows
-        limit = min(num_rows, SCHEMA_SAMPLE_SIZE)
+        limit = min(num_rows, config.SCHEMA_SAMPLE_SIZE)
 
         # Convert to list-of-lists for compatibility with CSV path
         rows: list[list[str]] = []
@@ -456,7 +449,7 @@ def _build_schema_report_impl(
         if use_parquet:
             assert parquet_result is not None
             headers, rows, pf = parquet_result
-            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
+            sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
             row_counts[origin_name] = pf.metadata.num_rows
 
             for idx, col in enumerate(headers):
@@ -517,7 +510,7 @@ def _build_schema_report_impl(
             headers, rows = result
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
-            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
+            sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
             row_counts[local.name] = len(rows)
 
             for idx, col in enumerate(headers):
@@ -579,7 +572,7 @@ def _build_schema_report_impl(
 
     if _dup_map:
         n_dups = len(_dup_map)
-        if n_dups <= SCHEMA_DUP_THRESHOLD:
+        if n_dups <= config.SCHEMA_DUP_THRESHOLD:
             for col_name, origins in _dup_map.items():
                 prev_origin = origins[0]
                 for other_origin in origins[1:]:
@@ -736,7 +729,7 @@ def build_dataset_card(
     if "datasets" not in tags:
         tags.append("datasets")
     # Emit 'tabular' as default modality when not already present.
-    if not any(t in tags for t in CARD_MODALITY_TAGS):
+    if not any(t in tags for t in config.CARD_MODALITY_TAGS):
         tags.append("tabular")
     frontmatter["tags"] = tags
 
@@ -799,7 +792,7 @@ def build_dataset_card(
             if row_counts:
                 approx_rows = sum(row_counts.values())
             else:
-                approx_rows = len(cfg.files) * CARD_FALLBACK_ROWS_PER_FILE
+                approx_rows = len(cfg.files) * config.CARD_FALLBACK_ROWS_PER_FILE
             splits = [{"name": "train", "num_examples": approx_rows}]
             dataset_info["splits"] = splits
 
@@ -933,7 +926,7 @@ def build_dataset_card(
             )
         lines.append("")
         lines.append(
-            f"*Statistics (unique, missing%) based on a {SCHEMA_SAMPLE_SIZE:,}-row sample."
+            f"*Statistics (unique, missing%) based on a {config.SCHEMA_SAMPLE_SIZE:,}-row sample."
             " Exact counts may differ in the full dataset.*"
         )
         lines.append("")
