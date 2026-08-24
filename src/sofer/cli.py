@@ -11,8 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
-from . import config
+from . import __version__, config
 from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
@@ -743,7 +742,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Entry point (installed via ``pyproject.toml [project.scripts]``)."""
+    """Entry point (installed via ``pyproject.toml [project.scripts]``).
+
+    Orchestration:
+
+        1. Phase-0 bootstrap: resolve ``[tool.sofer]`` anchored on the
+           current working directory (``config.reload(None)``) so argparse
+           defaults such as ``default_config_name`` reflect cwd-tree
+           overrides before the parser is built (TC-07).
+        2. Build the parser and dispatch; dataset commands re-resolve via
+           ``DatasetConfig.from_toml`` (dataset-dir anchor, TC-04/TC-05).
+    """
+    config.reload(None)
     parser = _build_parser()
     args = parser.parse_args()
     sys.exit(args.func(args))

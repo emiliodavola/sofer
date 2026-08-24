@@ -331,7 +331,8 @@ class QualityValidator:
         self._ran_checks.add("duplicates")
         if not self._dup_findings:
             return
-        pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:config.REPORT_MAX_ITEMS])
+        limit = config.REPORT_MAX_ITEMS
+        pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:limit])
         sev = self._checks["duplicates"]["severity"]
         self._add_result("duplicates", sev, f"Duplicate rows: {pairs}")
 
@@ -431,7 +432,8 @@ class QualityValidator:
         if not self._corrupt_findings:
             return
         sev = self._checks["corrupt_records"]["severity"]
-        for fname, row, actual, expected in self._corrupt_findings[:config.REPORT_MAX_CORRUPT_RECORDS]:
+        limit = config.REPORT_MAX_CORRUPT_RECORDS
+        for fname, row, actual, expected in self._corrupt_findings[:limit]:
             self._add_result(
                 "corrupt_records",
                 sev,

@@ -36,7 +36,7 @@ def stream_csv(
     path: Path,
     delimiter: str | Any = _UNSET,
     encoding: str | Any = _UNSET,
-    max_sample: int | None | Any = _UNSET,
+    max_sample: int | Any | None = _UNSET,
 ) -> Generator[tuple[list[str], list[str] | None], None, None]:
     """Yield ``(header, row)`` tuples from a CSV file, one at a time.
 

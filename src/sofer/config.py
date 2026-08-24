@@ -159,12 +159,23 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
 
 
 def _discover(start: str | Path | None = None) -> tuple[dict[str, Any], Path | None]:
-    """Resolve ``[tool.sofer]`` walking up from *start*.
+    """Resolve ``[tool.sofer]`` following the fixed precedence order.
+
+    Resolution (spec TC-02):
+
+        1. nearest ``pyproject.toml`` walking up from *start* (the dataset
+           TOML directory when known),
+        2. nearest ``pyproject.toml`` walking up from the current working
+           directory (only consulted when *start* was given and step 1
+           found nothing),
+        3. built-in ``_DEFAULTS``.
+
+    A found ``pyproject.toml`` without a ``[tool.sofer]`` section is still
+    selected as the source but contributes only default values.
 
     Args:
-        start: Anchor directory (see :func:`_find_project_root`). A found
-            ``pyproject.toml`` without a ``[tool.sofer]`` section is still
-            selected as the source but contributes only default values.
+        start: Anchor directory (see :func:`_find_project_root`); ``None``
+            anchors directly on the current working directory.
 
     Returns:
         ``(merged, source_path)`` where *merged* is the effective value dict
@@ -172,6 +183,9 @@ def _discover(start: str | Path | None = None) -> tuple[dict[str, Any], Path | N
         ``pyproject.toml``, or ``None`` when built-in defaults apply.
     """
     root = _find_project_root(start)
+    if root is None and start is not None:
+        # Dataset-anchor miss -> cwd fallback (precedence step 2).
+        root = _find_project_root(None)
     toml_path = root / "pyproject.toml" if root is not None else None
     return _read_tool_section(toml_path), toml_path
 

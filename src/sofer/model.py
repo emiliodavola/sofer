@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from . import config
+
 QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
     {
         "duplicates",
@@ -343,6 +345,13 @@ class DatasetConfig:
 
         path = Path(path)
         base_dir = path.parent
+
+        # Phase-1 tool-config resolution: re-anchor [tool.sofer] discovery on
+        # the dataset TOML's directory so every subsequent read of a module
+        # constant (config.X) reflects the dataset-tree overrides for this
+        # invocation (TC-04/TC-05). Harmless if called repeatedly — resolution
+        # is a pure function of (anchor, filesystem).
+        config.reload(base_dir)
 
         with open(path, "rb") as fh:
             data = _tomli.load(fh)
