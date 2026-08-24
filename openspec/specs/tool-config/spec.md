@@ -1,10 +1,14 @@
-# Delta for tool-config
+# Tool Config Specification
 
-New capability — all requirements are ADDED. At archive time this creates
-`openspec/specs/tool-config/spec.md`. Existing capabilities' behavior is
-unchanged under correct discovery; no MODIFIED/REMOVED entries.
+## Purpose
 
-## ADDED Requirements
+Tool-wide `[tool.sofer]` configuration discovery for sofer: where the config
+is searched (dataset TOML directory walk-up → cwd walk-up → built-in
+defaults), when it is resolved during a CLI or library run, how consumers
+read resolved values without import-time freezing, and how the resolved
+source becomes visible on request.
+
+## Requirements
 
 ### Requirement: Discovery anchors on the dataset TOML directory (TC-01)
 
@@ -67,9 +71,13 @@ subsequent reads within that invocation.
 
 #### Scenario: Override honored within the same invocation
 
-- GIVEN a dataset TOML whose sibling-tree `pyproject.toml` sets `csv_delimiter = ","`
-- WHEN `sofer prepare --config mydata/dataset.toml` runs
-- THEN CSV files are read with `,` during that same invocation
+- GIVEN a working tree whose `pyproject.toml` sets `csv_delimiter = ","`
+- WHEN `sofer profile data.csv` runs with the current working directory inside that tree
+- THEN the CSV is read with `,` during that same invocation
+
+(Note: the tool-wide `csv_delimiter` consumer is `sofer profile`, whose reader
+defaults flow through `stream_csv`. The `prepare` command uses the
+DATASET-level `[meta] csv_delimiter`, not this tool-wide key.)
 
 #### Scenario: Single-file commands without a dataset TOML
 
