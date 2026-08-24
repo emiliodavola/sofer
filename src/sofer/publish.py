@@ -253,14 +253,14 @@ def _repo_diff_summary(
 
     if new:
         lines.append(f"    + {len(new)} file(s) will be ADDED:")
-        for f in new[:config.REPORT_MAX_ITEMS]:
+        for f in new[: config.REPORT_MAX_ITEMS]:
             lines.append(f"      + {f}")
         if len(new) > config.REPORT_MAX_ITEMS:
             lines.append(f"      … and {len(new) - config.REPORT_MAX_ITEMS} more")
 
     if modified:
         lines.append(f"    ~ {len(modified)} file(s) will be OVERWRITTEN:")
-        for f in modified[:config.REPORT_MAX_MODIFIED]:
+        for f in modified[: config.REPORT_MAX_MODIFIED]:
             lines.append(f"      ~ {f}")
         if len(modified) > config.REPORT_MAX_MODIFIED:
             lines.append(f"      … and {len(modified) - config.REPORT_MAX_MODIFIED} more")
@@ -351,7 +351,7 @@ def _print_split_report(report: object) -> None:
     print("\n  Split detection:")
     for s in report.splits:
         print(f"    [{s.name}] {len(s.files)} file(s)")
-        for f in s.files[:config.REPORT_MAX_MODIFIED]:
+        for f in s.files[: config.REPORT_MAX_MODIFIED]:
             print(f"      - {f}")
         if len(s.files) > config.REPORT_MAX_MODIFIED:
             print(f"      … and {len(s.files) - config.REPORT_MAX_MODIFIED} more")

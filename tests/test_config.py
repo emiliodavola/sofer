@@ -225,9 +225,7 @@ class TestReload:
 class TestTc01DatasetDirAnchoring:
     """Discovery anchors on the dataset TOML directory."""
 
-    def test_pyproject_two_levels_above_dataset_honored(
-        self, restore_tool_config, pytree
-    ):
+    def test_pyproject_two_levels_above_dataset_honored(self, restore_tool_config, pytree):
         """A pyproject.toml two levels above the dataset dir sets the value."""
         root = pytree("[tool.sofer]\nschema_sample_size = 500\n")
         dataset_dir = root / "lvl1" / "mydata"
@@ -267,9 +265,7 @@ class TestTc02Precedence:
         config.reload(dataset_dir)
         assert config.SCHEMA_SAMPLE_SIZE == 500
 
-    def test_nothing_found_falls_back_to_defaults(
-        self, restore_tool_config, monkeypatch, tmp_path
-    ):
+    def test_nothing_found_falls_back_to_defaults(self, restore_tool_config, monkeypatch, tmp_path):
         """No pyproject above dataset dir or cwd -> all values equal _DEFAULTS."""
         bare_cwd = tmp_path / "empty"
         bare_cwd.mkdir()

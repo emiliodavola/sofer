@@ -342,7 +342,7 @@ class QualityValidator:
         self._ran_checks.add("empty_rows")
         if not self._empty_row_numbers:
             return
-        sample = ", ".join(str(r) for r in self._empty_row_numbers[:config.REPORT_MAX_ITEMS])
+        sample = ", ".join(str(r) for r in self._empty_row_numbers[: config.REPORT_MAX_ITEMS])
         sev = self._checks["empty_rows"]["severity"]
         self._add_result("empty_rows", sev, f"Empty rows: {sample}")
 
@@ -493,7 +493,7 @@ class QualityValidator:
         sev = self._checks["encoding_validation"]["severity"]
         # Read first 8 KB and try each encoding
         try:
-            chunk = resolved.read_bytes()[:config.PROBE_CHUNK_BYTES]
+            chunk = resolved.read_bytes()[: config.PROBE_CHUNK_BYTES]
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
             return

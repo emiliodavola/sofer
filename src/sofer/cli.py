@@ -608,8 +608,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Maximum rows to sample for analysis (default: "
-            "codebook_max_sample from [tool.sofer])."
+            "Maximum rows to sample for analysis (default: codebook_max_sample from [tool.sofer])."
         ),
     )
     c.add_argument(
@@ -715,8 +714,7 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=config.DEFAULT_CONFIG_NAME,
         help=(
-            "Path to the .toml configuration file (default: default_config_name "
-            "from [tool.sofer])."
+            "Path to the .toml configuration file (default: default_config_name from [tool.sofer])."
         ),
     )
     s.add_argument(
