@@ -1,6 +1,6 @@
 [project]
 name = "sofer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards."
 requires-python = ">=3.10"
 dependencies = [
