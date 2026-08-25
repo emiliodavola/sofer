@@ -29,6 +29,10 @@ dev = [
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+# Design docs and specs under openspec/ embed Python snippets inside markdown;
+# the formatter rewrites those blocks, producing noise diffs on historical
+# SDD artifacts. They are documentation, not source — keep them out of scope.
+extend-exclude = ["openspec"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "RUF"]
