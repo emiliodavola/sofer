@@ -11,8 +11,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, config
+from . import config
 from ._formats import SUPPORTED_FORMATS
+from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
@@ -459,7 +460,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"sofer v{__version__}",
+        version=f"sofer v{get_version()}",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)

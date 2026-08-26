@@ -1,8 +1,23 @@
 [project]
 name = "sofer"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards."
+readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Emilio Davola" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "huggingface-hub>=0.26.0",
     "openpyxl>=3.1",
@@ -12,6 +27,11 @@ dependencies = [
     "tomli-w>=1.0",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/emiliodavola/sofer"
+Repository = "https://github.com/emiliodavola/sofer"
+Issues = "https://github.com/emiliodavola/sofer/issues"
 
 [project.scripts]
 sofer = "sofer.cli:main"
@@ -113,6 +133,9 @@ detect_threshold = 0.5    # match_rate below this -> no detection (None)
 profile_max_sample = 100000
 confidence_round_digits = 4
 
+[tool.hatch.version]
+source = "vcs"
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"

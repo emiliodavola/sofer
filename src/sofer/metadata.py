@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from . import __version__
+from ._version import get_version
 from .model import InferenceStatus
 from .pii import PiiDetection
 
@@ -169,12 +169,13 @@ class GeneratedMetadata:
 
     Attributes:
         tool:      Producer identifier — always ``"sofer"``.
-        version:   The sofer ``__version__`` that generated the document.
+        version:   The resolved sofer version that generated the document
+                   (see :func:`sofer._version.get_version`).
         timestamp: ISO-8601 generation timestamp (populated by ``profile``).
     """
 
     tool: str = "sofer"
-    version: str = __version__
+    version: str = field(default_factory=get_version)
     timestamp: str = ""
 
 

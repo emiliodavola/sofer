@@ -61,12 +61,17 @@ class TestParser:
         assert args.csv == "data.csv"
         assert args.output == "out.md"
 
-    def test_version(self):
-        """`sofer --version` should print version and exit."""
-        try:
+    def test_version(self, capsys):
+        """`sofer --version` prints `sofer v<resolved version>` and exits 0 (CLI-R05)."""
+        import pytest
+
+        from sofer._version import get_version
+
+        with pytest.raises(SystemExit) as excinfo:
             cli._build_parser().parse_args(["--version"])
-        except SystemExit as e:
-            assert e.code == 0
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out.strip()
+        assert out == f"sofer v{get_version()}"
 
 
 # ── init command ──────────────────────────────────────────────────────────────
