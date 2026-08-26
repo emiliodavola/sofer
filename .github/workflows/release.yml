@@ -51,8 +51,48 @@ jobs:
       - name: Run tests
         run: uv run pytest -v
 
-  release:
+  build:
     needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build distribution
+        run: uv build --out-dir dist
+
+      - name: Verify wheel METADATA version matches the tag
+        run: |
+          WHEEL=$(ls dist/sofer-*.whl)
+          VERSION=$(unzip -p "$WHEEL" 'sofer-*.dist-info/METADATA' | sed -n 's/^Version: //p')
+          test "$VERSION" = "${GITHUB_REF_NAME#v}"
+
+      - name: Verify wheel METADATA completeness (PKG-02)
+        run: |
+          WHEEL=$(ls dist/sofer-*.whl)
+          unzip -p "$WHEEL" 'sofer-*.dist-info/METADATA' > metadata.txt
+          grep -q '^Classifier:' metadata.txt
+          grep -q '^Project-URL:' metadata.txt
+
+      - name: Verify console-script entry point
+        run: |
+          WHEEL=$(ls dist/sofer-*.whl)
+          unzip -p "$WHEEL" '*/entry_points.txt' | grep -q 'sofer = sofer.cli:main'
+
+      - name: Verify LICENSE bundled
+        run: |
+          WHEEL=$(ls dist/sofer-*.whl)
+          unzip -l "$WHEEL" | grep -q 'licenses/LICENSE'
+
+  release:
+    needs: [lint, test, build]
     runs-on: ubuntu-latest
 
     steps:

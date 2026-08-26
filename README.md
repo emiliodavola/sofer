@@ -7,6 +7,19 @@
 and quality-assessed package — combining automatic inference with human
 knowledge, and publishable to Hugging Face Hub or any local directory.**
 
+## Install
+
+sofer is a standalone CLI — install it once, run it anywhere:
+
+```bash
+pip install sofer
+# or, with uv (isolated tool install):
+uv tool install sofer
+```
+
+Then run `sofer --help`. `sofer --version` always matches the release tag
+(e.g. `v0.3.0` installs as `sofer v0.3.0`).
+
 ## Why
 
 Sharing data for analysis is hard. The [Leek group guide](https://github.com/jtleek/datasharing)
@@ -31,7 +44,7 @@ in an object store, or in a local directory.
 - **Domain-agnostic.** Works for census data, survey exports, shapefiles,
   document collections — anything you'd put in a dataset repository.
 
-## Setup
+## Development setup
 
 ```bash
 uv sync
@@ -363,7 +376,8 @@ error listing the colliding sources.
 
 ```
 src/sofer/
-├── __init__.py         # Version + public API
+├── __init__.py         # Package docstring + public API
+├── _version.py         # Runtime version resolution (installed metadata + dev fallback)
 ├── _formats.py         # Supported file extension registry
 ├── _sentinels.py       # Shared sentinel value sets
 ├── _csv_reader.py      # CSV/TSV streaming reader
