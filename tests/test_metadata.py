@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import yaml
 
-from sofer import __version__
+from sofer._version import get_version
 from sofer.metadata import (
     METADATA_VERSION,
     ColumnMetadata,
@@ -208,14 +208,30 @@ class TestMissingFields:
 class TestGeneratedProvenance:
     """generated carries tool, version, and timestamp."""
 
-    def test_generated_defaults_to_sofer_and_package_version(self):
+    def test_generated_defaults_to_sofer_and_resolved_version(self):
         data = yaml.safe_load(serialize(Metadata()))
         assert data["generated"]["tool"] == "sofer"
-        assert data["generated"]["version"] == __version__
+        assert data["generated"]["version"] == get_version()
+        assert data["generated"]["version"]
 
     def test_generated_timestamp_round_trips(self):
         meta = Metadata(generated=GeneratedMetadata(timestamp="2026-08-17T00:00:00+00:00"))
         gen = yaml.safe_load(serialize(meta))["generated"]
         assert gen["tool"] == "sofer"
-        assert gen["version"] == __version__
+        assert gen["version"] == get_version()
         assert gen["timestamp"] == "2026-08-17T00:00:00+00:00"
+
+    def test_generated_version_matches_cli_version(self, capsys):
+        """generated.version equals `sofer --version` stripped of its prefix (CLI-R06)."""
+        import pytest
+
+        from sofer import cli
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._build_parser().parse_args(["--version"])
+        assert excinfo.value.code == 0
+        cli_output = capsys.readouterr().out.strip()
+        assert cli_output.startswith("sofer v")
+        cli_version = cli_output.removeprefix("sofer v")
+        assert Metadata().generated.version == cli_version
+        assert cli_version == get_version()
