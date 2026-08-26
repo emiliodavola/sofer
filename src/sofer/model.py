@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from . import config
+from ._mirror import _validate_case_fold_collisions
 
 QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
     {
@@ -503,6 +504,10 @@ class DatasetConfig:
             resolved = f.resolve(base)
             if not resolved.exists():
                 errors.append(f"Local path not found: {resolved}")
+
+        # RC-R16: refuse case-fold collisions on staged-Parquet remotes before
+        # any staging write.
+        errors.extend(_validate_case_fold_collisions(self))
 
         # optional docs
         for field_name, doc_path in (
