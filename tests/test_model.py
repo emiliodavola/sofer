@@ -332,6 +332,89 @@ class TestValidate:
         errors = cfg.validate()
         assert errors == []
 
+    # ── RC-R16 case-fold collisions (S1-S4) ─────────────────────────────
+
+    def test_case_collision_error_present(self, tmp_path):
+        """Case-differing .csv remotes produce a collision error in validate()."""
+        (tmp_path / "a.csv").touch()
+        (tmp_path / "b.csv").touch()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=tmp_path / "a.csv", remote="Data/Prov/Train.CSV"),
+                FileEntry(local=tmp_path / "b.csv", remote="data/prov/train.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        errors = cfg.validate()
+        assert any("Case-fold collision" in e for e in errors)
+
+    def test_case_collision_error_names_both_remotes(self, tmp_path):
+        """The collision error names both colliding remotes (S1)."""
+        (tmp_path / "a.csv").touch()
+        (tmp_path / "b.csv").touch()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=tmp_path / "a.csv", remote="Data/a.csv"),
+                FileEntry(local=tmp_path / "b.csv", remote="data/a.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        errors = cfg.validate()
+        collision = next(e for e in errors if "Case-fold collision" in e)
+        assert "Data/a.csv" in collision
+        assert "data/a.csv" in collision
+
+    def test_exact_duplicate_no_collision_error(self, tmp_path):
+        """Verbatim-identical remotes do not raise an RC-R16 error (S2)."""
+        (tmp_path / "a.csv").touch()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=tmp_path / "a.csv", remote="data/train.csv"),
+                FileEntry(local=tmp_path / "a.csv", remote="data/train.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        errors = cfg.validate()
+        assert not any("Case-fold collision" in e for e in errors)
+
+    def test_unicode_casefold_distinct_no_error(self, tmp_path):
+        """straße vs strasse stay distinct under lower() — no error (S3)."""
+        (tmp_path / "a.csv").touch()
+        (tmp_path / "b.csv").touch()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=tmp_path / "a.csv", remote="straße.csv"),
+                FileEntry(local=tmp_path / "b.csv", remote="strasse.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        errors = cfg.validate()
+        assert not any("Case-fold collision" in e for e in errors)
+
+    def test_include_in_schema_false_pair_collides(self, tmp_path):
+        """include_in_schema=false .csv pair still collides (D2 overrides S4)."""
+        (tmp_path / "a.csv").touch()
+        (tmp_path / "b.csv").touch()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=tmp_path / "a.csv", remote="Data/a.csv", include_in_schema=False),
+                FileEntry(local=tmp_path / "b.csv", remote="data/a.csv", include_in_schema=False),
+            ],
+            _base_dir=tmp_path,
+        )
+        errors = cfg.validate()
+        assert any("Case-fold collision" in e for e in errors)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FileEntry.include_in_schema — schema opt-out feature
