@@ -100,9 +100,9 @@ write side is untouched behaviorally. Gitflow: work stays on
 
 ## Success Criteria
 
-- [ ] Nested-remote entries read their own staged Parquet (exact dtypes, Parquet-metadata row counts)
-- [ ] Root+nested same-stem entries show zero cross-contamination
-- [ ] Single definition of the remote→parquet-key expression (7 adoption sites: 6 duplication sites + 1 flat lookup; see design's inventory correction)
-- [ ] Deterministic warning emitted when staged Parquet is missing; CSV fallback preserved
-- [ ] Backslash remotes behave identically on writer and reader sides
-- [ ] Full suite green: `uv run pytest tests/ -q`; `uv run mypy src/` clean
+- [x] Nested-remote entries read their own staged Parquet (exact dtypes, Parquet-metadata row counts)
+- [x] Root+nested same-stem entries show zero cross-contamination
+- [x] Single definition of the remote→parquet-key expression (7 adoption sites: 6 duplication sites + 1 flat lookup; see design's inventory correction)
+- [x] Deterministic warning emitted when staged Parquet is missing; CSV fallback preserved
+- [x] Backslash remotes behave identically on writer and reader sides
+- [x] Full suite green: `uv run pytest tests/ -q`; `uv run mypy src/` clean

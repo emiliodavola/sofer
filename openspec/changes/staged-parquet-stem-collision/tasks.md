@@ -47,10 +47,10 @@ Rationale: exceeds 400-line default but stays well under the approved 2000-line 
 
 ## Phase 3: Scenario tests (spec ↔ test map, all in commit 2)
 
-- [ ] 3.1 New class `TestStagedParquetRemoteRelativeLookup` in `tests/test_repo_compliance.py` covering: **S1** nested remote reads own Parquet (dtypes/nullability from Parquet schema); **S2** root+nested same-stem independence (no cross-contamination); **S4** missing Parquet → exactly one `[!]` via capsys + CSV fallback columns; **S5** present → no `[!]` (capsys silence); **S10** origins `survey.parquet` vs `data/survey.parquet`.
-- [ ] 3.2 New nested-remote parity test in `tests/test_prepare.py` (near :116 fixtures): **S3** run `prepare` on cfg with remote `data/PROV/train.csv`, then `build_schema_report_with_rows(cfg, staging_dir=output_dir)` matches Parquet dtypes + metadata row count.
-- [ ] 3.3 Backslash e2e half of **S6** in `tests/test_prepare.py`: TOML remote `data\a\train.csv` round-trips — writer and reader derive the same `/`-key, Parquet branch taken.
-- [ ] 3.4 Extend `TestColumnOriginAttribution` in `tests/test_repo_compliance.py`: **S8** multi-file origins ∈ remotes (not basenames); **S9** duplicate-name first-wins with remotes differing from basenames (extend existing :1842 test).
+- [x] 3.1 New class `TestStagedParquetRemoteRelativeLookup` in `tests/test_repo_compliance.py` covering: **S1** nested remote reads own Parquet (dtypes/nullability from Parquet schema); **S2** root+nested same-stem independence (no cross-contamination); **S4** missing Parquet → exactly one `[!]` via capsys + CSV fallback columns; **S5** present → no `[!]` (capsys silence); **S10** origins `survey.parquet` vs `data/survey.parquet`.
+- [x] 3.2 New nested-remote parity test in `tests/test_prepare.py` (near :116 fixtures): **S3** run `prepare` on cfg with remote `data/PROV/train.csv`, then `build_schema_report_with_rows(cfg, staging_dir=output_dir)` matches Parquet dtypes + metadata row count.
+- [x] 3.3 Backslash e2e half of **S6** in `tests/test_prepare.py`: TOML remote `data\a\train.csv` round-trips — writer and reader derive the same `/`-key, Parquet branch taken.
+- [x] 3.4 Extend `TestColumnOriginAttribution` in `tests/test_repo_compliance.py`: **S8** multi-file origins ∈ remotes (not basenames); **S9** duplicate-name first-wins with remotes differing from basenames (extend existing :1842 test).
 
 ## Phase 4: Reconciliation, gates, follow-ups
 
