@@ -11,6 +11,7 @@ from sofer.publish import publish
 from sofer.repo_compliance import (
     _SIZE_CATEGORIES,
     ColumnSchema,
+    _classify_parquet_read_failure,
     _csv_values_look_like_bool,
     _parquet_to_hf_dtype,
     _validate_size_category,
@@ -655,6 +656,30 @@ class TestBuildSchemaReportParquet:
         assert result[0].nullable is False
 
 
+class TestClassifyParquetReadFailure:
+    """RC-R17 — closed vocabulary mapping of staged-Parquet read failures."""
+
+    def test_arrow_invalid_maps_corrupt_parse(self) -> None:
+        """Invalid/truncated parquet data → corrupt/parse."""
+        import pyarrow as pa
+
+        assert _classify_parquet_read_failure(pa.ArrowInvalid("garbage")) == "corrupt/parse"
+
+    def test_permission_error_maps_io_permission(self) -> None:
+        """PermissionError → io/permission (an OSError subclass)."""
+        assert _classify_parquet_read_failure(PermissionError("denied")) == "io/permission"
+
+    def test_arrow_io_error_maps_io_permission(self) -> None:
+        """ArrowIOError subclasses OSError → io/permission."""
+        import pyarrow as pa
+
+        assert _classify_parquet_read_failure(pa.ArrowIOError("io")) == "io/permission"
+
+    def test_other_exception_maps_other(self) -> None:
+        """An unrelated exception → other."""
+        assert _classify_parquet_read_failure(RuntimeError("boom")) == "other"
+
+
 class TestBuildSchemaReportParquetFallback:
     """Fallback to CSV when Parquet not available or upload_as_csv=True."""
 
@@ -723,6 +748,136 @@ class TestBuildSchemaReportParquetFallback:
         assert len(schema) == 1
         # Should read CSV, so x values are 1, 2 (not 10, 20)
         assert schema[0].dtype == "numeric"
+
+    # ── RC-R17 unreadable staged Parquet (S6-S11) ───────────────────────
+
+    def test_corrupt_parquet_warns_corrupt_parse_and_falls_back(self, tmp_path, capsys):
+        """S6: a present-but-corrupt staged Parquet warns with the
+        corrupt/parse class and falls back to CSV."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        (tmp_path / "data.parquet").write_bytes(b"this is not a parquet file")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "corrupt/parse" in out
+        assert schema[0].name == "x"
+
+    def test_directory_path_warns_io_permission(self, tmp_path, capsys):
+        """S7: a staged 'parquet' that is a directory warns io/permission."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        (tmp_path / "data.parquet").mkdir()
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "io/permission" in out
+        assert schema[0].name == "x"
+
+    def test_other_exception_warns_other(self, tmp_path, capsys, monkeypatch):
+        """S8: a non-corrupt/IO exception warns with the generic 'other' class."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        import sofer.repo_compliance as rc
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        pq.write_table(pa.table({"x": [10, 20]}), tmp_path / "data.parquet")
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(rc, "_read_parquet_sample", boom)
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "other" in out
+        assert schema[0].name == "x"
+
+    def test_absent_parquet_warns_rc14_only(self, tmp_path, capsys):
+        """S9: an absent staged Parquet triggers only the RC-R14 missing warning."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        empty = tmp_path / "empty"
+        empty.mkdir()
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        build_schema_report(cfg, staging_dir=empty)
+        out = capsys.readouterr().out
+        assert "not found in staging" in out
+        assert "could not be read" not in out
+
+    def test_warn_once_per_key(self, tmp_path, capsys):
+        """S10: two entries sharing one corrupt staged-Parquet key warn once."""
+        csv_a = tmp_path / "a.csv"
+        csv_a.write_text("x\n1\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b.csv"
+        csv_b.write_text("x\n2\n", encoding="utf-8-sig")
+        staging = tmp_path / "staging"
+        (staging / "data").mkdir(parents=True)
+        (staging / "data" / "train.parquet").write_bytes(b"garbage")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="data\\train.csv"),
+                FileEntry(local=csv_b, remote="data/train.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        build_schema_report(cfg, staging_dir=staging)
+        out = capsys.readouterr().out
+        assert out.count("could not be read") == 1
+
+    def test_readable_parquet_silent(self, tmp_path, capsys):
+        """S11: a readable staged Parquet emits no unreadable warning."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        pq.write_table(pa.table({"x": [10, 20]}), tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "could not be read" not in out
 
 
 class TestBuildSchemaReportSampling:

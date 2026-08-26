@@ -12,6 +12,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
@@ -343,41 +344,70 @@ def _map_parquet_type(pa_type: object) -> str:
     return "categorical/text"
 
 
+def _classify_parquet_read_failure(exc: Exception) -> str:
+    """Classify a staged-Parquet read failure into a closed vocabulary token.
+
+    Returns one of:
+
+    - ``"corrupt/parse"`` — invalid/truncated data, i.e. a
+      :class:`pyarrow.ArrowInvalid` error;
+    - ``"io/permission"`` — filesystem-level errors (:class:`OSError`, which
+      :class:`pyarrow.ArrowIOError` and :class:`PermissionError` both subclass);
+    - ``"other"`` — any other exception.
+
+    The returned token is the single source of truth for the RC-R17 warning
+    vocabulary; callers interpolate it verbatim rather than re-deriving it.
+
+    Args:
+        exc: The exception raised while reading a staged Parquet file.
+
+    Returns:
+        One of ``"corrupt/parse"``, ``"io/permission"``, or ``"other"``.
+    """
+    if isinstance(exc, pa.ArrowInvalid):
+        return "corrupt/parse"
+    if isinstance(exc, OSError):
+        return "io/permission"
+    return "other"
+
+
 def _read_parquet_sample(
     parquet_path: Path,
-) -> tuple[list[str], list[list[str]], pq.ParquetFile] | None:
+) -> tuple[list[str], list[list[str]], pq.ParquetFile]:
     """Read header, sample rows, and the ParquetFile handle from a Parquet file.
 
-    Returns ``(column_names, sample_rows, parquet_file)`` on success, or
-    ``None`` if the file cannot be read.
+    Returns ``(column_names, sample_rows, parquet_file)``.
+
+    Raises:
+        On any read failure — e.g. :class:`pyarrow.ArrowInvalid` for corrupt or
+        truncated data, or :class:`OSError` for IO/permission errors.  Callers
+        are expected to catch and classify the exception (see
+        :func:`_classify_parquet_read_failure`) before falling back to CSV.
 
     Iterates over pyarrow arrays directly — does not depend on pandas.
     """
-    try:
-        pf = pq.ParquetFile(parquet_path)
-        column_names = pf.schema_arrow.names
+    pf = pq.ParquetFile(parquet_path)
+    column_names = pf.schema_arrow.names
 
-        # Read first row group for sampling
-        table = pf.read_row_groups([0])
-        num_rows = table.num_rows
-        limit = min(num_rows, config.SCHEMA_SAMPLE_SIZE)
+    # Read first row group for sampling
+    table = pf.read_row_groups([0])
+    num_rows = table.num_rows
+    limit = min(num_rows, config.SCHEMA_SAMPLE_SIZE)
 
-        # Convert to list-of-lists for compatibility with CSV path
-        rows: list[list[str]] = []
-        for i in range(limit):
-            row: list[str] = []
-            for col in column_names:
-                col_array = table.column(col)
-                val = col_array[i].as_py() if i < len(col_array) else None
-                if val is None:
-                    row.append("")
-                else:
-                    row.append(str(val))
-            rows.append(row)
+    # Convert to list-of-lists for compatibility with CSV path
+    rows: list[list[str]] = []
+    for i in range(limit):
+        row: list[str] = []
+        for col in column_names:
+            col_array = table.column(col)
+            val = col_array[i].as_py() if i < len(col_array) else None
+            if val is None:
+                row.append("")
+            else:
+                row.append(str(val))
+        rows.append(row)
 
-        return column_names, rows, pf
-    except Exception:
-        return None
+    return column_names, rows, pf
 
 
 def _warn_duplicate_remotes(cfg: DatasetConfig) -> None:
@@ -445,6 +475,7 @@ def _build_schema_report_impl(
     _dup_map: dict[str, list[str]] = {}
     _had_potential_csv_entries = False
     _warned_missing: set[str] = set()
+    _warned_unreadable: set[str] = set()
 
     for entry in cfg.files:
         remote = entry.remote.lower()
@@ -461,6 +492,7 @@ def _build_schema_report_impl(
         # Determine if we can read from Parquet instead of CSV
         use_parquet = False
         parquet_path = None
+        parquet_key = ""
         origin_name = local.name  # used for disambiguation
 
         # Resolve the staged Parquet by its remote-relative POSIX key (RC-R13)
@@ -485,9 +517,19 @@ def _build_schema_report_impl(
         parquet_result = None
         if use_parquet and parquet_path is not None:
             # ── Read from Parquet ────────────────────────────────────────
-            parquet_result = _read_parquet_sample(parquet_path)
-            if parquet_result is None:
-                # Fall back to CSV if Parquet read fails
+            try:
+                parquet_result = _read_parquet_sample(parquet_path)
+            except Exception as exc:  # classify + fall back (RC-R17)
+                failure_class = _classify_parquet_read_failure(exc)
+                if parquet_key not in _warned_unreadable:
+                    # Deterministic warn-once per key (RC-R17); mutually
+                    # exclusive with RC-R14 (absent) via the candidate.exists()
+                    # branch above. Falls back to CSV inference below.
+                    _warned_unreadable.add(parquet_key)
+                    print(
+                        f"  [!] Staged Parquet '{parquet_key}' exists but could not be "
+                        f"read ({failure_class}); falling back to CSV inference."
+                    )
                 use_parquet = False
 
         if use_parquet:
