@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 
 from sofer.model import ColumnCheck, DatasetConfig, FileEntry
 from sofer.prepare import prepare, resolve_output_dir
+from sofer.repo_compliance import build_schema_report_with_rows
 from sofer.verification import VerificationReport
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -128,6 +129,60 @@ class TestPrepareConversion:
         dpto = pq.read_table(out / "data/DPTO/train.parquet").to_pydict()
         assert prov["a"] == [1]
         assert dpto["a"] == [3]
+
+    def test_backslash_remote_round_trips(self, tmp_path: Path) -> None:
+        """RC-R15 e2e (S6): a TOML-style backslash remote derives the same
+        forward-slash key on the writer and reader sides — the staged Parquet
+        is found and read from the Parquet branch."""
+        (tmp_path / "data" / "a").mkdir(parents=True)
+        csv = tmp_path / "data" / "a" / "train.csv"
+        csv.write_text("v\n1\n2\n3\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data\\a\\train.csv")])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        assert rc == 0
+        assert (out / "data" / "a" / "train.parquet").is_file()
+
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=out)
+        # Row count comes from Parquet metadata under the verbatim remote key.
+        assert row_counts == {"data\\a\\train.csv": 3}
+        # Parquet branch taken: native int64 dtype + remote-relative origin.
+        assert columns[0].hf_dtype == "int64"
+        assert columns[0].origin == "data/a/train.parquet"
+
+
+class TestPrepareSchemaReportParity:
+    """RC-R13 — prepare's mirror output feeds the schema report losslessly."""
+
+    def test_nested_remote_report_matches_parquet(self, tmp_path: Path) -> None:
+        """S3: prepare on remote data/PROV/train.csv, then
+        build_schema_report_with_rows(staging_dir=out) matches the Parquet's
+        dtypes and metadata row count."""
+        (tmp_path / "PROV").mkdir()
+        csv = tmp_path / "PROV" / "train.csv"
+        csv.write_text("a;b;label\n1;2.5;x\n3;4.5;y\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data/PROV/train.csv")])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        assert rc == 0
+
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=out)
+        table = pq.read_table(out / "data/PROV/train.parquet")
+
+        # Exact row counts come from Parquet metadata.
+        assert row_counts == {"data/PROV/train.csv": table.num_rows}
+
+        # Column dtypes match the converted Parquet schema.
+        by_name = {c.name: c for c in columns}
+        for field in table.schema:
+            col = by_name[field.name]
+            assert col.nullable == field.nullable
+            assert col.origin == "data/PROV/train.parquet"
+        assert by_name["a"].hf_dtype == "int64"
+        assert by_name["b"].hf_dtype == "float64"
+        assert by_name["label"].hf_dtype == "string"
 
     def test_upload_as_csv_keeps_csv(self, tmp_path: Path) -> None:
         """upload_as_csv=True -> original CSV staged at remote path, no parquet."""
