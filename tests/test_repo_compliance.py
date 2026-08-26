@@ -1,6 +1,6 @@
 """Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -1799,10 +1799,11 @@ class TestUniqueCountsExcludeSentinels:
 
 
 class TestColumnOriginAttribution:
-    """RC-R05 — ColumnSchema.origin carries the source file's basename."""
+    """RC-R05 (MODIFIED) — ColumnSchema.origin carries the source file's
+    remote-relative POSIX path (CSV remote or remote-derived .parquet key)."""
 
     def test_csv_columns_carry_origin(self, tmp_path):
-        """CSV-path columns carry the local file's basename as origin."""
+        """CSV-path columns carry the entry's verbatim remote as origin."""
         csv_path = tmp_path / "survey.csv"
         csv_path.write_text("id;val\n1;a\n2;b\n", encoding="utf-8-sig")
         cfg = DatasetConfig(
@@ -1840,7 +1841,8 @@ class TestColumnOriginAttribution:
         assert cs.origin == ""
 
     def test_duplicate_name_keeps_first_occurrence_origin(self, tmp_path):
-        """A column name in two files yields ONE entry attributed to its first source."""
+        """A column name in two files yields ONE entry attributed to its first
+        source — with remotes differing from basenames (S9)."""
         first = tmp_path / "first.csv"
         first.write_text("value\na\n", encoding="utf-8-sig")
         second = tmp_path / "second.csv"
@@ -1849,15 +1851,208 @@ class TestColumnOriginAttribution:
             name="test",
             repo_id="user/test",
             files=[
-                FileEntry(local=first, remote="first.csv"),
-                FileEntry(local=second, remote="second.csv"),
+                FileEntry(local=first, remote="data/first.csv"),
+                FileEntry(local=second, remote="other/second.csv"),
             ],
             _base_dir=tmp_path,
         )
         schema = build_schema_report(cfg)
         value_cols = [s for s in schema if s.name == "value"]
         assert len(value_cols) == 1
-        assert value_cols[0].origin == "first.csv"
+        assert value_cols[0].origin == "data/first.csv"
+
+    def test_multi_file_origins_are_remotes_not_basenames(self, tmp_path):
+        """S8 (RC-R05): every origin is a declared remote, never a bare
+        basename — same-basename files under different remotes stay distinct."""
+        one = tmp_path / "one.csv"
+        one.write_text("value\n1\n2\n", encoding="utf-8-sig")
+        two = tmp_path / "two.csv"
+        two.write_text("count\na\nb\nc\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=one, remote="data/x/value.csv"),
+                FileEntry(local=two, remote="other/y/count.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert {s.origin for s in schema} == {"data/x/value.csv", "other/y/count.csv"}
+
+
+class TestStagedParquetRemoteRelativeLookup:
+    """RC-R13 / RC-R14 / RC-R05 — staged Parquets resolve by remote-relative
+    POSIX key (S1, S2, S4, S5, S10)."""
+
+    @staticmethod
+    def _stage_parquet(
+        stage: Path,
+        remote_key: str,
+        table: object,
+    ) -> None:
+        """Write a pyarrow *table* into *stage* at its remote-relative key."""
+        import pyarrow.parquet as pq
+
+        dest = stage.joinpath(*PurePosixPath(remote_key).parts)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, dest)
+
+    def test_nested_remote_reads_own_parquet(self, tmp_path):
+        """S1 (RC-R13): a nested remote reads ITS staged Parquet — dtypes,
+        nullability from the Parquet schema; rows from metadata."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(
+            stage,
+            "data/PROV/train.parquet",
+            pa.table(
+                {"v": [1, 2, 3]}, schema=pa.schema([pa.field("v", pa.int64(), nullable=False)])
+            ),
+        )
+        csv_path = tmp_path / "train.csv"
+        csv_path.write_text("v\n1\n2\n3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/PROV/train.csv")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        assert row_counts == {"data/PROV/train.csv": 3}
+        col = columns[0]
+        assert col.dtype == "numeric"
+        assert col.hf_dtype == "int64"  # CSV fallback would say float64
+        assert col.nullable is False
+
+    def test_same_stem_root_and_nested_resolve_independently(self, tmp_path):
+        """S2 (RC-R13): remotes survey.csv and data/survey.csv each read their
+        OWN parquet — no cross-contamination of dtype or rows."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(stage, "survey.parquet", pa.table({"root_col": ["a", "b"]}))
+        self._stage_parquet(stage, "data/survey.parquet", pa.table({"nested_col": [1, 2]}))
+        root_csv = tmp_path / "root-survey.csv"
+        root_csv.write_text("root_col\na\nb\n", encoding="utf-8-sig")
+        nested_csv = tmp_path / "nested-survey.csv"
+        nested_csv.write_text("nested_col\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=root_csv, remote="survey.csv"),
+                FileEntry(local=nested_csv, remote="data/survey.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        by_name = {c.name: c for c in columns}
+        # Root entry keeps its string schema; nested entry keeps int64.
+        assert by_name["root_col"].dtype == "categorical/text"
+        assert by_name["nested_col"].hf_dtype == "int64"
+        assert row_counts == {"survey.csv": 2, "data/survey.csv": 2}
+
+    def test_missing_parquet_warns_once_and_falls_back_to_csv(self, tmp_path, capsys):
+        """S4 (RC-R14): absent staged Parquet → exactly one [!] naming the
+        expected key; columns come from the CSV fallback path."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        self._stage_parquet(stage, "data/PROV/train.parquet", pa.table({"v": [1]}))
+        csv_a = tmp_path / "a-train.csv"
+        csv_a.write_text("va\n1\n2\n3\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b-train.csv"
+        csv_b.write_text("vb\n4\n5\n6\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="data/A/train.csv"),
+                FileEntry(local=csv_b, remote="data/B/train.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        warnings = [ln for ln in out.splitlines() if "[!]" in ln and "Staged Parquet" in ln]
+        # Two distinct missing keys → exactly one warning each, naming the key.
+        assert len(warnings) == 2
+        assert any("data/A/train.parquet" in w for w in warnings)
+        assert any("data/B/train.parquet" in w for w in warnings)
+        # CSV fallback produced the columns and exact row counts.
+        assert row_counts == {"data/A/train.csv": 3, "data/B/train.csv": 3}
+        by_name = {c.name: c for c in columns}
+        assert by_name["va"].origin == "data/A/train.csv"
+        assert by_name["vb"].origin == "data/B/train.csv"
+        assert all(c.dtype == "numeric" for c in columns)
+
+    def test_missing_parquet_warns_once_per_unique_key(self, tmp_path, capsys):
+        """RC-R14 determinism: two entries sharing one missing key emit ONE
+        warning total (warn-once per unique key)."""
+        csv_a = tmp_path / "a.csv"
+        csv_a.write_text("v\n1\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b.csv"
+        csv_b.write_text("v\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="shared.csv"),
+                FileEntry(local=csv_b, remote="shared.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        build_schema_report_with_rows(cfg, staging_dir=tmp_path / "empty-stage")
+        out = capsys.readouterr().out
+        warnings = [ln for ln in out.splitlines() if "Staged Parquet" in ln]
+        assert len(warnings) == 1
+        assert "shared.parquet" in warnings[0]
+
+    def test_present_parquets_stay_silent(self, tmp_path, capsys):
+        """S5 (RC-R14): every eligible entry's staged Parquet exists → no [!]."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(stage, "data/PROV/train.parquet", pa.table({"v": [1, 2, 3]}))
+        csv_path = tmp_path / "train.csv"
+        csv_path.write_text("v\n1\n2\n3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/PROV/train.csv")],
+            _base_dir=tmp_path,
+        )
+        build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        assert "[!]" not in out
+
+    def test_nested_parquet_origins_distinguish_same_stem(self, tmp_path):
+        """S10 (RC-R05): same-stem remotes get distinct .parquet origins."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(stage, "survey.parquet", pa.table({"root_col": ["a"]}))
+        self._stage_parquet(stage, "data/survey.parquet", pa.table({"nested_col": [1]}))
+        root_csv = tmp_path / "root-survey.csv"
+        root_csv.write_text("root_col\na\n", encoding="utf-8-sig")
+        nested_csv = tmp_path / "nested-survey.csv"
+        nested_csv.write_text("nested_col\n1\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=root_csv, remote="survey.csv"),
+                FileEntry(local=nested_csv, remote="data/survey.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        columns = build_schema_report(cfg, staging_dir=stage)
+        by_name = {c.name: c for c in columns}
+        assert by_name["root_col"].origin == "survey.parquet"
+        assert by_name["nested_col"].origin == "data/survey.parquet"
 
 
 class TestDataFieldsFileColumn:
@@ -2003,8 +2198,8 @@ class TestNumExamplesFromRowCounts:
         import pyarrow.parquet as pq
 
         stage = tmp_path / "stage"
-        stage.mkdir()
-        pq.write_table(pa.table({"v": [str(i) for i in range(5)]}), stage / "x.parquet")
+        (stage / "data").mkdir(parents=True)
+        pq.write_table(pa.table({"v": [str(i) for i in range(5)]}), stage / "data" / "x.parquet")
         csv_x = tmp_path / "x.csv"
         csv_x.write_text("v\n1\n2\n3\n4\n5\n", encoding="utf-8-sig")
         csv_y = tmp_path / "y.csv"
@@ -2085,11 +2280,14 @@ class TestDuplicateRemoteWarning:
         )
         schema, row_counts = build_schema_report_with_rows(cfg)
         out = capsys.readouterr().out
+        # RC-R05: origins are remote-relative now, so the duplicate-COLUMN
+        # warning also names the remote — filter on the remote-dup message.
         warnings = [
-            line for line in out.splitlines() if "[!]" in line and "shared/data.csv" in line
+            line
+            for line in out.splitlines()
+            if "[!]" in line and "Duplicate remote 'shared/data.csv'" in line
         ]
         assert len(warnings) == 1
-        assert "Duplicate remote 'shared/data.csv'" in warnings[0]
         # First-declared entry's count is kept.
         assert row_counts == {"shared/data.csv": 10}
         # The build still completes end-to-end.

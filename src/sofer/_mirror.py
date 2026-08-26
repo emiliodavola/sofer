@@ -50,6 +50,28 @@ def _validate_remote_paths(cfg: DatasetConfig) -> list[str]:
     return errors
 
 
+def parquet_remote_for(remote: str) -> str:
+    """Return the staged-Parquet remote key for *remote*.
+
+    The single definition of the remote → ``.parquet`` key derivation shared
+    by every producer (prepare staging) and consumer (publish, schema-report
+    lookup) of staged-Parquet paths.  Pure, total, and idempotent:
+    backslash separators are normalized to forward slashes first (RC-R15)
+    so a TOML remote like ``data\\a\\train.csv`` yields the same key on both
+    handshake sides; the suffix is then replaced with ``.parquet``.
+    Case is preserved — callers gate eligibility via ``.lower()`` themselves.
+
+    Args:
+        remote: Verbatim ``FileEntry.remote`` path (e.g. ``data/PROV/train.csv``).
+
+    Returns:
+        The POSIX-normalized remote with its suffix replaced by ``.parquet``
+        (e.g. ``data/PROV/train.parquet``).
+    """
+    posix_remote = remote.replace("\\", "/")
+    return str(PurePosixPath(posix_remote).with_suffix(".parquet"))
+
+
 def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
     """Return the remote paths a publish would deliver for *cfg*.
 
@@ -79,7 +101,7 @@ def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
         if entry.recursive:
             planned.append(entry.remote.rstrip("/\\"))
         elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-            planned.append(str(PurePosixPath(entry.remote).with_suffix(".parquet")))
+            planned.append(parquet_remote_for(entry.remote))
             if keep_csv:
                 planned.append(entry.remote)
         else:

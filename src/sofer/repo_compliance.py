@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pyarrow.parquet as pq
 import yaml
 
 from . import config
-from ._mirror import planned_remotes
+from ._mirror import parquet_remote_for, planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
@@ -444,6 +444,7 @@ def _build_schema_report_impl(
     seen_names: dict[str, tuple[str, int]] = {}
     _dup_map: dict[str, list[str]] = {}
     _had_potential_csv_entries = False
+    _warned_missing: set[str] = set()
 
     for entry in cfg.files:
         remote = entry.remote.lower()
@@ -456,19 +457,30 @@ def _build_schema_report_impl(
             continue
 
         local = entry.resolve(base)
-        entry_stem = Path(entry.remote).stem
 
         # Determine if we can read from Parquet instead of CSV
         use_parquet = False
         parquet_path = None
         origin_name = local.name  # used for disambiguation
 
+        # Resolve the staged Parquet by its remote-relative POSIX key (RC-R13)
+        # — never a bare filename stem, which misses nested remotes and
+        # cross-contaminates same-stem entries under different directories.
         if staging_dir is not None and not entry.upload_as_csv:
-            candidate = staging_dir / f"{entry_stem}.parquet"
+            parquet_key = parquet_remote_for(entry.remote)
+            candidate = staging_dir / PurePosixPath(parquet_key)
             if candidate.exists():
                 use_parquet = True
                 parquet_path = candidate
-                origin_name = f"{entry_stem}.parquet"
+                origin_name = parquet_key
+            elif parquet_key not in _warned_missing:
+                # Deterministic warn-once per unique key (RC-R14); the CSV
+                # fallback below never raises on absence.
+                _warned_missing.add(parquet_key)
+                print(
+                    f"  [!] Staged Parquet '{parquet_key}' not found in staging "
+                    f"directory; falling back to CSV inference."
+                )
 
         parquet_result = None
         if use_parquet and parquet_path is not None:
@@ -555,10 +567,10 @@ def _build_schema_report_impl(
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
                     prev_origin, _ = seen_names[col_name]
-                    _dup_map.setdefault(col_name, [prev_origin]).append(local.name)
+                    _dup_map.setdefault(col_name, [prev_origin]).append(entry.remote)
                     continue
                 else:
-                    seen_names[col_name] = (local.name, len(columns))
+                    seen_names[col_name] = (entry.remote, len(columns))
 
                 col_values = []
                 for row in sample:
@@ -599,7 +611,7 @@ def _build_schema_report_impl(
                         unique=n_unique,
                         missing=pct_missing,
                         hf_dtype=hf_dtype,
-                        origin=local.name,
+                        origin=entry.remote,
                     )
                 )
 

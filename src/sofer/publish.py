@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 from huggingface_hub import HfApi
 
 from . import config
-from ._mirror import copy_to_mirror, planned_remotes
+from ._mirror import copy_to_mirror, parquet_remote_for, planned_remotes
 from .prepare import prepare, resolve_output_dir
 from .splits import detect_splits, validate_layout, validate_split_mapping
 
@@ -230,7 +230,7 @@ def _repo_diff_summary(
         if entry.recursive:
             planned.append(f"{entry.remote}*")  # directory — can't list contents
         elif remote_lower.endswith(".csv") and not entry.upload_as_csv:
-            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            parquet_remote = parquet_remote_for(entry.remote)
             planned.append(parquet_remote)
             if keep_csv:
                 planned.append(entry.remote)
@@ -476,7 +476,7 @@ def _copy_package(
             if src.exists():
                 copy_to_mirror(src, dest, entry.remote)
         elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            parquet_remote = parquet_remote_for(entry.remote)
             if parquet_remote.lower() not in skip:
                 src = source / PurePosixPath(parquet_remote)
                 if src.exists():

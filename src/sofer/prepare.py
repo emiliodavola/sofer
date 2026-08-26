@@ -59,7 +59,7 @@ import pyarrow.csv as pc
 import pyarrow.parquet as pq
 
 from . import config
-from ._mirror import copy_to_mirror
+from ._mirror import copy_to_mirror, parquet_remote_for
 from ._parquet_helpers import _parquet_to_hf_dtype
 from .checks import DatasetValidator
 from .codebook import generate_all as generate_all_codebooks
@@ -361,7 +361,7 @@ def _assert_cross_file_schema(
         remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
         if remote_key in converted and remote_key not in seen:
             seen.add(remote_key)
-            parquet_remote = str(PurePosixPath(entry.remote).with_suffix(".parquet"))
+            parquet_remote = parquet_remote_for(entry.remote)
             parquet_specs.append((parquet_remote, converted[remote_key][0]))
 
     if len(parquet_specs) < 2:
@@ -573,7 +573,7 @@ def _check_local_overwrite(cfg: DatasetConfig, output_dir: Path, all_files: bool
             continue  # directory trees are merged by copy_to_mirror
         remote_lower = entry.remote.lower()
         if remote_lower.endswith(".csv") and not entry.upload_as_csv:
-            candidate = output_dir / PurePosixPath(entry.remote).with_suffix(".parquet")
+            candidate = output_dir / PurePosixPath(parquet_remote_for(entry.remote))
         else:
             candidate = output_dir / entry.remote
         if candidate.exists():
@@ -706,7 +706,7 @@ def prepare(
 
         # ── 5. Stage converted Parquet files into the mirror layout ────
         for remote_key, (parquet_path, _csv_path, original_remote) in converted.items():
-            parquet_remote = str(PurePosixPath(original_remote).with_suffix(".parquet"))
+            parquet_remote = parquet_remote_for(original_remote)
             copy_to_mirror(parquet_path, output_dir, parquet_remote)
 
         # ── 6. Schema report + Dataset Card + LICENSE (PRP-03) ─────────

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sofer._mirror import copy_to_mirror, planned_remotes
+from sofer._mirror import copy_to_mirror, parquet_remote_for, planned_remotes
 from sofer.model import DatasetConfig, FileEntry
 
 
@@ -69,6 +69,46 @@ class TestPlannedRemotes:
         """A nested CSV remote keeps its directory, only the extension flips."""
         cfg = _cfg([FileEntry(local=Path("data.csv"), remote="data/PROV/train.csv")])
         assert planned_remotes(cfg, keep_csv=False) == ["data/PROV/train.parquet"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  parquet_remote_for
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestParquetRemoteFor:
+    """RC-R15 — shared remote → .parquet key derivation (S6-unit, S7)."""
+
+    def test_backslash_remote_normalizes_to_posix_key(self) -> None:
+        """A backslash remote yields the same forward-slash key as its
+        POSIX twin — writer and reader stay in sync (S6-unit)."""
+        assert parquet_remote_for("data\\a\\train.csv") == "data/a/train.parquet"
+        assert parquet_remote_for("data\\a\\train.csv") == parquet_remote_for("data/a/train.csv")
+
+    def test_nested_forward_slash_remote_preserved(self) -> None:
+        """Directory components are kept; only the suffix flips."""
+        assert parquet_remote_for("data/PROV/train.csv") == "data/PROV/train.parquet"
+
+    def test_root_remote_flips_suffix(self) -> None:
+        """A bare remote maps to a bare .parquet key."""
+        assert parquet_remote_for("survey.csv") == "survey.parquet"
+
+    def test_case_preserving(self) -> None:
+        """The derivation never lowercases — gating stays at each call site."""
+        assert parquet_remote_for("Data/PROV/Train.CSV") == "Data/PROV/Train.parquet"
+
+    def test_idempotent_on_normalized_and_backslash_inputs(self) -> None:
+        """Re-deriving an already-derived remote is a no-op (S7), including
+        backslash variants of every input shape."""
+        for remote in (
+            "a/b.csv",
+            "a\\b.csv",
+            "survey.csv",
+            "data/PROV/train.csv",
+            "data\\PROV\\train.csv",
+        ):
+            once = parquet_remote_for(remote)
+            assert parquet_remote_for(once) == once
 
 
 # ══════════════════════════════════════════════════════════════════════════════
