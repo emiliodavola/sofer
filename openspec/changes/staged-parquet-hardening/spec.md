@@ -9,16 +9,19 @@
 
 ### Requirement: Case-fold collision on staged-Parquet remotes is refused (RC-R16)
 
-For entries eligible for staged-Parquet reading (declares a `.csv` remote
-case-insensitively, NOT `recursive`, NOT `upload_as_csv`, NOT
-`include_in_schema=false`), if two entries' `entry.remote` values differ
-verbatim but case-fold equal, the system MUST reject the config with a
-deterministic hard error naming BOTH colliding remotes, during `validate()` and
-before any staging write. Case-preserving `parquet_remote_for` keys remain
-unchanged. This is distinct from RC-R11: verbatim-identical remotes produce
-RC-R11's non-aborting `[!]` warning; case-differing-but-casefold-equal remotes
-produce RC-R16's hard error. Equivalence is `str.casefold()` only — no
-additional Unicode normalization (e.g. `"ß"` vs `"ss"` are NOT equal).
+For entries that declare a `.csv` remote case-insensitively and are NOT
+`recursive` (the scan covers all physically-staged `.csv` remotes — including
+`upload_as_csv` and `include_in_schema=false`, which `prepare` still stages via
+`copy_to_mirror`), if two entries' `entry.remote` values differ verbatim but
+normalize to the same staged-Parquet key, the system MUST reject the config
+with a deterministic hard error naming BOTH colliding remotes, during
+`validate()` and before any staging write. Case-preserving `parquet_remote_for`
+keys remain unchanged. This is distinct from RC-R11: verbatim-identical remotes
+produce RC-R11's non-aborting `[!]` warning; case-differing-but-colliding
+remotes produce RC-R16's hard error. Equivalence is the derived key
+`parquet_remote_for(entry.remote).lower()` (which also catches backslash-vs-slash
+normalized collisions) — and uses `str.lower()`, NOT `casefold()`: no additional
+Unicode normalization (e.g. `"ß"` vs `"ss"` are NOT equal).
 
 #### Scenario: Case-differing remotes are rejected naming both
 
@@ -34,11 +37,11 @@ additional Unicode normalization (e.g. `"ß"` vs `"ss"` are NOT equal).
 - THEN RC-R11's `[!]` warning SHALL fire (non-aborting)
 - AND NO case-fold collision error SHALL be raised
 
-#### Scenario: Case-fold equivalence only, no Unicode normalization
+#### Scenario: Lower-case equivalence only, no Unicode normalization
 
 - GIVEN remotes `straße.csv` and `strasse.csv`
 - WHEN validation runs
-- THEN no collision error SHALL be raised (case-fold treats them distinct)
+- THEN no collision error SHALL be raised (lower() treats them distinct)
 
 #### Scenario: Ineligible entries are unaffected
 
