@@ -16,8 +16,8 @@ from typing import Any
 
 import tomli_w
 
+from . import config
 from ._formats import SUPPORTED_FORMATS
-from .config import OUTPUT_ENCODING
 from .model import FileEntry
 
 #: Directory names excluded from recursive file discovery (scan command).
@@ -248,4 +248,4 @@ def copy_files(
 
 def write_toml(raw_toml: dict[str, Any], config_path: Path) -> None:
     """Serialize *raw_toml* and overwrite *config_path*."""
-    config_path.write_text(tomli_w.dumps(raw_toml), encoding=OUTPUT_ENCODING)
+    config_path.write_text(tomli_w.dumps(raw_toml), encoding=config.OUTPUT_ENCODING)

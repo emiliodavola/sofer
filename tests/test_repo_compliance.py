@@ -1,16 +1,17 @@
 """Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
 
-from sofer.config import SCHEMA_DUP_THRESHOLD
+import sofer.config as config
 from sofer.model import DatasetConfig, FileEntry
 from sofer.publish import publish
 from sofer.repo_compliance import (
     _SIZE_CATEGORIES,
     ColumnSchema,
+    _classify_parquet_read_failure,
     _csv_values_look_like_bool,
     _parquet_to_hf_dtype,
     _validate_size_category,
@@ -655,6 +656,30 @@ class TestBuildSchemaReportParquet:
         assert result[0].nullable is False
 
 
+class TestClassifyParquetReadFailure:
+    """RC-R17 — closed vocabulary mapping of staged-Parquet read failures."""
+
+    def test_arrow_invalid_maps_corrupt_parse(self) -> None:
+        """Invalid/truncated parquet data → corrupt/parse."""
+        import pyarrow as pa
+
+        assert _classify_parquet_read_failure(pa.ArrowInvalid("garbage")) == "corrupt/parse"
+
+    def test_permission_error_maps_io_permission(self) -> None:
+        """PermissionError → io/permission (an OSError subclass)."""
+        assert _classify_parquet_read_failure(PermissionError("denied")) == "io/permission"
+
+    def test_arrow_io_error_maps_io_permission(self) -> None:
+        """ArrowIOError subclasses OSError → io/permission."""
+        import pyarrow as pa
+
+        assert _classify_parquet_read_failure(pa.ArrowIOError("io")) == "io/permission"
+
+    def test_other_exception_maps_other(self) -> None:
+        """An unrelated exception → other."""
+        assert _classify_parquet_read_failure(RuntimeError("boom")) == "other"
+
+
 class TestBuildSchemaReportParquetFallback:
     """Fallback to CSV when Parquet not available or upload_as_csv=True."""
 
@@ -723,6 +748,136 @@ class TestBuildSchemaReportParquetFallback:
         assert len(schema) == 1
         # Should read CSV, so x values are 1, 2 (not 10, 20)
         assert schema[0].dtype == "numeric"
+
+    # ── RC-R17 unreadable staged Parquet (S6-S11) ───────────────────────
+
+    def test_corrupt_parquet_warns_corrupt_parse_and_falls_back(self, tmp_path, capsys):
+        """S6: a present-but-corrupt staged Parquet warns with the
+        corrupt/parse class and falls back to CSV."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        (tmp_path / "data.parquet").write_bytes(b"this is not a parquet file")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "corrupt/parse" in out
+        assert schema[0].name == "x"
+
+    def test_directory_path_warns_io_permission(self, tmp_path, capsys):
+        """S7: a staged 'parquet' that is a directory warns io/permission."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        (tmp_path / "data.parquet").mkdir()
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "io/permission" in out
+        assert schema[0].name == "x"
+
+    def test_other_exception_warns_other(self, tmp_path, capsys, monkeypatch):
+        """S8: a non-corrupt/IO exception warns with the generic 'other' class."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        import sofer.repo_compliance as rc
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        pq.write_table(pa.table({"x": [10, 20]}), tmp_path / "data.parquet")
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(rc, "_read_parquet_sample", boom)
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        schema = build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "other" in out
+        assert schema[0].name == "x"
+
+    def test_absent_parquet_warns_rc14_only(self, tmp_path, capsys):
+        """S9: an absent staged Parquet triggers only the RC-R14 missing warning."""
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        empty = tmp_path / "empty"
+        empty.mkdir()
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        build_schema_report(cfg, staging_dir=empty)
+        out = capsys.readouterr().out
+        assert "not found in staging" in out
+        assert "could not be read" not in out
+
+    def test_warn_once_per_key(self, tmp_path, capsys):
+        """S10: two entries sharing one corrupt staged-Parquet key warn once."""
+        csv_a = tmp_path / "a.csv"
+        csv_a.write_text("x\n1\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b.csv"
+        csv_b.write_text("x\n2\n", encoding="utf-8-sig")
+        staging = tmp_path / "staging"
+        (staging / "data").mkdir(parents=True)
+        (staging / "data" / "train.parquet").write_bytes(b"garbage")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="data\\train.csv"),
+                FileEntry(local=csv_b, remote="data/train.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+
+        build_schema_report(cfg, staging_dir=staging)
+        out = capsys.readouterr().out
+        assert out.count("could not be read") == 1
+
+    def test_readable_parquet_silent(self, tmp_path, capsys):
+        """S11: a readable staged Parquet emits no unreadable warning."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("x\n1\n2\n", encoding="utf-8-sig")
+        pq.write_table(pa.table({"x": [10, 20]}), tmp_path / "data.parquet")
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        build_schema_report(cfg, staging_dir=tmp_path)
+        out = capsys.readouterr().out
+        assert "could not be read" not in out
 
 
 class TestBuildSchemaReportSampling:
@@ -1799,10 +1954,11 @@ class TestUniqueCountsExcludeSentinels:
 
 
 class TestColumnOriginAttribution:
-    """RC-R05 — ColumnSchema.origin carries the source file's basename."""
+    """RC-R05 (MODIFIED) — ColumnSchema.origin carries the source file's
+    remote-relative POSIX path (CSV remote or remote-derived .parquet key)."""
 
     def test_csv_columns_carry_origin(self, tmp_path):
-        """CSV-path columns carry the local file's basename as origin."""
+        """CSV-path columns carry the entry's verbatim remote as origin."""
         csv_path = tmp_path / "survey.csv"
         csv_path.write_text("id;val\n1;a\n2;b\n", encoding="utf-8-sig")
         cfg = DatasetConfig(
@@ -1840,7 +1996,8 @@ class TestColumnOriginAttribution:
         assert cs.origin == ""
 
     def test_duplicate_name_keeps_first_occurrence_origin(self, tmp_path):
-        """A column name in two files yields ONE entry attributed to its first source."""
+        """A column name in two files yields ONE entry attributed to its first
+        source — with remotes differing from basenames (S9)."""
         first = tmp_path / "first.csv"
         first.write_text("value\na\n", encoding="utf-8-sig")
         second = tmp_path / "second.csv"
@@ -1849,15 +2006,208 @@ class TestColumnOriginAttribution:
             name="test",
             repo_id="user/test",
             files=[
-                FileEntry(local=first, remote="first.csv"),
-                FileEntry(local=second, remote="second.csv"),
+                FileEntry(local=first, remote="data/first.csv"),
+                FileEntry(local=second, remote="other/second.csv"),
             ],
             _base_dir=tmp_path,
         )
         schema = build_schema_report(cfg)
         value_cols = [s for s in schema if s.name == "value"]
         assert len(value_cols) == 1
-        assert value_cols[0].origin == "first.csv"
+        assert value_cols[0].origin == "data/first.csv"
+
+    def test_multi_file_origins_are_remotes_not_basenames(self, tmp_path):
+        """S8 (RC-R05): every origin is a declared remote, never a bare
+        basename — same-basename files under different remotes stay distinct."""
+        one = tmp_path / "one.csv"
+        one.write_text("value\n1\n2\n", encoding="utf-8-sig")
+        two = tmp_path / "two.csv"
+        two.write_text("count\na\nb\nc\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=one, remote="data/x/value.csv"),
+                FileEntry(local=two, remote="other/y/count.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema = build_schema_report(cfg)
+        assert {s.origin for s in schema} == {"data/x/value.csv", "other/y/count.csv"}
+
+
+class TestStagedParquetRemoteRelativeLookup:
+    """RC-R13 / RC-R14 / RC-R05 — staged Parquets resolve by remote-relative
+    POSIX key (S1, S2, S4, S5, S10)."""
+
+    @staticmethod
+    def _stage_parquet(
+        stage: Path,
+        remote_key: str,
+        table: object,
+    ) -> None:
+        """Write a pyarrow *table* into *stage* at its remote-relative key."""
+        import pyarrow.parquet as pq
+
+        dest = stage.joinpath(*PurePosixPath(remote_key).parts)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, dest)
+
+    def test_nested_remote_reads_own_parquet(self, tmp_path):
+        """S1 (RC-R13): a nested remote reads ITS staged Parquet — dtypes,
+        nullability from the Parquet schema; rows from metadata."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(
+            stage,
+            "data/PROV/train.parquet",
+            pa.table(
+                {"v": [1, 2, 3]}, schema=pa.schema([pa.field("v", pa.int64(), nullable=False)])
+            ),
+        )
+        csv_path = tmp_path / "train.csv"
+        csv_path.write_text("v\n1\n2\n3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/PROV/train.csv")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        assert row_counts == {"data/PROV/train.csv": 3}
+        col = columns[0]
+        assert col.dtype == "numeric"
+        assert col.hf_dtype == "int64"  # CSV fallback would say float64
+        assert col.nullable is False
+
+    def test_same_stem_root_and_nested_resolve_independently(self, tmp_path):
+        """S2 (RC-R13): remotes survey.csv and data/survey.csv each read their
+        OWN parquet — no cross-contamination of dtype or rows."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(stage, "survey.parquet", pa.table({"root_col": ["a", "b"]}))
+        self._stage_parquet(stage, "data/survey.parquet", pa.table({"nested_col": [1, 2]}))
+        root_csv = tmp_path / "root-survey.csv"
+        root_csv.write_text("root_col\na\nb\n", encoding="utf-8-sig")
+        nested_csv = tmp_path / "nested-survey.csv"
+        nested_csv.write_text("nested_col\n1\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=root_csv, remote="survey.csv"),
+                FileEntry(local=nested_csv, remote="data/survey.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        by_name = {c.name: c for c in columns}
+        # Root entry keeps its string schema; nested entry keeps int64.
+        assert by_name["root_col"].dtype == "categorical/text"
+        assert by_name["nested_col"].hf_dtype == "int64"
+        assert row_counts == {"survey.csv": 2, "data/survey.csv": 2}
+
+    def test_missing_parquet_warns_once_and_falls_back_to_csv(self, tmp_path, capsys):
+        """S4 (RC-R14): absent staged Parquet → exactly one [!] naming the
+        expected key; columns come from the CSV fallback path."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        self._stage_parquet(stage, "data/PROV/train.parquet", pa.table({"v": [1]}))
+        csv_a = tmp_path / "a-train.csv"
+        csv_a.write_text("va\n1\n2\n3\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b-train.csv"
+        csv_b.write_text("vb\n4\n5\n6\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="data/A/train.csv"),
+                FileEntry(local=csv_b, remote="data/B/train.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        warnings = [ln for ln in out.splitlines() if "[!]" in ln and "Staged Parquet" in ln]
+        # Two distinct missing keys → exactly one warning each, naming the key.
+        assert len(warnings) == 2
+        assert any("data/A/train.parquet" in w for w in warnings)
+        assert any("data/B/train.parquet" in w for w in warnings)
+        # CSV fallback produced the columns and exact row counts.
+        assert row_counts == {"data/A/train.csv": 3, "data/B/train.csv": 3}
+        by_name = {c.name: c for c in columns}
+        assert by_name["va"].origin == "data/A/train.csv"
+        assert by_name["vb"].origin == "data/B/train.csv"
+        assert all(c.dtype == "numeric" for c in columns)
+
+    def test_missing_parquet_warns_once_per_unique_key(self, tmp_path, capsys):
+        """RC-R14 determinism: two entries sharing one missing key emit ONE
+        warning total (warn-once per unique key)."""
+        csv_a = tmp_path / "a.csv"
+        csv_a.write_text("v\n1\n", encoding="utf-8-sig")
+        csv_b = tmp_path / "b.csv"
+        csv_b.write_text("v\n2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_a, remote="shared.csv"),
+                FileEntry(local=csv_b, remote="shared.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        build_schema_report_with_rows(cfg, staging_dir=tmp_path / "empty-stage")
+        out = capsys.readouterr().out
+        warnings = [ln for ln in out.splitlines() if "Staged Parquet" in ln]
+        assert len(warnings) == 1
+        assert "shared.parquet" in warnings[0]
+
+    def test_present_parquets_stay_silent(self, tmp_path, capsys):
+        """S5 (RC-R14): every eligible entry's staged Parquet exists → no [!]."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(stage, "data/PROV/train.parquet", pa.table({"v": [1, 2, 3]}))
+        csv_path = tmp_path / "train.csv"
+        csv_path.write_text("v\n1\n2\n3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=csv_path, remote="data/PROV/train.csv")],
+            _base_dir=tmp_path,
+        )
+        build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        assert "[!]" not in out
+
+    def test_nested_parquet_origins_distinguish_same_stem(self, tmp_path):
+        """S10 (RC-R05): same-stem remotes get distinct .parquet origins."""
+        import pyarrow as pa
+
+        stage = tmp_path / "stage"
+        self._stage_parquet(stage, "survey.parquet", pa.table({"root_col": ["a"]}))
+        self._stage_parquet(stage, "data/survey.parquet", pa.table({"nested_col": [1]}))
+        root_csv = tmp_path / "root-survey.csv"
+        root_csv.write_text("root_col\na\n", encoding="utf-8-sig")
+        nested_csv = tmp_path / "nested-survey.csv"
+        nested_csv.write_text("nested_col\n1\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=root_csv, remote="survey.csv"),
+                FileEntry(local=nested_csv, remote="data/survey.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        columns = build_schema_report(cfg, staging_dir=stage)
+        by_name = {c.name: c for c in columns}
+        assert by_name["root_col"].origin == "survey.parquet"
+        assert by_name["nested_col"].origin == "data/survey.parquet"
 
 
 class TestDataFieldsFileColumn:
@@ -1941,6 +2291,7 @@ class TestNumExamplesFromRowCounts:
         schema, row_counts = build_schema_report_with_rows(cfg)
         # Sanity: sum of uniques really is 13 (the old buggy value).
         assert sum(s.unique for s in schema) == 13
+        # Key is the verbatim remote ("d.csv" == filename here).
         assert row_counts == {"d.csv": 5}
 
         card = build_dataset_card(cfg, schema, row_counts=row_counts)
@@ -1961,14 +2312,69 @@ class TestNumExamplesFromRowCounts:
             _base_dir=tmp_path,
         )
         schema, row_counts = build_schema_report_with_rows(cfg)
+        # Keys are verbatim remotes ("a.csv"/"b.csv" == filenames here).
         assert row_counts == {"a.csv": 30, "b.csv": 40}
 
         card = build_dataset_card(cfg, schema, row_counts=row_counts)
         assert self._card_num_examples(card) == 70
 
+    def test_same_stem_subdirectory_remotes_keep_distinct_counts(self, tmp_path):
+        """Same-stem CSVs under different dirs get DISTINCT remote keys (RC-R07).
+
+        Basenames collide ("data.csv" twice) but remotes don't: the dict must
+        hold two entries and num_examples must be 70 (no silent overwrite).
+        """
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        rows_a = "\n".join(f"a{i}" for i in range(30))
+        rows_b = "\n".join(f"b{i}" for i in range(40))
+        fa = tmp_path / "a" / "data.csv"
+        fb = tmp_path / "b" / "data.csv"
+        fa.write_text(f"val\n{rows_a}\n", encoding="utf-8-sig")
+        fb.write_text(f"val\n{rows_b}\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="a/data.csv"),
+                FileEntry(local=fb, remote="b/data.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        assert row_counts == {"a/data.csv": 30, "b/data.csv": 40}
+
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert self._card_num_examples(card) == 70
+
+    def test_parquet_and_csv_paths_both_key_by_remote(self, tmp_path):
+        """Staged-parquet and upload_as_csv entries both key by remote (RC-R07)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        stage = tmp_path / "stage"
+        (stage / "data").mkdir(parents=True)
+        pq.write_table(pa.table({"v": [str(i) for i in range(5)]}), stage / "data" / "x.parquet")
+        csv_x = tmp_path / "x.csv"
+        csv_x.write_text("v\n1\n2\n3\n4\n5\n", encoding="utf-8-sig")
+        csv_y = tmp_path / "y.csv"
+        csv_y.write_text("w\n1\n2\n3\n4\n5\n6\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=csv_x, remote="data/x.csv"),
+                FileEntry(local=csv_y, remote="data/y.csv", upload_as_csv=True),
+            ],
+            _base_dir=tmp_path,
+        )
+        _schema, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        # Parquet-path count AND CSV-path count, each under its entry.remote.
+        assert row_counts == {"data/x.csv": 5, "data/y.csv": 6}
+
     def test_parquet_row_count_not_capped_by_sample(self, tmp_path, monkeypatch):
         """Row counts are exact (pf.metadata.num_rows) even when sampling caps at 2."""
-        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        monkeypatch.setattr("sofer.config.SCHEMA_SAMPLE_SIZE", 2)
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -1982,11 +2388,12 @@ class TestNumExamplesFromRowCounts:
             _base_dir=tmp_path,
         )
         _schema, row_counts = build_schema_report_with_rows(cfg, staging_dir=tmp_path)
-        assert row_counts == {"p.parquet": 5}
+        # Key is the verbatim remote ("p.csv") even though the data was read
+        # from the staged Parquet file — remotes, not parquet origins.
+        assert row_counts == {"p.csv": 5}
 
     def test_fallback_when_no_row_counts(self):
         """Without counts, num_examples falls back to files * CARD_FALLBACK_ROWS_PER_FILE."""
-        from sofer.config import CARD_FALLBACK_ROWS_PER_FILE
 
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         cfg.files = [
@@ -1999,7 +2406,131 @@ class TestNumExamplesFromRowCounts:
             ),
         ]
         card = build_dataset_card(cfg, schema)
-        assert self._card_num_examples(card) == 2 * CARD_FALLBACK_ROWS_PER_FILE
+        assert self._card_num_examples(card) == 2 * config.CARD_FALLBACK_ROWS_PER_FILE
+
+
+class TestDuplicateRemoteWarning:
+    """RC-R11 — duplicate declared remote emits one [!] and keeps first count."""
+
+    @staticmethod
+    def _csv(tmp_path: Path, name: str, n_rows: int) -> Path:
+        rows = "\n".join(f"{name}{i}" for i in range(n_rows))
+        path = tmp_path / name
+        path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
+        return path
+
+    def test_duplicate_remote_warns_once_and_keeps_first(self, tmp_path, capsys):
+        """Two entries sharing a remote: exactly one [!], build completes,
+        first entry's count wins."""
+        fa = self._csv(tmp_path, "a.csv", 10)
+        fb = self._csv(tmp_path, "b.csv", 20)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="shared/data.csv"),
+                FileEntry(local=fb, remote="shared/data.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        schema, row_counts = build_schema_report_with_rows(cfg)
+        out = capsys.readouterr().out
+        # RC-R05: origins are remote-relative now, so the duplicate-COLUMN
+        # warning also names the remote — filter on the remote-dup message.
+        warnings = [
+            line
+            for line in out.splitlines()
+            if "[!]" in line and "Duplicate remote 'shared/data.csv'" in line
+        ]
+        assert len(warnings) == 1
+        # First-declared entry's count is kept.
+        assert row_counts == {"shared/data.csv": 10}
+        # The build still completes end-to-end.
+        card = build_dataset_card(cfg, schema, row_counts=row_counts)
+        assert "---" in card
+
+    def test_duplicate_remote_warnings_in_declaration_order(self, tmp_path, capsys):
+        """Gate review — two distinct duplicated remotes warn in the order
+        their duplicates were first declared."""
+        fa = self._csv(tmp_path, "a.csv", 1)
+        fb = self._csv(tmp_path, "b.csv", 1)
+        fc = self._csv(tmp_path, "c.csv", 2)
+        fd = self._csv(tmp_path, "d.csv", 2)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="r1.csv"),
+                FileEntry(local=fb, remote="r2.csv"),
+                FileEntry(local=fc, remote="r1.csv"),
+                FileEntry(local=fd, remote="r2.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        build_schema_report_with_rows(cfg)
+        out = capsys.readouterr().out
+        idx_r1 = out.index("Duplicate remote 'r1.csv'")
+        idx_r2 = out.index("Duplicate remote 'r2.csv'")
+        assert idx_r1 < idx_r2
+
+    def test_unique_remotes_stay_silent(self, tmp_path, capsys):
+        """All-unique remotes → no duplicate-remote warning at all."""
+        fa = self._csv(tmp_path, "a.csv", 3)
+        fb = self._csv(tmp_path, "b.csv", 4)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[
+                FileEntry(local=fa, remote="a/data.csv"),
+                FileEntry(local=fb, remote="b/data.csv"),
+            ],
+            _base_dir=tmp_path,
+        )
+        _schema, row_counts = build_schema_report_with_rows(cfg)
+        out = capsys.readouterr().out
+        assert "Duplicate remote" not in out
+        assert row_counts == {"a/data.csv": 3, "b/data.csv": 4}
+
+
+class TestNonSchemaRowCountFallback:
+    """RC-R12 — non-schema entries never contribute exact counts; when NO
+    configured file yields one, num_examples falls back to the product of
+    CARD_FALLBACK_ROWS_PER_FILE and len(cfg.files)."""
+
+    @staticmethod
+    def _card_num_examples(result: str) -> int:
+        frontmatter = yaml.safe_load(result.split("---\n")[1])
+        return frontmatter["dataset_info"]["splits"][0]["num_examples"]
+
+    @staticmethod
+    def _schema() -> list[ColumnSchema]:
+        return [
+            ColumnSchema(
+                name="v", dtype="numeric", nullable=False, example="1", unique=9, missing=0.0
+            ),
+        ]
+
+    def test_recursive_only_dataset_uses_fallback(self):
+        """Only recursive directory entries → fallback product."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        cfg.files = [
+            FileEntry(local=Path("tree_a"), remote="tree_a/", recursive=True),
+            FileEntry(local=Path("tree_b"), remote="tree_b/", recursive=True),
+        ]
+        card = build_dataset_card(cfg, self._schema(), row_counts=None)
+        expected = config.CARD_FALLBACK_ROWS_PER_FILE * len(cfg.files)
+        assert self._card_num_examples(card) == expected
+
+    def test_excluded_files_fallback(self):
+        """Every entry include_in_schema=false with empty counts → fallback product."""
+        cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
+        cfg.files = [
+            FileEntry(local=Path("a.csv"), remote="a.csv", include_in_schema=False),
+            FileEntry(local=Path("b.csv"), remote="b.csv", include_in_schema=False),
+        ]
+        card = build_dataset_card(cfg, self._schema(), row_counts={})
+        expected = config.CARD_FALLBACK_ROWS_PER_FILE * len(cfg.files)
+        assert self._card_num_examples(card) == expected
 
 
 class TestBuildSchemaReportWithRowsWrapper:
@@ -2018,6 +2549,7 @@ class TestBuildSchemaReportWithRowsWrapper:
         assert isinstance(columns, list)
         assert all(isinstance(c, ColumnSchema) for c in columns)
         assert len(columns) == 2
+        # Key is the verbatim remote ("w.csv" == filename here).
         assert row_counts == {"w.csv": 3}
 
     def test_plain_build_schema_report_still_returns_list(self, tmp_path):
@@ -2114,7 +2646,7 @@ class TestSchemaSampleSizeFromConfig:
 
     def test_footnote_uses_configured_value(self, monkeypatch):
         """The footnote states the configured sample size, not a literal."""
-        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 5000)
+        monkeypatch.setattr("sofer.config.SCHEMA_SAMPLE_SIZE", 5000)
         cfg = DatasetConfig(name="test", repo_id="user/test", license="mit")
         schema = [
             ColumnSchema(
@@ -2126,7 +2658,7 @@ class TestSchemaSampleSizeFromConfig:
 
     def test_sampling_caps_at_configured_value(self, tmp_path, monkeypatch):
         """Sampling reads at most SCHEMA_SAMPLE_SIZE rows."""
-        monkeypatch.setattr("sofer.repo_compliance.SCHEMA_SAMPLE_SIZE", 2)
+        monkeypatch.setattr("sofer.config.SCHEMA_SAMPLE_SIZE", 2)
         rows = "\n".join(f"v{i}" for i in range(5))
         csv_path = tmp_path / "cap.csv"
         csv_path.write_text(f"val\n{rows}\n", encoding="utf-8-sig")
@@ -2290,17 +2822,16 @@ class TestSchemaDupThreshold:
 
     def test_default_value_is_3(self):
         """Default schema_dup_threshold should be 3."""
-        assert SCHEMA_DUP_THRESHOLD == 3
+        assert config.SCHEMA_DUP_THRESHOLD == 3
 
     def test_is_int(self):
         """SCHEMA_DUP_THRESHOLD must be an int."""
-        assert isinstance(SCHEMA_DUP_THRESHOLD, int)
+        assert isinstance(config.SCHEMA_DUP_THRESHOLD, int)
 
     def test_constant_is_importable(self):
-        """SCHEMA_DUP_THRESHOLD should be importable from sofer.config."""
-        from sofer.config import SCHEMA_DUP_THRESHOLD as T
+        """SCHEMA_DUP_THRESHOLD should be readable from sofer.config."""
 
-        assert T >= 1  # threshold must be at least 1
+        assert config.SCHEMA_DUP_THRESHOLD >= 1  # threshold must be at least 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -5,7 +5,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sofer._mirror import copy_to_mirror, planned_remotes
+from sofer._mirror import (
+    _validate_case_fold_collisions,
+    copy_to_mirror,
+    parquet_remote_for,
+    planned_remotes,
+)
 from sofer.model import DatasetConfig, FileEntry
 
 
@@ -72,6 +77,46 @@ class TestPlannedRemotes:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  parquet_remote_for
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestParquetRemoteFor:
+    """RC-R15 — shared remote → .parquet key derivation (S6-unit, S7)."""
+
+    def test_backslash_remote_normalizes_to_posix_key(self) -> None:
+        """A backslash remote yields the same forward-slash key as its
+        POSIX twin — writer and reader stay in sync (S6-unit)."""
+        assert parquet_remote_for("data\\a\\train.csv") == "data/a/train.parquet"
+        assert parquet_remote_for("data\\a\\train.csv") == parquet_remote_for("data/a/train.csv")
+
+    def test_nested_forward_slash_remote_preserved(self) -> None:
+        """Directory components are kept; only the suffix flips."""
+        assert parquet_remote_for("data/PROV/train.csv") == "data/PROV/train.parquet"
+
+    def test_root_remote_flips_suffix(self) -> None:
+        """A bare remote maps to a bare .parquet key."""
+        assert parquet_remote_for("survey.csv") == "survey.parquet"
+
+    def test_case_preserving(self) -> None:
+        """The derivation never lowercases — gating stays at each call site."""
+        assert parquet_remote_for("Data/PROV/Train.CSV") == "Data/PROV/Train.parquet"
+
+    def test_idempotent_on_normalized_and_backslash_inputs(self) -> None:
+        """Re-deriving an already-derived remote is a no-op (S7), including
+        backslash variants of every input shape."""
+        for remote in (
+            "a/b.csv",
+            "a\\b.csv",
+            "survey.csv",
+            "data/PROV/train.csv",
+            "data\\PROV\\train.csv",
+        ):
+            once = parquet_remote_for(remote)
+            assert parquet_remote_for(once) == once
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  copy_to_mirror
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -130,3 +175,104 @@ class TestCopyToMirror:
 
         assert (dest / "f.txt").is_file()
         assert (dest / "existing.txt").read_text(encoding="utf-8") == "keep"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _validate_case_fold_collisions
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestValidateCaseFoldCollisions:
+    """RC-R16 — case-differing ``.csv`` remotes that collide on the staged
+    Parquet key are refused; verbatim dups / casefold-distinct / ineligible
+    entries pass."""
+
+    def test_case_differing_remotes_error_names_both(self) -> None:
+        """Two remotes differing only by case map to one Parquet key — the
+        error names BOTH remotes (S1)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="Data/Prov/Train.CSV"),
+                FileEntry(local=Path("b.csv"), remote="data/prov/train.csv"),
+            ]
+        )
+        errors = _validate_case_fold_collisions(cfg)
+        assert len(errors) == 1
+        assert "Data/Prov/Train.CSV" in errors[0]
+        assert "data/prov/train.csv" in errors[0]
+
+    def test_exact_duplicate_remotes_no_error(self) -> None:
+        """Verbatim-identical remotes are RC-R11's concern, not RC-R16 (S2)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="data/train.csv"),
+                FileEntry(local=Path("b.csv"), remote="data/train.csv"),
+            ]
+        )
+        assert _validate_case_fold_collisions(cfg) == []
+
+    def test_casefold_distinct_unicode_no_error(self) -> None:
+        """lower() (not casefold) keeps ``straße`` != ``strasse`` — no error (S3)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="straße.csv"),
+                FileEntry(local=Path("b.csv"), remote="strasse.csv"),
+            ]
+        )
+        assert _validate_case_fold_collisions(cfg) == []
+
+    def test_recursive_entry_ignored(self) -> None:
+        """recursive entries are never scanned (S4)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("d"), remote="Dir/", recursive=True),
+                FileEntry(local=Path("a.csv"), remote="Dir/file.csv"),
+            ]
+        )
+        assert _validate_case_fold_collisions(cfg) == []
+
+    def test_non_csv_remote_ignored(self) -> None:
+        """Non-.csv remotes are never scanned (S4)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.parquet"), remote="Data/a.parquet"),
+                FileEntry(local=Path("b.parquet"), remote="data/a.parquet"),
+            ]
+        )
+        assert _validate_case_fold_collisions(cfg) == []
+
+    def test_include_in_schema_false_pair_collides(self) -> None:
+        """include_in_schema=false ``.csv`` remotes are still physically staged,
+        so a case-differing pair errors (D2 overrides spec S4)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="Data/a.csv", include_in_schema=False),
+                FileEntry(local=Path("b.csv"), remote="data/a.csv", include_in_schema=False),
+            ]
+        )
+        errors = _validate_case_fold_collisions(cfg)
+        assert len(errors) == 1
+
+    def test_upload_as_csv_pair_collides(self) -> None:
+        """upload_as_csv ``.csv`` remotes are staged as-is, so a case-differing
+        pair errors (D2)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="Data/a.csv", upload_as_csv=True),
+                FileEntry(local=Path("b.csv"), remote="data/a.csv", upload_as_csv=True),
+            ]
+        )
+        errors = _validate_case_fold_collisions(cfg)
+        assert len(errors) == 1
+
+    def test_backslash_and_posix_remotes_collide(self) -> None:
+        """Backslash-vs-slash remotes normalize to the same Parquet key via
+        RC-R15 and are caught by the derived-key ``lower()`` keying (D3)."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="data\\a\\c.csv"),
+                FileEntry(local=Path("b.csv"), remote="data/a/c.csv"),
+            ]
+        )
+        errors = _validate_case_fold_collisions(cfg)
+        assert len(errors) == 1

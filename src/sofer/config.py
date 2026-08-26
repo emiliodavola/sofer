@@ -2,11 +2,21 @@
 Tool-wide configuration loaded from ``pyproject.toml`` under ``[tool.sofer]``.
 
 Every value has a sensible default — the ``pyproject.toml`` section is optional.
-Module-level constants are read once at import time.
+
+Discovery anchoring (issue #56): the nearest ``pyproject.toml`` is found by
+walking up from a caller-supplied *start* directory — the dataset TOML's
+directory when known, otherwise the current working directory — **never**
+from the installed package location. Module-level constants are bound from
+built-in defaults at import time (zero filesystem access) and rebound by
+:func:`reload` once an anchor is known, so all consumers read live values
+through attribute access (``config.X``).
 """
 
 from __future__ import annotations
 
+import os
+import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -67,28 +77,49 @@ _DEFAULTS: dict[str, Any] = {
     "confidence_round_digits": 4,
 }
 
+# Guard around constant rebinding in :func:`reload` — concurrent readers see
+# either the old or the new complete state, never a partial mix.
+_LOCK = threading.Lock()
 
-def _find_project_root() -> Path:
-    """Walk up from this file until a ``pyproject.toml`` is found."""
-    current = Path(__file__).resolve().parent
-    for ancestor in current.parents:
-        if (ancestor / "pyproject.toml").is_file():
-            return ancestor
-    # Fallback: working directory
-    return Path.cwd()
+# Absolute path of the pyproject.toml the current constants were resolved
+# from, or ``None`` when built-in defaults apply. Rebound by :func:`reload`.
+SOURCE_PATH: Path | None = None
 
 
-def _load_tool_config() -> dict[str, Any]:
-    """Read ``[tool.sofer]`` from the project's ``pyproject.toml``.
+def _find_project_root(start: str | Path | None = None) -> Path | None:
+    """Walk up from *start* until a directory containing ``pyproject.toml``.
+
+    Args:
+        start: Directory anchoring the walk-up. When ``None``, the current
+            working directory is used. The start directory itself is part of
+            the search. The installed package location is never consulted.
+
+    Returns:
+        The first directory (starting at *start*, then each parent up to the
+        filesystem root) containing a ``pyproject.toml``, or ``None`` when
+        no such file exists anywhere on the path.
+    """
+    start_dir = Path(start).resolve() if start is not None else Path.cwd().resolve()
+    for candidate in (start_dir, *start_dir.parents):
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    return None
+
+
+def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
+    """Read and validate the ``[tool.sofer]`` table from *toml_path*.
 
     All keys are optional — missing keys fall back to :data:`_DEFAULTS`.
-    Returns a merged ``dict``: TOML values take precedence over defaults.
-    """
-    root = _find_project_root()
-    toml_path = root / "pyproject.toml"
 
+    Args:
+        toml_path: Absolute path to the discovered ``pyproject.toml``, or
+            ``None`` when nothing was found on the walk-up.
+
+    Returns:
+        A merged ``dict``: TOML values take precedence over defaults.
+    """
     toml_data: dict[str, Any] = {}
-    if toml_path.is_file():
+    if toml_path is not None and toml_path.is_file():
         try:
             import tomli as _tomli
         except ImportError:  # Python ≥ 3.11
@@ -127,48 +158,124 @@ def _load_tool_config() -> dict[str, Any]:
     return merged
 
 
+def _discover(start: str | Path | None = None) -> tuple[dict[str, Any], Path | None]:
+    """Resolve ``[tool.sofer]`` following the fixed precedence order.
+
+    Resolution (spec TC-02):
+
+        1. nearest ``pyproject.toml`` walking up from *start* (the dataset
+           TOML directory when known),
+        2. nearest ``pyproject.toml`` walking up from the current working
+           directory (only consulted when *start* was given and step 1
+           found nothing),
+        3. built-in ``_DEFAULTS``.
+
+    A found ``pyproject.toml`` without a ``[tool.sofer]`` section is still
+    selected as the source but contributes only default values.
+
+    Args:
+        start: Anchor directory (see :func:`_find_project_root`); ``None``
+            anchors directly on the current working directory.
+
+    Returns:
+        ``(merged, source_path)`` where *merged* is the effective value dict
+        and *source_path* is the absolute path of the selected
+        ``pyproject.toml``, or ``None`` when built-in defaults apply.
+    """
+    root = _find_project_root(start)
+    if root is None and start is not None:
+        # Dataset-anchor miss -> cwd fallback (precedence step 2).
+        root = _find_project_root(None)
+    toml_path = root / "pyproject.toml" if root is not None else None
+    return _read_tool_section(toml_path), toml_path
+
+
+def reload(start: str | Path | None = None) -> None:
+    """Re-resolve ``[tool.sofer]`` and rebind every module constant.
+
+    Discovery anchors on *start*: pass a dataset TOML's directory for the
+    dataset-anchored resolution (Phase 1), or ``None`` to anchor on the
+    current working directory (Phase 0 bootstrap). Resolution is a pure
+    function of (anchor, filesystem) — calling twice is harmless.
+
+    Records :data:`SOURCE_PATH` (``None`` means built-in defaults were used)
+    and emits one stderr line describing the source when the ``SOFER_VERBOSE``
+    environment variable is truthy. Stdout is never touched.
+
+    Args:
+        start: Directory anchoring the walk-up; ``None`` anchors on cwd.
+    """
+    merged, source = _discover(start)
+
+    with _LOCK:
+        # ``SOURCE_PATH`` is included so concurrent readers see the source
+        # and the values resolved from it atomically.
+        for key, value in merged.items():
+            globals()[key.upper()] = value
+        globals()["SOURCE_PATH"] = source
+
+    if os.environ.get("SOFER_VERBOSE", "").strip().lower() in ("1", "true", "yes", "on"):
+        shown = str(source) if source is not None else "built-in defaults"
+        print(f"[tool.sofer] source: {shown}", file=sys.stderr)
+
+
+def _load_tool_config() -> dict[str, Any]:
+    """Read ``[tool.sofer]`` from the nearest ``pyproject.toml`` above cwd.
+
+    Convenience wrapper over :func:`_discover` returning only the merged
+    value dict (kept for direct callers and tests).
+
+    Returns:
+        A merged ``dict``: TOML values take precedence over defaults.
+    """
+    merged, _source = _discover(None)
+    return merged
+
+
 # ---------------------------------------------------------------------------
-#  Module-level constants — read once at import
+#  Module-level constants — bound from built-in defaults at import time.
+#
+#  Import performs NO filesystem access (TC-03 hardening): real discovery
+#  happens in :func:`reload`, invoked by the CLI entry point (cwd anchor)
+#  and by ``DatasetConfig.from_toml`` (dataset-directory anchor).
 # ---------------------------------------------------------------------------
 
-_tool = _load_tool_config()
+OUTPUT_DIR: str = _DEFAULTS["output_dir"]
+DEFAULT_CONFIG_NAME: str = _DEFAULTS["default_config_name"]
 
-OUTPUT_DIR: str = _tool["output_dir"]
-DEFAULT_CONFIG_NAME: str = _tool["default_config_name"]
+PARQUET_ROW_GROUP_SIZE: int = _DEFAULTS["parquet_row_group_size"]
+PARQUET_COMPRESSION: str = _DEFAULTS["parquet_compression"]
+PARQUET_SHARD_WARNING_MB: int = _DEFAULTS["parquet_shard_warning_mb"]
 
-PARQUET_ROW_GROUP_SIZE: int = _tool["parquet_row_group_size"]
-PARQUET_COMPRESSION: str = _tool["parquet_compression"]
-PARQUET_SHARD_WARNING_MB: int = _tool["parquet_shard_warning_mb"]
+REPORT_MAX_ITEMS: int = _DEFAULTS["report_max_items"]
+REPORT_MAX_MODIFIED: int = _DEFAULTS["report_max_modified"]
+REPORT_MAX_CORRUPT_RECORDS: int = _DEFAULTS["report_max_corrupt_records"]
+REPORT_LINE_WIDTH: int = _DEFAULTS["report_line_width"]
+REPORT_SUB_LINE_WIDTH: int = _DEFAULTS["report_sub_line_width"]
 
-REPORT_MAX_ITEMS: int = _tool["report_max_items"]
-REPORT_MAX_MODIFIED: int = _tool["report_max_modified"]
-REPORT_MAX_CORRUPT_RECORDS: int = _tool["report_max_corrupt_records"]
-REPORT_LINE_WIDTH: int = _tool["report_line_width"]
-REPORT_SUB_LINE_WIDTH: int = _tool["report_sub_line_width"]
+CODEBOOKS_DIR: str = _DEFAULTS["codebooks_dir"]
+CODEBOOK_MAX_SAMPLE: int = _DEFAULTS["codebook_max_sample"]
+CODEBOOK_NUMERIC_THRESHOLD: float = _DEFAULTS["codebook_numeric_threshold"]
+CODEBOOK_MIXED_THRESHOLD: float = _DEFAULTS["codebook_mixed_threshold"]
 
-CODEBOOKS_DIR: str = _tool["codebooks_dir"]
-CODEBOOK_MAX_SAMPLE: int = _tool["codebook_max_sample"]
-CODEBOOK_NUMERIC_THRESHOLD: float = _tool["codebook_numeric_threshold"]
-CODEBOOK_MIXED_THRESHOLD: float = _tool["codebook_mixed_threshold"]
+OUTPUT_ENCODING: str = _DEFAULTS["output_encoding"]
+PROBE_CHUNK_BYTES: int = _DEFAULTS["probe_chunk_bytes"]
+CSV_DELIMITER: str = _DEFAULTS["csv_delimiter"]
+CSV_ENCODING: str = _DEFAULTS["csv_encoding"]
 
-OUTPUT_ENCODING: str = _tool["output_encoding"]
-PROBE_CHUNK_BYTES: int = _tool["probe_chunk_bytes"]
-CSV_DELIMITER: str = _tool["csv_delimiter"]
-CSV_ENCODING: str = _tool["csv_encoding"]
+SNIFF_DELIMITERS: list[str] = _DEFAULTS["sniff_delimiters"]
 
-SNIFF_DELIMITERS: list[str] = _tool["sniff_delimiters"]
+CARD_FALLBACK_ROWS_PER_FILE: int = _DEFAULTS["card_fallback_rows_per_file"]
+CARD_MODALITY_TAGS: list[str] = _DEFAULTS["card_modality_tags"]
+CARD_BOOLEAN_VALUES: list[str] = _DEFAULTS["card_boolean_values"]
 
-CARD_FALLBACK_ROWS_PER_FILE: int = _tool["card_fallback_rows_per_file"]
-CARD_MODALITY_TAGS: list[str] = _tool["card_modality_tags"]
-CARD_BOOLEAN_VALUES: list[str] = _tool["card_boolean_values"]
-
-SCHEMA_DUP_THRESHOLD: int = _tool["schema_dup_threshold"]
-SCHEMA_SAMPLE_SIZE: int = _tool["schema_sample_size"]
+SCHEMA_DUP_THRESHOLD: int = _DEFAULTS["schema_dup_threshold"]
+SCHEMA_SAMPLE_SIZE: int = _DEFAULTS["schema_sample_size"]
 
 # Metadata-core (profile/render) inference knobs.
-SEMANTIC_PRIORS: dict[str, float] = _tool["semantic_priors"]
-CONFIRM_THRESHOLD: float = _tool["confirm_threshold"]
-MIN_THRESHOLD: float = _tool["min_threshold"]
-DETECT_THRESHOLD: float = _tool["detect_threshold"]
-PROFILE_MAX_SAMPLE: int = _tool["profile_max_sample"]
-CONFIDENCE_ROUND_DIGITS: int = _tool["confidence_round_digits"]
+SEMANTIC_PRIORS: dict[str, float] = _DEFAULTS["semantic_priors"]
+CONFIRM_THRESHOLD: float = _DEFAULTS["confirm_threshold"]
+MIN_THRESHOLD: float = _DEFAULTS["min_threshold"]
+DETECT_THRESHOLD: float = _DEFAULTS["detect_threshold"]
+PROFILE_MAX_SAMPLE: int = _DEFAULTS["profile_max_sample"]
+CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]

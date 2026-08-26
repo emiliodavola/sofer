@@ -41,7 +41,7 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 ### 6. Tests must match specs
 - Every SDD spec scenario must have a corresponding test.
 - When implementing, run `uv run pytest tests/ -q` after every change batch.
-- 422 tests currently pass — never reduce coverage.
+- 795 tests currently pass — never reduce coverage.
 
 ### 7. CLI help text accuracy
 - When adding a new flag or changing behavior, update the argparse `help=` and `description=` strings.
@@ -72,3 +72,18 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Fill every section — don't leave placeholders or `<!-- comments -->`.
 - Verification section must contain **actual command output**, not placeholders.
 - SDD artifacts section is mandatory when the change followed the SDD workflow; for ad-hoc fixes it can be omitted but the change description must still be thorough.
+
+### 12. Release process
+Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag runs lint + the full test matrix + a wheel-build validation job, then creates a GitHub Release with auto-generated notes. There is no PyPI publishing.
+
+Cutting a release:
+1. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev`. Note: `main` is **not** a fast-forward of `dev` (release PR merge commits live on `main`), so always use `--no-ff`.
+2. Do **not** bump a version anywhere: the version is derived from the tag at build time (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth — `pyproject.toml` has no static `version` field and there is no `__version__` constant.
+3. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push with `git push origin main --follow-tags`.
+4. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases with notes generated from commits/PRs since the previous tag.
+
+Rules:
+- Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the release notes (e.g. v0.2.0 removed the `upload` subcommand). The shipped version always equals the tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed metadata (never a static constant).
+- **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
+- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: under 3.10 the `import tomli as tomllib` fallback triggers `no-redef` errors (known latent issue in `model.py`, `config.py`, `cli.py`).
+- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time).

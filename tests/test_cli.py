@@ -61,12 +61,17 @@ class TestParser:
         assert args.csv == "data.csv"
         assert args.output == "out.md"
 
-    def test_version(self):
-        """`sofer --version` should print version and exit."""
-        try:
+    def test_version(self, capsys):
+        """`sofer --version` prints `sofer v<resolved version>` and exits 0 (CLI-R05)."""
+        import pytest
+
+        from sofer._version import get_version
+
+        with pytest.raises(SystemExit) as excinfo:
             cli._build_parser().parse_args(["--version"])
-        except SystemExit as e:
-            assert e.code == 0
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out.strip()
+        assert out == f"sofer v{get_version()}"
 
 
 # ── init command ──────────────────────────────────────────────────────────────
@@ -206,6 +211,36 @@ class TestLoadAndValidate:
         )
         assert rc == 1
         assert "fix before publishing" in capsys.readouterr().out
+
+    def test_prepare_case_collision_refuses_no_output(self, tmp_path, monkeypatch, capsys):
+        """RC-R16 S5: case-differing .csv remotes make prepare exit 1 with no
+        staging output directory created."""
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "data" / "b.csv").write_text("x\n2\n", encoding="utf-8")
+
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\nbuild_dir = "build"\n\n'
+            '[[file]]\nlocal = "data/a.csv"\nremote = "Data/a.csv"\n'
+            '[[file]]\nlocal = "data/b.csv"\nremote = "data/a.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_prepare(
+            Namespace(
+                config=str(toml_path),
+                output=None,
+                all_files=False,
+                no_checks=False,
+                force=False,
+                verify=False,
+            )
+        )
+        assert rc == 1
+        assert "Case-fold collision" in capsys.readouterr().out
+        # The staging output directory must never be created (S5).
+        assert not (tmp_path / "build").exists()
 
 
 # ── prepare subparser ───────────────────────────────────────────────

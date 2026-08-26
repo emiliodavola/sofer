@@ -14,5 +14,3 @@ Usage:
     sofer validate my-dataset.toml # Check data integrity
     sofer codebook data.csv        # Generate a markdown codebook
 """
-
-__version__ = "0.1.0"

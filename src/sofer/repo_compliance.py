@@ -10,23 +10,17 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-from ._mirror import planned_remotes
+from . import config
+from ._mirror import parquet_remote_for, planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
-from .config import (
-    CARD_BOOLEAN_VALUES,
-    CARD_FALLBACK_ROWS_PER_FILE,
-    CARD_MODALITY_TAGS,
-    PROBE_CHUNK_BYTES,
-    SCHEMA_DUP_THRESHOLD,
-    SCHEMA_SAMPLE_SIZE,
-)
 from .model import DatasetConfig
 
 
@@ -99,7 +93,7 @@ def _validate_size_category(value: str) -> str | None:
 
 def _csv_values_look_like_bool(values: list[str]) -> bool:
     """Check if all non-null CSV values look like boolean literals."""
-    bool_vals = set(CARD_BOOLEAN_VALUES)
+    bool_vals = set(config.CARD_BOOLEAN_VALUES)
     non_null = [
         v.strip().lower()
         for v in values
@@ -291,7 +285,7 @@ def _read_csv_sample(
             if delimiter is None:
                 # First try ";", Sniffer fallback
                 try:
-                    sample = fh.read(PROBE_CHUNK_BYTES)
+                    sample = fh.read(config.PROBE_CHUNK_BYTES)
                     fh.seek(0)
                     dialect = csv.Sniffer().sniff(sample)
                     delimiter = dialect.delimiter
@@ -350,41 +344,93 @@ def _map_parquet_type(pa_type: object) -> str:
     return "categorical/text"
 
 
+def _classify_parquet_read_failure(exc: Exception) -> str:
+    """Classify a staged-Parquet read failure into a closed vocabulary token.
+
+    Returns one of:
+
+    - ``"corrupt/parse"`` — invalid/truncated data, i.e. a
+      :class:`pyarrow.ArrowInvalid` error;
+    - ``"io/permission"`` — filesystem-level errors (:class:`OSError`, which
+      :class:`pyarrow.ArrowIOError` and :class:`PermissionError` both subclass);
+    - ``"other"`` — any other exception.
+
+    The returned token is the single source of truth for the RC-R17 warning
+    vocabulary; callers interpolate it verbatim rather than re-deriving it.
+
+    Args:
+        exc: The exception raised while reading a staged Parquet file.
+
+    Returns:
+        One of ``"corrupt/parse"``, ``"io/permission"``, or ``"other"``.
+    """
+    if isinstance(exc, pa.ArrowInvalid):
+        return "corrupt/parse"
+    if isinstance(exc, OSError):
+        return "io/permission"
+    return "other"
+
+
 def _read_parquet_sample(
     parquet_path: Path,
-) -> tuple[list[str], list[list[str]], pq.ParquetFile] | None:
+) -> tuple[list[str], list[list[str]], pq.ParquetFile]:
     """Read header, sample rows, and the ParquetFile handle from a Parquet file.
 
-    Returns ``(column_names, sample_rows, parquet_file)`` on success, or
-    ``None`` if the file cannot be read.
+    Returns ``(column_names, sample_rows, parquet_file)``.
+
+    Raises:
+        On any read failure — e.g. :class:`pyarrow.ArrowInvalid` for corrupt or
+        truncated data, or :class:`OSError` for IO/permission errors.  Callers
+        are expected to catch and classify the exception (see
+        :func:`_classify_parquet_read_failure`) before falling back to CSV.
 
     Iterates over pyarrow arrays directly — does not depend on pandas.
     """
-    try:
-        pf = pq.ParquetFile(parquet_path)
-        column_names = pf.schema_arrow.names
+    pf = pq.ParquetFile(parquet_path)
+    column_names = pf.schema_arrow.names
 
-        # Read first row group for sampling
-        table = pf.read_row_groups([0])
-        num_rows = table.num_rows
-        limit = min(num_rows, SCHEMA_SAMPLE_SIZE)
+    # Read first row group for sampling
+    table = pf.read_row_groups([0])
+    num_rows = table.num_rows
+    limit = min(num_rows, config.SCHEMA_SAMPLE_SIZE)
 
-        # Convert to list-of-lists for compatibility with CSV path
-        rows: list[list[str]] = []
-        for i in range(limit):
-            row: list[str] = []
-            for col in column_names:
-                col_array = table.column(col)
-                val = col_array[i].as_py() if i < len(col_array) else None
-                if val is None:
-                    row.append("")
-                else:
-                    row.append(str(val))
-            rows.append(row)
+    # Convert to list-of-lists for compatibility with CSV path
+    rows: list[list[str]] = []
+    for i in range(limit):
+        row: list[str] = []
+        for col in column_names:
+            col_array = table.column(col)
+            val = col_array[i].as_py() if i < len(col_array) else None
+            if val is None:
+                row.append("")
+            else:
+                row.append(str(val))
+        rows.append(row)
 
-        return column_names, rows, pf
-    except Exception:
-        return None
+    return column_names, rows, pf
+
+
+def _warn_duplicate_remotes(cfg: DatasetConfig) -> None:
+    """Emit one ``[!]`` warning per remote declared by 2+ ``[[file]]`` entries.
+
+    Exact row counts are keyed by verbatim :attr:`FileEntry.remote`; when two
+    entries declare the same remote they would overwrite one another's count.
+    This pre-pass makes the resulting first-wins overwrite visible instead of
+    silent.  It guards the keying invariant only — it never aborts the run.
+
+    Deterministic: iterates ``cfg.files`` in declaration order, so warnings
+    are emitted in first-declaration order of each duplicated remote.
+    Never raises.
+    """
+    seen: dict[str, int] = {}
+    for entry in cfg.files:
+        seen[entry.remote] = seen.get(entry.remote, 0) + 1
+    for remote, n in seen.items():
+        if n > 1:
+            print(
+                f"  [!] Duplicate remote '{remote}' declared by multiple "
+                f"[[file]] entries; keeping the first entry's row count."
+            )
 
 
 def _build_schema_report_impl(
@@ -405,12 +451,21 @@ def _build_schema_report_impl(
                        entry before falling back to CSV reading.
 
     Returns:
-        ``(columns, row_counts)`` where *row_counts* maps each sampled file's
-        origin basename (``"x.parquet"`` / ``"x.csv"``) to its EXACT row count
-        (Parquet metadata vs. fully-read CSV rows).  Files that cannot be read
-        contribute no entry.  Same-basename collisions overwrite each other —
-        a documented MVP limitation.
+        ``(columns, row_counts)`` where *row_counts* maps each counted file's
+        verbatim remote path (``entry.remote``, POSIX-style — identical to how
+        ``planned_remotes`` and ``configs.data_files`` render remotes) to its
+        EXACT row count (Parquet metadata vs. fully-read CSV rows).  Remotes
+        are unique per well-formed dataset; if duplicates are declared anyway,
+        the FIRST entry's count is kept (``setdefault``) after a ``[!]``
+        warning from :func:`_warn_duplicate_remotes`.  Files that cannot be
+        read contribute no entry.
+
+        Gate-review note: because unreadable files contribute no entry, if the
+        first-declared entry's file cannot be read while a later same-remote
+        entry's file can, the later entry stores its count under the shared
+        remote key.
     """
+    _warn_duplicate_remotes(cfg)
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
     delimiter = csv_delimiter or cfg.csv_delimiter
     csv_encoding = csv_encoding or cfg.csv_encoding
@@ -419,6 +474,8 @@ def _build_schema_report_impl(
     seen_names: dict[str, tuple[str, int]] = {}
     _dup_map: dict[str, list[str]] = {}
     _had_potential_csv_entries = False
+    _warned_missing: set[str] = set()
+    _warned_unreadable: set[str] = set()
 
     for entry in cfg.files:
         remote = entry.remote.lower()
@@ -431,33 +488,57 @@ def _build_schema_report_impl(
             continue
 
         local = entry.resolve(base)
-        entry_stem = Path(entry.remote).stem
 
         # Determine if we can read from Parquet instead of CSV
         use_parquet = False
         parquet_path = None
+        parquet_key = ""
         origin_name = local.name  # used for disambiguation
 
+        # Resolve the staged Parquet by its remote-relative POSIX key (RC-R13)
+        # — never a bare filename stem, which misses nested remotes and
+        # cross-contaminates same-stem entries under different directories.
         if staging_dir is not None and not entry.upload_as_csv:
-            candidate = staging_dir / f"{entry_stem}.parquet"
+            parquet_key = parquet_remote_for(entry.remote)
+            candidate = staging_dir / PurePosixPath(parquet_key)
             if candidate.exists():
                 use_parquet = True
                 parquet_path = candidate
-                origin_name = f"{entry_stem}.parquet"
+                origin_name = parquet_key
+            elif parquet_key not in _warned_missing:
+                # Deterministic warn-once per unique key (RC-R14); the CSV
+                # fallback below never raises on absence.
+                _warned_missing.add(parquet_key)
+                print(
+                    f"  [!] Staged Parquet '{parquet_key}' not found in staging "
+                    f"directory; falling back to CSV inference."
+                )
 
         parquet_result = None
         if use_parquet and parquet_path is not None:
             # ── Read from Parquet ────────────────────────────────────────
-            parquet_result = _read_parquet_sample(parquet_path)
-            if parquet_result is None:
-                # Fall back to CSV if Parquet read fails
+            try:
+                parquet_result = _read_parquet_sample(parquet_path)
+            except Exception as exc:  # classify + fall back (RC-R17)
+                failure_class = _classify_parquet_read_failure(exc)
+                if parquet_key not in _warned_unreadable:
+                    # Deterministic warn-once per key (RC-R17); mutually
+                    # exclusive with RC-R14 (absent) via the candidate.exists()
+                    # branch above. Falls back to CSV inference below.
+                    _warned_unreadable.add(parquet_key)
+                    print(
+                        f"  [!] Staged Parquet '{parquet_key}' exists but could not be "
+                        f"read ({failure_class}); falling back to CSV inference."
+                    )
                 use_parquet = False
 
         if use_parquet:
             assert parquet_result is not None
             headers, rows, pf = parquet_result
-            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
-            row_counts[origin_name] = pf.metadata.num_rows
+            sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
+            # Key by verbatim remote (first-wins via setdefault) — NOT the
+            # flat-stem parquet origin, which collides across subdirectories.
+            row_counts.setdefault(entry.remote, pf.metadata.num_rows)
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -517,8 +598,10 @@ def _build_schema_report_impl(
             headers, rows = result
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
-            sample = rows[: min(len(rows), SCHEMA_SAMPLE_SIZE)]
-            row_counts[local.name] = len(rows)
+            sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
+            # Key by verbatim remote (first-wins via setdefault) — local
+            # filenames collide across subdirectories with the same basename.
+            row_counts.setdefault(entry.remote, len(rows))
 
             for idx, col in enumerate(headers):
                 col_name = col
@@ -526,10 +609,10 @@ def _build_schema_report_impl(
                 # disambiguate duplicate column names across files
                 if col_name in seen_names:
                     prev_origin, _ = seen_names[col_name]
-                    _dup_map.setdefault(col_name, [prev_origin]).append(local.name)
+                    _dup_map.setdefault(col_name, [prev_origin]).append(entry.remote)
                     continue
                 else:
-                    seen_names[col_name] = (local.name, len(columns))
+                    seen_names[col_name] = (entry.remote, len(columns))
 
                 col_values = []
                 for row in sample:
@@ -570,7 +653,7 @@ def _build_schema_report_impl(
                         unique=n_unique,
                         missing=pct_missing,
                         hf_dtype=hf_dtype,
-                        origin=local.name,
+                        origin=entry.remote,
                     )
                 )
 
@@ -579,7 +662,7 @@ def _build_schema_report_impl(
 
     if _dup_map:
         n_dups = len(_dup_map)
-        if n_dups <= SCHEMA_DUP_THRESHOLD:
+        if n_dups <= config.SCHEMA_DUP_THRESHOLD:
             for col_name, origins in _dup_map.items():
                 prev_origin = origins[0]
                 for other_origin in origins[1:]:
@@ -655,10 +738,13 @@ def build_schema_report_with_rows(
 
     Returns:
         ``(columns, row_counts)`` — the same schema report as
-        :func:`build_schema_report`, plus a dict mapping each sampled file's
-        origin basename to its EXACT row count (Parquet:
-        ``pf.metadata.num_rows``; CSV: ``len(rows)`` on the fully read file).
-        Row counts are never capped by the schema sample size.
+        :func:`build_schema_report`, plus a dict mapping each counted file's
+        verbatim remote path (``entry.remote``, POSIX-style) to its EXACT
+        row count (Parquet: ``pf.metadata.num_rows``; CSV: ``len(rows)`` on
+        the fully read file).  Remotes are unique per well-formed dataset;
+        duplicate declarations keep the FIRST entry's count and emit a
+        ``[!]`` warning.  Row counts are never capped by the schema sample
+        size.
     """
     return _build_schema_report_impl(cfg, csv_delimiter, csv_encoding, staging_dir)
 
@@ -707,12 +793,16 @@ def build_dataset_card(
         study_design_content:  Pre-loaded study design content, or ``None``.
         empty_columns:         Optional list of column names that are entirely empty.
         duplicate_rows:        Optional dict mapping filenames to duplicate row counts.
-        row_counts:            Optional dict mapping each file's origin basename to
-                               its exact data-row count (from
-                               :func:`build_schema_report_with_rows`).  When given,
-                               the train split's ``num_examples`` is their sum;
-                               otherwise it falls back to
-                               ``CARD_FALLBACK_ROWS_PER_FILE`` per declared file.
+        row_counts:            Optional dict mapping each file's verbatim
+                               remote path (``entry.remote``, POSIX-style —
+                               keys are unique per well-formed dataset; the
+                               sole consumer sums VALUES only) to its exact
+                               data-row count (from
+                               :func:`build_schema_report_with_rows`).  When
+                               given, the train split's ``num_examples`` is
+                               their sum; otherwise it falls back to
+                               ``CARD_FALLBACK_ROWS_PER_FILE`` per declared
+                               file.
         keep_csv:              Whether converted CSVs are also delivered at their
                                original remote (the publish ``--keep-csv`` flag).
                                Governs the Dataset Structure listing only.
@@ -736,7 +826,7 @@ def build_dataset_card(
     if "datasets" not in tags:
         tags.append("datasets")
     # Emit 'tabular' as default modality when not already present.
-    if not any(t in tags for t in CARD_MODALITY_TAGS):
+    if not any(t in tags for t in config.CARD_MODALITY_TAGS):
         tags.append("tabular")
     frontmatter["tags"] = tags
 
@@ -795,11 +885,15 @@ def build_dataset_card(
 
         # splits — single train split; num_examples from exact row counts
         # when available, else the conservative per-file fallback (D7).
+        # NOTE (partial counts undercount): when only SOME declared files
+        # yield exact counts (mixed schema/excluded/recursive datasets), the
+        # sum silently undercounts the dataset — the fallback product below
+        # applies only when NO file yields an exact count (RC-R12).
         if cfg.files:
             if row_counts:
                 approx_rows = sum(row_counts.values())
             else:
-                approx_rows = len(cfg.files) * CARD_FALLBACK_ROWS_PER_FILE
+                approx_rows = len(cfg.files) * config.CARD_FALLBACK_ROWS_PER_FILE
             splits = [{"name": "train", "num_examples": approx_rows}]
             dataset_info["splits"] = splits
 
@@ -933,7 +1027,7 @@ def build_dataset_card(
             )
         lines.append("")
         lines.append(
-            f"*Statistics (unique, missing%) based on a {SCHEMA_SAMPLE_SIZE:,}-row sample."
+            f"*Statistics (unique, missing%) based on a {config.SCHEMA_SAMPLE_SIZE:,}-row sample."
             " Exact counts may differ in the full dataset.*"
         )
         lines.append("")

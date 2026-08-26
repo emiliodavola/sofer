@@ -50,6 +50,72 @@ def _validate_remote_paths(cfg: DatasetConfig) -> list[str]:
     return errors
 
 
+def parquet_remote_for(remote: str) -> str:
+    """Return the staged-Parquet remote key for *remote*.
+
+    The single definition of the remote → ``.parquet`` key derivation shared
+    by every producer (prepare staging) and consumer (publish, schema-report
+    lookup) of staged-Parquet paths.  Pure, total, and idempotent:
+    backslash separators are normalized to forward slashes first (RC-R15)
+    so a TOML remote like ``data\\a\\train.csv`` yields the same key on both
+    handshake sides; the suffix is then replaced with ``.parquet``.
+    Case is preserved — callers gate eligibility via ``.lower()`` themselves.
+
+    Args:
+        remote: Verbatim ``FileEntry.remote`` path (e.g. ``data/PROV/train.csv``).
+
+    Returns:
+        The POSIX-normalized remote with its suffix replaced by ``.parquet``
+        (e.g. ``data/PROV/train.parquet``).
+    """
+    posix_remote = remote.replace("\\", "/")
+    return str(PurePosixPath(posix_remote).with_suffix(".parquet"))
+
+
+def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
+    """Detect ``.csv`` remotes that differ only by case but share a Parquet key.
+
+    RC-R16.  Entries eligible for staged-Parquet reading declare a ``.csv``
+    remote (case-insensitive) and are not ``recursive``.  ``upload_as_csv`` and
+    ``include_in_schema`` do NOT exclude an entry: ``prepare`` stages these
+    physically (section 7 ``copy_to_mirror`` does not skip them), so a
+    case-differing pair would still collide on disk.
+
+    Two eligible remotes collide when their derived Parquet keys
+    (:func:`parquet_remote_for`) are equal under ``str.lower()`` but not
+    verbatim.  ``lower()`` (not ``casefold()``) is used so ``straße`` and
+    ``strasse`` stay distinct (spec S3 — ``casefold`` would fold ``ß`` to
+    ``ss``).  Keying on the DERIVED parquet key (not the raw remote) also
+    catches backslash-vs-slash pairs that normalize to the same key via RC-R15.
+
+    Verbatim-equal remotes are left to RC-R11's non-aborting ``[!]`` warning
+    and are skipped here (no double-report).
+
+    Args:
+        cfg: Dataset configuration whose ``files`` are being validated.
+
+    Returns:
+        A list of error messages (empty = no case-fold collisions).
+    """
+    errors: list[str] = []
+    seen: dict[str, str] = {}
+    for entry in cfg.files:
+        if entry.recursive or not entry.remote.lower().endswith(".csv"):
+            continue
+        key = parquet_remote_for(entry.remote).lower()
+        current = entry.remote
+        first = seen.get(key)
+        if first is not None and first != current:
+            errors.append(
+                f"Case-fold collision: remotes '{first}' and '{current}' differ "
+                f"only by case and would map to the same staged Parquet file; "
+                f"rename one of them."
+            )
+        else:
+            seen[key] = current
+    return errors
+
+
 def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
     """Return the remote paths a publish would deliver for *cfg*.
 
@@ -79,7 +145,7 @@ def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
         if entry.recursive:
             planned.append(entry.remote.rstrip("/\\"))
         elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-            planned.append(str(PurePosixPath(entry.remote).with_suffix(".parquet")))
+            planned.append(parquet_remote_for(entry.remote))
             if keep_csv:
                 planned.append(entry.remote)
         else:
