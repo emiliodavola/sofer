@@ -313,16 +313,22 @@ class TestNetworkOffline:
             raise RuntimeError("upload exploded")
 
         _mock_hf_api(monkeypatch)
-        # publish._hf_upload_folder swallows _api.upload_folder errors
-        # internally (publish.py:151-181); patch the module seam so the
-        # failure propagates to publish's rc (design test-gap row).
-        monkeypatch.setattr(publish_mod, "_hf_upload_folder", _boom)
+        # Drive the REAL failure path: _api.upload_folder raises inside
+        # _hf_upload_folder, which catches + prints + returns False
+        # (publish.py:151-181). publish() accounts on that return value and
+        # returns rc 1 — so sofer_publish_confirm must surface ok:False /
+        # exit_code:1. This used to monkeypatch _hf_upload_folder itself to
+        # raise, a dead seam that never fires in production (the old
+        # try/except in publish.py was dead code); the broken accounting
+        # returned ok:True/exit_code:0 on a total upload failure.
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _boom)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         build_server(root=tmp_path)
 
         envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
+        assert envelope["partial"] is False
         assert "upload exploded" in envelope["output"]
 
     def test_empty_token_fails_like_missing(self, tmp_path, monkeypatch, restore_tool_config):

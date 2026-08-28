@@ -678,14 +678,20 @@ def publish(
                 print(f"  \u2717  NOT FOUND: {local}")
 
         staged_count = sum(1 for _ in staging_root.rglob("*") if _.is_file())
-        try:
-            _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type)
+        # _hf_upload_folder never raises: it catches and prints the error
+        # internally and returns ``False`` on failure (its documented
+        # contract, see :func:`_hf_upload_folder`). Account on that return
+        # value — a falsy result means the single upload_folder call
+        # delivered nothing, so every staged file counts as failed (rc 1).
+        # The try/except that previously wrapped this call was dead code
+        # and masked total upload failures as success (ok=staged_count,
+        # fail=0 → rc 0).
+        if _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type):
             ok = staged_count
             fail = 0
-        except Exception as exc:
-            print(f"  \u2717  upload_folder failed: {exc}")
+        else:
             ok = 0
-            fail = staged_count
+            fail = staged_count or 1
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

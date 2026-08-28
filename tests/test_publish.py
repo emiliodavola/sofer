@@ -436,6 +436,16 @@ class TestHfPublish:
         assert (staging_root / "data.csv").read_text(encoding="utf-8-sig") == "a;b\n1;2\n"
 
     def test_upload_folder_failure_returns_1(self, tmp_path: Path, monkeypatch) -> None:
+        """HF upload failure (real path) -> rc 1, never 0.
+
+        Regression for the broken accounting: ``_hf_upload_folder`` swallows
+        exceptions internally and returns ``False`` (publish.py:151-181), so
+        ``publish()`` must key its accounting on that return value. This
+        test drives the REAL failure path (``_api.upload_folder`` raises
+        inside the seam); it used to monkeypatch ``_hf_upload_folder``
+        itself to raise, which is a dead seam that never fires in
+        production — that only passed because of the dead except branch.
+        """
         from sofer import publish as publish_mod
 
         csv = tmp_path / "data.csv"
@@ -450,14 +460,53 @@ class TestHfPublish:
         monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
 
-        def _boom(*_a: Any, **_kw: Any) -> bool:
+        def _raise_network(*_a: Any, **_kw: Any) -> None:
             raise RuntimeError("Simulated network failure")
 
-        monkeypatch.setattr(publish_mod, "_hf_upload_folder", _boom)
+        # Fail at the REAL seam: _api.upload_folder raises inside
+        # _hf_upload_folder, which catches + prints + returns False.
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
 
         rc = publish(cfg, target="hf")
         assert rc == 1
         assert not td.exists(), "staging tmpdir should be cleaned up"
+
+    def test_upload_failure_accounting_zero_uploaded(self, tmp_path, monkeypatch, capsys) -> None:
+        """Accounting: a total upload failure reports 0 uploaded / N failed.
+
+        The single upload_folder call either delivers the whole staged
+        package or fails as a unit; a falsy return from
+        ``_hf_upload_folder`` must count every staged file as failed so the
+        CLI reports an honest ``Result: 0 uploaded, N failed`` and returns
+        rc 1 (MSP-R11: upload-failure -> ok:False/exit_code:1). The pre-fix
+        accounting returned ``ok=staged_count, fail=0`` -> rc 0.
+        """
+        from sofer import publish as publish_mod
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)  # build first so auto-prepare stays quiet
+        expected_staged = sum(1 for p in out.rglob("*") if p.is_file())
+        assert expected_staged > 0, "fixture must stage at least one file"
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+
+        def _raise_network(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError("Simulated network failure")
+
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf")
+        captured = capsys.readouterr()
+        assert rc == 1, "a total upload failure must return rc 1, not 0"
+        assert "0 uploaded" in captured.out
+        assert f"{expected_staged} failed" in captured.out
 
     def test_recursive_tree_staged_without_exception(self, tmp_path: Path, monkeypatch) -> None:
         assets = tmp_path / "assets"
