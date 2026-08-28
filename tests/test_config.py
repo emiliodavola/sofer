@@ -72,7 +72,9 @@ class TestMetadataCoreTomlOverride:
     def _load_with_toml(self, monkeypatch, tmp_path: Path, toml: str) -> dict[str, Any]:
         """Point config discovery at a temp pyproject.toml and load the section."""
         (tmp_path / "pyproject.toml").write_text(toml, encoding="utf-8")
-        monkeypatch.setattr("sofer.config._find_project_root", lambda start=None: tmp_path)
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
         return config._load_tool_config()
 
     def test_toml_overrides_semantic_priors(self, monkeypatch, tmp_path):
@@ -110,7 +112,9 @@ class TestSemanticPriorsValidation:
 
     def _load_with_toml(self, monkeypatch, tmp_path: Path, toml: str) -> dict[str, Any]:
         (tmp_path / "pyproject.toml").write_text(toml, encoding="utf-8")
-        monkeypatch.setattr("sofer.config._find_project_root", lambda start=None: tmp_path)
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
         return config._load_tool_config()
 
     def test_semantic_priors_rejects_non_dict(self, monkeypatch, tmp_path):
