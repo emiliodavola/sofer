@@ -9,12 +9,15 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 
 ## Install
 
-sofer is a standalone CLI — install it once, run it anywhere:
+sofer is a standalone CLI — install it once, run it anywhere. It is not
+published on PyPI yet, so install it from the git tag of the release you want
+(use the latest `v*` tag):
 
 ```bash
-pip install sofer
-# or, with uv (isolated tool install):
-uv tool install sofer
+# with uv (isolated tool install):
+uv tool install git+https://github.com/emiliodavola/sofer.git@v0.2.1
+# or with pip:
+pip install git+https://github.com/emiliodavola/sofer.git@v0.2.1
 ```
 
 Then run `sofer --help`. `sofer --version` always matches the release tag
