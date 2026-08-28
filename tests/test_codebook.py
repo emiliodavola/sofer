@@ -2,6 +2,7 @@
 
 import csv
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -1014,3 +1015,100 @@ class TestCodebookCLI:
         assert exc.code == 1
         captured = capsys.readouterr()
         assert "Collision" in captured.err or "collision" in captured.err.lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 1 (sofer-mcp-server) — empty-input placeholder + dataset-driven
+#  delimiter/encoding seam in generate_all (adv5, D2/MSP-R10)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEmptyInputPlaceholder:
+    """Empty/headerless inputs render a marker codebook instead of crashing."""
+
+    def test_build_markdown_empty_headers_placeholder(self):
+        result = _build_markdown([], [], None, "empty.csv")
+        assert "**No data rows found** — the file is empty or headerless." in result
+        assert "# Codebook: empty.csv" in result
+
+    def test_generate_empty_csv_returns_placeholder(self, tmp_path):
+        csv_path = tmp_path / "empty.csv"
+        csv_path.write_text("", encoding="utf-8")
+
+        result = generate(str(csv_path))
+
+        assert "**No data rows found** — the file is empty or headerless." in result
+
+    def test_generate_empty_jsonl_returns_placeholder(self, tmp_path):
+        jsonl_path = tmp_path / "empty.jsonl"
+        jsonl_path.write_text("", encoding="utf-8")
+
+        result = generate(str(jsonl_path))
+
+        assert "**No data rows found** — the file is empty or headerless." in result
+
+    def test_generate_header_only_csv_still_renders_columns(self, tmp_path):
+        """A header-only file is NOT 'headerless' — columns keep rendering."""
+        csv_path = tmp_path / "header_only.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["col_a", "col_b"])
+
+        result = generate(str(csv_path))
+
+        assert "**No data rows found**" not in result
+        assert "| 1 | `col_a`" in result
+
+
+class TestGenerateAllDelimiterSeam:
+    """generate_all resolves None → cfg.csv_delimiter/csv_encoding ([meta])."""
+
+    def _toml(self, tmp_path, delimiter: str) -> Path:
+        lines = [
+            "[dataset]",
+            'name = "delim-ds"',
+            'repo_id = "user/delim-ds"',
+            "",
+            "[meta]",
+            f'csv_delimiter = "{delimiter}"',
+            "",
+            "[[file]]",
+            'local = "data.csv"',
+            'remote = "data.csv"',
+            "",
+        ]
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text("\n".join(lines), encoding="utf-8")
+        return toml_path
+
+    def test_uses_cfg_meta_delimiter_when_none(self, tmp_path):
+        """Rule-3 fix: [meta] csv_delimiter=\",\" is honored, not the hardcoded ';'."""
+        from sofer.model import DatasetConfig
+
+        (tmp_path / "data.csv").write_text("a,b\n1,2\n3,4\n", encoding="utf-8-sig")
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path, ","))
+
+        results = generate_all(cfg)
+
+        codebook_path = tmp_path / "cache" / "codebooks" / "data.md"
+        assert str(codebook_path) in results
+        content = codebook_path.read_text(encoding="utf-8")
+        # Two comma-separated columns, not one 'a,b' column.
+        assert "| 1 | `a`" in content
+        assert "| 2 | `b`" in content
+        assert "`a,b`" not in content
+
+    def test_explicit_delimiter_overrides_cfg(self, tmp_path):
+        """An explicit delimiter argument beats the [meta] value."""
+        from sofer.model import DatasetConfig
+
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path, ","))
+
+        results = generate_all(cfg, delimiter=";")
+
+        codebook_path = tmp_path / "cache" / "codebooks" / "data.md"
+        assert str(codebook_path) in results
+        content = codebook_path.read_text(encoding="utf-8")
+        assert "| 1 | `a`" in content
+        assert "| 2 | `b`" in content

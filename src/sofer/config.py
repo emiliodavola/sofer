@@ -75,6 +75,10 @@ _DEFAULTS: dict[str, Any] = {
     "detect_threshold": 0.5,
     "profile_max_sample": 100_000,
     "confidence_round_digits": 4,
+    # Size guard for MCP agent resource reads (sofer://dataset, sofer://codebook,
+    # sofer://metadata): resources larger than this are refused with a clear
+    # error naming the limit instead of being slurped into an LLM context.
+    "agent_resource_max_bytes": 50_000_000,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -86,21 +90,31 @@ _LOCK = threading.Lock()
 SOURCE_PATH: Path | None = None
 
 
-def _find_project_root(start: str | Path | None = None) -> Path | None:
+def _find_project_root(
+    start: str | Path | None = None, stop_at: str | Path | None = None
+) -> Path | None:
     """Walk up from *start* until a directory containing ``pyproject.toml``.
 
     Args:
         start: Directory anchoring the walk-up. When ``None``, the current
             working directory is used. The start directory itself is part of
             the search. The installed package location is never consulted.
+        stop_at: Optional upper bound for the walk-up (MCP server containment):
+            discovery never walks ABOVE this directory, so a ``pyproject.toml``
+            outside the boundary is ignored and defaults apply. ``None`` keeps
+            the CLI behavior — walk up to the filesystem root. A *start* that
+            is itself outside *stop_at* yields ``None`` (nothing is searched).
 
     Returns:
-        The first directory (starting at *start*, then each parent up to the
-        filesystem root) containing a ``pyproject.toml``, or ``None`` when
-        no such file exists anywhere on the path.
+        The first directory (starting at *start*, then each parent up to
+        *stop_at* or the filesystem root) containing a ``pyproject.toml``, or
+        ``None`` when no such file exists within the search bounds.
     """
     start_dir = Path(start).resolve() if start is not None else Path.cwd().resolve()
+    stop = Path(stop_at).resolve() if stop_at is not None else None
     for candidate in (start_dir, *start_dir.parents):
+        if stop is not None and not candidate.is_relative_to(stop):
+            break  # bounded discovery: never walk above stop_at
         if (candidate / "pyproject.toml").is_file():
             return candidate
     return None
@@ -158,7 +172,9 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     return merged
 
 
-def _discover(start: str | Path | None = None) -> tuple[dict[str, Any], Path | None]:
+def _discover(
+    start: str | Path | None = None, stop_at: str | Path | None = None
+) -> tuple[dict[str, Any], Path | None]:
     """Resolve ``[tool.sofer]`` following the fixed precedence order.
 
     Resolution (spec TC-02):
@@ -176,21 +192,24 @@ def _discover(start: str | Path | None = None) -> tuple[dict[str, Any], Path | N
     Args:
         start: Anchor directory (see :func:`_find_project_root`); ``None``
             anchors directly on the current working directory.
+        stop_at: Optional upper bound for the walk-up (see
+            :func:`_find_project_root`); ``None`` keeps the CLI behavior.
 
     Returns:
         ``(merged, source_path)`` where *merged* is the effective value dict
         and *source_path* is the absolute path of the selected
         ``pyproject.toml``, or ``None`` when built-in defaults apply.
     """
-    root = _find_project_root(start)
+    root = _find_project_root(start, stop_at)
     if root is None and start is not None:
-        # Dataset-anchor miss -> cwd fallback (precedence step 2).
-        root = _find_project_root(None)
+        # Dataset-anchor miss -> cwd fallback (precedence step 2). The
+        # fallback honors *stop_at* too — an out-of-bounds cwd yields defaults.
+        root = _find_project_root(None, stop_at)
     toml_path = root / "pyproject.toml" if root is not None else None
     return _read_tool_section(toml_path), toml_path
 
 
-def reload(start: str | Path | None = None) -> None:
+def reload(start: str | Path | None = None, stop_at: str | Path | None = None) -> None:
     """Re-resolve ``[tool.sofer]`` and rebind every module constant.
 
     Discovery anchors on *start*: pass a dataset TOML's directory for the
@@ -204,8 +223,10 @@ def reload(start: str | Path | None = None) -> None:
 
     Args:
         start: Directory anchoring the walk-up; ``None`` anchors on cwd.
+        stop_at: Optional upper bound for the walk-up (see
+            :func:`_find_project_root`); ``None`` keeps the CLI behavior.
     """
-    merged, source = _discover(start)
+    merged, source = _discover(start, stop_at)
 
     with _LOCK:
         # ``SOURCE_PATH`` is included so concurrent readers see the source
@@ -279,3 +300,6 @@ MIN_THRESHOLD: float = _DEFAULTS["min_threshold"]
 DETECT_THRESHOLD: float = _DEFAULTS["detect_threshold"]
 PROFILE_MAX_SAMPLE: int = _DEFAULTS["profile_max_sample"]
 CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]
+
+# MCP agent resource size guard (see ``_DEFAULTS["agent_resource_max_bytes"]``).
+AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
