@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -30,7 +31,6 @@ from sofer.mcp_server import (
     sofer_publish,
     sofer_publish_confirm,
     sofer_scan_apply,
-    sofer_validate,
 )
 from sofer.model import DatasetConfig
 from sofer.prepare import prepare as domain_prepare
@@ -45,9 +45,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _make_dataset(
-    root: Path, *, confidential: bool = False, name: str = "test-ds"
-) -> Path:
+def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-ds") -> Path:
     """Write a minimal, quality-passing dataset (TOML + CSV) under *root*."""
     (root / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
     lines = [
@@ -77,17 +75,17 @@ def _prepare_package(root: Path) -> None:
 def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
     """Stub every HF API method publish could reach (offline tests)."""
     monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        publish_mod._api, "list_repo_files", lambda *a, **kw: (existing or [])
-    )
+    monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: existing or [])
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
 
 def _call(server: ms._FastMCP, name: str, args: dict | None = None):
     """Call a tool through an in-memory client; returns the CallToolResult."""
+
     async def _go():
         async with Client(server) as client:
             return await client.call_tool(name, args)
+
     return _run(_go())
 
 
@@ -96,6 +94,7 @@ def _tool_schema(server: ms._FastMCP, name: str) -> dict:
         async with Client(server) as client:
             tools = await client.list_tools()
             return {t.name: t for t in tools}[name]
+
     tool = _run(_go())
     return dict(tool.inputSchema)
 
@@ -153,24 +152,27 @@ def server(tmp_path: Path):
 
 
 class TestToolRoster:
-    _EXPECTED = {
-        "sofer_validate",
-        "sofer_prepare",
-        "sofer_publish",
-        "sofer_publish_confirm",
-        "sofer_codebook",
-        "sofer_codebook_all",
-        "sofer_profile",
-        "sofer_render",
-        "sofer_scan_dry_run",
-        "sofer_scan_apply",
-    }
+    _EXPECTED: frozenset[str] = frozenset(
+        {
+            "sofer_validate",
+            "sofer_prepare",
+            "sofer_publish",
+            "sofer_publish_confirm",
+            "sofer_codebook",
+            "sofer_codebook_all",
+            "sofer_profile",
+            "sofer_render",
+            "sofer_scan_dry_run",
+            "sofer_scan_apply",
+        }
+    )
 
     def test_exactly_ten_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
                 return {t.name for t in tools}
+
         assert _run(_go()) == self._EXPECTED
 
     def test_validate_round_trip(self, server, tmp_path):
@@ -289,9 +291,7 @@ class TestNetworkOffline:
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"), acknowledge_risk=True
-        )
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
         assert envelope["skipped_protected"] == []
@@ -313,9 +313,7 @@ class TestNetworkOffline:
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"), acknowledge_risk=True
-        )
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert "upload exploded" in envelope["output"]
@@ -339,9 +337,7 @@ class TestNetworkOffline:
         monkeypatch.setenv("HF_HUB_TOKEN", "alias_token")
         build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"), acknowledge_risk=True
-        )
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
         assert envelope["ok"] is True
 
 
@@ -369,9 +365,7 @@ class TestPublishAuthorizationLadder:
         with pytest.raises(PublishRefusedError, match="confidential"):
             sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
 
-    def test_confidential_acknowledged_proceeds(
-        self, tmp_path, monkeypatch, restore_tool_config
-    ):
+    def test_confidential_acknowledged_proceeds(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path, confidential=True)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
@@ -421,9 +415,7 @@ class TestPublishAuthorizationLadder:
         build_server(root=tmp_path)
 
         with pytest.raises(PublishRefusedError, match="approval phrase"):
-            sofer_publish_confirm(
-                str(tmp_path / "dataset.toml"), acknowledge_risk=True
-            )
+            sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
         envelope = sofer_publish_confirm(
             str(tmp_path / "dataset.toml"),
             acknowledge_risk=True,
@@ -470,9 +462,7 @@ class TestContainment:
         )
         server = build_server(root=root)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(root / "dataset.toml")}
-        ).data
+        envelope = _call(server, "sofer_validate", {"config": str(root / "dataset.toml")}).data
         assert envelope["ok"] is False
         assert any("outside the server root" in e for e in envelope["config_errors"])
 
@@ -487,9 +477,7 @@ class TestContainment:
         )
         server = build_server(root=root)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(root / "dataset.toml")}
-        ).data
+        envelope = _call(server, "sofer_validate", {"config": str(root / "dataset.toml")}).data
         assert envelope["ok"] is False
         assert any("outside the server root" in e for e in envelope["config_errors"])
 
@@ -534,9 +522,7 @@ class TestContainment:
         )
         server = build_server(root=root)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(root / "dataset.toml")}
-        ).data
+        envelope = _call(server, "sofer_validate", {"config": str(root / "dataset.toml")}).data
         assert envelope["ok"] is False
         assert any("outside the server root" in e for e in envelope["config_errors"])
 
@@ -551,9 +537,7 @@ class TestContainment:
         )
         server = build_server(root=root)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(root / "dataset.toml")}
-        ).data
+        envelope = _call(server, "sofer_validate", {"config": str(root / "dataset.toml")}).data
         assert envelope["ok"] is False
         assert any("remote is unsafe" in e for e in envelope["config_errors"])
 
@@ -568,9 +552,7 @@ class TestContainment:
         )
         server = build_server(root=root)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(root / "dataset.toml")}
-        ).data
+        envelope = _call(server, "sofer_validate", {"config": str(root / "dataset.toml")}).data
         assert envelope["ok"] is False
         assert any("remote is unsafe" in e for e in envelope["config_errors"])
 
@@ -585,9 +567,7 @@ class TestContainment:
         )
         server = build_server(root=root)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(root / "dataset.toml")}
-        ).data
+        envelope = _call(server, "sofer_validate", {"config": str(root / "dataset.toml")}).data
         assert envelope["ok"] is False
         assert any("remote is unsafe" in e for e in envelope["config_errors"])
 
@@ -624,9 +604,7 @@ class TestContainment:
 
 
 class TestConfigDeterminism:
-    def test_validate_a_then_scan_b_uses_b_anchor(
-        self, tmp_path, monkeypatch, restore_tool_config
-    ):
+    def test_validate_a_then_scan_b_uses_b_anchor(self, tmp_path, monkeypatch, restore_tool_config):
         tree_a = tmp_path / "treeA"
         tree_a.mkdir()
         (tree_a / "pyproject.toml").write_text(
@@ -648,9 +626,7 @@ class TestConfigDeterminism:
         server = build_server(root=tmp_path)
 
         # Residue source: A's scan-anchored config state (cache-a).
-        envelope_a = _call(
-            server, "sofer_validate", {"config": str(tree_a / "dataset.toml")}
-        ).data
+        envelope_a = _call(server, "sofer_validate", {"config": str(tree_a / "dataset.toml")}).data
         assert envelope_a["ok"] is True
 
         # B's scan MUST self-anchor on B's own tree (cache-b).
@@ -682,6 +658,7 @@ class TestResources:
                     f"sofer://dataset/{tmp_path / 'dataset.toml'}"
                 )
                 return contents[0].text
+
         text = _run(_go())
         assert "[dataset]" in text
         assert 'name = "test-ds"' in text
@@ -692,10 +669,9 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                contents = await client.read_resource(
-                    f"sofer://codebook/{tmp_path / 'data.csv'}"
-                )
+                contents = await client.read_resource(f"sofer://codebook/{tmp_path / 'data.csv'}")
                 return contents[0].text
+
         text = _run(_go())
         assert "# Codebook: data.csv" in text
         assert "| 1 | `col_a`" in text
@@ -712,6 +688,7 @@ class TestResources:
                     f"sofer://metadata/{tmp_path / 'metadata.yaml'}"
                 )
                 return contents[0].text
+
         assert "metadata_version" in _run(_go())
 
     def test_metadata_missing_clear_error(self, tmp_path):
@@ -721,6 +698,7 @@ class TestResources:
         async def _go():
             async with Client(server) as client:
                 await client.read_resource("sofer://metadata/absent.yaml")
+
         from mcp import McpError
 
         with pytest.raises(McpError) as excinfo:
@@ -739,9 +717,8 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                await client.read_resource(
-                    f"sofer://dataset/{outside / 'evil.toml'}"
-                )
+                await client.read_resource(f"sofer://dataset/{outside / 'evil.toml'}")
+
         from mcp import McpError
 
         with pytest.raises(McpError, match="outside the server root"):
@@ -755,6 +732,7 @@ class TestResources:
         async def _go():
             async with Client(server) as client:
                 await client.read_resource(f"sofer://dataset/{tmp_path / 'notes.txt'}")
+
         from mcp import McpError
 
         with pytest.raises(McpError, match="one of these extensions"):
@@ -767,9 +745,8 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                await client.read_resource(
-                    f"sofer://dataset/{tmp_path / 'dataset.toml'}"
-                )
+                await client.read_resource(f"sofer://dataset/{tmp_path / 'dataset.toml'}")
+
         from mcp import McpError
 
         with pytest.raises(McpError, match="resource size limit"):
@@ -789,6 +766,7 @@ class TestPrompts:
             async with Client(server) as client:
                 prompts = await client.list_prompts()
                 return {p.name for p in prompts}
+
         assert _run(_go()) == {"prepare_dataset", "assess_dataset", "finalize_and_publish"}
 
     def test_prompt_arguments_substituted(self, tmp_path):
@@ -796,10 +774,9 @@ class TestPrompts:
 
         async def _go():
             async with Client(server) as client:
-                prompt = await client.get_prompt(
-                    "prepare_dataset", {"config": "my/dataset.toml"}
-                )
+                prompt = await client.get_prompt("prepare_dataset", {"config": "my/dataset.toml"})
                 return prompt.messages[0].content.text
+
         text = _run(_go())
         assert "my/dataset.toml" in text
 
@@ -812,6 +789,7 @@ class TestPrompts:
                     "finalize_and_publish", {"config": "my/dataset.toml"}
                 )
                 return prompt.messages[0].content.text
+
         text = _run(_go())
         assert "STOP" in text
         assert "approval" in text.lower()
@@ -855,6 +833,7 @@ class TestVerifyAndProtected:
                     "sofer_prepare",
                     {"config": str(tmp_path / "dataset.toml"), "verify": True},
                 )
+
         result = _run(_go())
         envelope = result.data
         assert envelope["ok"] is True
@@ -867,9 +846,7 @@ class TestVerifyAndProtected:
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"), acknowledge_risk=True
-        )
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
         assert envelope["ok"] is True
         assert envelope["partial"] is True
         assert "data.parquet" in envelope["skipped_protected"]
@@ -898,9 +875,7 @@ class TestPublishDryRun:
         build_server(root=tmp_path)
 
         with pytest.raises(MCPToolError, match="sofer_publish_confirm"):
-            sofer_publish(
-                str(tmp_path / "dataset.toml"), target="hf", dry_run=False
-            )
+            sofer_publish(str(tmp_path / "dataset.toml"), target="hf", dry_run=False)
 
 
 def test_scan_apply_never_prompts_and_chains_scanner():
@@ -914,3 +889,52 @@ def test_scan_apply_never_prompts_and_chains_scanner():
     assert "merge_entries" in src
     assert "copy_files" in src
     assert "write_toml" in src
+
+
+# ---------------------------------------------------------------------------
+#  MSP-R12 — wheel packaging: entry point + mcp extra (CI-marked integration)
+# ---------------------------------------------------------------------------
+
+
+class TestWheelPackaging:
+    @pytest.mark.skipif(
+        importlib.util.find_spec("hatchling") is None,
+        reason=(
+            "hatchling build backend is not installed in the dev environment "
+            "(CI builds the wheel; locally this is covered by pyproject.toml)"
+        ),
+    )
+    def test_wheel_declares_script_and_extra(self, tmp_path):
+        import zipfile
+
+        repo_root = Path(__file__).resolve().parents[1]
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hatchling",
+                "build",
+                "-t",
+                "wheel",
+                "-d",
+                str(dist),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+        )
+        wheels = list(dist.glob("*.whl"))
+        assert len(wheels) == 1
+        with zipfile.ZipFile(wheels[0]) as zf:
+            entry_points = [n for n in zf.namelist() if n.endswith("entry_points.txt")]
+            metadata = [n for n in zf.namelist() if n.endswith("METADATA")]
+            assert entry_points, "wheel is missing entry_points.txt"
+            ep = zf.read(entry_points[0]).decode("utf-8")
+            assert "sofer-mcp = sofer.mcp_server:main" in ep
+            assert metadata, "wheel is missing METADATA"
+            meta = zf.read(metadata[0]).decode("utf-8")
+            assert "Provides-Extra: mcp" in meta
+            assert "Requires-Dist: fastmcp>=3.4,<4" in meta
