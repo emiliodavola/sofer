@@ -19,4 +19,13 @@ Estimated changed lines ~2000-2600; 400-line budget risk High vs default BUT cus
 ## Risks
 400-line budget High vs default but custom 2000 accepted; win32 symlink test may need elevation (junction/skip, must not stall); generate_all delimiter default change deliberate rule-3 fix (flag old ";" tests); _EXEC_LOCK load-bearing for stdout swap + config rebind (fastmcp threadpool) — do not drop.
 
+## Post-review remediation (adversarial + reliability reviews, applied on feat/sofer-mcp-server)
+- [x] R1 (BLOCKER) sofer_publish refuses ANY non-"local" target with dry_run=False (PublishRefusedError; unknown target → clear refusal) — no HF write path in sofer_publish (MSP-R05).
+- [x] R2 (CRITICAL) config-content output paths contained: _validate_output_targets on every writing tool (prepare/publish/confirm/codebook_all/scan_*); [tool.sofer] discovery bounded at server root (config._find_project_root stop_at).
+- [x] R3 (CRITICAL) quality-gate-before-token ordering pinned by test (failing quality + no HF_TOKEN → ok:False, not HFTokenError).
+- [x] R4 (CRITICAL) behavioral tests for sofer_profile (pii_findings), sofer_render (README write), sofer_codebook_all (files/collision/[meta] delimiter), sofer_scan_dry_run (discovered/registered, no writes).
+- [x] R5 (CRITICAL) MSP-R03 prepare overwrite refusal test (force=False refuses, force=True regenerates).
+- [x] R6 (CRITICAL) confidential:true surfaced on validate; [tool.sofer] csv_delimiter injection honored by sofer_codebook (MSP-R10).
+- [x] R7 (advisories) _UNTRUSTED_NOTE referenced via _with_untrusted_note; build_server one-server-per-process docstring warning; sofer_publish_confirm refuses non-"hf" targets; _remote_is_unsafe("") → True; HF_TOKEN fully absent → HFTokenError; concurrency (asyncio.gather) + per-tool lock-usage tests.
+
 ## Next: apply (single batch, work-unit commits). USER opens PR manually — apply must NOT open PR.

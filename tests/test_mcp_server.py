@@ -28,9 +28,16 @@ from sofer.mcp_server import (
     MCPToolError,
     PublishRefusedError,
     build_server,
+    sofer_codebook,
+    sofer_codebook_all,
+    sofer_prepare,
+    sofer_profile,
     sofer_publish,
     sofer_publish_confirm,
+    sofer_render,
     sofer_scan_apply,
+    sofer_scan_dry_run,
+    sofer_validate,
 )
 from sofer.model import DatasetConfig
 from sofer.prepare import prepare as domain_prepare
@@ -938,3 +945,472 @@ class TestWheelPackaging:
             meta = zf.read(metadata[0]).decode("utf-8")
             assert "Provides-Extra: mcp" in meta
             assert "Requires-Dist: fastmcp>=3.4,<4" in meta
+
+
+# ---------------------------------------------------------------------------
+#  Review fix 1 — publish authorization ladder bypass via non-"local" targets
+#  (MSP-R05): publish.py routes ANY non-"local" target into the HF branch, so
+#  sofer_publish must refuse every non-local REAL run, not just target="hf".
+# ---------------------------------------------------------------------------
+
+
+class TestPublishTargetLadder:
+    def test_garbage_target_dry_run_false_refused_no_api(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api, "create_repo", lambda *a, **kw: calls.append("create_repo")
+        )
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: calls.append("list_repo_files"),
+        )
+        monkeypatch.setattr(
+            publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
+        )
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        build_server(root=tmp_path)
+
+        with pytest.raises(PublishRefusedError, match="unknown target"):
+            sofer_publish(str(tmp_path / "dataset.toml"), target="garbage", dry_run=False)
+        assert calls == [], "publish._api must never be reached for a refused target"
+
+    def test_aws_target_dry_run_false_refused(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        build_server(root=tmp_path)
+
+        with pytest.raises(PublishRefusedError, match="unknown target"):
+            sofer_publish(str(tmp_path / "dataset.toml"), target="aws", dry_run=False)
+
+    def test_garbage_target_dry_run_ok_no_network(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api, "create_repo", lambda *a, **kw: calls.append("create_repo")
+        )
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: calls.append("list_repo_files"),
+        )
+        monkeypatch.setattr(
+            publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
+        )
+        build_server(root=tmp_path)
+
+        envelope = sofer_publish(str(tmp_path / "dataset.toml"), target="garbage", dry_run=True)
+        assert envelope["ok"] is True
+        assert envelope["dry_run"] is True
+        assert "Dry-run" in envelope["output"] or "no files uploaded" in envelope["output"]
+        assert calls == [], "a dry-run plan must never touch publish._api"
+
+    def test_local_target_dry_run_false_copies_package(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        build_server(root=tmp_path)
+
+        deliver = tmp_path / "deliver"
+        envelope = sofer_publish(
+            str(tmp_path / "dataset.toml"),
+            target="local",
+            dry_run=False,
+            output=str(deliver),
+        )
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0
+        assert (deliver / "data.parquet").is_file(), "local copy must deliver the package"
+
+
+# ---------------------------------------------------------------------------
+#  Review fix 2 — config-content output paths must never escape the server
+#  root: [dataset] build_dir / [tool.sofer] output_dir / codebooks_dir are
+#  agent-controlled TOML values and get the same containment as the output
+#  ARG (MSP-R07); [tool.sofer] discovery is bounded at the server root.
+# ---------------------------------------------------------------------------
+
+
+class TestOutputTargetContainment:
+    def test_prepare_refuses_escaped_build_dir(self, tmp_path, restore_tool_config):
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        (root / "dataset.toml").write_text(
+            "[dataset]\nname='x'\nrepo_id='u/x'\nbuild_dir = '../../evil'\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+            encoding="utf-8",
+        )
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_prepare", {"config": str(root / "dataset.toml")}).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any(
+            "build_dir" in e and "outside the server root" in e for e in envelope["config_errors"]
+        )
+        assert not (tmp_path / "evil").exists(), "nothing may be written outside the root"
+
+    def test_prepare_refuses_absolute_build_dir_outside_root(self, tmp_path, restore_tool_config):
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        evil_abs = (tmp_path / "abs-evil").as_posix()
+        (root / "dataset.toml").write_text(
+            f"[dataset]\nname='x'\nrepo_id='u/x'\nbuild_dir = '{evil_abs}'\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+            encoding="utf-8",
+        )
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_prepare", {"config": str(root / "dataset.toml")}).data
+        assert envelope["ok"] is False
+        assert any(
+            "build_dir" in e and "outside the server root" in e for e in envelope["config_errors"]
+        )
+        assert not (tmp_path / "abs-evil").exists()
+
+    def test_prepare_relative_build_dir_inside_root_works(self, tmp_path, restore_tool_config):
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        (root / "dataset.toml").write_text(
+            "[dataset]\nname='x'\nrepo_id='u/x'\nbuild_dir = 'pkg'\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+            encoding="utf-8",
+        )
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_prepare", {"config": str(root / "dataset.toml")}).data
+        assert envelope["ok"] is True, envelope
+        assert (root / "pkg" / "data.parquet").is_file()
+
+    def test_scan_apply_refuses_in_root_escaped_output_dir(self, tmp_path, restore_tool_config):
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            '[tool.sofer]\noutput_dir = "../../evil"\n', encoding="utf-8"
+        )
+        _make_dataset(root)
+        (root / "raw").mkdir()
+        (root / "raw" / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        before = (root / "dataset.toml").read_text(encoding="utf-8")
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_scan_apply", {"config": str(root / "dataset.toml")}).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any(
+            "output_dir" in e and "outside the server root" in e for e in envelope["config_errors"]
+        )
+        assert not (tmp_path / "evil").exists(), "refused scan must not write outside root"
+        assert (root / "dataset.toml").read_text(encoding="utf-8") == before
+
+    def test_scan_ignores_pyproject_above_root(self, tmp_path, restore_tool_config):
+        # A [tool.sofer] in a pyproject ABOVE the server root must not steer
+        # the scan — discovery is bounded at the root (fix 2b).
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\noutput_dir = "../../evil"\n', encoding="utf-8"
+        )
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        (root / "raw").mkdir()
+        (root / "raw" / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_scan_apply", {"config": str(root / "dataset.toml")}).data
+        assert envelope["ok"] is True, envelope
+        assert (root / "cache" / "new.csv").is_file(), "files must land under the default cache"
+        assert not (root / "evil-cache").exists()
+        assert not (tmp_path / "evil").exists(), "nothing may escape the root"
+        toml = (root / "dataset.toml").read_text(encoding="utf-8")
+        assert 'local = "cache/new.csv"' in toml
+        assert "evil" not in toml
+
+
+# ---------------------------------------------------------------------------
+#  Review fix 3 — MSP-R05 security ordering: the quality gate runs BEFORE the
+#  HF token check, so a failing config with no token fails deterministically
+#  (ok:False) instead of raising HFTokenError.
+# ---------------------------------------------------------------------------
+
+
+class TestQualityGateBeforeToken:
+    def test_failing_quality_no_token_returns_ok_false(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        _make_dataset(tmp_path)
+        # Duplicate rows + a fail-severity duplicates check → quality fails.
+        (tmp_path / "data.csv").write_text("col_a;col_b\n1;2\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "dataset.toml").write_text(
+            "[dataset]\nname='test-ds'\nrepo_id='user/test-ds'\n\n[meta]\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n\n"
+            "[[quality]]\ncheck='duplicates'\nseverity='fail'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        build_server(root=tmp_path)
+
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+
+
+# ---------------------------------------------------------------------------
+#  Review fix 4 — behavioral tests for the four untested callables:
+#  sofer_profile (MSP-R09), sofer_render, sofer_codebook_all (collision +
+#  [meta] delimiter injection), sofer_scan_dry_run.
+# ---------------------------------------------------------------------------
+
+
+class TestProfileBehavior:
+    def test_profile_surfaces_pii_findings(self, tmp_path, restore_tool_config):
+        (tmp_path / "people.csv").write_text(
+            "name;email\nAlice;a@b.com\nBob;c@d.com\n", encoding="utf-8-sig"
+        )
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile", {"dataset": "people.csv"}).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0
+        assert (tmp_path / "metadata.yaml").is_file(), "profile must write metadata.yaml"
+        assert any(
+            f["column"] == "email" and f["label"] == "email" for f in envelope["pii_findings"]
+        ), envelope["pii_findings"]
+
+
+class TestRenderBehavior:
+    def test_render_writes_readme_next_to_metadata(self, tmp_path, restore_tool_config):
+        (tmp_path / "people.csv").write_text(
+            "name;email\nAlice;a@b.com\nBob;c@d.com\n", encoding="utf-8-sig"
+        )
+        server = build_server(root=tmp_path)
+        profiled = _call(server, "sofer_profile", {"dataset": "people.csv"}).data
+        assert profiled["ok"] is True
+
+        envelope = _call(server, "sofer_render", {"package": str(tmp_path)}).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0
+        readme = tmp_path / "README.md"
+        assert readme.is_file(), "render must write README.md"
+        assert "Wrote" in envelope["output"]
+        assert "# " in readme.read_text(encoding="utf-8")
+
+
+class TestCodebookAllBehavior:
+    def test_codebook_all_writes_files_and_index(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0
+        assert len(envelope["files"]) >= 2, envelope["files"]
+        assert all(Path(f).is_file() for f in envelope["files"])
+        assert (tmp_path / "codebook.md").is_file(), "root index must be generated"
+
+    def test_codebook_all_collision_ok_false(self, tmp_path, restore_tool_config):
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        (root / "cache").mkdir()
+        (root / "cache" / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        (root / "dataset.toml").write_text(
+            "[dataset]\nname='x'\nrepo_id='u/x'\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n\n"
+            "[[file]]\nlocal='cache/data.csv'\nremote='cache/data.csv'\n",
+            encoding="utf-8",
+        )
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_codebook_all", {"config": str(root / "dataset.toml")}).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert "Collision" in envelope["output"]
+
+    def test_codebook_all_honors_meta_delimiter(self, tmp_path, restore_tool_config):
+        (tmp_path / "data.csv").write_text("name,age\nAlice,30\nBob,25\n", encoding="utf-8-sig")
+        (tmp_path / "dataset.toml").write_text(
+            "[dataset]\nname='x'\nrepo_id='u/x'\n\n[meta]\ncsv_delimiter = ','\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+            encoding="utf-8",
+        )
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        codebook = tmp_path / "cache" / "codebooks" / "data.md"
+        assert codebook.is_file(), f"missing {codebook}"
+        text = codebook.read_text(encoding="utf-8")
+        assert "| 1 | `name`" in text, text
+        assert "| 2 | `age`" in text, text
+
+
+class TestScanDryRunBehavior:
+    def test_scan_dry_run_counts_and_writes_nothing(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        (tmp_path / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["discovered"] == 2, envelope
+        assert envelope["registered"] == 1, envelope
+        assert not (tmp_path / "cache").exists(), "dry-run must not copy files"
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+#  Review fix 5 — MSP-R03 prepare overwrite refusal: a second sofer_prepare
+#  without force refuses; force=True regenerates.
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareOverwrite:
+    def test_second_prepare_without_force_refuses(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        first = _call(server, "sofer_prepare", {"config": str(tmp_path / "dataset.toml")}).data
+        assert first["ok"] is True, first
+
+        second = _call(server, "sofer_prepare", {"config": str(tmp_path / "dataset.toml")}).data
+        assert second["ok"] is False
+        assert second["exit_code"] == 1
+        assert "Refusing to overwrite" in second["output"]
+
+        third = _call(
+            server, "sofer_prepare", {"config": str(tmp_path / "dataset.toml"), "force": True}
+        ).data
+        assert third["ok"] is True, third
+
+
+# ---------------------------------------------------------------------------
+#  Review fix 6 — surfacing scenarios: confidential flag on validate (MSP-R09)
+#  and the tool-level [tool.sofer] delimiter injection (MSP-R10).
+# ---------------------------------------------------------------------------
+
+
+class TestSurfacingScenarios:
+    def test_validate_surfaces_confidential_true(self, tmp_path):
+        _make_dataset(tmp_path, confidential=True)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_validate", {"config": str(tmp_path / "dataset.toml")}).data
+        assert envelope["ok"] is True
+        assert envelope["confidential"] is True
+
+    def test_codebook_honors_tool_sofer_delimiter(self, tmp_path, restore_tool_config):
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\ncsv_delimiter = ","\n', encoding="utf-8"
+        )
+        (tmp_path / "data.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_codebook", {"path": "data.csv"}).data
+        assert envelope["ok"] is True, envelope
+        assert "| 1 | `name`" in envelope["output"], envelope["output"]
+        assert "| 2 | `age`" in envelope["output"], envelope["output"]
+
+
+# ---------------------------------------------------------------------------
+#  Review advisories — empty remote unsafe, absent HF_TOKEN, confirm refuses
+#  local targets, one-server-per-process docstring, concurrency under the
+#  execution lock.
+# ---------------------------------------------------------------------------
+
+
+class TestAdvisoryHardening:
+    def test_remote_empty_is_unsafe(self):
+        from sofer.mcp_server import _remote_is_unsafe
+
+        assert _remote_is_unsafe("")
+
+    def test_token_fully_absent_raises(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        build_server(root=tmp_path)
+
+        with pytest.raises(HFTokenError, match="HF_TOKEN"):
+            sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+
+    def test_confirm_refuses_local_target(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        build_server(root=tmp_path)
+
+        with pytest.raises(PublishRefusedError, match="sofer_publish"):
+            sofer_publish_confirm(
+                str(tmp_path / "dataset.toml"), target="local", acknowledge_risk=True
+            )
+
+    def test_confirm_refuses_unknown_target(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        build_server(root=tmp_path)
+
+        with pytest.raises(PublishRefusedError, match="sofer_publish"):
+            sofer_publish_confirm(
+                str(tmp_path / "dataset.toml"), target="aws", acknowledge_risk=True
+            )
+
+    def test_build_server_docstring_warns_one_server_per_process(self):
+        import inspect
+
+        doc = inspect.getdoc(build_server) or ""
+        assert "One-server-per-process" in doc
+
+    def test_concurrent_calls_serialized(self, tmp_path):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                results = await asyncio.gather(
+                    client.call_tool("sofer_validate", {"config": str(tmp_path / "dataset.toml")}),
+                    client.call_tool("sofer_validate", {"config": str(tmp_path / "dataset.toml")}),
+                )
+                return [r.data for r in results]
+
+        envelopes = _run(_go())
+        assert len(envelopes) == 2
+        for envelope in envelopes:
+            assert envelope["ok"] is True
+            assert envelope["exit_code"] == 0
+            assert "config_errors" in envelope
+
+    def test_every_tool_acquires_execution_lock(self):
+        import inspect
+
+        callables = [
+            sofer_validate,
+            sofer_prepare,
+            sofer_publish,
+            sofer_publish_confirm,
+            sofer_codebook,
+            sofer_codebook_all,
+            sofer_profile,
+            sofer_render,
+            sofer_scan_dry_run,
+            sofer_scan_apply,
+        ]
+        for fn in callables:
+            src = inspect.getsource(fn)
+            assert "_tool_execution()" in src, f"{fn.__name__} does not acquire the exec lock"
+            assert "_capture_output()" in src, f"{fn.__name__} does not capture stdout"
