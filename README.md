@@ -407,6 +407,11 @@ The server exposes 10 tool callables (`sofer_validate`, `sofer_prepare`,
 `assess_dataset`, `finalize_and_publish`). No remote/streamable-http
 transport is exposed in v1.
 
+Resource URIs are resolved **relative to the server root** — e.g.
+`sofer://dataset/dataset.toml` reads `<root>/dataset.toml`. Absolute POSIX
+paths are also accepted (rest-pattern templates): `sofer://dataset//tmp/...`
+arrives with a leading `/` and must still resolve inside the root.
+
 ### Agent setup (example: Claude Code)
 
 ```bash

@@ -667,9 +667,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                contents = await client.read_resource(
-                    f"sofer://dataset/{tmp_path / 'dataset.toml'}"
-                )
+                contents = await client.read_resource("sofer://dataset/dataset.toml")
                 return contents[0].text
 
         text = _run(_go())
@@ -682,7 +680,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                contents = await client.read_resource(f"sofer://codebook/{tmp_path / 'data.csv'}")
+                contents = await client.read_resource("sofer://codebook/data.csv")
                 return contents[0].text
 
         text = _run(_go())
@@ -697,9 +695,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                contents = await client.read_resource(
-                    f"sofer://metadata/{tmp_path / 'metadata.yaml'}"
-                )
+                contents = await client.read_resource("sofer://metadata/metadata.yaml")
                 return contents[0].text
 
         assert "metadata_version" in _run(_go())
@@ -744,7 +740,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                await client.read_resource(f"sofer://dataset/{tmp_path / 'notes.txt'}")
+                await client.read_resource("sofer://dataset/notes.txt")
 
         from mcp import McpError
 
@@ -758,11 +754,67 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
-                await client.read_resource(f"sofer://dataset/{tmp_path / 'dataset.toml'}")
+                await client.read_resource("sofer://dataset/dataset.toml")
 
         from mcp import McpError
 
         with pytest.raises(McpError, match="resource size limit"):
+            _run(_go())
+
+    def test_absolute_posix_uri_resolves_inside_root(self, tmp_path):
+        """CI regression: absolute POSIX-style resource URIs must resolve.
+
+        On Linux CI, ``f"sofer://dataset/{tmp_path / 'dataset.toml'}"`` renders
+        as ``sofer://dataset//tmp/pytest-of-runner/.../dataset.toml`` — an
+        absolute path whose leading ``/`` (and inner separators) the old
+        single-segment ``{param}`` template could not match, failing with
+        "Unknown resource". The rest-pattern template must accept it and
+        ``_contained_path`` must accept the absolute path because it resolves
+        inside the root.
+
+        The URI string is built manually with ``/`` separators (never via a
+        ``Path`` in an f-string, which emits backslashes on win32), so the
+        same shape is exercised on every OS: POSIX renders the CI-exact
+        double-slash form, win32 renders the drive-absolute form.
+        """
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+        posix_root = str(tmp_path.resolve()).replace("\\", "/")
+        uri = f"sofer://dataset/{posix_root}/dataset.toml"
+
+        async def _go():
+            async with Client(server) as client:
+                contents = await client.read_resource(uri)
+                return contents[0].text
+
+        text = _run(_go())
+        assert "[dataset]" in text
+        assert 'name = "test-ds"' in text
+
+    def test_absolute_posix_uri_outside_root_rejected(self, tmp_path):
+        """CI regression: absolute POSIX URIs outside the root stay refused.
+
+        Same manual-``/`` construction as the resolving case, but the path
+        points outside the root — the rest-pattern template must still route
+        it into ``_contained_path``, which rejects it.
+        """
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.toml").write_text("[dataset]\n", encoding="utf-8")
+        server = build_server(root=root)
+        posix_outside = str(outside.resolve()).replace("\\", "/")
+        uri = f"sofer://dataset/{posix_outside}/evil.toml"
+
+        async def _go():
+            async with Client(server) as client:
+                await client.read_resource(uri)
+
+        from mcp import McpError
+
+        with pytest.raises(McpError, match="outside the server root"):
             _run(_go())
 
 

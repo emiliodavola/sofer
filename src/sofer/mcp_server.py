@@ -1201,10 +1201,22 @@ def _resource_metadata(data_file: str) -> str:
 
 
 def _register_resources(server: _FastMCP) -> None:
-    """Register the 3 resource templates on *server* (MSP-R07)."""
-    server.resource("sofer://dataset/{config_path}")(_resource_dataset)
-    server.resource("sofer://codebook/{data_file}")(_resource_codebook)
-    server.resource("sofer://metadata/{data_file}")(_resource_metadata)
+    """Register the 3 resource templates on *server* (MSP-R07).
+
+    Templates use fastmcp's rest-pattern syntax (``{name*}``, RFC 6570
+    wildcard → ``(?P<name>.+)``) so a URI path containing ``/`` matches:
+    absolute POSIX paths arrive with a leading ``/`` and inner separators
+    (e.g. ``sofer://dataset//tmp/root/dataset.toml``), and a plain
+    ``{name}`` single-segment placeholder would reject them as "Unknown
+    resource" — the CI failure fixed here. The captured parameter is passed
+    verbatim to the handler; ``_contained_path`` already resolves both
+    relative-to-root and absolute-inside-root paths and rejects anything
+    outside the root, so no leading-slash stripping is needed (lstripping
+    would corrupt the absolute-inside-root case, whose parent *is* the root).
+    """
+    server.resource("sofer://dataset/{config_path*}")(_resource_dataset)
+    server.resource("sofer://codebook/{data_file*}")(_resource_codebook)
+    server.resource("sofer://metadata/{data_file*}")(_resource_metadata)
 
 
 # ---------------------------------------------------------------------------
