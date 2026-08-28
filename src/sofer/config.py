@@ -75,6 +75,10 @@ _DEFAULTS: dict[str, Any] = {
     "detect_threshold": 0.5,
     "profile_max_sample": 100_000,
     "confidence_round_digits": 4,
+    # Size guard for MCP agent resource reads (sofer://dataset, sofer://codebook,
+    # sofer://metadata): resources larger than this are refused with a clear
+    # error naming the limit instead of being slurped into an LLM context.
+    "agent_resource_max_bytes": 50_000_000,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -279,3 +283,6 @@ MIN_THRESHOLD: float = _DEFAULTS["min_threshold"]
 DETECT_THRESHOLD: float = _DEFAULTS["detect_threshold"]
 PROFILE_MAX_SAMPLE: int = _DEFAULTS["profile_max_sample"]
 CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]
+
+# MCP agent resource size guard (see ``_DEFAULTS["agent_resource_max_bytes"]``).
+AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]

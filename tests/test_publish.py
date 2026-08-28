@@ -903,6 +903,43 @@ class TestBatchStaging:
             f"--force must stage the data file, found: {list(staging_root.rglob('*'))}"
         )
 
+    def test_protected_out_surfaces_skipped_remotes(self, tmp_path, monkeypatch):
+        """PUB-05 adv8: publish(protected_out=...) is filled with the protected set."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: ["data.parquet"])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        protected: set[str] = set()
+        rc = publish(cfg, target="hf", protected_out=protected)
+        assert rc == 0
+        assert "data.parquet" in protected, f"protected_out must carry the skip, got {protected}"
+
+    def test_protected_out_empty_when_force(self, tmp_path, monkeypatch):
+        """--force skips overwrite protection, so protected_out stays empty."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: ["data.parquet"])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        _fixed_staging(tmp_path, monkeypatch)
+
+        protected: set[str] = set()
+        rc = publish(cfg, target="hf", force=True, protected_out=protected)
+        assert rc == 0
+        assert protected == set()
+
 
 class TestCopyPackageProtection:
     """_copy_package honors the protected set for data remotes (PUB-05)."""

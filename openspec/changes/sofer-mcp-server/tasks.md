@@ -1,0 +1,22 @@
+# Tasks: sofer-mcp-server
+
+**status**: ready-for-apply. 9 phases, 40 tasks, standard TDD (strict_tdd=false), single PR to dev, NO chaining, user opens PR manually (apply must NOT open PR).
+
+## Review Workload Forecast
+Estimated changed lines ~2000-2600; 400-line budget risk High vs default BUT custom budget 2000 accepted (size-exception); Chained PRs recommended NO; Delivery single-pr. If apply diff exceeds ~2600, surface to user.
+
+## Phase plan (work-unit commits)
+1. Domain seams (+tests): [x] 1.1 codebook generate_all(cfg, output_dir, delimiter=None, encoding=None) None→cfg.csv_delimiter/csv_encoding (D2/MSP-R10); [x] 1.2 _read_csv wrap next(reader) StopIteration → ([],[],None) (adv5); [x] 1.3 _build_markdown "**No data rows found** — the file is empty or headerless." placeholder; [x] 1.4 publish(protected_out: set[str]|None=None) fill at :653 (adv8); [x] 1.5 config _DEFAULTS agent_resource_max_bytes=50_000_000 (adv11).
+2. mcp_server.py core: 2.1 module docstring + lazy-import guard ImportError → pip install 'sofer[mcp]' (MSP-R02); 2.2 typed exceptions MCPToolError/PublishRefusedError/PathOutsideRootError (CF); 2.3 _EXEC_LOCK + _tool_execution() (adv1/MSP-R04); 2.4 _capture_output finally restore (MSP-R04); 2.5 _contained_path expanduser→abs→resolve→is_relative_to(root)→ext allow-list→existence (CF-2); 2.6 _validate_file_entries re-resolve local→is_relative_to; remote POSIX+drive/UNC prefix+.. reject (CF-2, PINNED algorithm); 2.7 _load_dataset → (cfg, report) + config_errors + _result (MSP-R03/R04); 2.8 _require_hf_token empty=missing + HF_HUB_TOKEN alias (adv7).
+3. 10 tools (each docstring side-effects/network + untrusted note): 3.1 validate read-only full envelope + config_errors; 3.2 prepare run_checks=not no_checks + verify-skip note; 3.3 publish dry_run=True never writes HF, hf+dry_run=False raises naming confirm; 3.4 publish_confirm auth ladder (acknowledge_risk/acknowledge_confidential/approval_phrase hmac.compare_digest, quality-before-token, protected_out→skipped_protected+partial); 3.5 codebook config.reload(path.parent) + inject CSV_DELIMITER/ENCODING; 3.6 codebook_all cfg.csv_delimiter/csv_encoding; 3.7 profile anchor dataset.parent + PII; 3.8 render anchor package; 3.9 scan_dry_run config.reload(config.parent) before OUTPUT_DIR; 3.10 scan_apply non-interactive chain never input().
+4. Resources+prompts: 4.1 dataset URI .toml contained; 4.2 codebook URI data ext + size guard; 4.3 metadata URI .yaml/.yml missing→clear error; 4.4 size guard agent_resource_max_bytes; 4.5 3 prompts prepare_dataset/assess_dataset/finalize_and_publish confirm-before-publish + untrusted note.
+5. build_server/main: 5.1 build_server(root=None, approval_phrase=None) root=(root or cwd()).resolve() phrase from SOFER_MCP_APPROVAL_PHRASE; 5.2 main() stdio FastMCP registers all no remote transport; 5.3 lazy-import guard verify.
+6. Packaging: 6.1 pyproject mcp extra ["fastmcp>=3.4,<4"] + sofer-mcp script + dev group += fastmcp + [tool.sofer] agent_resource_max_bytes.
+7. Tests tests/test_mcp_server.py: 7.1 import-without-extra sys.modules monkeypatch; 7.2 in-memory client 10 callables schemas + validate round-trip; 7.3 no-silent-default schema error path/config in required; 7.4 stdio smoke spawn sofer-mcp clean framing; 7.5 stream-restored raising path; 7.6 network offline monkeypatch publish._api + upload-failure ok:False + empty-token + HF_HUB_TOKEN alias; 7.7 security auth refusals + containment vectors config="../evil.toml" local="C:/..." local="<root>/../x" symlink→outside (skip/junction win32) remote="../x" remote="C:/evil" remote="C:evil" output-outside-root; 7.8 determinism validate A then scan_apply B → cache-b; 7.9 resources metadata-missing size-guard containment; 7.10 prompts/get with args + 3 prompts; 7.11 empty/headerless marker; 7.12 verify=True skip note + protected_out.
+8. Docs: 8.1 README AI/MCP section (install sofer[mcp], launch, claude mcp add sofer -- uv run sofer-mcp, root/approval-phrase guidance).
+9. Verification: 9.1 pytest full green (803+new); 9.2 ruff + mypy clean.
+
+## Risks
+400-line budget High vs default but custom 2000 accepted; win32 symlink test may need elevation (junction/skip, must not stall); generate_all delimiter default change deliberate rule-3 fix (flag old ";" tests); _EXEC_LOCK load-bearing for stdout swap + config rebind (fastmcp threadpool) — do not drop.
+
+## Next: apply (single batch, work-unit commits). USER opens PR manually — apply must NOT open PR.
