@@ -33,8 +33,12 @@ Homepage = "https://github.com/emiliodavola/sofer"
 Repository = "https://github.com/emiliodavola/sofer"
 Issues = "https://github.com/emiliodavola/sofer/issues"
 
+[project.optional-dependencies]
+mcp = ["fastmcp>=3.4,<4"]
+
 [project.scripts]
 sofer = "sofer.cli:main"
+sofer-mcp = "sofer.mcp_server:main"
 
 [dependency-groups]
 dev = [
