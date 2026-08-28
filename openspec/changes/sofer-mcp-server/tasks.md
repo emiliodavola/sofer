@@ -13,7 +13,7 @@ Estimated changed lines ~2000-2600; 400-line budget risk High vs default BUT cus
 5. build_server/main: [x] 5.1 build_server(root=None, approval_phrase=None) root=(root or cwd()).resolve() phrase from SOFER_MCP_APPROVAL_PHRASE; [x] 5.2 main() stdio FastMCP registers all no remote transport; [x] 5.3 lazy-import guard verify.
 6. Packaging: [x] 6.1 pyproject mcp extra ["fastmcp>=3.4,<4"] + sofer-mcp script + dev group += fastmcp + [tool.sofer] agent_resource_max_bytes.
 7. Tests tests/test_mcp_server.py: [x] 7.1 import-without-extra sys.modules monkeypatch; [x] 7.2 in-memory client 10 callables schemas + validate round-trip; [x] 7.3 no-silent-default schema error path/config in required; [x] 7.4 stdio smoke spawn sofer-mcp clean framing; [x] 7.5 stream-restored raising path; [x] 7.6 network offline monkeypatch publish._api + upload-failure ok:False + empty-token + HF_HUB_TOKEN alias; [x] 7.7 security auth refusals + containment vectors config="../evil.toml" local="C:/..." local="<root>/../x" symlink→outside (skip/junction win32) remote="../x" remote="C:/evil" remote="C:evil" output-outside-root; [x] 7.8 determinism validate A then scan_apply B → cache-b; [x] 7.9 resources metadata-missing size-guard containment; [x] 7.10 prompts/get with args + 3 prompts; [x] 7.11 empty/headerless marker; [x] 7.12 verify=True skip note + protected_out.
-8. Docs: 8.1 README AI/MCP section (install sofer[mcp], launch, claude mcp add sofer -- uv run sofer-mcp, root/approval-phrase guidance).
+8. Docs: [x] 8.1 README AI/MCP section (install sofer[mcp], launch, claude mcp add sofer -- uv run sofer-mcp, root/approval-phrase guidance).
 9. Verification: 9.1 pytest full green (803+new); 9.2 ruff + mypy clean.
 
 ## Risks
