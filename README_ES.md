@@ -261,20 +261,20 @@ canalización.
 | `publish <config.toml>` | Entrega el paquete preparado: `--target hf` (por defecto) garantiza el repositorio HF, aplica el control del informe de calidad y sube el paquete en una sola llamada `upload_folder`; `--target local` copia el paquete a `--output` sin red. Prepara automáticamente cuando los artefactos faltan o están desactualizados. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verifica la configuración, la integridad de los datos y los controles de calidad. Nunca contacta con HF. |
 | `--help` | Ayuda detallada para cualquier comando. |
-| `sofer-mcp` | Launch the MCP server over stdio (10 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
+| `sofer-mcp` | Lanza el servidor MCP por stdio (10 herramientas, 3 recursos, 3 prompts). Requiere el extra mcp — ver AI and MCP server. |
 
 > `sofer upload` se eliminó en favor de `prepare` + `publish` — la mitad de
 > generación (sin conexión, inspeccionable) y la mitad de entrega (red).
 
 ### Flags at a glance
 
-| Flag | Commands | What it does |
+| Flag | Comandos | Qué hace |
 |---|---|---|
-| `--keep-csv` | `publish` (HF target only) | Also upload the original CSV alongside the converted Parquet; no effect with `--target local`. |
-| `--no-checks` | `prepare` | Skip the structural and quality validators — generate the package without running checks. |
-| `--force` | `prepare`, `publish`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
-| `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
-| `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). |
+| `--keep-csv` | `publish` (solo target HF) | También sube el CSV original junto al Parquet convertido; sin efecto con `--target local`. |
+| `--no-checks` | `prepare` | Omite los validadores estructurales y de calidad — genera el paquete sin ejecutar los controles. |
+| `--force` | `prepare`, `publish`, `scan` | Sobrescribe artefactos o archivos de destino existentes y omite la confirmación interactiva. |
+| `--dry-run` | `publish`, `scan` | Previsualiza la ejecución sin efectos secundarios — sin llamadas de red, sin copias de archivos, sin escrituras en el TOML. |
+| `--output DIR` | `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`). |
 
 ## Data format support
 
@@ -429,8 +429,7 @@ y el único acceso a la red es la subida a Hugging Face dentro de
 La instalación base se mantiene ligera — `fastmcp` es un extra opcional:
 
 ```bash
-pip install 'sofer[mcp]'
-# or, from the release tag:
+# install the mcp extra from the release tag:
 pip install 'git+https://github.com/emiliodavola/sofer.git@vX.Y.Z[mcp]'
 ```
 
