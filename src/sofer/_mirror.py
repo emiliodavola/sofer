@@ -7,8 +7,10 @@ under a single root.  ``prepare`` writes this layout into its output
 directory; ``publish`` copies the planned artifacts out of it.
 
 This module is the single home for remote-path validation, planned-remote
-derivation, and dir-aware mirror copies — including the ``recursive=true``
-staging fix (RC-R04, where ``shutil.copy2`` on a directory raised
+derivation (logical :func:`planned_remotes` and ground-truth
+:func:`expanded_planned_remotes` for multi-sheet XLSX, PUB-10), and
+dir-aware mirror copies — including the ``recursive=true`` staging fix
+(RC-R04, where ``shutil.copy2`` on a directory raised
 PermissionError/IsADirectoryError).
 """
 
@@ -125,29 +127,21 @@ def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
 
 
 def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
-    """Return the remote paths a publish would deliver for *cfg*.
+    """Return the *logical* remote paths a publish would deliver for *cfg*.
 
-    Universal: every convertible entry (``.csv/.tsv/.xlsx/.jsonl``) that is not
-    ``recursive`` and has ``convert_to_parquet`` (with ``upload_as_csv`` alias
-    for csv) maps to its **normalised** ``.parquet`` remote; XLSX with N sheets
-    would ideally expand to N remotes — but sheet names are not known without
-    opening the file, so we emit the single normalised stem remote here and let
-    ``prepare`` record the actual N files via the conversion dispatcher.  For
-    the diff/copy contract the single remote is sufficient; multi-sheet
-    expansion is handled in the staging step (publish copies whatever Parquets
-    exist in the mirror layout under the normalized prefix).
+    Logical placeholder: every convertible entry (``.csv/.tsv/.xlsx/.jsonl``)
+    that is not ``recursive`` and has ``convert_to_parquet`` maps to its
+    **normalised** ``.parquet`` remote.  For ``.xlsx`` this is the single
+    stem placeholder (``stem.parquet``) — sheet names are not known without
+    opening the workbook, so the ground-truth N remotes (``stem__sheet.parquet``)
+    are resolved only by :func:`expanded_planned_remotes` when the staging
+    mirror is available.  The single placeholder keeps dry-run before prepare
+    useful and avoids workbook I/O at plan time.
 
-    When ``convert_to_parquet`` is False (or deprecated ``upload_as_csv`` for
-    csv) the original remote is kept.  For XLSX the normalised stem remote is
-    expanded to N ``stem__sheet.parquet`` entries only when the caller knows
-    the sheet count — otherwise the single normalised remote is returned and
-    publish's ``_copy_package`` stages all matching files.
-
-    To keep the delegation invariant (PUB-09) without opening workbooks at
-    planning time, we emit the **normalised** ``parquet_remote_for`` for every
-    convertible entry; XLSX N-expansion is achieved by ``prepare`` staging N
-    files and by ``publish._copy_package`` globbing the mirror layout for
-    ``stem__*.parquet`` when the entry suffix is ``.xlsx``.
+    To obtain the ground truth when the mirror exists, call
+    :func:`expanded_planned_remotes` instead — it globs
+    ``staging_dir/<dir>/<stem>__*.parquet`` for eligible ``.xlsx`` and falls
+    back to this logical list when the mirror is absent (PUB-10).
 
     Args:
         cfg: Dataset configuration.
@@ -181,6 +175,97 @@ def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
         else:
             planned.append(entry.remote)
     return planned
+
+
+def expanded_planned_remotes(
+    cfg: DatasetConfig, keep_csv: bool, staging_dir: Path | None
+) -> list[str]:
+    """Return the ground-truth remotes for *cfg*, expanding multi-sheet XLSX via mirror glob.
+
+    For convertible ``.xlsx`` entries that are not ``recursive`` and have
+    ``convert_to_parquet`` true, the helper inspects the staging mirror
+    instead of opening workbooks (PUB-10):
+
+    - When *staging_dir* is ``None`` or not a directory, it delegates to
+      :func:`planned_remotes` (logical single placeholder).
+    - When the mirror exists, it globs ``staging_dir/<dir>/<stem>__*.parquet``
+      (sorted) where ``<dir>/<stem>`` is the normalized placeholder
+      (``normalize_parquet_remote(parquet_remote_for(remote))``).  If the glob
+      matches, each match is emitted as its mirror-relative POSIX path
+      (already normalized on disk); otherwise the single normalized placeholder
+      is emitted (single-sheet, no phantom ``__``).
+    - All other entries follow :func:`planned_remotes` exactly, including the
+      ``keep_csv`` CSV-only rule and the ``recursive`` passthrough.
+
+    The glob is sorted so declaration order plus per-XLSX alphabetical sheet
+    order is deterministic.  No workbook I/O is performed — dedup and
+    normalization are already reflected in the staged filenames.  The helper
+    reuses :func:`sofer._converters.normalize_parquet_remote` for the fallback
+    placeholder and :func:`sofer._converters.sanitize_sheet_name` rationale
+    (sheet names are already sanitized on disk).
+
+    Args:
+        cfg: Dataset configuration whose ``files`` are examined.
+        keep_csv: When ``True`` and a CSV was converted, also include the
+            original CSV remote (CSV-only, never for XLSX).
+        staging_dir: Mirror layout root (e.g. ``prepare`` output directory).
+            ``None`` or not a directory triggers the logical fallback.
+
+    Returns:
+        List of remote paths, in ``cfg.files`` declaration order, with each
+        eligible XLSX expanded to N ``__`` remotes when the mirror contains
+        them.
+    """
+    if staging_dir is None or not Path(staging_dir).is_dir():
+        return planned_remotes(cfg, keep_csv)
+
+    from ._converters import CONVERTIBLE_SUFFIXES, normalize_parquet_remote
+
+    expanded: list[str] = []
+    for entry in cfg.files:
+        if entry.recursive:
+            expanded.append(entry.remote.rstrip("/\\"))
+            continue
+        suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+        is_convertible = suffix in CONVERTIBLE_SUFFIXES
+        eligible = is_convertible and bool(entry.convert_to_parquet)
+        if eligible and suffix == ".xlsx":
+            placeholder = normalize_parquet_remote(parquet_remote_for(entry.remote))
+            parent = PurePosixPath(placeholder).parent
+            stem = PurePosixPath(placeholder).stem
+            search_dir = Path(staging_dir) / parent if str(parent) != "." else Path(staging_dir)
+            candidates: list[Path] = []
+            if search_dir.is_dir():
+                # Primary: double-underscore sheet files (spec)
+                candidates = sorted(search_dir.glob(f"{stem}__*.parquet"))
+                candidates = [c for c in candidates if c.is_file()]
+                # Fallback for current single-underscore staging (backward compat)
+                # when prepare stored sheets as report_ventas.parquet (collapsed).
+                if not candidates:
+                    alt = sorted(search_dir.glob(f"{stem}_*.parquet"))
+                    # Filter to keep only those that look like sheet files
+                    # (exclude the placeholder itself).  For single-underscore
+                    # layout, sheet files are report_ventas.parquet vs
+                    # placeholder report.parquet — they differ by suffix.
+                    alt = [c for c in alt if c.is_file() and c.stem != stem]
+                    if alt:
+                        candidates = alt
+            if candidates:
+                for cand in candidates:
+                    rel = cand.relative_to(Path(staging_dir)).as_posix()
+                    expanded.append(rel)
+                continue
+            # No sheets found — single-sheet fallback
+            expanded.append(placeholder)
+            continue
+        if eligible:
+            normalized = normalize_parquet_remote(parquet_remote_for(entry.remote))
+            expanded.append(normalized)
+            if keep_csv and suffix == ".csv":
+                expanded.append(entry.remote)
+        else:
+            expanded.append(entry.remote)
+    return expanded
 
 
 def copy_to_mirror(src: Path, dest_root: Path, remote: str) -> None:

@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from . import config
-from ._mirror import parquet_remote_for, planned_remotes
+from ._mirror import expanded_planned_remotes, parquet_remote_for, planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
@@ -934,11 +934,17 @@ def build_dataset_card(
     duplicate_rows: dict[str, int] | None = None,
     row_counts: dict[str, int] | None = None,
     keep_csv: bool = False,
+    staging_dir: Path | None = None,
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
     Follows the official Hugging Face Dataset Card template:
     https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/templates/datasetcard_template.md
+
+    Dataset Structure and ``configs.data_files`` are derived via
+    :func:`sofer._mirror.expanded_planned_remotes` when *staging_dir* exists
+    (ground truth, RC-Universal-Card), otherwise via the logical
+    :func:`planned_remotes` placeholder (fallback before prepare, PUB-10).
 
     Args:
         cfg:                   Dataset configuration.
@@ -960,6 +966,10 @@ def build_dataset_card(
         keep_csv:              Whether converted CSVs are also delivered at their
                                original remote (the publish ``--keep-csv`` flag).
                                Governs the Dataset Structure listing only.
+        staging_dir:           Mirror layout root for XLSX expansion.  ``None``
+                               or not a directory falls back to the logical
+                               placeholder; when it exists each eligible XLSX
+                               expands to N ``stem__sheet.parquet`` entries.
 
     Returns:
         Complete ``README.md`` content as a single string.
@@ -1010,9 +1020,11 @@ def build_dataset_card(
     # -- configs (always emit when files declared) --------------------------
     if cfg.files:
         config_name = cfg.config_names[0] if cfg.config_names else (cfg.pretty_name or cfg.name)
-        data_files: list[dict[str, object]] = []
-        for e in cfg.files:
-            data_files.append({"split": "train", "path": e.remote})
+        if staging_dir is not None and staging_dir.is_dir():
+            card_remotes = expanded_planned_remotes(cfg, keep_csv, staging_dir)
+        else:
+            card_remotes = planned_remotes(cfg, keep_csv)
+        data_files: list[dict[str, object]] = [{"split": "train", "path": r} for r in card_remotes]
         if not data_files:
             data_files.append({"split": "train", "path": "data/*"})
         frontmatter["configs"] = [
@@ -1153,7 +1165,11 @@ def build_dataset_card(
     if cfg.files:
         # Delivered repo-relative paths — same mapping the upload pipeline
         # uses (conversion, upload_as_csv, recursive, keep_csv), RC-R08.
-        delivered = planned_remotes(cfg, keep_csv)
+        # Expanded when the mirror exists (RC-Universal-Card).
+        if staging_dir is not None and staging_dir.is_dir():
+            delivered = expanded_planned_remotes(cfg, keep_csv, staging_dir)
+        else:
+            delivered = planned_remotes(cfg, keep_csv)
         file_list = "\n".join(f"  - `{remote}`" for remote in delivered)
         lines.append(f"This dataset contains **{len(delivered)} file(s)**:")
         lines.append("")
