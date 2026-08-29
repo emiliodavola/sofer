@@ -7,7 +7,9 @@
 and quality-assessed package — combining automatic inference with human
 knowledge, and publishable to Hugging Face Hub or any local directory.**
 
-<!-- BADGES (design D7, optional bonus): CI / license / Python badges go here — under the tagline, above the TOC; mirrored in README_ES.md (PR4). No badge URLs invented: replace with real links when adopted. -->
+[![CI](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/emiliodavola/sofer)](LICENSE)
+[![Python >=3.10](https://img.shields.io/badge/python-3.10%2B-3776AB)](pyproject.toml)
 
 ## Table of Contents
 
@@ -19,8 +21,12 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Directory layout](#directory-layout)
 - [Profiling and rendering](#profiling-and-rendering)
 - [Command reference](#command-reference)
+- [Flags at a glance](#flags-at-a-glance)
 - [Data format support](#data-format-support)
+- [Parquet conversion limitations](#parquet-conversion-limitations)
+- [Split detection](#split-detection)
 - [Validation and quality checks](#validation-and-quality-checks)
+- [Verify the built package (prepare --verify)](#verify-the-built-package-prepare---verify)
 - [Codebook generation](#codebook-generation)
 - [AI and MCP server](#ai-and-mcp-server)
 - [Configuration](#configuration)
@@ -241,19 +247,57 @@ detector class, no changes to the pipeline.
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
 | `--help` | Detailed help for any command. |
+| `sofer-mcp` | Launch the MCP server over stdio (10 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
 > generation half (offline, inspectable) and the delivery half (network).
 
+### Flags at a glance
+
+| Flag | Commands | What it does |
+|---|---|---|
+| `--keep-csv` | `publish` (HF target only) | Also upload the original CSV alongside the converted Parquet; no effect with `--target local`. |
+| `--no-checks` | `prepare` | Skip the structural and quality validators — generate the package without running checks. |
+| `--force` | `prepare`, `publish`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
+| `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
+| `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). |
+
 ## Data format support
 
-| Format | `scan` | `codebook` | `profile` |
-|---|---|---|---|
-| CSV (`.csv`) | ✅ | ✅ | ✅ |
-| TSV (`.tsv`) | ✅ | ✅ | ✅ |
-| Parquet (`.parquet`) | ✅ | ✅ | ✅ |
-| Excel (`.xlsx`) | ✅ | ✅ | ✅ |
-| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ |
+| Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
+|---|---|---|---|---|---|
+| CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
+| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+¹ `prepare` converts CSV files to Parquet (unless `upload_as_csv = true`); every other format is staged into the package as-is. `publish` delivers the prepared package unchanged.
+
+### Parquet conversion limitations
+
+`prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead):
+
+| CSV pattern | What can go wrong | Workaround |
+|---|---|---|
+| Comma as decimal separator (`3,14`) | pyarrow reads the comma as a field delimiter, not a decimal mark | Use a non-comma `csv_delimiter` in the TOML |
+| Mixed-type column, >50 % numeric-looking with some text | pyarrow may promote the whole column to `string` or fail | Clean the column or accept the `string` type |
+| Extremely long string fields (>2 GB) | `large_string` handles them, but the CSV parser can hit memory limits | Split the file or trim the field |
+
+## Split detection
+
+`prepare` groups files into `train` / `validation` / `test` splits automatically, following the Hugging Face repository conventions. Detection reads the remote paths declared in the TOML:
+
+- **Keywords.** `train` / `training`, `validation` / `valid` / `val` / `dev`, and `test` / `testing` / `eval` / `evaluation` are recognised split keywords.
+- **Delimiting rule.** A keyword counts only when it is delimited by non-word characters — `test-file.csv` is a test split, `testfile.csv` is not (`-`, `_`, `.`, and whitespace all delimit; a bare run of word characters does not).
+- **Sources, in cascade order** — the first source that yields at least one split wins:
+  1. Top-level directory name — `train/data.csv`, `test/data.csv`
+  2. Filename stem — `train.csv`, `my-train-data.csv`
+  3. Shard pattern — `train-00001-of-00005.parquet` (needs at least two distinct splits to count)
+- **Fallback.** When nothing matches, every file is assigned to a single `train` split.
+- **Exclusions.** `README.md`, `LICENSE`, `.gitattributes`, and `.gitignore` are never treated as data splits. Files that match a keyword group together into that split; anything else is reported as unclassified.
+
+The HF dataset viewer requires a `train` split to auto-load a repository — if detection leaves you without one, name a file or directory with `train` in it.
 
 ## Validation and quality checks
 
@@ -282,6 +326,23 @@ Every dataset is checked before publish:
 | Value range | Values outside min/max bounds |
 | Cross-file types | Dtype mismatches across configs |
 | Encoding validation | File encoding issues |
+
+### Verify the built package (prepare --verify)
+
+`prepare --verify` runs an end-to-end load check on the freshly built package:
+it calls `datasets.load_dataset()` on the output directory — the same call a
+user makes with `load_dataset("user/repo")` — and compares the splits it
+returns against the ones detected from the remote file paths. The result is
+printed after the prepare summary:
+
+- **SKIPPED** — the optional `datasets` package is not installed. Install it
+  with `pip install datasets` and re-run.
+- **PASSED** — `load_dataset()` succeeded and the detected splits match.
+- **FAILED** — `load_dataset()` raised, or the splits differ from what was
+  detected; the report lists the errors and warnings.
+
+Verification is informational and non-blocking: it never fails the `prepare`
+run. Check the report, fix the layout, and re-run.
 
 ## Codebook generation
 

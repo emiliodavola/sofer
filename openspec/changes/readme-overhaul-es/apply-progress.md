@@ -1,7 +1,7 @@
 # Apply Progress — readme-overhaul-es
 
-**Phase**: sdd-apply (PR1 + PR2 slices — bug fixes; restructure + extraction)
-**Dates**: 2026-08-28 (PR1), 2026-08-28 (PR2)
+**Phase**: sdd-apply (PR1 + PR2 + PR3 slices — bug fixes; restructure + extraction; feature docs)
+**Dates**: 2026-08-28 (PR1), 2026-08-28 (PR2), 2026-08-28 (PR3)
 **Branch**: `docs/readme-overhaul-es` (off `dev`)
 **Mode**: Standard (strict TDD disabled — `openspec/config.yaml` `apply.tdd: false`)
 
@@ -9,7 +9,8 @@
 
 PR1 of the 4-PR feature-branch chain: bug fixes in `README.md` only (tasks
 1.1–1.4). PR2 of the chain: restructure + extraction (tasks 2.1–2.7).
-PR3/PR4 tasks intentionally untouched.
+PR3 of the chain: feature documentation (tasks 3.1–3.7). PR4 tasks
+intentionally untouched.
 
 ## Completed tasks
 
@@ -49,7 +50,8 @@ PR3/PR4 tasks intentionally untouched.
   task 2.1's own verify gate ("every TOC anchor resolves") wins over the
   design's final-state TOC. **CARRY-FORWARD (PR3)**: add the 3 subsection
   bullets to the TOC in the same commit as their sections. All 15 PR2 TOC
-  anchors verified against the GitHub slug rule.
+  anchors verified against the GitHub slug rule. **RESOLVED in PR3** — all 3
+  subsection bullets landed in the same commits as their sections.
 - [x] **2.2** `README.md`: reorder to the pinned spine (Install → Quick start →
   Why → Typical workflow → TOML reference → Directory layout → Profiling and
   rendering → Command reference → Data format support → Split detection →
@@ -98,83 +100,150 @@ PR3/PR4 tasks intentionally untouched.
   from README (leftover check empty); `## Architecture summary` links to
   `CONTRIBUTING.md#architecture` and `CONTRIBUTING.md`.
 
+### Phase 3 (PR3) — feature documentation
+
+- [x] **3.1** `README.md` `## Command reference`: add `sofer-mcp` row
+  (carry-forward #1, exact text from design; `sofer upload` removal note
+  kept). Verify: row matches design verbatim. **Done** — row added verbatim
+  (README L250). Formatted as a separate console-script entry point
+  (`pyproject.toml` `[project.scripts] sofer-mcp = "sofer.mcp_server:main"`),
+  no `<args>`; `upload`-removal note kept.
+- [x] **3.2** `README.md`: add `### Flags at a glance` glossary
+  (carry-forward #2 — `--keep-csv`, `--no-checks`, `--force`, `--dry-run`,
+  `--output` with per-command semantics). Verify: semantics match `cli.py`.
+  **Done** — all 5 rows verified against cli.py: `--keep-csv` publish / HF
+  target only (no effect with `--target local`, PUB-07); `--no-checks`
+  prepare (`run_checks=not args.no_checks`); `--force` prepare/publish/scan
+  (overwrite existing artifacts/destination files + skip the confirmation
+  prompt); `--dry-run` publish/scan (no network, no copies, no TOML writes);
+  `--output DIR` prepare/publish/profile/render. Command list follows the
+  design's carry-forward text verbatim (`codebook` also accepts `--output`,
+  kept out of the glossary per design — noted, not a deviation).
+- [x] **3.3** `README.md` `## Data format support`: add prepare/publish
+  columns to the format table. Verify: columns match `_formats.py`. **Done** —
+  format rows unchanged (CSV/TSV/Parquet/Excel/JSONL = `SUPPORTED_FORMATS`
+  keys exactly); `prepare`/`publish` columns + footnote added — CSV is
+  converted to Parquet during prepare (unless `upload_as_csv = true`), every
+  other format is staged as-is, publish delivers the package unchanged
+  (verified against the prepare.py conversion loop, L660-711).
+- [x] **3.4** `README.md`: add `### Parquet conversion limitations` (spec
+  parquet-conversion §7.2 content). Verify: §7.2 limitations documented.
+  **Done** — the three §7.2 gaps (comma-as-decimal, mixed-type >50 %, >2 GB
+  strings) in a pattern/workaround table. Fallback wording modernized to the
+  current prepare flow (warning + stage the original CSV as-is in the
+  package), replacing the old uploader-era "upload as CSV" phrasing.
+- [x] **3.5** `README.md`: add `## Split detection` (keyword delimiting rule,
+  filename/directory/shard sources, precedence). Verify: matches `splits.py`.
+  **Done** — keywords (train/training, validation/valid/val/dev,
+  test/testing/eval/evaluation), delimiting rule (`test-file.csv` ✅ /
+  `testfile.csv` ❌, `-`/`_`/`.`/whitespace delimit), cascade directory →
+  filename → shard (`-NNNNN-of-NNNNN`, needs ≥2 distinct splits) → single-train
+  fallback, exclusions (README.md/LICENSE/.gitattributes/.gitignore), and the
+  HF-viewer `train`-split note — all from splits.py.
+- [x] **3.6** `README.md` under `Validation and quality checks`: add
+  `### Verify the built package (prepare --verify)` (SKIPPED/PASSED/FAILED,
+  `pip install datasets` opt-in). Verify: matches `verification.py`/`cli.py`.
+  **Done** — end-to-end `datasets.load_dataset()` on the build directory (the
+  same call a user makes with `load_dataset("user/repo")`); **SKIPPED** when
+  the optional `datasets` package is not installed (install hint `pip install
+  datasets`); **PASSED**/**FAILED** with split comparison; informational and
+  non-blocking (prepare.py step 10, PRP-08).
+- [x] **3.7** Optional bonus (badges under tagline above TOC, live HF dataset
+  link, rendered codebook example): adopt or defer. Verify: if adopted,
+  placement per design D7 and mirrored in ES (PR4). **Done — badges ADOPTED**
+  at the D7 position (under tagline, above TOC), replacing the PR2
+  placeholder: CI (`https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg`
+  — `.github/workflows/ci.yml` verified to exist), License (LICENSE file +
+  `license = "MIT"` → shields GitHub-license badge), Python (`requires-python
+  = ">=3.10"` → static shields badge; no PyPI dynamic badge because sofer is
+  not published). Live-HF-dataset-link + rendered-codebook-example bonuses
+  **DEFERRED** (not determinable without inventing). **PR4 MUST mirror the
+  badge block verbatim into README_ES.md.**
+
 ## Files changed
 
 | File | Action | What Was Done |
 |------|--------|---------------|
-| `README.md` | Modified (PR1 + PR2) | PR1: 4+/11- bug fixes. PR2: TOC, Quick start, reorder to pinned spine, 4 heading renames, badges placeholder, deep `[tool.sofer]` ref removed, `## Configuration` + `## Architecture summary` added. |
+| `README.md` | Modified (PR1 + PR2 + PR3) | PR1: 4+/11- bug fixes. PR2: TOC, Quick start, reorder to pinned spine, 4 heading renames, badges placeholder, deep `[tool.sofer]` ref removed, `## Configuration` + `## Architecture summary` added. PR3: `sofer-mcp` row, `### Flags at a glance`, prepare/publish format columns, `### Parquet conversion limitations`, `## Split detection`, `### Verify the built package (prepare --verify)`, 4 TOC bullets, real CI/license/Python badges. |
 | `docs/configuration.md` | Created (PR2) | `[tool.sofer]` deep reference, moved verbatim (80 lines verified), 4 pinned headings + H1, deduped canonical copies. |
 | `CONTRIBUTING.md` | Modified (PR2) | + Development setup, Development commands, Architecture (tree verbatim + 2-line orientation); Getting-started step 3 → pointer to Development setup; existing content preserved. |
-| `openspec/changes/readme-overhaul-es/tasks.md` | Modified | Tasks 1.1–1.4 (PR1) and 2.1–2.7 (PR2) marked `[x]`. |
-| `openspec/changes/readme-overhaul-es/apply-progress.md` | Modified | This artifact (merged PR1 + PR2). |
+| `openspec/changes/readme-overhaul-es/tasks.md` | Modified | Tasks 1.1–1.4 (PR1), 2.1–2.7 (PR2), 3.1–3.7 (PR3) marked `[x]`. |
+| `openspec/changes/readme-overhaul-es/apply-progress.md` | Modified | This artifact (merged PR1 + PR2 + PR3). |
 
 ## Deviations from design
 
-1. **TOC subsection bullets deferred to PR3.** Design's final-state TOC lists
-   `### Flags at a glance`, `### Parquet conversion limitations`, `### Verify
-   the built package (prepare --verify)`; those sections are PR3 tasks and
-   their anchors cannot resolve in PR2. PR2 TOC carries top-level bullets
-   only — task 2.1's "every TOC anchor resolves" gate satisfied (verified
-   programmatically). PR3 MUST add the 3 bullets with their sections.
-2. **Badges = placeholder marker, not links.** Design D7 places badges under
-   the tagline above the TOC (optional bonus). No real badge URLs are
-   determinable without inventing them, so PR2 leaves the marked placeholder
-   `<!-- BADGES ... -->` at the pinned position. **Decision for reviewer**:
-   adopt real CI/license/Python badge links in PR3 (task 3.7) or keep the
-   placeholder.
-3. **CONTRIBUTING PR sync bullet deferred to PR4.** Design's CONTRIBUTING
-   structure lists a NEW "Pull requests" bullet ("Changes touching a
-   user-facing README section MUST update README_ES.md in the same commit")
-   and the File-Changes table tags it "(PR2)", but the delivery table puts
-   "sync policy" out of PR2 scope, tasks.md has no 2.x task for it, and
-   `README_ES.md` does not exist until PR4. Deferred to PR4 with AGENTS.md
-   rule 13 + PR-template item (design D5 sync policy). Flagged for reviewer.
-4. **Getting-started step 3 pointer.** Design says Development setup is
-   "merged from README L50-57 + existing env steps" — the env commands
-   (uv sync / pre-commit install) moved into Development setup, so Getting
-   started step 3 now points there instead of repeating them (no duplicated
-   env setup).
+1. **TOC subsection bullets deferred to PR3** (PR2). Design's final-state TOC
+   lists `### Flags at a glance`, `### Parquet conversion limitations`,
+   `### Verify the built package (prepare --verify)`; those sections are PR3
+   tasks and their anchors could not resolve in PR2. **RESOLVED in PR3** —
+   all 3 subsection bullets added in the same commits as their sections
+   (mandatory carry-forward honored; 19/19 TOC anchors resolve).
+2. **Badges = placeholder marker, not links** (PR2). No badge URLs were
+   determinable in PR2 without inventing them. **RESOLVED in PR3** — 3 real
+   badges adopted (task 3.7) at the D7 pinned position.
+3. **CONTRIBUTING PR sync bullet deferred to PR4** (design D5 sync policy).
+   Design's File-Changes table tags it "(PR2)" but the delivery table puts
+   "sync policy" out of PR2 scope, no 2.x task exists for it, and
+   `README_ES.md` does not exist until PR4. Lands with AGENTS.md rule 13 +
+   PR-template item in PR4. Flagged for reviewer.
+4. **Getting-started step 3 pointer** (PR2). Design says Development setup is
+   "merged from README L50-57 + existing env steps" — the env commands moved
+   into Development setup, so Getting started step 3 now points there instead
+   of repeating them (no duplicated env setup).
+5. **NEW (PR3)**: §7.2 fallback wording modernized — the parquet-conversion
+   spec's "upload as CSV" language predates the prepare/publish split; the
+   README documents the current behavior (conversion failure → warning + the
+   original CSV is staged into the package as-is). Content (the three §7.2
+   gaps) is verbatim-in-spirit.
+6. **NEW (PR3), noted not a deviation**: `--output` glossary row follows the
+   design carry-forward command list (prepare/publish/profile/render);
+   `codebook --output` exists in cli.py but is outside the design's list.
+   Reviewer may extend the row if desired.
 
 ## Issues found
 
 None blocking. Notes: tasks.md cites stale README line counts (388/501) and a
-795-test baseline; the file (494 → 535 → 462 lines across PR1/PR2a/PR2b) and
-the suite (886 passed, 2 skipped) are authoritative.
+795-test baseline; the file (494 → 535 → 462 → 493 lines across PR1/PR2a/PR2b/
+PR3) and the suite (886 passed, 2 skipped) are authoritative.
 
 ## Workload / PR boundary
 
-- Mode: chained PR slice (PR2 of 4), feature-branch-chain, tracker `docs/readme-overhaul-es`
-- Current work unit: PR2 — restructure + extraction, split into two commits:
-  - 2a `1f81040` `docs(readme): restructure README into user-first sections with TOC` — 119 insertions / 78 deletions (README only)
-  - 2b (this batch) `docs(readme): extract tool config and contributor guides` — README extraction + docs/configuration.md + CONTRIBUTING.md + process artifacts
-- Boundary: start = README.md after PR1 (`5923838`, 494 lines); end = final
-  README (462 lines) + docs/configuration.md + CONTRIBUTING.md (all links
-  resolve, zero content loss). PR3+ work NOT started.
-- Review budget impact: combined PR2 diff ≈ 300 insertions / 200 deletions
-  (within the ~550–650 forecast; mechanical move reads as delete+add).
+- Mode: chained PR slice (PR3 of 4), feature-branch-chain, tracker `docs/readme-overhaul-es`
+- Current work unit: PR3 — feature docs, three commits:
+  - `1c28dc9` `docs(readme): add sofer-mcp row and flags-at-a-glance glossary` — 12 insertions (README only)
+  - `e3d1ddf` `docs(readme): document data formats, parquet limits, and split detection` — 36 insertions / 7 deletions (README only)
+  - (this batch) `docs(readme): document prepare --verify and add project badges` — README (verify subsection + TOC bullet + badges) + tasks.md + apply-progress.md
+- Boundary: start = README after PR2 (`d434b05`, 462 lines); end = README
+  (493 lines) with all 6 feature-doc deliverables, 19/19 TOC anchors
+  resolving, badges adopted. PR4 work NOT started.
+- Review budget impact: PR3 combined ≈ 54 insertions / 7 deletions on README
+  + process artifacts (well within the ~150 forecast).
 
 ## Verification evidence
 
-- PR2a: every one of the 494 pre-PR2 lines present in the restructured README
-  after the 4 D2 heading renames (programmatic line-set check).
-- PR2b: deep-ref body (80 lines) → docs/configuration.md, architecture tree
-  (25 lines), development commands (3 lines), dev-setup block (4 lines) →
-  CONTRIBUTING.md, and 33 existing CONTRIBUTING lines — all 0 missing
-  (programmatic checks). README leftovers scan: no `## Development setup`,
-  `## Architecture`, `## Development`, `### Tool-wide configuration`, or
-  `####` deep-ref headings remain. TOC anchors match the GitHub slug rule
-  exactly (15/15). New markers present: `## Configuration`, `## Architecture
-  summary`, both `docs/configuration.md#…` links, `CONTRIBUTING.md#architecture`
-  link, `SOFER_VERBOSE=1` pointer.
-- `uv run pytest tests/ -q` → `886 passed, 2 skipped` (16.94s) — unchanged
+- TOC anchors: **19/19 resolve** (fence-aware GitHub slug rule, programmatic
+  check; 0 unresolved).
+- New headings present with pinned anchors: `flags-at-a-glance`,
+  `parquet-conversion-limitations`, `split-detection`,
+  `verify-the-built-package-prepare---verify` (triple-hyphen anchor verified).
+- `sofer-mcp` row verbatim vs design carry-forward #1; entry point confirmed
+  in `pyproject.toml` `[project.scripts]` (`sofer-mcp = "sofer.mcp_server:main"`).
+- Flags glossary semantics verified against `cli.py` (all 5 rows).
+- Format rows match `_formats.py` exactly; prepare/publish columns verified
+  against the prepare.py conversion loop.
+- Split detection verified against `splits.py` (keywords, delimiters,
+  cascade, exclusions, fallback).
+- Verify subsection verified against `verification.py` + prepare.py step 10
+  (optional-dependency guard, load_dataset on staging dir, split comparison,
+  non-blocking).
+- §7.2 three limitations documented (parquet-conversion spec).
+- Badges: `.github/workflows/ci.yml` exists (Get-ChildItem), LICENSE exists,
+  `license = "MIT"`, `requires-python = ">=3.10"`.
+- `uv run pytest tests/ -q` → **886 passed, 2 skipped** (14.18s) — unchanged
   from baseline, code untouched.
-- Rendered heading order (README): Install → Quick start → Why → Typical
-  workflow → TOML reference → Directory layout → Profiling and rendering →
-  Command reference → Data format support → Validation and quality checks →
-  Codebook generation → AI and MCP server → Configuration → Architecture
-  summary → Related — matches design spine.
 
 ## Status
 
-11/11 tasks complete (PR1: 1.1–1.4; PR2: 2.1–2.7). Ready for `sdd-verify`
-(PR2 slice) or the next `apply` batch (PR3 — feature docs).
+18/18 tasks complete (PR1: 1.1–1.4; PR2: 2.1–2.7; PR3: 3.1–3.7). Ready for
+`sdd-verify` (PR3 slice) or the next `apply` batch (PR4 — README_ES.md +
+sync policy).
