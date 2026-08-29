@@ -7,7 +7,9 @@
 and quality-assessed package — combining automatic inference with human
 knowledge, and publishable to Hugging Face Hub or any local directory.**
 
-<!-- BADGES (design D7, optional bonus): CI / license / Python badges go here — under the tagline, above the TOC; mirrored in README_ES.md (PR4). No badge URLs invented: replace with real links when adopted. -->
+[![CI](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/emiliodavola/sofer)](LICENSE)
+[![Python >=3.10](https://img.shields.io/badge/python-3.10%2B-3776AB)](pyproject.toml)
 
 ## Table of Contents
 
@@ -24,6 +26,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Parquet conversion limitations](#parquet-conversion-limitations)
 - [Split detection](#split-detection)
 - [Validation and quality checks](#validation-and-quality-checks)
+- [Verify the built package (prepare --verify)](#verify-the-built-package-prepare---verify)
 - [Codebook generation](#codebook-generation)
 - [AI and MCP server](#ai-and-mcp-server)
 - [Configuration](#configuration)
@@ -323,6 +326,23 @@ Every dataset is checked before publish:
 | Value range | Values outside min/max bounds |
 | Cross-file types | Dtype mismatches across configs |
 | Encoding validation | File encoding issues |
+
+### Verify the built package (prepare --verify)
+
+`prepare --verify` runs an end-to-end load check on the freshly built package:
+it calls `datasets.load_dataset()` on the output directory — the same call a
+user makes with `load_dataset("user/repo")` — and compares the splits it
+returns against the ones detected from the remote file paths. The result is
+printed after the prepare summary:
+
+- **SKIPPED** — the optional `datasets` package is not installed. Install it
+  with `pip install datasets` and re-run.
+- **PASSED** — `load_dataset()` succeeded and the detected splits match.
+- **FAILED** — `load_dataset()` raised, or the splits differ from what was
+  detected; the report lists the errors and warnings.
+
+Verification is informational and non-blocking: it never fails the `prepare`
+run. Check the report, fix the layout, and re-run.
 
 ## Codebook generation
 
