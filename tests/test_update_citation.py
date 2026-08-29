@@ -41,12 +41,6 @@ class TestUpdateCitationVersion:
             "date-released: 2025-08-01", "date-released: 2026-08-27"
         )
         assert updated == expected
-        # The untouched multi-line keywords block and cff-version header survive.
-        assert "cff-version: 1.2.0\n" in updated
-        assert (
-            "keywords:\n  - huggingface\n  - datasets\n  - open-data\n  - cli\n  - python\n"
-            in updated
-        )
 
     def test_update_is_idempotent(self):
         """Running update twice with the same values changes nothing."""
@@ -87,10 +81,10 @@ class TestUpdateCitationVersion:
             "keywords:\n",
         )
         updated = update_citation_version(text, "0.2.2", "2026-08-27")
-        assert "version: 0.2.2\n" in updated
-        assert "date-released: 2026-08-27\n" in updated
-        assert "  version: 9.9.9\n" in updated
-        assert "  date-released: 2030-01-01\n" in updated
+        expected = text.replace("version: 0.1.0", "version: 0.2.2").replace(
+            "date-released: 2025-08-01", "date-released: 2026-08-27"
+        )
+        assert updated == expected
 
     def test_update_raises_on_duplicate_top_level_version(self):
         """Two column-0 version: fields are rejected with ValueError."""

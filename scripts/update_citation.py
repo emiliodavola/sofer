@@ -27,17 +27,31 @@ from pathlib import Path
 _ISO_DATE_FORMAT = "%Y-%m-%d"
 
 
-def _top_level_field(text: str, key: str) -> re.Match[str] | None:
-    """Return the match for a column-0 ``key:`` field in ``text``, or None.
+def _top_level_field_value(text: str, key: str) -> str | None:
+    """Return the raw value of the sole column-0 ``key:`` field, or None.
 
     The pattern is anchored at column 0 with no indentation allowed, so nested
     fields inside an indented block such as ``preferred-citation:`` are never
     matched, and a field such as ``cff-version:`` never matches the ``version``
     key. The value class ``[^\\r\\n]*`` keeps a trailing carriage return out of
-    the captured value. Group 1 is the ``key:`` prefix, group 2 is the raw
-    value.
+    the captured value.
+
+    Args:
+        text: The full CITATION.cff content.
+        key:  The top-level field name, e.g. ``"version"``.
+
+    Returns:
+        The raw field value (including any separator whitespace), or ``None``
+        when the field is absent.
+
+    Raises:
+        ValueError: If the field appears more than once at the top level
+            (column 0).
     """
-    return re.search(rf"^({re.escape(key)}\s*:)([^\r\n]*)", text, re.MULTILINE)
+    matches = re.findall(rf"^({re.escape(key)}\s*:)([^\r\n]*)", text, re.MULTILINE)
+    if len(matches) > 1:
+        raise ValueError(f"expected exactly one top-level '{key}:' field, found {len(matches)}")
+    return matches[0][1] if matches else None
 
 
 def _replace_field(text: str, key: str, value: str) -> str:
@@ -47,18 +61,28 @@ def _replace_field(text: str, key: str, value: str) -> str:
     carriage return, so a CRLF file keeps ``\\r\\n`` endings on every line
     instead of degrading to mixed endings. A lambda replacement avoids
     interpreting backslashes or group references in ``value``.
+
+    Args:
+        text:  The full CITATION.cff content.
+        key:   The top-level field name, e.g. ``"version"``.
+        value: The replacement value.
+
+    Returns:
+        The input text with the first column-0 ``key:`` line's value replaced.
     """
     pattern = re.compile(rf"^({re.escape(key)}\s*:)[^\r\n]*", re.MULTILINE)
     return pattern.sub(lambda m: f"{m.group(1)} {value}", text, count=1)
 
 
-def _count_top_level_field(text: str, key: str) -> int:
-    """Count column-0 occurrences of the ``key:`` field in ``text``."""
-    return len(re.findall(rf"^{re.escape(key)}\s*:", text, re.MULTILINE))
-
-
 def _is_valid_iso_date(value: str) -> bool:
-    """Return True when ``value`` is a well-formed ISO ``YYYY-MM-DD`` date."""
+    """Return True when ``value`` is a well-formed ISO ``YYYY-MM-DD`` date.
+
+    Args:
+        value: The date string to validate.
+
+    Returns:
+        True when the value parses as ``YYYY-MM-DD``; False otherwise.
+    """
     try:
         datetime.strptime(value, _ISO_DATE_FORMAT)
     except ValueError:
@@ -67,75 +91,55 @@ def _is_valid_iso_date(value: str) -> bool:
 
 
 def update_citation_version(text: str, version: str, date_released: str) -> str:
-    """Return ``text`` with the ``version`` and ``date-released`` lines replaced.
+    """Replace the version and date-released lines in a CITATION.cff text.
 
-    Parameters
-    ----------
-    text : str
-        The full CITATION.cff content.
-    version : str
-        The release version to write, e.g. ``"0.3.0"``.
-    date_released : str
-        The ISO ``YYYY-MM-DD`` release date to write.
+    Only the two top-level lines are touched; every other byte is preserved
+    exactly, including line endings.
 
-    Returns
-    -------
-    str
-        The input text with only the two top-level lines replaced; every other
-        byte is preserved exactly, including line endings.
+    Args:
+        text:          The full CITATION.cff content.
+        version:       The release version to write, e.g. ``"0.3.0"``.
+        date_released: The ISO ``YYYY-MM-DD`` release date to write.
 
-    Raises
-    ------
-    ValueError
-        If either field is missing, or if either appears more than once at the
-        top level (column 0). Nested fields inside indented blocks such as
-        ``preferred-citation:`` are not counted.
+    Returns:
+        The input text with only the two top-level lines replaced.
+
+    Raises:
+        ValueError: If either field is missing, or if either appears more than
+            once at the top level (column 0). Nested fields inside indented
+            blocks such as ``preferred-citation:`` are not counted.
     """
     for key in ("version", "date-released"):
-        count = _count_top_level_field(text, key)
-        if count == 0:
+        if _top_level_field_value(text, key) is None:
             raise ValueError(f"CITATION.cff is missing the '{key}:' field")
-        if count > 1:
-            raise ValueError(f"expected exactly one top-level '{key}:' field, found {count}")
     text = _replace_field(text, "version", version)
     return _replace_field(text, "date-released", date_released)
 
 
 def check_citation_version(text: str, version: str) -> bool:
-    """Return True when ``text`` declares ``version`` with a valid ISO date.
+    """Return True when the CFF declares ``version`` with a valid ISO date.
 
-    Parameters
-    ----------
-    text : str
-        The full CITATION.cff content.
-    version : str
-        The expected release version, e.g. ``"0.3.0"``.
+    Args:
+        text:    The full CITATION.cff content.
+        version: The expected release version, e.g. ``"0.3.0"``.
 
-    Returns
-    -------
-    bool
+    Returns:
         True when the CFF declares exactly the expected ``version:`` value
         (surrounding single or double quotes allowed) and a well-formed,
         non-empty ``YYYY-MM-DD`` ``date-released:``; False on version mismatch
         or on a missing, empty, or non-ISO ``date-released:``.
 
-    Raises
-    ------
-    ValueError
-        If either field appears more than once at the top level (column 0).
-        Nested fields inside indented blocks such as ``preferred-citation:``
-        are not counted.
+    Raises:
+        ValueError: If either field appears more than once at the top level
+            (column 0). Nested fields inside indented blocks such as
+            ``preferred-citation:`` are not counted.
     """
-    for key in ("version", "date-released"):
-        if _count_top_level_field(text, key) > 1:
-            count = _count_top_level_field(text, key)
-            raise ValueError(f"expected exactly one top-level '{key}:' field, found {count}")
-    version_line = _top_level_field(text, "version")
-    date_line = _top_level_field(text, "date-released")
-    if version_line is None or date_line is None:
+    declared_version = _top_level_field_value(text, "version")
+    declared_date = _top_level_field_value(text, "date-released")
+    if declared_version is None or declared_date is None:
         return False
-    declared_version = version_line.group(2).strip(" \t\"'")
-    declared_date = date_line.group(2).strip()
+    declared_version = declared_version.strip(" \t\"'")
+    declared_date = declared_date.strip()
     return declared_version == version and _is_valid_iso_date(declared_date)
 
 
@@ -149,19 +153,15 @@ def main(argv: list[str] | None = None) -> int:
     3. Read the CFF as UTF-8 bytes; exit 1 when the file cannot be read.
     4. With ``--check``: print OK and exit 0 when the CFF declares the expected
        version with a valid ISO date-released, otherwise print FAIL to stderr
-       and exit 1.
+       (echoing what the CFF declares) and exit 1.
     5. Without ``--check``: replace the two fields, write the file back and
        print a confirmation; exit 1 with a clear message when a field is
        missing or duplicated, or the file cannot be written.
 
-    Parameters
-    ----------
-    argv : list[str] | None, default=None
-        CLI arguments; defaults to ``sys.argv[1:]`` when None.
+    Args:
+        argv: CLI arguments; defaults to ``sys.argv[1:]`` when None.
 
-    Returns
-    -------
-    int
+    Returns:
         Exit code: 0 on success; 1 on validation/update errors; 2 on argument
         parsing errors (raised by argparse).
     """
@@ -180,7 +180,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--date",
         default=None,
-        help="ISO release date (YYYY-MM-DD); defaults to today in UTC.",
+        help=(
+            "ISO YYYY-MM-DD release date (defaults to today in UTC); "
+            "only used when syncing, ignored with --check."
+        ),
     )
     parser.add_argument(
         "--cff-path",
@@ -218,8 +221,12 @@ def main(argv: list[str] | None = None) -> int:
         if matches:
             print(f"OK: {cff_path} declares version {args.version} with a valid date-released.")
             return 0
+        found_version = _top_level_field_value(text, "version")
+        found_date = _top_level_field_value(text, "date-released")
         print(
-            f"FAIL: {cff_path} does not declare version {args.version} with a valid date-released.",
+            f"FAIL: {cff_path} does not declare version {args.version} with a "
+            f"valid date-released (found version={found_version!r}, "
+            f"date-released={found_date!r}).",
             file=sys.stderr,
         )
         return 1

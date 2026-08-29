@@ -96,6 +96,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Bare runner python on purpose: update_citation.py is stdlib-only, so
+      # no `uv sync` is needed. Keep it that way.
       - name: Verify CITATION.cff matches the release tag
         run: python scripts/update_citation.py --check --version "${GITHUB_REF_NAME#v}"
 
