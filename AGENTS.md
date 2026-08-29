@@ -74,13 +74,14 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - SDD artifacts section is mandatory when the change followed the SDD workflow; for ad-hoc fixes it can be omitted but the change description must still be thorough.
 
 ### 12. Release process
-Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag runs lint + the full test matrix + a wheel-build validation job, then creates a GitHub Release with auto-generated notes. There is no PyPI publishing.
+Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag runs lint + the full test matrix + a wheel-build validation job, then creates a GitHub Release with auto-generated notes. There is no PyPI publishing. A `citation-check` guard job fails the workflow when `CITATION.cff` does not declare the tagged version, so the CFF must be synced before tagging.
 
 Cutting a release:
 1. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev`. Note: `main` is **not** a fast-forward of `dev` (release PR merge commits live on `main`), so always use `--no-ff`.
-2. Do **not** bump a version anywhere: the version is derived from the tag at build time (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth — `pyproject.toml` has no static `version` field and there is no `__version__` constant.
-3. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push with `git push origin main --follow-tags`.
-4. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases with notes generated from commits/PRs since the previous tag.
+2. Sync `CITATION.cff` with the release version: run `python scripts/update_citation.py --version X.Y.Z`, review the `CITATION.cff` diff, and commit it BEFORE creating the tag.
+3. Do **not** bump a version anywhere else: the version is derived from the tag at build time (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth — `pyproject.toml` has no static `version` field and there is no `__version__` constant.
+4. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push with `git push origin main --follow-tags`.
+5. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases with notes generated from commits/PRs since the previous tag.
 
 Rules:
 - Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the release notes (e.g. v0.2.0 removed the `upload` subcommand). The shipped version always equals the tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed metadata (never a static constant).
