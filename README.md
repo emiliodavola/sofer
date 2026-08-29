@@ -7,6 +7,27 @@
 and quality-assessed package — combining automatic inference with human
 knowledge, and publishable to Hugging Face Hub or any local directory.**
 
+<!-- BADGES (design D7, optional bonus): CI / license / Python badges go here — under the tagline, above the TOC; mirrored in README_ES.md (PR4). No badge URLs invented: replace with real links when adopted. -->
+
+## Table of Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Why](#why)
+- [Typical workflow](#typical-workflow)
+- [TOML reference](#toml-reference)
+- [Directory layout](#directory-layout)
+- [Profiling and rendering](#profiling-and-rendering)
+- [Command reference](#command-reference)
+- [Data format support](#data-format-support)
+- [Validation and quality checks](#validation-and-quality-checks)
+- [Codebook generation](#codebook-generation)
+- [AI and MCP server](#ai-and-mcp-server)
+- [Development setup](#development-setup)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Related](#related)
+
 ## Install
 
 sofer is a standalone CLI — install it once, run it anywhere. Install it from
@@ -22,6 +43,26 @@ pip install git+https://github.com/emiliodavola/sofer.git@vX.Y.Z
 
 Then run `sofer --help`. `sofer --version` always matches the release tag
 (e.g. `v0.3.0` installs as `sofer v0.3.0`).
+
+## Quick start
+
+```bash
+# 1. Generate a configuration template
+sofer init my-dataset
+
+# 2. Scan for data files
+sofer scan my-dataset.toml
+
+# 3. Edit my-dataset.toml (repo_id, description, tags, etc.)
+
+# 4. Build the package locally — no network calls
+sofer prepare my-dataset.toml
+
+# 5. Publish to Hugging Face Hub (or --target local)
+sofer publish my-dataset.toml
+```
+
+See [Typical workflow](#typical-workflow) for the full annotated walkthrough.
 
 ## Why
 
@@ -46,15 +87,6 @@ in an object store, or in a local directory.
 - **Read-only profiling.** `profile` never modifies the source dataset.
 - **Domain-agnostic.** Works for census data, survey exports, shapefiles,
   document collections — anything you'd put in a dataset repository.
-
-## Development setup
-
-```bash
-uv sync
-cp .env.template .env   # then edit .env with your HF token
-```
-
-> Get your token at: https://huggingface.co/settings/tokens
 
 ## Typical workflow
 
@@ -86,72 +118,6 @@ sofer publish my-dataset.toml --target local --output ./out/
 
 `publish` re-runs `prepare` automatically whenever the package is missing or
 stale (the TOML or any declared source file is newer than the newest Parquet).
-
-## Profiling & rendering (metadata workflow)
-
-`profile` and `render` form a lightweight, read-only documentation pipeline
-that works on a dataset file alone — no TOML needed:
-
-```bash
-# 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
-sofer profile data/contacts.csv
-
-# 2. Render a status-annotated README.md from that metadata
-sofer render data/            # directory containing metadata.yaml
-sofer render data/metadata.yaml   # ...or the file directly
-```
-
-`metadata.yaml` is the machine-readable source of truth; `render` is a pure
-projection of it — it never recomputes inference. Inference states are always
-rendered distinctly so a reader can tell a fact from a guess:
-
-| Status | Meaning | Rendered |
-|---|---|---|
-| `confirmed` | high-confidence, corroborated inference | `email` |
-| `inferred` | plausible but unverified guess | `email (inferred, 78%)` |
-| `unknown` | not reliably inferable | `unknown` |
-
-Unknown human-input fields (description, license, source) render as `unknown`
-too — never blank, never fabricated.
-
-### Semantic types & PII detection
-
-`profile` distinguishes **what a column is** (semantic type) from **whether it
-is sensitive** (possible PII) — two independent, extensible detector sets:
-
-- **Semantic type** — the *meaning* of a column beyond its storage type
-  (`integer` → `identifier`, a value matching an email pattern → `email`).
-  Each detection carries a confidence score: `match_rate × prior`, where the
-  prior reflects how reliable the pattern itself is.
-- **Possible PII** — heuristic detection of potentially sensitive data
-  (email, phone, …). Always reported as **`possible_pii`**, never as a
-  categorical verdict: a pattern match is an observation, not a legal or
-  ethical conclusion.
-
-```yaml
-# excerpt from metadata.yaml
-schema:
-  - name: email
-    storage_type: categorical/text
-    semantic_type:
-      type: email
-      status: confirmed          # confirmed | inferred | unknown
-      confidence: 0.98
-    pii:
-      - label: email
-        note: possible_pii
-```
-
-Detectors are pluggable — adding a new semantic type or PII pattern is a new
-detector class, no changes to the pipeline.
-
-## Directory layout
-
-```
-data/           source files only (declared in dataset.toml [[file]] local=) — never written by sofer
-cache/          sofer artifact cache: codebook --all-files writes cache/codebooks/
-build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
-```
 
 ## TOML reference
 
@@ -276,6 +242,72 @@ profile_max_sample = 100000
 confidence_round_digits = 4
 ```
 
+## Directory layout
+
+```
+data/           source files only (declared in dataset.toml [[file]] local=) — never written by sofer
+cache/          sofer artifact cache: codebook --all-files writes cache/codebooks/
+build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
+```
+
+## Profiling and rendering
+
+`profile` and `render` form a lightweight, read-only documentation pipeline
+that works on a dataset file alone — no TOML needed:
+
+```bash
+# 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
+sofer profile data/contacts.csv
+
+# 2. Render a status-annotated README.md from that metadata
+sofer render data/            # directory containing metadata.yaml
+sofer render data/metadata.yaml   # ...or the file directly
+```
+
+`metadata.yaml` is the machine-readable source of truth; `render` is a pure
+projection of it — it never recomputes inference. Inference states are always
+rendered distinctly so a reader can tell a fact from a guess:
+
+| Status | Meaning | Rendered |
+|---|---|---|
+| `confirmed` | high-confidence, corroborated inference | `email` |
+| `inferred` | plausible but unverified guess | `email (inferred, 78%)` |
+| `unknown` | not reliably inferable | `unknown` |
+
+Unknown human-input fields (description, license, source) render as `unknown`
+too — never blank, never fabricated.
+
+### Semantic types and PII detection
+
+`profile` distinguishes **what a column is** (semantic type) from **whether it
+is sensitive** (possible PII) — two independent, extensible detector sets:
+
+- **Semantic type** — the *meaning* of a column beyond its storage type
+  (`integer` → `identifier`, a value matching an email pattern → `email`).
+  Each detection carries a confidence score: `match_rate × prior`, where the
+  prior reflects how reliable the pattern itself is.
+- **Possible PII** — heuristic detection of potentially sensitive data
+  (email, phone, …). Always reported as **`possible_pii`**, never as a
+  categorical verdict: a pattern match is an observation, not a legal or
+  ethical conclusion.
+
+```yaml
+# excerpt from metadata.yaml
+schema:
+  - name: email
+    storage_type: categorical/text
+    semantic_type:
+      type: email
+      status: confirmed          # confirmed | inferred | unknown
+      confidence: 0.98
+    pii:
+      - label: email
+        note: possible_pii
+```
+
+Detectors are pluggable — adding a new semantic type or PII pattern is a new
+detector class, no changes to the pipeline.
+
 ## Command reference
 
 | Command | Description |
@@ -304,7 +336,7 @@ confidence_round_digits = 4
 | Excel (`.xlsx`) | ✅ | ✅ | ✅ |
 | JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ |
 
-## Validation & quality checks (automatic)
+## Validation and quality checks
 
 Every dataset is checked before publish:
 
@@ -368,7 +400,7 @@ error listing the colliding sources.
 - `publish` stages these codebooks after the data files, so the repo ends up
   with `codebooks/**/*.md` plus the root `codebook.md`.
 
-## AI / MCP server
+## AI and MCP server
 
 sofer ships an optional Model Context Protocol (MCP) server that exposes the
 same deterministic pipeline (validate → prepare → codebook → profile →
@@ -449,6 +481,15 @@ sofer-mcp
 
 When no phrase is configured, only the two acknowledgment booleans gate the
 HF publish — a weaker posture suited to trusted single-user stdio setups.
+
+## Development setup
+
+```bash
+uv sync
+cp .env.template .env   # then edit .env with your HF token
+```
+
+> Get your token at: https://huggingface.co/settings/tokens
 
 ## Architecture
 
