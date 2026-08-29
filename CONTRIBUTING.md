@@ -88,6 +88,7 @@ Prefixes: `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `refactor`.
 
 - Open a PR against the `dev` branch.
 - Fill the PR template — describe what, why, and how.
+- Changes touching a user-facing README section MUST update README_ES.md in the same commit.
 - Link related issues (`Closes #N`).
 - PRs need at least one approving review before merge.
 

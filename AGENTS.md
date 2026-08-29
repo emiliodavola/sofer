@@ -87,3 +87,10 @@ Rules:
 - **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
 - The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: under 3.10 the `import tomli as tomllib` fallback triggers `no-redef` errors (known latent issue in `model.py`, `config.py`, `cli.py`).
 - Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time).
+
+### 13. README / README_ES sync
+- `README_ES.md` mirrors the user-facing headings and section order of `README.md`.
+  Any change to a translated README section MUST update the matching `README_ES.md`
+  section in the same commit; section additions/removals MUST land in both files.
+- Technical content (commands, flags, TOML/YAML excerpts, CLI output, filenames,
+  URLs) stays in English in both files; only prose is translated.
