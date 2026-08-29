@@ -33,8 +33,12 @@ Homepage = "https://github.com/emiliodavola/sofer"
 Repository = "https://github.com/emiliodavola/sofer"
 Issues = "https://github.com/emiliodavola/sofer/issues"
 
+[project.optional-dependencies]
+mcp = ["fastmcp>=3.4,<4"]
+
 [project.scripts]
 sofer = "sofer.cli:main"
+sofer-mcp = "sofer.mcp_server:main"
 
 [dependency-groups]
 dev = [
@@ -42,6 +46,7 @@ dev = [
     "ruff>=0.9.0",
     "mypy>=1.15.0",
     "pre-commit>=4.0.0",
+    "fastmcp>=3.4,<4",
 ]
 
 # ── Ruff: linter & formatter ─────────────────────────────────────────────
@@ -78,6 +83,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+pythonpath = ["scripts"]
 
 # ── sofer tool-wide defaults ──────────────────────────────────────
 
@@ -132,6 +138,10 @@ min_threshold = 0.5       # confidence >= this -> status "inferred"
 detect_threshold = 0.5    # match_rate below this -> no detection (None)
 profile_max_sample = 100000
 confidence_round_digits = 4
+
+# ── MCP agent resources ──
+# Size guard for sofer://dataset | sofer://codebook | sofer://metadata reads.
+agent_resource_max_bytes = 50000000
 
 [tool.hatch.version]
 source = "vcs"

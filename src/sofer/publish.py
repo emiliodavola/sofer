@@ -541,6 +541,7 @@ def publish(
     keep_csv: bool = False,
     dry_run: bool = False,
     quality_report: ValidationReport | None = None,
+    protected_out: set[str] | None = None,
 ) -> int:
     """Deliver the prepared dataset package for *cfg* to *target*.
 
@@ -567,6 +568,13 @@ def publish(
         quality_report: Optional pre-computed quality validation report.
                         When provided and failing, hf delivery is blocked
                         before any network call (PUB-01).
+        protected_out: Optional out-param (adv8): when given, the set of
+                       lowercased remote names skipped by overwrite
+                       protection (computed at :func:`_check_overwrite_protection`)
+                       is written into it, so callers can surface
+                       ``skipped_protected`` without re-inspecting the repo
+                       or parsing output.  ``None`` keeps the legacy behavior
+                       (no side channel).
 
     Returns:
         Exit code (``0`` success, ``1`` quality-gate failure, prepare
@@ -651,6 +659,8 @@ def publish(
     print()
 
     protected = _check_overwrite_protection(existing_files, force, planned_files=planned)
+    if protected_out is not None:
+        protected_out.update(protected)
     _print_split_mapping_validation(planned)
 
     # ── 5. Staging + single upload_folder call ───────────────────────────
@@ -668,14 +678,20 @@ def publish(
                 print(f"  \u2717  NOT FOUND: {local}")
 
         staged_count = sum(1 for _ in staging_root.rglob("*") if _.is_file())
-        try:
-            _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type)
+        # _hf_upload_folder never raises: it catches and prints the error
+        # internally and returns ``False`` on failure (its documented
+        # contract, see :func:`_hf_upload_folder`). Account on that return
+        # value — a falsy result means the single upload_folder call
+        # delivered nothing, so every staged file counts as failed (rc 1).
+        # The try/except that previously wrapped this call was dead code
+        # and masked total upload failures as success (ok=staged_count,
+        # fail=0 → rc 0).
+        if _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type):
             ok = staged_count
             fail = 0
-        except Exception as exc:
-            print(f"  \u2717  upload_folder failed: {exc}")
+        else:
             ok = 0
-            fail = staged_count
+            fail = staged_count or 1
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
