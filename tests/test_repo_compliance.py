@@ -2061,7 +2061,7 @@ class TestStagedParquetRemoteRelativeLookup:
         stage = tmp_path / "stage"
         self._stage_parquet(
             stage,
-            "data/PROV/train.parquet",
+            "data/prov/train.parquet",
             pa.table(
                 {"v": [1, 2, 3]}, schema=pa.schema([pa.field("v", pa.int64(), nullable=False)])
             ),
@@ -2135,8 +2135,8 @@ class TestStagedParquetRemoteRelativeLookup:
         warnings = [ln for ln in out.splitlines() if "[!]" in ln and "Staged Parquet" in ln]
         # Two distinct missing keys → exactly one warning each, naming the key.
         assert len(warnings) == 2
-        assert any("data/A/train.parquet" in w for w in warnings)
-        assert any("data/B/train.parquet" in w for w in warnings)
+        assert any("data/a/train.parquet" in w for w in warnings)
+        assert any("data/b/train.parquet" in w for w in warnings)
         # CSV fallback produced the columns and exact row counts.
         assert row_counts == {"data/A/train.csv": 3, "data/B/train.csv": 3}
         by_name = {c.name: c for c in columns}
@@ -2171,7 +2171,7 @@ class TestStagedParquetRemoteRelativeLookup:
         import pyarrow as pa
 
         stage = tmp_path / "stage"
-        self._stage_parquet(stage, "data/PROV/train.parquet", pa.table({"v": [1, 2, 3]}))
+        self._stage_parquet(stage, "data/prov/train.parquet", pa.table({"v": [1, 2, 3]}))
         csv_path = tmp_path / "train.csv"
         csv_path.write_text("v\n1\n2\n3\n", encoding="utf-8-sig")
         cfg = DatasetConfig(

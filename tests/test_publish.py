@@ -715,7 +715,7 @@ class TestBatchStaging:
         assert rc == 0
 
         staging_root = Path(td) / "repo"
-        expected = staging_root / "data" / "PROV" / "data.parquet"
+        expected = staging_root / "data" / "prov" / "data.parquet"
         assert expected.is_file(), (
             f"Expected {expected}, found files: {list(staging_root.rglob('*'))}"
         )
@@ -1005,7 +1005,7 @@ class TestCopyPackageProtection:
         dest.mkdir()
         _copy_package(cfg, out, dest, keep_csv=False, protected={"data/prov/data.parquet"})
 
-        assert not (dest / "data" / "PROV" / "data.parquet").exists(), (
+        assert not (dest / "data" / "prov" / "data.parquet").exists(), (
             f"protected remote was staged: {list(dest.rglob('*'))}"
         )
 
@@ -1021,7 +1021,7 @@ class TestCopyPackageProtection:
         dest.mkdir()
         _copy_package(cfg, out, dest, keep_csv=False)
 
-        assert (dest / "data" / "PROV" / "data.parquet").is_file(), (
+        assert (dest / "data" / "prov" / "data.parquet").is_file(), (
             f"data remote missing from staging: {list(dest.rglob('*'))}"
         )
 
@@ -1114,7 +1114,7 @@ class TestCodebookUpload:
         assert (staging_root / "codebooks" / "DPTO.md").is_file()
         assert (staging_root / "codebooks" / "PROV.md").is_file()
         assert (staging_root / "codebook.md").is_file()
-        assert (staging_root / "DPTO.parquet").is_file(), "data file missing from staging"
+        assert (staging_root / "dpto.parquet").is_file(), "data file missing from staging"
 
     def test_legacy_codebook_not_uploaded(self, tmp_path, monkeypatch):
         """cfg.codebook declared in TOML is ignored; RC-C01 supersedes it."""

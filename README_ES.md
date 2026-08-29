@@ -281,12 +281,12 @@ canalización.
 | Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
 |---|---|---|---|---|---|
 | CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
-| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 | Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
+| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 
-¹ `prepare` convierte los archivos CSV a Parquet (salvo que `upload_as_csv = true`); cualquier otro formato se incorpora al paquete tal cual. `publish` entrega el paquete preparado sin cambios.
+¹ `prepare` convierte `csv/tsv/xlsx/jsonl` a Parquet normalizado por defecto (Excel → un Parquet por hoja como `stem__sheet.parquet`); usa `convert_to_parquet = false` por `[[file]]` para conservar el original. `upload_as_csv = true` es un alias obsoleto de `convert_to_parquet = false` solo para `.csv`. `publish` entrega el paquete preparado sin cambios (`--keep-csv` conserva el `.csv` original junto a su Parquet, solo para CSV).
 
 ### Parquet conversion limitations
 

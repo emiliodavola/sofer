@@ -122,11 +122,11 @@ class TestPrepareConversion:
 
         rc = prepare(cfg, out)
         assert rc == 0
-        assert (out / "data/PROV/train.parquet").is_file()
-        assert (out / "data/DPTO/train.parquet").is_file()
+        assert (out / "data/prov/train.parquet").is_file()
+        assert (out / "data/dpto/train.parquet").is_file()
         # Distinct content — same-stem conversion must not collide.
-        prov = pq.read_table(out / "data/PROV/train.parquet").to_pydict()
-        dpto = pq.read_table(out / "data/DPTO/train.parquet").to_pydict()
+        prov = pq.read_table(out / "data/prov/train.parquet").to_pydict()
+        dpto = pq.read_table(out / "data/dpto/train.parquet").to_pydict()
         assert prov["a"] == [1]
         assert dpto["a"] == [3]
 
@@ -169,7 +169,7 @@ class TestPrepareSchemaReportParity:
         assert rc == 0
 
         columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=out)
-        table = pq.read_table(out / "data/PROV/train.parquet")
+        table = pq.read_table(out / "data/prov/train.parquet")
 
         # Exact row counts come from Parquet metadata.
         assert row_counts == {"data/PROV/train.csv": table.num_rows}
@@ -179,7 +179,7 @@ class TestPrepareSchemaReportParity:
         for field in table.schema:
             col = by_name[field.name]
             assert col.nullable == field.nullable
-            assert col.origin == "data/PROV/train.parquet"
+            assert col.origin == "data/prov/train.parquet"
         assert by_name["a"].hf_dtype == "int64"
         assert by_name["b"].hf_dtype == "float64"
         assert by_name["label"].hf_dtype == "string"
