@@ -150,8 +150,8 @@ def stream_csv(
    `(header, None)` where `header` is the list of parsed column names (or `[]`
    for a completely empty file), then stop without error.
 6. On `UnicodeDecodeError` (or `UnicodeError`): retry with `encoding="utf-8"`
-   after printing a warning. On second failure: retry with `encoding="latin-1"`,
-   then `encoding="cp1252"`. If all fallbacks fail: raise `ValueError`.
+   after printing a warning. If both `utf-8-sig` and `utf-8` fail: raise `ValueError`.
+   `latin-1`/`cp1252` SHALL NOT be retried — `ENCODING_FALLBACKS` is `["utf-8-sig", "utf-8"]` only.
 7. On every data row: the consumer SHALL detect corrupt records via
    `len(row) != len(header)` on each row. (`csv.reader` defaults to
    `strict=False`, so it does NOT raise `csv.Error` on inconsistent lengths.)
@@ -168,7 +168,7 @@ THEN the first yielded tuple SHALL have row=None (header only)
   AND every row SHALL have len 4
 ```
 
-**Encoding fallback**
+**Encoding fallback — UTF-8-only**
 
 ```
 GIVEN a Latin-1-encoded CSV with accented characters
@@ -176,9 +176,7 @@ WHEN stream_csv(path, encoding="utf-8-sig") is called
 THEN open SHALL fail with UnicodeDecodeError on first attempt
   AND the reader SHALL retry with encoding="utf-8"
   AND utf-8 SHALL also fail
-  AND the reader SHALL retry with encoding="latin-1"
-  AND all rows SHALL be yielded successfully
-  AND a warning SHALL be printed
+  AND ValueError SHALL be raised (latin-1/cp1252 NOT retried)
 ```
 
 **Unrecoverable encoding**
@@ -186,7 +184,7 @@ THEN open SHALL fail with UnicodeDecodeError on first attempt
 ```
 GIVEN a binary file passed as CSV
 WHEN stream_csv(path) is called
-THEN utf-8-sig, utf-8, latin-1, and cp1252 attempts SHALL all fail
+THEN utf-8-sig and utf-8 attempts SHALL both fail
   AND ValueError SHALL be raised
 ```
 
@@ -229,7 +227,9 @@ class QualityValidator:
 ```
 
 `run()` SHALL execute every active check in a fixed order. It SHALL NOT stop
-on the first failure — all checks run regardless.
+on the first failure — all checks run regardless. `run()` SHALL gate on text-eligibility
+(`is_text_eligible()` in `src/sofer/_formats.py`, `TEXT_SUFFIXES = {".csv", ".tsv"}` via
+`Path.suffix.lower()`) — see §4.10 and §4.11 for the full gating contract.
 
 ### 4.1 Duplicates — row-hash based, streaming
 
@@ -468,46 +468,151 @@ WHEN _check_cross_file_types() runs
 THEN no cross-file type mismatch SHALL be reported for "CPV2010_REF_ID"
 ```
 
-### 4.9 Encoding validation — detect non-UTF-8 files
+### 4.9 Encoding validation — detect non-UTF-8 files in text-eligible inputs
 
-**Requirement:** The system MUST verify every CSV file is decodable using the
-same fallback chain as `stream_csv`: `utf-8-sig` → `utf-8` → `latin-1` →
-`cp1252`. The check SHALL read the first 8 KB of each file and attempt decoding
-with each encoding in order. If ANY encoding succeeds, the check SHALL pass.
-Only fail if ALL fallbacks fail. Default severity: `fail`.
+**Requirement:** The system MUST verify each text-eligible (`.csv`/`.tsv`, case-insensitive)
+file is decodable via `["utf-8-sig", "utf-8"]` by reading `config.PROBE_CHUNK_BYTES` (8 KB)
+and trying `chunk.decode(enc)` in order. If any succeeds the check SHALL pass; only if all
+fail SHALL a `fail` error naming the file be appended. Non-eligible files (`.xlsx`, `.parquet`,
+`.jsonl`, `.csv.gz` → `.gz`, no extension) SHALL be skipped with no finding and no `ran_checks`
+entry. `latin-1`/`cp1252` SHALL NOT be retried.
+
+> Previously: `utf-8-sig → utf-8 → latin-1 → cp1252` on every file; binary files produced
+> fail findings blocking publish. Now scoped to text-eligible inputs only with UTF-8-only chain.
 
 #### Scenarios
 
-**Valid UTF-8**
+**Valid UTF-8 csv/tsv pass**
 
 ```
-GIVEN a CSV file with valid UTF-8 encoding
-WHEN _check_encoding_validation() runs
-THEN no error SHALL be appended
+GIVEN a valid UTF-8 `.csv` and a valid UTF-8 `.tsv`
+WHEN _check_encoding_validation runs on each
+THEN no error SHALL be appended for either
 ```
 
-**Non-UTF-8 file decoded via fallback**
+**Non-UTF-8 csv fails**
 
 ```
-GIVEN a CSV file encoded in Windows-1252
-WHEN _check_encoding_validation() runs
-THEN the file SHALL pass (cp1252 is Python's name for the Windows-1252 encoding)
-  AND no error SHALL be appended
+GIVEN a `.csv` whose 8 KB chunk fails both `utf-8-sig` and `utf-8`
+WHEN _check_encoding_validation runs
+THEN a `fail` error naming the file SHALL be appended
 ```
 
-**Unrecoverable encoding**
+**xlsx skipped regardless of 8 KB content**
 
 ```
-GIVEN a binary file that fails utf-8-sig, utf-8, latin-1, AND cp1252
-WHEN _check_encoding_validation() runs
-THEN a fail-level error SHALL be appended
-  AND the error SHALL name the file
+GIVEN a `.xlsx` whose first 8 KB happens to be valid UTF-8 (or not)
+WHEN _check_encoding_validation runs via `run()` or direct call
+THEN no error SHALL be appended and `ran_checks` SHALL not gain `encoding_validation`
 ```
 
 > **Known limitation:** The 8 KB peek may not detect binary files with
 > UTF-8-like prologues (e.g., a PNG or PDF whose first 8 KB happen to be valid
 > UTF-8). This is an accepted gap for P0 — full-file encoding detection would
-> require reading the entire file, breaking the streaming constraint.
+> require reading the entire file, breaking the streaming constraint. For non-eligible
+> files this limitation is moot — they are skipped by suffix before any probe.
+
+### 4.10 QualityValidator.run() — eligibility-gated dispatch
+
+**Requirement:** `QualityValidator.run()` SHALL run checks in fixed order without stopping on first
+failure. After `exists`/`is_dir` guards it MUST skip any entry where `not is_text_eligible(resolved)`
+(`path.suffix.lower() not in TEXT_SUFFIXES`). Defensive early-returns SHALL exist in
+`_check_encoding_validation(resolved)` and `_process_file(resolved)` so direct calls on non-eligible
+paths produce no finding and no `ran_checks` mutation. Only eligible files SHALL contribute to `ran_checks`.
+
+> Previously: `run()` called both helpers unconditionally for every file; no suffix guard;
+> fallbacks included latin-1/cp1252.
+
+#### Scenarios
+
+**run() filters before accumulators**
+
+```
+GIVEN `a.csv`, `b.xlsx`, `c.tsv` (all exist)
+WHEN `QualityValidator.run()` executes
+THEN only `a.csv`/`c.tsv` SHALL reach encoding probe and streaming accumulators
+```
+
+**Defensive helper guard**
+
+```
+GIVEN direct call `_check_encoding_validation(Path("data.xlsx"))` or `_process_file(Path("data.parquet"))`
+WHEN the method executes
+THEN it SHALL return with no `QualityResult` and no `ran_checks` change
+```
+
+**ran_checks empty for binary-only dataset**
+
+```
+GIVEN a dataset with only `.xlsx` files
+WHEN `QualityValidator.run()` completes
+THEN `ran_checks` SHALL be empty and `print_summary()` SHALL show `0 failed` (publish not blocked)
+```
+
+**Mixed dataset ran_checks**
+
+```
+GIVEN `data.csv` (valid) plus `extra.xlsx`
+WHEN `QualityValidator.run()` completes
+THEN `ran_checks` SHALL reflect only work done on `data.csv`
+```
+
+### 4.11 Text-eligible scope for all P0 checks
+
+**Requirement:** All P0 checks (§4) MUST apply only to text-eligible files where `Path.suffix.lower()`
+is in `TEXT_SUFFIXES = {".csv", ".tsv"}` via `is_text_eligible()` in `src/sofer/_formats.py`. Other
+suffixes (`.xlsx`, `.parquet`, `.jsonl`, `.csv.gz` → `.gz`, no extension) MUST be skipped: no read,
+no accumulator update, no `QualityResult`, no `ran_checks` increment. Binary-only datasets MUST yield
+empty `quality_results`.
+
+#### Scenarios
+
+**Binary formats skipped**
+
+```
+GIVEN `[[file]]` entries for `.xlsx`, `.parquet`, `.jsonl` (ZIP/parquet/jsonl bytes)
+WHEN `QualityValidator.run()` executes
+THEN `quality_results` SHALL be empty and `ran_checks` SHALL be empty
+```
+
+**TSV is eligible**
+
+```
+GIVEN a `.tsv` with a short row (field count mismatch)
+WHEN `QualityValidator.run()` executes
+THEN a `corrupt_records` `fail` finding SHALL be produced
+```
+
+**Case-insensitive and no-extension skipped**
+
+```
+GIVEN files `DATA.XLSX`, `Report.CSV`, `values.TSV`, `README` (no suffix)
+WHEN `QualityValidator.run()` executes
+THEN `DATA.XLSX` and `README` SHALL be skipped; `Report.CSV` and `values.TSV` SHALL be checked
+```
+
+**Binary-only dataset — no cross-file findings**
+
+```
+GIVEN two `.xlsx` files with identical bytes
+WHEN `QualityValidator.run()` executes
+THEN no `duplicates`/`cross_file_types`/`empty_columns`/`corrupt_records` finding SHALL be produced
+```
+
+### 4.12 UTF-8-only enforcement
+
+**Requirement:** `ENCODING_FALLBACKS` in `src/sofer/_csv_reader.py` SHALL be `["utf-8-sig", "utf-8"]`
+only; `latin-1`/`cp1252` MUST NOT be retried. `stream_csv` and `_check_encoding_validation` SHALL
+share this chain. A `.csv` with non-UTF-8 bytes MUST fail; `ValueError` from `stream_csv` remains the
+safety net for mislabeled `.csv`.
+
+#### Scenario: latin-1 csv fails
+
+```
+GIVEN a `.csv` encoded `latin-1` containing `José`
+WHEN encoding validation runs
+THEN a `fail` finding naming the file SHALL be appended
+```
 
 ---
 
