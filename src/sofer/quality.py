@@ -1,9 +1,18 @@
 """
-Data-quality checks for CSV content.
+Data-quality checks for CSV/TSV content (P0).
 
 The :class:`QualityValidator` runs all active P0 checks in a **single pass**
-per file — each CSV is opened once and every row is distributed to all active
-accumulators simultaneously.
+per file — each eligible file is opened once and every row is distributed to
+all active accumulators simultaneously.
+
+Only text-eligible files (``.csv`` / ``.tsv``, case-insensitive via
+``is_text_eligible`` from :mod:`sofer._formats`) are scanned.  Non-eligible
+suffixes (``.xlsx``, ``.parquet``, ``.jsonl``, ``.gz``, no extension) are
+skipped without I/O, without accumulator updates, and without ``ran_checks``
+entries.  ``_check_encoding_validation`` enforces UTF-8-only
+(``utf-8-sig → utf-8``) — ``latin-1``/``cp1252`` are not retried; a
+``ValueError`` from :func:`sofer._csv_reader.stream_csv` remains the safety
+net for mislabeled ``.csv`` files containing binary bytes.
 """
 
 from __future__ import annotations
@@ -16,6 +25,7 @@ from typing import Any
 
 from . import config
 from ._csv_reader import ENCODING_FALLBACKS, stream_csv
+from ._formats import is_text_eligible
 from ._sentinels import MISSING_VALUE_SENTINELS
 from .checks import ValidationReport
 from .codebook import infer_column_type
@@ -99,6 +109,7 @@ class QualityValidator:
 
         # Make sure user-supplied max_sample is respected
         self._max_sample = cfg.quality.max_sample
+        self._had_eligible: bool = False
 
         # ── Accumulator state (reset per run) ───────────────────────────
         self._reset_accumulators()
@@ -108,7 +119,12 @@ class QualityValidator:
     # ------------------------------------------------------------------
 
     def run(self) -> ValidationReport:
-        """Execute every active quality check across all CSV files.
+        """Execute every active quality check across all eligible files.
+
+        Only text-eligible files (``.csv``/``.tsv``, case-insensitive) are
+        scanned.  Non-eligible files are skipped after the ``exists``/
+        ``is_dir`` guards with no I/O, no accumulator updates, and no
+        ``ran_checks`` entries.
 
         Returns:
             A :class:`ValidationReport` whose ``quality_results`` list holds
@@ -121,6 +137,10 @@ class QualityValidator:
             resolved = entry.resolve(base)
             if not resolved.exists() or resolved.is_dir():
                 continue
+            if not is_text_eligible(resolved):
+                continue
+
+            self._had_eligible = True
 
             # ── Pre-scan: encoding validation ──────────────────────────
             self._check_encoding_validation(resolved)
@@ -148,6 +168,7 @@ class QualityValidator:
 
     def _reset_accumulators(self) -> None:
         self._results: list[QualityResult] = []
+        self._had_eligible = False
         # Per-file state
         self._file_headers: dict[str, list[str]] = {}
         self._file_row_count: dict[str, int] = {}
@@ -187,7 +208,13 @@ class QualityValidator:
     # ------------------------------------------------------------------
 
     def _process_file(self, resolved: Path) -> None:
-        """Open one CSV and distribute all rows to active accumulators."""
+        """Open one CSV/TSV and distribute all rows to active accumulators.
+
+        Non-eligible paths return immediately with no accumulator updates and
+        no ``ran_checks`` mutation (defensive guard for direct calls).
+        """
+        if not is_text_eligible(resolved):
+            return
         fname = resolved.name
         self._current_file = fname
         self._file_row_count[fname] = 0
@@ -328,6 +355,8 @@ class QualityValidator:
     def _check_duplicates(self) -> None:
         if "duplicates" not in self._checks:
             return
+        if not self._had_eligible:
+            return
         self._ran_checks.add("duplicates")
         if not self._dup_findings:
             return
@@ -339,6 +368,8 @@ class QualityValidator:
     def _check_empty_rows(self) -> None:
         if "empty_rows" not in self._checks:
             return
+        if not self._had_eligible:
+            return
         self._ran_checks.add("empty_rows")
         if not self._empty_row_numbers:
             return
@@ -348,6 +379,8 @@ class QualityValidator:
 
     def _check_empty_columns(self) -> None:
         if "empty_columns" not in self._checks:
+            return
+        if not self._had_eligible:
             return
         self._ran_checks.add("empty_columns")
         # Group empty columns per-file using the "fname::col" key format
@@ -372,6 +405,8 @@ class QualityValidator:
 
     def _check_null_profiling(self) -> None:
         if "null_profiling" not in self._checks:
+            return
+        if not self._had_eligible:
             return
         self._ran_checks.add("null_profiling")
         threshold = self._checks["null_profiling"].get("max_null_pct", 50.0)
@@ -406,6 +441,8 @@ class QualityValidator:
     def _check_format_consistency(self) -> None:
         if "format_consistency" not in self._checks:
             return
+        if not self._had_eligible:
+            return
         self._ran_checks.add("format_consistency")
         ignore = self._checks["format_consistency"].get("ignore_values", [])
         ignore_set = {v.upper() for v in ignore}
@@ -428,6 +465,8 @@ class QualityValidator:
     def _check_corrupt_records(self) -> None:
         if "corrupt_records" not in self._checks:
             return
+        if not self._had_eligible:
+            return
         self._ran_checks.add("corrupt_records")
         if not self._corrupt_findings:
             return
@@ -442,6 +481,8 @@ class QualityValidator:
 
     def _check_value_range(self) -> None:
         if "value_range" not in self._checks:
+            return
+        if not self._had_eligible:
             return
         self._ran_checks.add("value_range")
         cfg = self._checks["value_range"]
@@ -466,6 +507,8 @@ class QualityValidator:
     def _check_cross_file_types(self) -> None:
         if "cross_file_types" not in self._checks:
             return
+        if not self._had_eligible:
+            return
         self._ran_checks.add("cross_file_types")
         sev = self._checks["cross_file_types"]["severity"]
         # Find shared column names across files (skip zero-row files)
@@ -487,6 +530,15 @@ class QualityValidator:
                 self._add_result("cross_file_types", sev, f"Type mismatch for '{col}': {details}")
 
     def _check_encoding_validation(self, resolved: Path) -> None:
+        """Probe the first 8 KB with ``utf-8-sig → utf-8``.
+
+        Non-eligible paths return immediately with no finding and no
+        ``ran_checks`` mutation (defensive guard for direct calls).  Only
+        text-eligible files (``.csv``/``.tsv``) are probed; ``latin-1``/
+        ``cp1252`` are not retried.
+        """
+        if not is_text_eligible(resolved):
+            return
         if "encoding_validation" not in self._checks:
             return
         self._ran_checks.add("encoding_validation")
