@@ -23,9 +23,8 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Validation and quality checks](#validation-and-quality-checks)
 - [Codebook generation](#codebook-generation)
 - [AI and MCP server](#ai-and-mcp-server)
-- [Development setup](#development-setup)
-- [Architecture](#architecture)
-- [Development](#development)
+- [Configuration](#configuration)
+- [Architecture summary](#architecture-summary)
 - [Related](#related)
 
 ## Install
@@ -160,86 +159,6 @@ expected = ["column_a", "column_b"]
 # [[quality]]
 # check = "null_profiling"
 # max_null_pct = 15.0
-```
-
-### Tool-wide configuration (`[tool.sofer]`)
-
-Tool-wide defaults live in a `pyproject.toml` under `[tool.sofer]`. Every
-value has a sensible default — the whole section is optional.
-
-#### Where sofer looks for it (discovery & precedence)
-
-sofer resolves the section by walking up the directory tree, in this fixed
-order:
-
-1. **Dataset directory** — once a dataset TOML is loaded (e.g.
-   `sofer prepare mydata/dataset.toml`), the nearest `pyproject.toml`
-   walking up from the TOML's directory wins. This is where per-project
-   overrides normally live.
-2. **Current working directory** — if no `pyproject.toml` is found above the
-   dataset, sofer walks up from the directory the command was invoked in.
-   This also covers single-file commands such as `sofer codebook FILE` or
-   `sofer profile FILE`, which have no dataset TOML.
-3. **Built-in defaults** — if neither walk finds anything, all values fall
-   back to the built-in defaults below.
-
-The first `pyproject.toml` found stops the search (matching ruff/pytest
-conventions). A found file without a `[tool.sofer]` section contributes no
-overrides — the walk does not continue past it.
-
-> **Behavior change for editable installs:** sofer no longer reads its *own*
-> repository `pyproject.toml` at runtime. If you maintain sofer and run it
-> from an editable install, your user-project overrides now come from the
-> project you are working on — not from sofer's repo. Put your `[tool.sofer]`
-> section there instead.
-
-#### Bootstrap keys: cwd-only until a dataset config loads
-
-Two keys are needed *before* any dataset TOML is known:
-
-- `default_config_name` (used to build CLI defaults, e.g. for
-  `sofer scan [config]` and `codebook --config`)
-- `output_dir` (used by `scan`/`init` before a config is validated)
-
-These honor `[tool.sofer]` overrides only via the **cwd walk-up** at startup.
-Once a dataset TOML is loaded, they are re-resolved from the dataset-dir
-walk like every other key; the cwd-only limitation applies only to that
-pre-config window.
-
-#### Seeing which file was used
-
-Set `SOFER_VERBOSE=1` to make sofer print one line on **stderr** describing
-where the tool-wide configuration came from:
-
-```text
-[tool.sofer] source: /home/me/myproj/pyproject.toml
-[tool.sofer] source: built-in defaults
-```
-
-Stdout is never modified, so piping/redirecting output stays byte-identical.
-
-#### Metadata inference tuning
-
-The inference pipeline (used by `profile`) is fully configurable in
-`pyproject.toml` — no magic numbers in code:
-
-```toml
-[tool.sofer]
-# Confidence prior per semantic detector (pattern reliability).
-# Higher = the pattern alone is more trustworthy.
-semantic_priors = { email = 0.98 }
-
-# Status thresholds (confidence bands).
-confirm_threshold = 0.8   # >= this → confirmed
-min_threshold = 0.5       # >= this → inferred; below → unknown
-detect_threshold = 0.5    # match_rate below this → no detection at all
-
-# Profiling sample size (statistics are computed over a bounded sample, never
-# a full in-memory load — and reported as such).
-profile_max_sample = 100000
-
-# Confidence is rounded to this many decimal places before it is stored.
-confidence_round_digits = 4
 ```
 
 ## Directory layout
@@ -482,52 +401,30 @@ sofer-mcp
 When no phrase is configured, only the two acknowledgment booleans gate the
 HF publish — a weaker posture suited to trusted single-user stdio setups.
 
-## Development setup
+## Configuration
 
-```bash
-uv sync
-cp .env.template .env   # then edit .env with your HF token
-```
+Tool-wide defaults live in a `pyproject.toml` under `[tool.sofer]` — every
+value has a sensible default, so the whole section is optional. sofer finds it
+by walking up from the dataset directory, then from the current working
+directory, and finally falls back to built-in defaults; the first
+`pyproject.toml` found stops the search.
 
-> Get your token at: https://huggingface.co/settings/tokens
+The full reference lives in
+[docs/configuration.md#discovery-and-precedence](docs/configuration.md#discovery-and-precedence).
 
-## Architecture
+Set `SOFER_VERBOSE=1` to print where the tool-wide configuration came from —
+full explanation in
+[docs/configuration.md#seeing-which-file-was-used](docs/configuration.md#seeing-which-file-was-used).
 
-```
-src/sofer/
-├── __init__.py         # Package docstring + public API
-├── _version.py         # Runtime version resolution (installed metadata + dev fallback)
-├── _formats.py         # Supported file extension registry
-├── _sentinels.py       # Shared sentinel value sets
-├── _csv_reader.py      # CSV/TSV streaming reader
-├── _mirror.py          # Remote-path validation + dir-aware mirror copies
-├── _patterns.py        # Shared regexes (EMAIL_PATTERN)
-├── cli.py              # argparse CLI with 8 subcommands (init, scan, validate, prepare, publish, codebook, profile, render)
-├── model.py            # DatasetConfig + InferenceStatus
-├── checks.py           # DatasetValidator — data integrity checks
-├── quality.py          # QualityValidator — 9 quality checks (single-pass)
-├── codebook.py         # Multi-format codebook generator
-├── scanner.py          # File discovery, TOML merge, copy-to-cache
-├── prepare.py          # Offline generation: Parquet conversion, card, LICENSE, codebooks
-├── publish.py          # Delivery: HF upload_folder / local copy, auto-prepare, dry-run
-├── semantic.py         # Semantic type inference detectors (email)
-├── pii.py              # Possible-PII detection detectors (email)
-├── metadata.py         # metadata.yaml schema + deterministic (de)serialization
-├── profile.py          # Read-only profile orchestrator → metadata.yaml
-├── render.py           # Render status-annotated README.md from metadata.yaml
-├── repo_compliance.py  # Dataset Card & schema compliance
-├── splits.py           # Split detection (train/test/validation)
-├── verification.py     # load_dataset() end-to-end verification
-└── mcp_server.py       # Optional MCP server (stdio) — tools, resources, prompts
-```
+## Architecture summary
 
-## Development
+sofer is a single Python package (`src/sofer/`) with one module per concern:
+CLI dispatch in `cli.py`, configuration in `model.py`, and each command owning
+its domain module (scanner, codebook, prepare, publish, profile, render). The
+annotated module tree lives in
+[CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
-```bash
-uv run pytest
-uv run mypy src/
-uv run ruff check src/ tests/
-```
+Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Related
 
