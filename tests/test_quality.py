@@ -772,3 +772,314 @@ class TestStreamCsv:
         csv_path.write_bytes(b"\xff\xfe\xfd\xfc\xfb\xfa\xfb\xfc\xff")
         with pytest.raises(ValueError, match="Cannot decode"):
             list(stream_csv(csv_path))
+
+
+# ── Text-eligible gating (fix-quality-encoding-xlsx) ───────────────────────
+
+
+class TestBinaryFormatsSkipped:
+    """Binary formats are skipped — no QualityResult, no ran_checks."""
+
+    def test_run_with_xlsx_parquet_jsonl_yields_empty(self, tmp_path):
+        """Binary .xlsx/.parquet/.jsonl → quality_results == [] and ran_checks == {}."""
+        xlsx = tmp_path / "a.xlsx"
+        parquet = tmp_path / "b.parquet"
+        jsonl = tmp_path / "c.jsonl"
+        xlsx.write_bytes(b"PK\x03\x04\x14\x00\x00\x00\x08\x00 fake xlsx content")
+        parquet.write_bytes(b"PAR1\x15\x00\x00\x00fake parquet")
+        jsonl.write_bytes(b'{"a": 1}\n{"a": 2}\n')
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=xlsx, remote="a.xlsx"),
+                FileEntry(local=parquet, remote="b.parquet"),
+                FileEntry(local=jsonl, remote="c.jsonl"),
+            ],
+        )
+        report = _run_quality(cfg)
+        assert report.quality_results == []
+        assert report.ran_checks == set()
+
+
+class TestTsvEligible:
+    """TSV is text-eligible and checked like CSV."""
+
+    def test_tsv_short_row_produces_corrupt_records_fail(self, tmp_path):
+        """TSV with short row → corrupt_records fail."""
+        tsv = tmp_path / "data.tsv"
+        with open(tsv, "w", newline="", encoding="utf-8") as f:
+            # Use default delimiter ";" so the validator (which uses cfg.csv_delimiter=";")
+            # correctly parses the file regardless of .tsv suffix.
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(["a", "b", "c"])
+            writer.writerow(["1", "x", "10"])
+            writer.writerow(["2", "y"])  # short row: 2 vs 3
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert len(qr) >= 1
+        assert any(r.severity == "fail" for r in qr)
+
+
+class TestCaseInsensitiveAndNoExtension:
+    """Case-insensitive suffix and no-extension files are handled."""
+
+    def test_uppercase_xlsx_and_readme_skipped(self, tmp_path):
+        """DATA.XLSX + README skipped; Report.CSV + values.TSV checked."""
+        xlsx = tmp_path / "DATA.XLSX"
+        readme = tmp_path / "README"
+        csv_file = tmp_path / "Report.CSV"
+        tsv_file = tmp_path / "values.TSV"
+        xlsx.write_bytes(b"PK\x03\x04 binary content for uppercase xlsx")
+        readme.write_text("just a readme with no suffix", encoding="utf-8")
+        # Report.CSV with short row
+        with open(csv_file, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["a", "b", "c"])
+            w.writerow(["1", "x"])  # short
+        # values.TSV with short row — use ";" so default delimiter parses it
+        with open(tsv_file, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["x", "y", "z"])
+            w.writerow(["1", "2"])  # short
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=xlsx, remote="DATA.XLSX"),
+                FileEntry(local=readme, remote="README"),
+                FileEntry(local=csv_file, remote="Report.CSV"),
+                FileEntry(local=tsv_file, remote="values.TSV"),
+            ],
+        )
+        report = _run_quality(cfg)
+        # Should have corrupt_records findings for the two eligible files
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert len(qr) >= 2
+        messages = " ".join(r.message for r in qr)
+        assert "Report.CSV" in messages
+        assert "values.TSV" in messages
+        # Non-eligible must not appear in messages
+        assert "DATA.XLSX" not in messages
+        assert "README" not in messages
+
+    def test_csv_gz_suffix_skipped(self, tmp_path):
+        """a.csv.gz → suffix .gz → skipped."""
+        gz_csv = tmp_path / "a.csv.gz"
+        gz_csv.write_bytes(b"PK\x03\x04 fake gzipped csv")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=gz_csv, remote="a.csv.gz")],
+        )
+        report = _run_quality(cfg)
+        assert report.quality_results == []
+        assert report.ran_checks == set()
+
+
+class TestBinaryOnlyNoCrossFile:
+    """Binary-only datasets produce no cross-file findings."""
+
+    def test_two_identical_xlsx_no_cross_file_findings(self, tmp_path):
+        """Two identical .xlsx → no duplicates/cross_file_types/empty_columns/corrupt_records."""
+        content = b"PK\x03\x04\x14\x00\x08\x00 identical xlsx bytes"
+        p1 = tmp_path / "a.xlsx"
+        p2 = tmp_path / "b.xlsx"
+        p1.write_bytes(content)
+        p2.write_bytes(content)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=p1, remote="a.xlsx"),
+                FileEntry(local=p2, remote="b.xlsx"),
+            ],
+        )
+        report = _run_quality(cfg)
+        assert report.quality_results == []
+        assert report.ran_checks == set()
+        for check in ("duplicates", "cross_file_types", "empty_columns", "corrupt_records"):
+            assert not any(r.check == check for r in report.quality_results)
+
+
+class TestDefensiveHelperGuards:
+    """Direct helper calls on non-eligible paths are no-ops."""
+
+    def test_check_encoding_validation_guard(self, tmp_path):
+        """Direct _check_encoding_validation on .xlsx → no result, no ran_checks."""
+        cfg, _ = _make_csv_cfg(tmp_path, ["a"], [["x"]])
+        validator = QualityValidator(cfg)
+        # Reset to known empty state
+        validator._reset_accumulators()
+        validator._check_encoding_validation(Path("data.xlsx"))
+        assert validator._results == []
+        assert validator._ran_checks == set()
+        validator._check_encoding_validation(Path("data.parquet"))
+        assert validator._results == []
+        assert validator._ran_checks == set()
+        validator._check_encoding_validation(Path("data.jsonl"))
+        assert validator._results == []
+        assert validator._ran_checks == set()
+
+    def test_process_file_guard(self, tmp_path):
+        """Direct _process_file on .parquet → no result, no ran_checks."""
+        cfg, _ = _make_csv_cfg(tmp_path, ["a"], [["x"]])
+        validator = QualityValidator(cfg)
+        validator._reset_accumulators()
+        validator._process_file(Path("data.parquet"))
+        assert validator._results == []
+        assert validator._ran_checks == set()
+        validator._process_file(Path("data.xlsx"))
+        assert validator._results == []
+        assert validator._ran_checks == set()
+        # Also check case-insensitive guard
+        validator._process_file(Path("DATA.XLSX"))
+        assert validator._results == []
+        assert validator._ran_checks == set()
+
+
+class TestMixedAndRanChecksAndEncoding:
+    """Mixed datasets, ran_checks accounting, and UTF-8-only encoding."""
+
+    def test_run_filters_before_accumulators(self, tmp_path):
+        """a.csv + b.xlsx + c.tsv → only a/c reach probe/stream."""
+        a_csv = _make_csv(tmp_path / "a.csv", [["a", "b", "c"], ["1", "x", "10"]])
+        b_xlsx = tmp_path / "b.xlsx"
+        b_xlsx.write_bytes(b"PK\x03\x04 fake xlsx")
+        c_tsv = tmp_path / "c.tsv"
+        with open(c_tsv, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["a", "b", "c"])
+            w.writerow(["1", "x"])  # short row → corrupt
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=a_csv, remote="a.csv"),
+                FileEntry(local=b_xlsx, remote="b.xlsx"),
+                FileEntry(local=c_tsv, remote="c.tsv"),
+            ],
+        )
+        report = _run_quality(cfg)
+        # Only c.tsv should produce corrupt_records
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert len(qr) >= 1
+        assert any("c.tsv" in r.message for r in qr)
+        assert not any("b.xlsx" in r.message for r in qr)
+        assert not any("a.csv" in r.message for r in qr)
+
+    def test_mixed_ran_checks_reflects_only_eligible(self, tmp_path):
+        """data.csv + extra.xlsx → ran_checks same as data.csv alone."""
+        # Run with only eligible file
+        data_only_csv = _make_csv(tmp_path / "data_only.csv", [["id", "val"], ["1", "x"]])
+        cfg_only = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=data_only_csv, remote="data.csv")],
+        )
+        report_only = _run_quality(cfg_only)
+        # Run with eligible + binary
+        data_csv = _make_csv(tmp_path / "data.csv", [["id", "val"], ["1", "x"]])
+        extra = tmp_path / "extra.xlsx"
+        extra.write_bytes(b"PK\x03\x04 extra")
+        cfg_mixed = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=data_csv, remote="data.csv"),
+                FileEntry(local=extra, remote="extra.xlsx"),
+            ],
+        )
+        report_mixed = _run_quality(cfg_mixed)
+        assert report_mixed.ran_checks == report_only.ran_checks
+        assert report_mixed.ran_checks != set()
+
+    def test_binary_only_ran_checks_empty(self, tmp_path):
+        """Binary-only → ran_checks == {} and quality_results == []."""
+        p1 = tmp_path / "only.xlsx"
+        p1.write_bytes(b"PK\x03\x04 binary")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p1, remote="only.xlsx")],
+        )
+        report = _run_quality(cfg)
+        assert report.quality_results == []
+        assert report.ran_checks == set()
+
+    def test_latin1_csv_fails_utf8_passes_xlsx_skipped(self, tmp_path):
+        """latin-1 José fails, UTF-8 passes, .xlsx skipped regardless."""
+        # latin-1 csv
+        latin_csv = _make_csv(tmp_path / "latin.csv", [["name"], ["José"]], encoding="latin-1")
+        cfg_latin = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=latin_csv, remote="latin.csv")],
+        )
+        report_latin = _run_quality(cfg_latin)
+        qr_latin = [r for r in report_latin.quality_results if r.check == "encoding_validation"]
+        assert len(qr_latin) >= 1
+        assert qr_latin[0].severity == "fail"
+
+        # UTF-8 csv passes
+        utf_csv = _make_csv(tmp_path / "utf.csv", [["name"], ["José"]], encoding="utf-8")
+        cfg_utf = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=utf_csv, remote="utf.csv")],
+        )
+        report_utf = _run_quality(cfg_utf)
+        qr_utf = [r for r in report_utf.quality_results if r.check == "encoding_validation"]
+        assert len(qr_utf) == 0
+
+        # .xlsx with valid UTF-8 bytes → still skipped
+        xlsx = tmp_path / "data.xlsx"
+        xlsx.write_bytes("name\nJosé\n".encode())
+        cfg_xlsx = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=xlsx, remote="data.xlsx")],
+        )
+        report_xlsx = _run_quality(cfg_xlsx)
+        assert report_xlsx.quality_results == []
+        assert report_xlsx.ran_checks == set()
+
+    def test_mislabeled_csv_with_pk_raises_value_error(self, tmp_path):
+        """Mislabelled .csv containing PK + invalid UTF-8 → ValueError from stream_csv."""
+        bad_csv = tmp_path / "bad.csv"
+        # PK header plus invalid UTF-8 bytes (\xff\xfe) ensures decode failure
+        bad_csv.write_bytes(b"PK\x03\x04\xff\xfe\xfd\xfc mislabeled")
+        with pytest.raises(ValueError, match="Cannot decode"):
+            list(stream_csv(bad_csv, encoding="utf-8-sig"))
+        # Via QualityValidator it should surface as encoding_validation fail
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=bad_csv, remote="bad.csv")],
+        )
+        report = _run_quality(cfg)
+        assert any(
+            r.check == "encoding_validation" and r.severity == "fail"
+            for r in report.quality_results
+        )
+
+    def test_is_text_eligible_direct(self):
+        """is_text_eligible handles .csv/.tsv case-insensitive and others false."""
+        from sofer._formats import is_text_eligible
+
+        assert is_text_eligible(Path("a.csv")) is True
+        assert is_text_eligible(Path("a.tsv")) is True
+        assert is_text_eligible(Path("A.CSV")) is True
+        assert is_text_eligible(Path("values.TSV")) is True
+        assert is_text_eligible(Path("Report.CSV")) is True
+        assert is_text_eligible(Path("a.xlsx")) is False
+        assert is_text_eligible(Path("a.parquet")) is False
+        assert is_text_eligible(Path("a.jsonl")) is False
+        assert is_text_eligible(Path("a.csv.gz")) is False  # suffix .gz
+        assert is_text_eligible(Path("README")) is False
+        assert is_text_eligible(Path("DATA.XLSX")) is False
