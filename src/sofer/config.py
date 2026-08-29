@@ -26,9 +26,11 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: dict[str, Any] = {
-    # sofer artifact cache — ``data/`` stays reserved for raw source files
-    # (user decision for the prepare/publish split).
+    # sofer artifact cache — ``cache/`` holds scan copies ready for prepare;
+    # ``raw/`` is the tracked source root scanned via ``flatten_first_level``
+    # (``raw/DPTO.csv → cache/DPTO.csv``).
     "output_dir": "cache",
+    "raw_dir": "raw",
     "default_config_name": "dataset.toml",
     "parquet_row_group_size": 100_000,
     "parquet_compression": "zstd",
@@ -262,6 +264,7 @@ def _load_tool_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 OUTPUT_DIR: str = _DEFAULTS["output_dir"]
+RAW_DIR: str = _DEFAULTS["raw_dir"]
 DEFAULT_CONFIG_NAME: str = _DEFAULTS["default_config_name"]
 
 PARQUET_ROW_GROUP_SIZE: int = _DEFAULTS["parquet_row_group_size"]
