@@ -9,9 +9,9 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 
 ## Install
 
-sofer is a standalone CLI — install it once, run it anywhere. It is not
-published on PyPI yet, so install it from the git tag of the release you want.
-Replace `X.Y.Z` with the latest version (check the repo's tags/releases):
+sofer is a standalone CLI — install it once, run it anywhere. Install it from
+the git tag of the release you want. Replace `X.Y.Z` with the latest version
+(check the repo's tags/releases):
 
 ```bash
 # with uv (isolated tool install):
@@ -33,7 +33,7 @@ in an object store, or in a local directory.
 
 **Key principles:**
 
-- **Automatizar observaciones; no inventar conocimiento semántico.**
+- **Automate observations; don't invent semantic knowledge.**
   sofer infers what is reliably inferable and marks everything else as a
   guess — it never presents an inference as a fact.
 - **Confidential by default.** Repos are private unless you say otherwise.
@@ -275,13 +275,6 @@ profile_max_sample = 100000
 # Confidence is rounded to this many decimal places before it is stored.
 confidence_round_digits = 4
 ```
-
-> **Release note:** runtime discovery of `[tool.sofer]` no longer
-> consults sofer's own repository `pyproject.toml` — see *Where sofer looks
-> for it* above. Editable-install users must place overrides in their user
-> project's `pyproject.toml`.
-
-Every value has a sensible default — the whole section is optional.
 
 ## Command reference
 
