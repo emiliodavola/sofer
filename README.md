@@ -394,8 +394,7 @@ network access is the Hugging Face upload inside `sofer_publish_confirm`.
 The base install stays lean — `fastmcp` is an optional extra:
 
 ```bash
-pip install 'sofer[mcp]'
-# or, from the release tag:
+# install the mcp extra from the release tag:
 pip install 'git+https://github.com/emiliodavola/sofer.git@vX.Y.Z[mcp]'
 ```
 
