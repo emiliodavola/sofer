@@ -19,6 +19,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Directory layout](#directory-layout)
 - [Profiling and rendering](#profiling-and-rendering)
 - [Command reference](#command-reference)
+- [Flags at a glance](#flags-at-a-glance)
 - [Data format support](#data-format-support)
 - [Validation and quality checks](#validation-and-quality-checks)
 - [Codebook generation](#codebook-generation)
@@ -241,9 +242,20 @@ detector class, no changes to the pipeline.
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
 | `--help` | Detailed help for any command. |
+| `sofer-mcp` | Launch the MCP server over stdio (10 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
 > generation half (offline, inspectable) and the delivery half (network).
+
+### Flags at a glance
+
+| Flag | Commands | What it does |
+|---|---|---|
+| `--keep-csv` | `publish` (HF target only) | Also upload the original CSV alongside the converted Parquet; no effect with `--target local`. |
+| `--no-checks` | `prepare` | Skip the structural and quality validators — generate the package without running checks. |
+| `--force` | `prepare`, `publish`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
+| `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
+| `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). |
 
 ## Data format support
 
