@@ -486,10 +486,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate the full dataset package locally (Parquet, card, LICENSE, codebooks).",
         description=(
             "Generate every artifact that makes up a dataset package on the "
-            "local machine: CSV-to-Parquet conversion, cross-file schema "
+            "local machine: universal csv/tsv/xlsx/jsonl → normalized Parquet "
+            "conversion (Excel → one Parquet per sheet), cross-file schema "
             "checks, a schema report, the Dataset Card (README.md) and "
-            "LICENSE, and - with --all-files - codebooks.  This command "
-            "never contacts Hugging Face and needs no credentials.\n"
+            "LICENSE, and - with --all-files - codebooks.  Set "
+            "convert_to_parquet=false per [[file]] to keep the original.  This "
+            "command never contacts Hugging Face and needs no credentials.\n"
             "\n"
             "Artifacts are written to --output DIR (default: the dataset's "
             "[dataset] build_dir, usually build/).  Existing generated "
@@ -570,7 +572,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pb.add_argument(
         "--keep-csv",
         action="store_true",
-        help="Upload the original CSV alongside the converted Parquet (hf target only).",
+        help=(
+            "Upload the original CSV alongside the converted Parquet "
+            "(hf target only; CSV-only, ignored for tsv/xlsx/jsonl)."
+        ),
     )
     pb.add_argument(
         "--dry-run",

@@ -60,16 +60,39 @@ class FileEntry:
     """A single file or directory to be uploaded to a HF repo.
 
     Attributes:
-        local:     Local filesystem path (absolute, or relative to the TOML file).
-        remote:    Destination path inside the HF repository.
-        recursive: If True and local is a directory, upload it recursively.
+        local:              Local filesystem path (absolute, or relative to the TOML file).
+        remote:             Destination path inside the HF repository.
+        recursive:          If True and local is a directory, upload it recursively.
+        convert_to_parquet: When True (default), convertible files are staged as
+            normalized Parquet.  When False, the original file is staged as-is.
+        upload_as_csv:      Deprecated alias for ``convert_to_parquet`` — only
+            honoured for ``.csv`` remotes.  Prefer ``convert_to_parquet``.
+        include_in_schema:  Whether this file contributes to the schema report.
     """
 
     local: Path
     remote: str
     recursive: bool = False
+    convert_to_parquet: bool = True
     upload_as_csv: bool = False
     include_in_schema: bool = True
+
+    def __post_init__(self) -> None:
+        """Honour deprecated ``upload_as_csv`` alias for direct construction.
+
+        ``DatasetConfig.from_toml`` already implements precedence
+        (explicit ``convert_to_parquet`` wins, csv-only deprecation warning).
+        This hook keeps ad-hoc ``FileEntry(..., upload_as_csv=True)`` in tests
+        and callers consistent without requiring TOML parsing.
+        """
+        if self.upload_as_csv and self.convert_to_parquet:
+            if self.remote.lower().endswith(".csv"):
+                # csv-only alias: upload_as_csv=True → convert_to_parquet=False
+                # (no warning here — from_toml already warns for TOML path)
+                object.__setattr__(self, "convert_to_parquet", False)
+            else:
+                # non-csv ignored — keep convert_to_parquet=True
+                pass
 
     def resolve(self, base_dir: Path) -> Path:
         """Return the absolute local path.
@@ -362,12 +385,34 @@ class DatasetConfig:
         # -- files ---------------------------------------------------------
         files: list[FileEntry] = []
         for entry in data.get("file", []):
+            remote_val: str = entry["remote"]
+            upload_as_csv_val: bool = bool(entry.get("upload_as_csv", False))
+            # Precedence: explicit convert_to_parquet wins; otherwise derive
+            # from upload_as_csv for csv-only with deprecation warning.
+            if "convert_to_parquet" in entry:
+                convert_val: bool = bool(entry["convert_to_parquet"])
+            elif upload_as_csv_val:
+                if remote_val.lower().endswith(".csv"):
+                    print(
+                        "  [!] 'upload_as_csv' is deprecated — "
+                        "use 'convert_to_parquet = false' instead."
+                    )
+                    convert_val = False
+                else:
+                    print(
+                        f"  [!] 'upload_as_csv=true' ignored for non-csv remote '{remote_val}' — "
+                        f"use 'convert_to_parquet = false' to keep the original."
+                    )
+                    convert_val = True
+            else:
+                convert_val = True
             files.append(
                 FileEntry(
                     local=Path(entry["local"]),
-                    remote=entry["remote"],
+                    remote=remote_val,
                     recursive=entry.get("recursive", False),
-                    upload_as_csv=entry.get("upload_as_csv", False),
+                    convert_to_parquet=convert_val,
+                    upload_as_csv=upload_as_csv_val,
                     include_in_schema=entry.get("include_in_schema", True),
                 )
             )

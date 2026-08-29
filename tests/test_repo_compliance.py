@@ -2135,8 +2135,8 @@ class TestStagedParquetRemoteRelativeLookup:
         warnings = [ln for ln in out.splitlines() if "[!]" in ln and "Staged Parquet" in ln]
         # Two distinct missing keys → exactly one warning each, naming the key.
         assert len(warnings) == 2
-        assert any("data/A/train.parquet" in w for w in warnings)
-        assert any("data/B/train.parquet" in w for w in warnings)
+        assert any("data/a/train.parquet" in w for w in warnings)
+        assert any("data/b/train.parquet" in w for w in warnings)
         # CSV fallback produced the columns and exact row counts.
         assert row_counts == {"data/A/train.csv": 3, "data/B/train.csv": 3}
         by_name = {c.name: c for c in columns}

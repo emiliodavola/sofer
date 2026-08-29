@@ -355,14 +355,32 @@ def _assert_cross_file_schema(
         return errors
 
     # ── Build (parquet_remote, parquet_path) pairs, de-duped by remote_key ──
+    # ``converted`` is keyed by *normalized* Parquet remotes; we resolve via
+    # the same normalization so that accent/case variants are grouped correctly.
+    from ._converters import normalize_parquet_remote
+
     seen: set[str] = set()
     parquet_specs: list[tuple[str, Path]] = []
     for entry in cfg.files:
-        remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
-        if remote_key in converted and remote_key not in seen:
-            seen.add(remote_key)
-            parquet_remote = parquet_remote_for(entry.remote)
-            parquet_specs.append((parquet_remote, converted[remote_key][0]))
+        norm_key = normalize_parquet_remote(parquet_remote_for(entry.remote))
+        legacy_key = str(PurePosixPath(entry.remote).with_suffix(""))
+        norm_stem = norm_key.removesuffix(".parquet")
+        # For xlsx multi-sheet, the entry's norm_key is the single-sheet
+        # stem; we need to include all matching sheet remotes
+        matching: list[str] = []
+        for k in converted:
+            if (
+                k == norm_key
+                or k == legacy_key
+                or k.lower() == norm_stem.lower()
+                or k.startswith(norm_stem + "__")
+                or k.startswith(legacy_key + "__")
+            ):
+                matching.append(k)
+        for mk in matching:
+            if mk not in seen:
+                seen.add(mk)
+                parquet_specs.append((mk, converted[mk][0]))
 
     if len(parquet_specs) < 2:
         return errors  # nothing to compare
@@ -555,8 +573,12 @@ def _check_local_overwrite(cfg: DatasetConfig, output_dir: Path, all_files: bool
 
     Used by PRP-07: without ``--force``, ``prepare`` refuses to overwrite
     existing generated artifacts.  The set checked matches what a run would
-    produce: converted Parquet mirror paths, root compliance files, and
-    (with ``--all-files``) the codebook index + ``codebooks/`` tree.
+    produce: converted Parquet mirror paths (normalized), root compliance
+    files, and (with ``--all-files``) the codebook index + ``codebooks/`` tree.
+
+    For convertible entries the candidate is the **normalized** Parquet remote
+    (via ``normalize_parquet_remote(parquet_remote_for(...))``); XLSX entries
+    check any ``stem__*.parquet`` match in the mirror layout.
 
     Args:
         cfg:        Dataset configuration.
@@ -566,18 +588,43 @@ def _check_local_overwrite(cfg: DatasetConfig, output_dir: Path, all_files: bool
     Returns:
         List of existing artifact paths (empty = nothing to overwrite).
     """
+    from ._converters import CONVERTIBLE_SUFFIXES, normalize_parquet_remote
+
     existing: list[str] = []
 
     for entry in cfg.files:
         if entry.recursive:
             continue  # directory trees are merged by copy_to_mirror
-        remote_lower = entry.remote.lower()
-        if remote_lower.endswith(".csv") and not entry.upload_as_csv:
-            candidate = output_dir / PurePosixPath(parquet_remote_for(entry.remote))
+        suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+        is_convertible = suffix in CONVERTIBLE_SUFFIXES
+        eligible = is_convertible and bool(entry.convert_to_parquet)
+        if eligible:
+            normalized = normalize_parquet_remote(parquet_remote_for(entry.remote))
+            if suffix == ".xlsx":
+                # Any existing sheet parquet for this stem counts
+                stem = PurePosixPath(normalized).stem
+                parent = PurePosixPath(normalized).parent
+                search_dir = output_dir / parent if str(parent) != "." else output_dir
+                if search_dir.is_dir():
+                    for p in search_dir.glob(f"{stem}__*.parquet"):
+                        if p.exists():
+                            existing.append(str(p))
+                    # Also single-sheet case
+                    candidate = output_dir / PurePosixPath(normalized)
+                    if candidate.exists():
+                        existing.append(str(candidate))
+                else:
+                    candidate = output_dir / PurePosixPath(normalized)
+                    if candidate.exists():
+                        existing.append(str(candidate))
+            else:
+                candidate = output_dir / PurePosixPath(normalized)
+                if candidate.exists():
+                    existing.append(str(candidate))
         else:
             candidate = output_dir / entry.remote
-        if candidate.exists():
-            existing.append(str(candidate))
+            if candidate.exists():
+                existing.append(str(candidate))
 
     for name in _GENERATED_ROOT_FILES:
         candidate = output_dir / name
@@ -657,23 +704,36 @@ def prepare(
         report.ran_checks = quality_report.ran_checks
         report.print_summary()
 
-    # ── 2. Conversion loop — CSV → Parquet (PRP-02) ────────────────────
-    # Conversion writes flat stem-named parquets into per-entry temp
-    # subdirs (same-stem files in different remote dirs must not collide),
-    # then each is staged to its remote-relative mirror path.
+    # ── 2. Conversion loop — universal csv/tsv/xlsx/jsonl → Parquet (PRP-02) ──
+    # Dispatcher in _converters handles per-format readers; this loop only
+    # gates eligibility (convertible set + convert_to_parquet + not recursive
+    # + not .parquet passthrough + local exists) and keys the result by the
+    # normalized Parquet remote.  XLSX multi-sheet expands to N entries.
+    from ._converters import CONVERTIBLE_SUFFIXES, convert_file_to_parquet, normalize_parquet_remote
+
     converted: dict[str, tuple[Path, Path, str]] = {}
     tmpdir = Path(tempfile.mkdtemp())
     try:
+        # Validate case-fold collisions on normalized keys before any write (PRP-02b)
+        from ._mirror import _validate_case_fold_collisions
+
+        collision_errors = _validate_case_fold_collisions(cfg)
+        if collision_errors:
+            for e in collision_errors:
+                print(f"  \u2717  {e}")
+            return 1
+
         for idx, entry in enumerate(cfg.files):
-            remote_lower = entry.remote.lower()
             if entry.recursive:
                 continue
-            if remote_lower.endswith(".csv") or remote_lower.endswith(".parquet"):
-                pass  # eligible for conversion
-            else:
-                continue
-            if entry.upload_as_csv:
-                print(f"  i  {entry.remote}: upload_as_csv=True, skipping conversion")
+            suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+            if suffix == ".parquet":
+                continue  # passthrough — staged as-is below
+            if suffix not in CONVERTIBLE_SUFFIXES:
+                continue  # non-convertible passthrough
+            if not entry.convert_to_parquet:
+                if entry.upload_as_csv and suffix == ".csv":
+                    print(f"  i  {entry.remote}: upload_as_csv=True, skipping conversion")
                 continue
 
             local = entry.resolve(base)
@@ -682,13 +742,31 @@ def prepare(
 
             entry_tmp = tmpdir / str(idx)
             entry_tmp.mkdir()
-            result = _convert_to_parquet(local, entry_tmp, delimiter=cfg.csv_delimiter)
-            if result is not None:
-                # Use the full remote path (without extension) as the key so
-                # that data/PROV/train and data/DPTO/train stay distinct.
-                remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
-                converted[remote_key] = (result, local, entry.remote)
-                print(f"  [~] {local.name} -> {result.name}")
+            dispatch_result = convert_file_to_parquet(local, entry_tmp)
+            if not dispatch_result:
+                # Conversion failed — warn already printed; fallback to original
+                print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")
+                continue
+            # Single-sheet / single-file converters return {stem: path}
+            # XLSX returns {stem__sheet: path} per sheet
+            for stem_key, parquet_path in dispatch_result.items():
+                if suffix == ".xlsx":
+                    # XLSX: stem_key is already stem__sheet or stem
+                    # Build normalized remote: dir(normalized) / stem_key.parquet
+                    parquet_remote = parquet_remote_for(entry.remote)
+                    # Replace stem with dispatch stem_key (preserves dir)
+                    base_remote = PurePosixPath(parquet_remote)
+                    # For multi-sheet, stem_key includes original stem prefix;
+                    # derive dir + stem_key.parquet
+                    normalized_remote = normalize_parquet_remote(
+                        str(base_remote.parent / f"{stem_key}.parquet")
+                        if str(base_remote.parent) != "."
+                        else f"{stem_key}.parquet"
+                    )
+                else:
+                    normalized_remote = normalize_parquet_remote(parquet_remote_for(entry.remote))
+                converted[normalized_remote] = (parquet_path, local, entry.remote)
+                print(f"  [~] {local.name} -> {PurePosixPath(normalized_remote).name}")
 
         # ── 3. Cross-file schema assertion (per split) ─────────────────
         schema_errors = _assert_cross_file_schema(converted, cfg)
@@ -705,9 +783,8 @@ def prepare(
                 print(f"  \u26a0  {w}")
 
         # ── 5. Stage converted Parquet files into the mirror layout ────
-        for remote_key, (parquet_path, _csv_path, original_remote) in converted.items():
-            parquet_remote = parquet_remote_for(original_remote)
-            copy_to_mirror(parquet_path, output_dir, parquet_remote)
+        for normalized_remote, (parquet_path, _csv_path, _orig_remote) in converted.items():
+            copy_to_mirror(parquet_path, output_dir, normalized_remote)
 
         # ── 6. Schema report + Dataset Card + LICENSE (PRP-03) ─────────
         print("  [i] Building schema report \u2026")
@@ -763,15 +840,23 @@ def prepare(
         (output_dir / "README.md").write_text(card, encoding=config.OUTPUT_ENCODING)
         (output_dir / "LICENSE").write_text(license_text, encoding=config.OUTPUT_ENCODING)
 
-        # ── 7. Stage non-converted files (upload_as_csv, parquet, other)
+        # ── 7. Stage non-converted files (opt-out, parquet passthrough, other)
         #       and recursive trees (RC-R04) ────────────────────────────
         for entry in cfg.files:
-            remote_key = str(PurePosixPath(entry.remote).with_suffix(""))
-            if remote_key in converted:
+            # If this entry's normalized remote (or any sheet expansion) was
+            # converted, it is already staged — skip
+            norm_key = normalize_parquet_remote(parquet_remote_for(entry.remote))
+            is_converted = any(
+                k == norm_key or k.startswith(norm_key.removesuffix(".parquet") + "__")
+                for k in converted
+            )
+            if is_converted:
                 continue  # already staged as Parquet above
             local = entry.resolve(base)
             if not local.exists():
                 continue  # will be reported as NOT FOUND below
+            # For passthrough .parquet, copy at declared remote; for opt-out
+            # convertible, keep original remote path
             copy_to_mirror(local, output_dir, entry.remote)
 
         # ── 8. Codebooks (PRP-04) — Option B: directly into output_dir ─

@@ -269,12 +269,12 @@ detector class, no changes to the pipeline.
 | Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
 |---|---|---|---|---|---|
 | CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
-| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 | Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
+| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 
-¹ `prepare` converts CSV files to Parquet (unless `upload_as_csv = true`); every other format is staged into the package as-is. `publish` delivers the prepared package unchanged.
+¹ `prepare` converts `csv/tsv/xlsx/jsonl` to normalized Parquet by default (Excel → one Parquet per sheet as `stem__sheet.parquet`); set `convert_to_parquet = false` per `[[file]]` to keep the original. `upload_as_csv = true` is a deprecated alias for `convert_to_parquet = false` on `.csv` only. `publish` delivers the prepared package unchanged (`--keep-csv` keeps the original `.csv` alongside its Parquet, CSV-only).
 
 ### Parquet conversion limitations
 
