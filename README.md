@@ -141,12 +141,13 @@ license = "MIT"
 tags = ["tag1", "tag2"]
 
 # Every file or directory to publish gets its own [[file]] section.
+# Source files live in raw/; scan copies to cache/ (cache/ is what prepare reads).
 [[file]]
-local = "data/file.csv"
+local = "cache/file.csv"
 remote = "file.csv"
 
 [[file]]
-local = "data/documents/"
+local = "cache/documents/"
 remote = "docs/"
 recursive = true
 
@@ -172,10 +173,20 @@ expected = ["column_a", "column_b"]
 ## Directory layout
 
 ```
-data/           source files only (declared in dataset.toml [[file]] local=) — never written by sofer
-cache/          sofer artifact cache: codebook --all-files writes cache/codebooks/
+raw/            tracked source root — put CSV/XLSX/JSONL here; scan copies to cache/ (e.g. raw/DPTO.csv -> cache/DPTO.csv)
+cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan destination; codebook --all-files writes cache/codebooks/
 build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
 ```
+
+Pipeline: `raw/` (tracked) -> `cache/` (gitignored) -> `build/` (gitignored)
+
+```
+raw/DPTO.csv                -> cache/DPTO.csv                -> build/*.parquet
+raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
+```
+
+`sofer init` scaffolds `raw/` (`mkdir -p raw/`, idempotent); `sofer init --move-existing` moves
+depth-1 supported files into `raw/` (opt-in, `--dry-run` previews, `--force` skips prompt).
 
 ## Profiling and rendering
 
@@ -184,11 +195,11 @@ that works on a dataset file alone — no TOML needed:
 
 ```bash
 # 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
-sofer profile data/contacts.csv
+sofer profile raw/contacts.csv
 
 # 2. Render a status-annotated README.md from that metadata
-sofer render data/            # directory containing metadata.yaml
-sofer render data/metadata.yaml   # ...or the file directly
+sofer render raw/            # directory containing metadata.yaml
+sofer render raw/metadata.yaml   # ...or the file directly
 ```
 
 `metadata.yaml` is the machine-readable source of truth; `render` is a pure
@@ -351,7 +362,7 @@ run. Check the report, fix the layout, and re-run.
 ### Single file
 
 ```bash
-sofer codebook data/persons.csv -o codebook.md
+sofer codebook raw/persons.csv -o codebook.md
 ```
 
 Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
@@ -377,7 +388,7 @@ error listing the colliding sources.
 (Option B) instead of the shared `cache/`:
 
 - Per-file codebooks land under `build/codebooks/` mirroring their relative
-  paths (e.g., `data/DPTO.csv` → `build/codebooks/DPTO.md`).
+  paths (e.g., `raw/DPTO.csv` → `build/codebooks/DPTO.md`).
 - The root index `codebook.md` is written to the output root.
 - `publish` stages these codebooks after the data files, so the repo ends up
   with `codebooks/**/*.md` plus the root `codebook.md`.

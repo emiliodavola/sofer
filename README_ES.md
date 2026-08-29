@@ -149,12 +149,13 @@ license = "MIT"
 tags = ["tag1", "tag2"]
 
 # Every file or directory to publish gets its own [[file]] section.
+# Los archivos fuente viven en raw/; scan los copia a cache/ (cache/ es lo que lee prepare).
 [[file]]
-local = "data/file.csv"
+local = "cache/file.csv"
 remote = "file.csv"
 
 [[file]]
-local = "data/documents/"
+local = "cache/documents/"
 remote = "docs/"
 recursive = true
 
@@ -180,10 +181,20 @@ expected = ["column_a", "column_b"]
 ## Directory layout
 
 ```
-data/           source files only (declared in dataset.toml [[file]] local=) — never written by sofer
-cache/          sofer artifact cache: codebook --all-files writes cache/codebooks/
-build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
+raw/            raíz de fuentes versionada — coloca CSV/XLSX/JSONL aquí; scan copia a cache/ (p. ej. raw/DPTO.csv -> cache/DPTO.csv)
+cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan; codebook --all-files escribe en cache/codebooks/
+build/          salida de prepare + entrada de publish (por dataset [dataset] build_dir, por defecto "build")
 ```
+
+Pipeline: `raw/` (versionado) -> `cache/` (gitignored) -> `build/` (gitignored)
+
+```
+raw/DPTO.csv                -> cache/DPTO.csv                -> build/*.parquet
+raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
+```
+
+`sofer init` crea `raw/` (`mkdir -p raw/`, idempotente); `sofer init --move-existing` mueve
+archivos soportados de profundidad 1 a `raw/` (opt-in, `--dry-run` previsualiza, `--force` omite confirmación).
 
 ## Profiling and rendering
 
@@ -192,11 +203,11 @@ lectura que funciona solo con un archivo de datos — no se necesita ningún TOM
 
 ```bash
 # 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
-sofer profile data/contacts.csv
+sofer profile raw/contacts.csv
 
 # 2. Render a status-annotated README.md from that metadata
-sofer render data/            # directory containing metadata.yaml
-sofer render data/metadata.yaml   # ...or the file directly
+sofer render raw/            # directory containing metadata.yaml
+sofer render raw/metadata.yaml   # ...or the file directly
 ```
 
 `metadata.yaml` es la fuente de verdad legible por máquina; `render` es una
@@ -383,7 +394,7 @@ de `prepare`. Revisa el informe, corrige la estructura y vuelve a ejecutar.
 ### Single file
 
 ```bash
-sofer codebook data/persons.csv -o codebook.md
+sofer codebook raw/persons.csv -o codebook.md
 ```
 
 Soporta CSV, TSV, Parquet, Excel (.xlsx) y JSON Lines (.jsonl). Produce una
@@ -411,7 +422,7 @@ en colisión.
 salida (Opción B) en lugar de en la `cache/` compartida:
 
 - Los codebooks por archivo se colocan en `build/codebooks/` reflejando sus
-  rutas relativas (p. ej., `data/DPTO.csv` → `build/codebooks/DPTO.md`).
+  rutas relativas (p. ej., `raw/DPTO.csv` → `build/codebooks/DPTO.md`).
 - El índice raíz `codebook.md` se escribe en la raíz del directorio de salida.
 - `publish` incorpora estos codebooks después de los archivos de datos, de modo
   que el repositorio termina con `codebooks/**/*.md` más el `codebook.md` raíz.

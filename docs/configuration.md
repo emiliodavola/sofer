@@ -31,16 +31,42 @@ overrides — the walk does not continue past it.
 
 ## Bootstrap keys (cwd-only)
 
-Two keys are needed *before* any dataset TOML is known:
+Three keys are needed *before* any dataset TOML is known:
 
 - `default_config_name` (used to build CLI defaults, e.g. for
   `sofer scan [config]` and `codebook --config`)
-- `output_dir` (used by `scan`/`init` before a config is validated)
+- `output_dir` (used by `scan`/`init` before a config is validated; the
+  artifact cache, default ``cache/``)
+- `raw_dir` (used by `sofer init` to scaffold the source root; default
+  ``raw/``)
 
-These honor `[tool.sofer]` overrides only via the **cwd walk-up** at startup.
-Once a dataset TOML is loaded, they are re-resolved from the dataset-dir
-walk like every other key; the cwd-only limitation applies only to that
-pre-config window.
+These honor `[tool.sofer]` overrides only via the **cwd walk-up** at startup
+(``config.reload(None)`` Phase-0 bootstrap). Dataset-dir-sourced overrides
+of these bootstrap keys are out of reach by construction — they can only be
+set via a ``pyproject.toml`` above the current working directory. Once a
+dataset TOML is loaded, other keys are re-resolved from the dataset-dir walk;
+the cwd-only limitation applies only to that pre-config window.
+
+## Source layout: raw/ -> cache/ -> build/
+
+```
+raw/            tracked source root — put CSV/XLSX/JSONL here (e.g. raw/DPTO.csv)
+cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan copies to cache/
+build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
+```
+
+Scan is copy-only and flattens the first path segment via
+``flatten_first_level``:
+
+```
+raw/DPTO.csv                -> cache/DPTO.csv                -> build/*.parquet
+raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
+```
+
+``raw/`` is never excluded from discovery; ``cache/`` (``OUTPUT_DIR``) is
+excluded via ``EXCLUSIONS|{OUTPUT_DIR}``. ``sofer init`` scaffolds ``raw/``
+(``mkdir -p raw/``, idempotent) and ``--move-existing`` moves depth-1
+supported files into it.
 
 ## Seeing which file was used
 
