@@ -71,9 +71,9 @@ class TestPlannedRemotes:
         ]
 
     def test_nested_csv_remote_preserves_dir(self) -> None:
-        """A nested CSV remote keeps its directory, only the extension flips."""
+        """A nested CSV remote is normalized: dir lowercased, extension flips."""
         cfg = _cfg([FileEntry(local=Path("data.csv"), remote="data/PROV/train.csv")])
-        assert planned_remotes(cfg, keep_csv=False) == ["data/PROV/train.parquet"]
+        assert planned_remotes(cfg, keep_csv=False) == ["data/prov/train.parquet"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

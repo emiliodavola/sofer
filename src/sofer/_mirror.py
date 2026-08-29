@@ -72,24 +72,32 @@ def parquet_remote_for(remote: str) -> str:
     return str(PurePosixPath(posix_remote).with_suffix(".parquet"))
 
 
+def _is_convertible_entry(entry) -> bool:
+    """Return True when *entry* is convertible (universal set, normalized)."""
+    # Import here to avoid cycle — _converters never imports _mirror
+    from ._converters import CONVERTIBLE_SUFFIXES
+
+    if entry.recursive:
+        return False
+    return PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower() in CONVERTIBLE_SUFFIXES
+
+
+def _normalized_parquet_key(remote: str) -> str:
+    """Return the normalised Parquet key for *remote* (suffix → .parquet, then normalize)."""
+    from ._converters import normalize_parquet_remote
+
+    return normalize_parquet_remote(parquet_remote_for(remote)).lower()
+
+
 def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
-    """Detect ``.csv`` remotes that differ only by case but share a Parquet key.
+    """Detect convertible remotes that differ only by case/normalization but share a Parquet key.
 
-    RC-R16.  Entries eligible for staged-Parquet reading declare a ``.csv``
-    remote (case-insensitive) and are not ``recursive``.  ``upload_as_csv`` and
-    ``include_in_schema`` do NOT exclude an entry: ``prepare`` stages these
-    physically (section 7 ``copy_to_mirror`` does not skip them), so a
-    case-differing pair would still collide on disk.
+    Universal: every ``.csv/.tsv/.xlsx/.jsonl`` entry that is not ``recursive``
+    is scanned.  Normalisation via :func:`sofer._converters.normalize_parquet_remote`
+    is applied before case-folding so that accent/space variants are also caught.
+    ``convert_to_parquet`` / ``include_in_schema`` do NOT exclude an entry.
 
-    Two eligible remotes collide when their derived Parquet keys
-    (:func:`parquet_remote_for`) are equal under ``str.lower()`` but not
-    verbatim.  ``lower()`` (not ``casefold()``) is used so ``straße`` and
-    ``strasse`` stay distinct (spec S3 — ``casefold`` would fold ``ß`` to
-    ``ss``).  Keying on the DERIVED parquet key (not the raw remote) also
-    catches backslash-vs-slash pairs that normalize to the same key via RC-R15.
-
-    Verbatim-equal remotes are left to RC-R11's non-aborting ``[!]`` warning
-    and are skipped here (no double-report).
+    Verbatim-equal normalised keys are left to RC-R11's warning and skipped here.
 
     Args:
         cfg: Dataset configuration whose ``files`` are being validated.
@@ -100,9 +108,9 @@ def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
     errors: list[str] = []
     seen: dict[str, str] = {}
     for entry in cfg.files:
-        if entry.recursive or not entry.remote.lower().endswith(".csv"):
+        if not _is_convertible_entry(entry):
             continue
-        key = parquet_remote_for(entry.remote).lower()
+        key = _normalized_parquet_key(entry.remote)
         current = entry.remote
         first = seen.get(key)
         if first is not None and first != current:
@@ -119,34 +127,56 @@ def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
 def planned_remotes(cfg: DatasetConfig, keep_csv: bool) -> list[str]:
     """Return the remote paths a publish would deliver for *cfg*.
 
-    Derived from the data-file planning logic of ``publish._repo_diff_summary``
-    (and the equivalent list in :func:`sofer.publish.publish`):
+    Universal: every convertible entry (``.csv/.tsv/.xlsx/.jsonl``) that is not
+    ``recursive`` and has ``convert_to_parquet`` (with ``upload_as_csv`` alias
+    for csv) maps to its **normalised** ``.parquet`` remote; XLSX with N sheets
+    would ideally expand to N remotes — but sheet names are not known without
+    opening the file, so we emit the single normalised stem remote here and let
+    ``prepare`` record the actual N files via the conversion dispatcher.  For
+    the diff/copy contract the single remote is sufficient; multi-sheet
+    expansion is handled in the staging step (publish copies whatever Parquets
+    exist in the mirror layout under the normalized prefix).
 
-    - recursive directory entries resolve to their path with the trailing
-      slash stripped — a copyable path, unlike the ``*`` marker used in the
-      human-readable diff;
-    - CSV entries eligible for conversion map to their ``.parquet`` remote
-      (plus the original CSV remote when *keep_csv* is ``True``);
-    - every other entry is its own remote path.
+    When ``convert_to_parquet`` is False (or deprecated ``upload_as_csv`` for
+    csv) the original remote is kept.  For XLSX the normalised stem remote is
+    expanded to N ``stem__sheet.parquet`` entries only when the caller knows
+    the sheet count — otherwise the single normalised remote is returned and
+    publish's ``_copy_package`` stages all matching files.
 
-    Compliance files (README.md / LICENSE) and codebooks are NOT included —
-    callers stage those separately.
+    To keep the delegation invariant (PUB-09) without opening workbooks at
+    planning time, we emit the **normalised** ``parquet_remote_for`` for every
+    convertible entry; XLSX N-expansion is achieved by ``prepare`` staging N
+    files and by ``publish._copy_package`` globbing the mirror layout for
+    ``stem__*.parquet`` when the entry suffix is ``.xlsx``.
 
     Args:
         cfg: Dataset configuration.
         keep_csv: When ``True`` and a CSV was converted to Parquet, also
-            include the original CSV remote.
+            include the original CSV remote (CSV-only).
 
     Returns:
         List of remote paths, in ``cfg.files`` declaration order.
     """
+    from ._converters import CONVERTIBLE_SUFFIXES, normalize_parquet_remote
+
     planned: list[str] = []
     for entry in cfg.files:
         if entry.recursive:
             planned.append(entry.remote.rstrip("/\\"))
-        elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-            planned.append(parquet_remote_for(entry.remote))
-            if keep_csv:
+            continue
+        suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+        is_convertible = suffix in CONVERTIBLE_SUFFIXES
+        # Eligibility: convertible suffix + convert_to_parquet (upload_as_csv for csv)
+        eligible = False
+        if is_convertible:
+            if suffix == ".csv":
+                eligible = bool(entry.convert_to_parquet)
+            else:
+                eligible = bool(entry.convert_to_parquet)
+        if eligible:
+            normalized = normalize_parquet_remote(parquet_remote_for(entry.remote))
+            planned.append(normalized)
+            if keep_csv and suffix == ".csv":
                 planned.append(entry.remote)
         else:
             planned.append(entry.remote)

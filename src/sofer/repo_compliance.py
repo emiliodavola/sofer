@@ -477,9 +477,11 @@ def _build_schema_report_impl(
     _warned_missing: set[str] = set()
     _warned_unreadable: set[str] = set()
 
+    from ._converters import CONVERTIBLE_SUFFIXES, normalize_parquet_remote
+
     for entry in cfg.files:
-        remote = entry.remote.lower()
-        if entry.recursive or not remote.endswith(".csv"):
+        suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+        if entry.recursive or suffix not in CONVERTIBLE_SUFFIXES:
             continue
 
         _had_potential_csv_entries = True
@@ -489,42 +491,82 @@ def _build_schema_report_impl(
 
         local = entry.resolve(base)
 
-        # Determine if we can read from Parquet instead of CSV
+        # Determine if we can read from Parquet instead of original
         use_parquet = False
         parquet_path = None
         parquet_key = ""
         origin_name = local.name  # used for disambiguation
+        # XLSX multi-sheet: we will handle per-sheet below
+        is_xlsx = suffix == ".xlsx"
 
-        # Resolve the staged Parquet by its remote-relative POSIX key (RC-R13)
-        # — never a bare filename stem, which misses nested remotes and
-        # cross-contaminates same-stem entries under different directories.
-        if staging_dir is not None and not entry.upload_as_csv:
-            parquet_key = parquet_remote_for(entry.remote)
-            candidate = staging_dir / PurePosixPath(parquet_key)
-            if candidate.exists():
-                use_parquet = True
-                parquet_path = candidate
-                origin_name = parquet_key
-            elif parquet_key not in _warned_missing:
-                # Deterministic warn-once per unique key (RC-R14); the CSV
-                # fallback below never raises on absence.
-                _warned_missing.add(parquet_key)
-                print(
-                    f"  [!] Staged Parquet '{parquet_key}' not found in staging "
-                    f"directory; falling back to CSV inference."
-                )
+        # Resolve the staged Parquet by its **normalized** remote-relative key
+        if staging_dir is not None and bool(entry.convert_to_parquet):
+            parquet_key = normalize_parquet_remote(parquet_remote_for(entry.remote))
+            # For XLSX, check multi-sheet files first
+            if is_xlsx:
+                # Look for stem__*.parquet files
+                base_parent = PurePosixPath(parquet_key).parent
+                base_stem = PurePosixPath(parquet_key).stem
+                search_dir = staging_dir / base_parent if str(base_parent) != "." else staging_dir
+                sheet_paths: list[Path] = []
+                if search_dir.is_dir():
+                    sheet_paths = sorted(search_dir.glob(f"{base_stem}__*.parquet"))
+                    single = staging_dir / PurePosixPath(parquet_key)
+                    if single.is_file():
+                        sheet_paths.append(single)
+                    # Filter to only parquet files that match stem prefix
+                    sheet_paths = [p for p in sheet_paths if p.is_file()]
+                # If any sheet files exist, we will iterate them below
+                # Otherwise fall back to warn
+                if sheet_paths:
+                    # Mark for multi-sheet handling — we will loop per sheet
+                    # Store list via closure variable for use below
+                    parquet_path = sheet_paths[0]  # placeholder for single-path logic
+                    # We set a flag to handle multi-sheet separately
+                    use_parquet = True  # actual handling is per-sheet below
+                    origin_name = parquet_key  # will be overridden per sheet
+                    # Warn path handling already done via existence
+                elif parquet_key not in _warned_missing:
+                    _warned_missing.add(parquet_key)
+                    print(
+                        f"  [!] Staged Parquet '{parquet_key}' not found in staging "
+                        f"directory; falling back to CSV inference."
+                    )
+            else:
+                candidate = staging_dir / PurePosixPath(parquet_key)
+                if candidate.exists():
+                    use_parquet = True
+                    parquet_path = candidate
+                    origin_name = parquet_key
+                elif parquet_key not in _warned_missing:
+                    _warned_missing.add(parquet_key)
+                    print(
+                        f"  [!] Staged Parquet '{parquet_key}' not found in staging "
+                        f"directory; falling back to CSV inference."
+                    )
+
+        # For XLSX multi-sheet, collect sheet paths to iterate
+        xlsx_sheet_paths: list[Path] = []
+        if is_xlsx and staging_dir is not None and bool(entry.convert_to_parquet):
+            base_parent = PurePosixPath(parquet_key).parent
+            base_stem = PurePosixPath(parquet_key).stem
+            search_dir = staging_dir / base_parent if str(base_parent) != "." else staging_dir
+            if search_dir.is_dir():
+                xlsx_sheet_paths = sorted(search_dir.glob(f"{base_stem}__*.parquet"))
+                single = staging_dir / PurePosixPath(parquet_key)
+                if single.is_file():
+                    xlsx_sheet_paths.append(single)
+                xlsx_sheet_paths = [p for p in xlsx_sheet_paths if p.is_file()]
+            # If multi-sheet files exist, they are the parquet source; otherwise fallback
 
         parquet_result = None
-        if use_parquet and parquet_path is not None:
-            # ── Read from Parquet ────────────────────────────────────────
+        if use_parquet and parquet_path is not None and not is_xlsx:
+            # ── Read from Parquet (single file) ───────────────────────────
             try:
                 parquet_result = _read_parquet_sample(parquet_path)
             except Exception as exc:  # classify + fall back (RC-R17)
                 failure_class = _classify_parquet_read_failure(exc)
                 if parquet_key not in _warned_unreadable:
-                    # Deterministic warn-once per key (RC-R17); mutually
-                    # exclusive with RC-R14 (absent) via the candidate.exists()
-                    # branch above. Falls back to CSV inference below.
                     _warned_unreadable.add(parquet_key)
                     print(
                         f"  [!] Staged Parquet '{parquet_key}' exists but could not be "
@@ -532,7 +574,70 @@ def _build_schema_report_impl(
                     )
                 use_parquet = False
 
-        if use_parquet:
+        if use_parquet and is_xlsx and xlsx_sheet_paths and staging_dir is not None:
+            # ── XLSX multi-sheet: each sheet parquet contributes columns ─
+            for sheet_path in xlsx_sheet_paths:
+                assert staging_dir is not None
+                sheet_origin = sheet_path.relative_to(staging_dir).as_posix()
+                try:
+                    headers_s, rows_s, pf_s = _read_parquet_sample(sheet_path)
+                except Exception as exc:
+                    failure_class = _classify_parquet_read_failure(exc)
+                    if sheet_origin not in _warned_unreadable:
+                        _warned_unreadable.add(sheet_origin)
+                        print(
+                            f"  [!] Staged Parquet '{sheet_origin}' exists but could not be "
+                            f"read ({failure_class}); falling back to CSV inference."
+                        )
+                    continue
+                sample_s = rows_s[: min(len(rows_s), config.SCHEMA_SAMPLE_SIZE)]
+                row_counts.setdefault(entry.remote + f"::{sheet_origin}", pf_s.metadata.num_rows)
+                # Also keep primary remote count as sum? Keep per-sheet counts only
+                for idx, col in enumerate(headers_s):
+                    col_name = col
+                    if col_name in seen_names:
+                        prev_origin, _ = seen_names[col_name]
+                        _dup_map.setdefault(col_name, [prev_origin]).append(sheet_origin)
+                        continue
+                    else:
+                        seen_names[col_name] = (sheet_origin, len(columns))
+                    pa_field = pf_s.schema_arrow.field(idx)
+                    dtype = _map_parquet_type(pa_field.type)
+                    nullable = pa_field.nullable
+                    col_values: list[str] = []
+                    for row in sample_s:
+                        v = row[idx] if idx < len(row) else ""
+                        col_values.append(v)
+                    n_total = len(sample_s)
+                    n_missing = sum(
+                        1
+                        for v in col_values
+                        if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
+                    )
+                    pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
+                    non_missing = [
+                        v
+                        for v in col_values
+                        if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
+                    ]
+                    example = non_missing[0] if non_missing else ""
+                    n_unique = count_unique_non_missing(col_values)
+                    columns.append(
+                        ColumnSchema(
+                            name=col_name,
+                            dtype=dtype,
+                            nullable=nullable,
+                            example=example,
+                            unique=n_unique,
+                            missing=pct_missing,
+                            hf_dtype=_parquet_to_hf_dtype(pa_field.type),
+                            origin=sheet_origin,
+                        )
+                    )
+            # Skip single-file parquet branch and fallback for this entry
+            continue
+
+        if use_parquet and not is_xlsx:
             assert parquet_result is not None
             headers, rows, pf = parquet_result
             sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
@@ -556,26 +661,26 @@ def _build_schema_report_impl(
                 dtype = _map_parquet_type(pa_field.type)
                 nullable = pa_field.nullable
 
-                col_values: list[str] = []
+                col_values2: list[str] = []
                 for row in sample:
                     v = row[idx] if idx < len(row) else ""
-                    col_values.append(v)
+                    col_values2.append(v)
 
-                n_total = len(sample)
+                n_total = len(col_values2)
                 n_missing = sum(
                     1
-                    for v in col_values
+                    for v in col_values2
                     if not v.strip() or v.strip().upper() in MISSING_VALUE_SENTINELS
                 )
                 pct_missing = round(n_missing / n_total * 100, 1) if n_total else 0.0
 
                 non_missing = [
                     v
-                    for v in col_values
+                    for v in col_values2
                     if v.strip() and v.strip().upper() not in MISSING_VALUE_SENTINELS
                 ]
                 example = non_missing[0] if non_missing else ""
-                n_unique = count_unique_non_missing(col_values)
+                n_unique = count_unique_non_missing(col_values2)
 
                 columns.append(
                     ColumnSchema(
@@ -590,12 +695,61 @@ def _build_schema_report_impl(
                     )
                 )
         else:
-            # ── Read from CSV (original behaviour) ───────────────────────
-            result = _read_csv_sample(local, delimiter=delimiter, encoding=csv_encoding)
-            if result is None:
-                continue  # skip missing / unreadable files gracefully
+            # ── Read from original file (fallback for any convertible suffix) ─
+            if suffix == ".xlsx":
+                try:
+                    import openpyxl
 
-            headers, rows = result
+                    wb_f = openpyxl.load_workbook(local, read_only=True, data_only=True)
+                    ws_f = wb_f[wb_f.sheetnames[0]]
+                    rows_iter_f = ws_f.iter_rows(values_only=True)
+                    try:
+                        header_row_f = next(rows_iter_f)
+                    except StopIteration:
+                        continue
+                    if header_row_f is None or all(v is None for v in header_row_f):
+                        continue
+                    headers_f = [str(v).strip() if v is not None else "" for v in header_row_f]
+                    headers_f = [normalize_header(h) for h in headers_f]
+                    rows_f: list[list[str]] = []
+                    for row_f in rows_iter_f:
+                        vals_f = [str(v) if v is not None else "" for v in (row_f or [])]
+                        # pad/truncate
+                        if len(vals_f) < len(headers_f):
+                            vals_f.extend([""] * (len(headers_f) - len(vals_f)))
+                        elif len(vals_f) > len(headers_f):
+                            vals_f = vals_f[: len(headers_f)]
+                        rows_f.append(vals_f)
+                    wb_f.close()
+                    headers, rows = headers_f, rows_f
+                except Exception:
+                    continue
+            elif suffix == ".jsonl":
+                try:
+                    import json as _json
+
+                    json_rows: list[dict[str, object]] = []
+                    with open(local, encoding="utf-8") as jf:
+                        for line in jf:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            json_rows.append(_json.loads(line))
+                    if not json_rows:
+                        continue
+                    # Union of keys
+                    headers = sorted({k for r in json_rows for k in r.keys()})
+                    headers = [normalize_header(h) for h in headers]
+                    rows = [[str(r.get(h, "")) for h in headers] for r in json_rows]
+                except Exception:
+                    continue
+            else:
+                # csv/tsv
+                tsv_delim = "\t" if suffix == ".tsv" else delimiter
+                result = _read_csv_sample(local, delimiter=tsv_delim, encoding=csv_encoding)
+                if result is None:
+                    continue  # skip missing / unreadable files gracefully
+                headers, rows = result
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
             sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]

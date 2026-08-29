@@ -49,7 +49,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 from huggingface_hub import HfApi
 
 from . import config
-from ._mirror import copy_to_mirror, parquet_remote_for, planned_remotes
+from ._mirror import copy_to_mirror, planned_remotes
 from .prepare import prepare, resolve_output_dir
 from .splits import detect_splits, validate_layout, validate_split_mapping
 
@@ -217,25 +217,27 @@ def _repo_diff_summary(
     """
     existing_set = {f.lower() for f in existing_files}
 
-    # Build the list of planned uploads
-    planned: list[str] = []
-
-    # Compliance files
-    planned.append("README.md")
-    planned.append("LICENSE")
-
-    # Data files
+    # Delegate to the single source (PUB-09); add * marker for recursive dirs
+    raw_planned = planned_remotes(cfg, keep_csv)
+    # raw_planned is flat; for diff we need to mark recursive entries with *
+    # Re-derive marker by walking cfg.files and mapping to raw_planned index
+    planned: list[str] = ["README.md", "LICENSE"]
+    rp_idx = 0
     for entry in cfg.files:
-        remote_lower = entry.remote.lower()
         if entry.recursive:
-            planned.append(f"{entry.remote}*")  # directory — can't list contents
-        elif remote_lower.endswith(".csv") and not entry.upload_as_csv:
-            parquet_remote = parquet_remote_for(entry.remote)
-            planned.append(parquet_remote)
-            if keep_csv:
-                planned.append(entry.remote)
+            planned.append(f"{entry.remote}*")
+            rp_idx += 1
         else:
-            planned.append(entry.remote)
+            planned.append(raw_planned[rp_idx])
+            rp_idx += 1
+            # keep_csv CSV case emits 2 entries for one FileEntry
+            if raw_planned[rp_idx - 1].lower().endswith(".parquet"):
+                # Check if next entry is the original CSV (keep_csv)
+                if rp_idx < len(raw_planned) and raw_planned[rp_idx].lower().endswith(".csv"):
+                    # Only when the next raw entry matches this entry's remote
+                    if raw_planned[rp_idx] == entry.remote:
+                        planned.append(raw_planned[rp_idx])
+                        rp_idx += 1
 
     # ── Codebook remotes (RC-C01) ──
     if codebook_remotes:
@@ -465,33 +467,101 @@ def _copy_package(
         protected: Lowercased remote names skipped by overwrite protection
                    (``None`` = nothing skipped).
     """
-    base = cfg._base_dir if cfg._base_dir else Path.cwd()
     skip = protected or set()
+    # Delegate to planned_remotes (PUB-09) so copy set == diff set
+    planned = planned_remotes(cfg, keep_csv)
+    # For copy we stage from the mirror layout (source) at each planned remote.
+    # XLSX multi-sheet: planned contains only the single stem remote, but the
+    # mirror actually holds N sheet files. We glob for stem__*.parquet to stage
+    # all sheets when the entry suffix is .xlsx.
+    from pathlib import PurePosixPath as _PP  # noqa: N814
+
+    # Build suffix map for XLSX detection (need to know which planned entry was
+    # the .xlsx single-sheet placeholder)
+    # Walk cfg.files and planned in lockstep to know suffix per planned entry
+    # (keep_csv expands CSV entries to 2 planned remotes)
+    plan_idx = 0
+    staged: set[str] = set()
     for entry in cfg.files:
         if entry.recursive:
             remote = entry.remote.rstrip("/\\")
-            if remote.lower() in skip:
+            if remote.lower() in skip or remote.lower() in staged:
+                plan_idx += 1
                 continue
-            src = source / PurePosixPath(remote)
+            src = source / _PP(remote)
             if src.exists():
                 copy_to_mirror(src, dest, entry.remote)
-        elif entry.remote.lower().endswith(".csv") and not entry.upload_as_csv:
-            parquet_remote = parquet_remote_for(entry.remote)
-            if parquet_remote.lower() not in skip:
-                src = source / PurePosixPath(parquet_remote)
-                if src.exists():
-                    copy_to_mirror(src, dest, parquet_remote)
-            if keep_csv and entry.remote.lower() not in skip:
-                csv_src = entry.resolve(base)
-                if csv_src.exists():
-                    copy_to_mirror(csv_src, dest, entry.remote)
+                staged.add(remote.lower())
+            plan_idx += 1
         else:
-            remote = entry.remote
-            if remote.lower() in skip:
-                continue
-            src = source / PurePosixPath(remote)
-            if src.exists():
-                copy_to_mirror(src, dest, entry.remote)
+            suffix = _PP(entry.remote.replace("\\", "/")).suffix.lower()
+            # Peek planned entry for this FileEntry
+            if plan_idx >= len(planned):
+                break
+            planned_remote = planned[plan_idx]
+            plan_idx += 1
+            # Check if this is a converted entry (planned ends with .parquet)
+            is_converted = planned_remote.lower().endswith(".parquet")
+            if is_converted and suffix == ".xlsx":
+                # Multi-sheet: stage all matching sheet files
+                if planned_remote.lower() in skip:
+                    # Still need to count extra CSV keep? No, xlsx never keep_csv
+                    pass
+                else:
+                    # Single placeholder remote e.g. report.parquet -> stage
+                    # stem__*.parquet plus the placeholder itself if it exists
+                    base_parent = _PP(planned_remote).parent
+                    base_stem = _PP(planned_remote).stem
+                    search_dir = source / base_parent if str(base_parent) != "." else source
+                    candidates: list[Path] = []
+                    if search_dir.is_dir():
+                        candidates.extend(sorted(search_dir.glob(f"{base_stem}__*.parquet")))
+                        # Single-sheet file
+                        single = source / _PP(planned_remote)
+                        if single.is_file():
+                            candidates.append(single)
+                    else:
+                        single = source / _PP(planned_remote)
+                        if single.is_file():
+                            candidates.append(single)
+                    for src in candidates:
+                        rel = src.relative_to(source).as_posix()
+                        if rel.lower() in skip or rel.lower() in staged:
+                            continue
+                        copy_to_mirror(src, dest, rel)
+                        staged.add(rel.lower())
+                # Handle keep_csv never for xlsx — no extra entry
+            elif is_converted:
+                # csv/tsv/jsonl converted: single parquet
+                if planned_remote.lower() not in skip and planned_remote.lower() not in staged:
+                    src = source / _PP(planned_remote)
+                    if src.exists():
+                        copy_to_mirror(src, dest, planned_remote)
+                        staged.add(planned_remote.lower())
+                # keep_csv extra CSV original (only for csv entries)
+                if plan_idx < len(planned):
+                    next_planned = planned[plan_idx]
+                    if next_planned.lower().endswith(".csv") and next_planned == entry.remote:
+                        if next_planned.lower() not in skip and next_planned.lower() not in staged:
+                            # Original CSV is staged from mirror if present, else from source file
+                            src_csv = source / _PP(next_planned)
+                            if src_csv.exists():
+                                copy_to_mirror(src_csv, dest, next_planned)
+                            else:
+                                base = cfg._base_dir if cfg._base_dir else Path.cwd()
+                                csv_src = entry.resolve(base)
+                                if csv_src.exists():
+                                    copy_to_mirror(csv_src, dest, entry.remote)
+                            staged.add(next_planned.lower())
+                        plan_idx += 1
+            else:
+                # Non-converted: original remote
+                if planned_remote.lower() in skip or planned_remote.lower() in staged:
+                    continue
+                src = source / _PP(planned_remote)
+                if src.exists():
+                    copy_to_mirror(src, dest, planned_remote)
+                    staged.add(planned_remote.lower())
 
     if "readme.md" not in skip:
         src = source / "README.md"
