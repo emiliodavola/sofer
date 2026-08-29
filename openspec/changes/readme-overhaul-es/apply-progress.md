@@ -1,16 +1,16 @@
 # Apply Progress — readme-overhaul-es
 
-**Phase**: sdd-apply (PR1 + PR2 + PR3 slices — bug fixes; restructure + extraction; feature docs)
-**Dates**: 2026-08-28 (PR1), 2026-08-28 (PR2), 2026-08-28 (PR3)
+**Phase**: sdd-apply (PR1 + PR2 + PR3 + PR4 slices — bug fixes; restructure + extraction; feature docs; README_ES.md + sync policy)
+**Dates**: 2026-08-28 (PR1), 2026-08-28 (PR2), 2026-08-28 (PR3), 2026-08-28 (PR4)
 **Branch**: `docs/readme-overhaul-es` (off `dev`)
 **Mode**: Standard (strict TDD disabled — `openspec/config.yaml` `apply.tdd: false`)
 
 ## Scope of this batch (cumulative)
 
-PR1 of the 4-PR feature-branch chain: bug fixes in `README.md` only (tasks
-1.1–1.4). PR2 of the chain: restructure + extraction (tasks 2.1–2.7).
-PR3 of the chain: feature documentation (tasks 3.1–3.7). PR4 tasks
-intentionally untouched.
+All four PRs of the feature-branch chain: PR1 bug fixes (tasks 1.1–1.4),
+PR2 restructure + extraction (tasks 2.1–2.7), PR3 feature documentation
+(tasks 3.1–3.7), PR4 README_ES.md + sync policy (tasks 4.1–4.6). This is
+the FINAL slice — the change is complete (24/24 tasks).
 
 ## Completed tasks
 
@@ -160,15 +160,48 @@ intentionally untouched.
   **DEFERRED** (not determinable without inventing). **PR4 MUST mirror the
   badge block verbatim into README_ES.md.**
 
+### Phase 4 (PR4) — README_ES.md + sync policy
+
+- [x] **4.1** Created `README_ES.md` (new, 536 lines): mirror of README.md per
+  the D1 contract — **identical English heading tree (32/32**, fence-aware
+  compare), identical TOC (19/19 byte-identical), badge block verbatim,
+  all code blocks verbatim (comments included), technical tokens in English,
+  prose in neutral professional Spanish (no voseo; "tú" forms). Command
+  reference descriptions translated; `sofer-mcp` row + Flags at a glance
+  table kept verbatim English (carry-forwards 1+2). Configuration and
+  Architecture summary link to the English `docs/configuration.md` /
+  `CONTRIBUTING.md` with a "technical docs are in English" note. Deep config
+  reference and architecture stay English in docs/ per design.
+- [x] **4.2** Switcher `**[English](README.md) | [Español](README_ES.md)**`
+  added to BOTH files, byte-identical, immediately after the H1 (before the
+  tagline, per design tree); exactly 1 occurrence per file.
+- [x] **4.3** `sofer-mcp` row verbatim vs README (Compare-Object equal);
+  Flags at a glance table 10/10 lines byte-identical to README.
+- [x] **4.4** `AGENTS.md` rule 13 added — **verbatim** vs design.md L99-106
+  (header + both bullets byte-compared).
+- [x] **4.5** `.github/PULL_REQUEST_TEMPLATE.md` `## Checklist`:
+  `- [ ] README_ES.md updated if a translated README section changed`
+  inserted directly after "README updated if CLI surface changed".
+- [x] **4.6** Mirror verification: heading diff README.md ↔ README_ES.md
+  **EMPTY** (32/32, same order, same level); `pyproject.toml` L5
+  `readme = "README.md"` unchanged (packaging untouched); pytest still
+  **886 passed, 2 skipped**. Also added the deferred CONTRIBUTING.md PR sync
+  bullet ("Changes touching a user-facing README section MUST update
+  README_ES.md in the same commit") — design D5 item, PR2 deviation #3
+  RESOLVED.
+
 ## Files changed
 
 | File | Action | What Was Done |
 |------|--------|---------------|
-| `README.md` | Modified (PR1 + PR2 + PR3) | PR1: 4+/11- bug fixes. PR2: TOC, Quick start, reorder to pinned spine, 4 heading renames, badges placeholder, deep `[tool.sofer]` ref removed, `## Configuration` + `## Architecture summary` added. PR3: `sofer-mcp` row, `### Flags at a glance`, prepare/publish format columns, `### Parquet conversion limitations`, `## Split detection`, `### Verify the built package (prepare --verify)`, 4 TOC bullets, real CI/license/Python badges. |
+| `README.md` | Modified (PR1 + PR2 + PR3 + PR4) | PR1: 4+/11- bug fixes. PR2: TOC, Quick start, reorder to pinned spine, 4 heading renames, badges placeholder, deep `[tool.sofer]` ref removed, `## Configuration` + `## Architecture summary` added. PR3: `sofer-mcp` row, `### Flags at a glance`, prepare/publish format columns, `### Parquet conversion limitations`, `## Split detection`, `### Verify the built package (prepare --verify)`, 4 TOC bullets, real CI/license/Python badges. PR4: language switcher line after H1 (+2 lines, nothing else). |
+| `README_ES.md` | Created (PR4) | 536-line mirrored Spanish README: identical 32-heading tree, identical TOC, badge block + code blocks verbatim, Spanish prose, English technical tokens; links to English docs with note. |
 | `docs/configuration.md` | Created (PR2) | `[tool.sofer]` deep reference, moved verbatim (80 lines verified), 4 pinned headings + H1, deduped canonical copies. |
-| `CONTRIBUTING.md` | Modified (PR2) | + Development setup, Development commands, Architecture (tree verbatim + 2-line orientation); Getting-started step 3 → pointer to Development setup; existing content preserved. |
-| `openspec/changes/readme-overhaul-es/tasks.md` | Modified | Tasks 1.1–1.4 (PR1), 2.1–2.7 (PR2), 3.1–3.7 (PR3) marked `[x]`. |
-| `openspec/changes/readme-overhaul-es/apply-progress.md` | Modified | This artifact (merged PR1 + PR2 + PR3). |
+| `CONTRIBUTING.md` | Modified (PR2 + PR4) | PR2: + Development setup, Development commands, Architecture (tree verbatim + 2-line orientation); Getting-started step 3 → pointer to Development setup; existing content preserved. PR4: + PR sync bullet ("Changes touching a user-facing README section MUST update README_ES.md in the same commit") under `## Pull requests`. |
+| `AGENTS.md` | Modified (PR4) | + rule 13 README/README_ES sync (verbatim per design D5). |
+| `.github/PULL_REQUEST_TEMPLATE.md` | Modified (PR4) | + `- [ ] README_ES.md updated if a translated README section changed` after the README checklist item. |
+| `openspec/changes/readme-overhaul-es/tasks.md` | Modified | Tasks 1.1–1.4 (PR1), 2.1–2.7 (PR2), 3.1–3.7 (PR3), 4.1–4.6 (PR4) marked `[x]` — 24/24. |
+| `openspec/changes/readme-overhaul-es/apply-progress.md` | Modified | This artifact (merged PR1 + PR2 + PR3 + PR4). |
 
 ## Deviations from design
 
@@ -184,8 +217,9 @@ intentionally untouched.
 3. **CONTRIBUTING PR sync bullet deferred to PR4** (design D5 sync policy).
    Design's File-Changes table tags it "(PR2)" but the delivery table puts
    "sync policy" out of PR2 scope, no 2.x task exists for it, and
-   `README_ES.md` does not exist until PR4. Lands with AGENTS.md rule 13 +
-   PR-template item in PR4. Flagged for reviewer.
+   `README_ES.md` does not exist until PR4. **RESOLVED in PR4** — the bullet
+   landed in the sync-policy work unit with AGENTS.md rule 13 + PR-template
+   item.
 4. **Getting-started step 3 pointer** (PR2). Design says Development setup is
    "merged from README L50-57 + existing env steps" — the env commands moved
    into Development setup, so Getting started step 3 now points there instead
@@ -199,25 +233,38 @@ intentionally untouched.
    design carry-forward command list (prepare/publish/profile/render);
    `codebook --output` exists in cli.py but is outside the design's list.
    Reviewer may extend the row if desired.
+7. **NEW (PR4), interpretation note**: README_ES translation scope — reference
+   tables whose cells are technical facts (format table, integrity/quality
+   check tables) keep their technical tokens English while descriptive prose
+   cells are translated; the mandated verbatim items (badges, `sofer-mcp`
+   row, Flags at a glance) are untouched per carry-forward commitments.
+   Command-reference descriptions are translated (prose) with commands and
+   flags kept English.
 
 ## Issues found
 
 None blocking. Notes: tasks.md cites stale README line counts (388/501) and a
-795-test baseline; the file (494 → 535 → 462 → 493 lines across PR1/PR2a/PR2b/
-PR3) and the suite (886 passed, 2 skipped) are authoritative.
+795-test baseline; the file (494 → 535 → 462 → 493 → 495 lines across PR1/PR2a/
+PR2b/PR3/PR4 — PR4 adds the 2-line switcher) and the suite (886 passed, 2
+skipped) are authoritative. README_ES.md is 536 lines (mirror; longer than the
+English file because Spanish prose wraps slightly longer).
 
 ## Workload / PR boundary
 
-- Mode: chained PR slice (PR3 of 4), feature-branch-chain, tracker `docs/readme-overhaul-es`
-- Current work unit: PR3 — feature docs, three commits:
-  - `1c28dc9` `docs(readme): add sofer-mcp row and flags-at-a-glance glossary` — 12 insertions (README only)
-  - `e3d1ddf` `docs(readme): document data formats, parquet limits, and split detection` — 36 insertions / 7 deletions (README only)
-  - (this batch) `docs(readme): document prepare --verify and add project badges` — README (verify subsection + TOC bullet + badges) + tasks.md + apply-progress.md
-- Boundary: start = README after PR2 (`d434b05`, 462 lines); end = README
-  (493 lines) with all 6 feature-doc deliverables, 19/19 TOC anchors
-  resolving, badges adopted. PR4 work NOT started.
-- Review budget impact: PR3 combined ≈ 54 insertions / 7 deletions on README
-  + process artifacts (well within the ~150 forecast).
+- Mode: chained PR slice (PR4 of 4 — FINAL), feature-branch-chain, tracker `docs/readme-overhaul-es`
+- Current work unit: PR4 — README_ES.md + sync policy, three commits:
+  - `d39cc1e` `docs(readme): add Spanish README_ES.md mirror and language switcher` — README_ES.md (new, 536 lines) + README.md (+2)
+  - `65ad281` `docs: add README/README_ES sync policy (AGENTS rule 13, PR template, contributing)` — AGENTS.md (+7), PULL_REQUEST_TEMPLATE.md (+1), CONTRIBUTING.md (+1)
+  - (this batch) `docs(openspec): mark PR4 tasks complete and merge apply-progress` — tasks.md + apply-progress.md
+- Boundary: start = README after PR3 (`adb3f67`, 493 lines, no README_ES.md);
+  end = README 495 lines with switcher, README_ES.md (536 lines) with
+  identical 32-heading tree, sync policy in AGENTS/template/CONTRIBUTING.
+  Change COMPLETE — nothing pending.
+- Review budget impact: PR4 combined ≈ 547 insertions / 0 deletions on docs
+  (README_ES.md dominates — new file), + 9 on policy files, + process
+  artifacts. Above the 400-line default ONLY because README_ES.md is a new
+  mirror file (one indivisible unit); cumulative chain total ≈ 1280 changed
+  lines, within the user's 2000-line ceiling.
 
 ## Verification evidence
 
@@ -239,11 +286,18 @@ PR3) and the suite (886 passed, 2 skipped) are authoritative.
 - §7.2 three limitations documented (parquet-conversion spec).
 - Badges: `.github/workflows/ci.yml` exists (Get-ChildItem), LICENSE exists,
   `license = "MIT"`, `requires-python = ">=3.10"`.
-- `uv run pytest tests/ -q` → **886 passed, 2 skipped** (14.18s) — unchanged
+- **PR4 mirror checks** (programmatic, PowerShell): heading tree README.md ↔
+  README_ES.md **identical 32/32** (fence-aware, same order/level); switcher
+  line byte-identical, exactly 1 occurrence per file; TOC **19/19
+  byte-identical**; badge block **byte-identical**; Flags at a glance table
+  **10/10 lines identical**; `sofer-mcp` row verbatim; AGENTS.md rule 13
+  verbatim vs design.md L99-106; `pyproject.toml` `readme = "README.md"`
+  unchanged.
+- `uv run pytest tests/ -q` → **886 passed, 2 skipped** (14.31s) — unchanged
   from baseline, code untouched.
 
 ## Status
 
-18/18 tasks complete (PR1: 1.1–1.4; PR2: 2.1–2.7; PR3: 3.1–3.7). Ready for
-`sdd-verify` (PR3 slice) or the next `apply` batch (PR4 — README_ES.md +
-sync policy).
+24/24 tasks complete (PR1: 1.1–1.4; PR2: 2.1–2.7; PR3: 3.1–3.7; PR4:
+4.1–4.6). Change COMPLETE — ready for `sdd-verify` (full change), then
+`sdd-archive`.

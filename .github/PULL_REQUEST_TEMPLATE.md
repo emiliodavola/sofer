@@ -45,4 +45,5 @@ Specs updated: `openspec/specs/<domain>/spec.md`
 - [ ] `uv run mypy src/` — clean
 - [ ] New behaviour covered by tests
 - [ ] README updated if CLI surface changed
+- [ ] README_ES.md updated if a translated README section changed
 - [ ] Related issues linked (`Closes #N`)

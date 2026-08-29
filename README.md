@@ -1,5 +1,7 @@
 # sofer
 
+**[English](README.md) | [Español](README_ES.md)**
+
 > **Sofer** (Hebrew: סופר, "scribe") — a person who meticulously transcribes
 > sacred texts. This tool brings the same care to dataset documentation.
 
