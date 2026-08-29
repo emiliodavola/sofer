@@ -21,6 +21,8 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Command reference](#command-reference)
 - [Flags at a glance](#flags-at-a-glance)
 - [Data format support](#data-format-support)
+- [Parquet conversion limitations](#parquet-conversion-limitations)
+- [Split detection](#split-detection)
 - [Validation and quality checks](#validation-and-quality-checks)
 - [Codebook generation](#codebook-generation)
 - [AI and MCP server](#ai-and-mcp-server)
@@ -259,13 +261,40 @@ detector class, no changes to the pipeline.
 
 ## Data format support
 
-| Format | `scan` | `codebook` | `profile` |
-|---|---|---|---|
-| CSV (`.csv`) | ✅ | ✅ | ✅ |
-| TSV (`.tsv`) | ✅ | ✅ | ✅ |
-| Parquet (`.parquet`) | ✅ | ✅ | ✅ |
-| Excel (`.xlsx`) | ✅ | ✅ | ✅ |
-| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ |
+| Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
+|---|---|---|---|---|---|
+| CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
+| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+¹ `prepare` converts CSV files to Parquet (unless `upload_as_csv = true`); every other format is staged into the package as-is. `publish` delivers the prepared package unchanged.
+
+### Parquet conversion limitations
+
+`prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead):
+
+| CSV pattern | What can go wrong | Workaround |
+|---|---|---|
+| Comma as decimal separator (`3,14`) | pyarrow reads the comma as a field delimiter, not a decimal mark | Use a non-comma `csv_delimiter` in the TOML |
+| Mixed-type column, >50 % numeric-looking with some text | pyarrow may promote the whole column to `string` or fail | Clean the column or accept the `string` type |
+| Extremely long string fields (>2 GB) | `large_string` handles them, but the CSV parser can hit memory limits | Split the file or trim the field |
+
+## Split detection
+
+`prepare` groups files into `train` / `validation` / `test` splits automatically, following the Hugging Face repository conventions. Detection reads the remote paths declared in the TOML:
+
+- **Keywords.** `train` / `training`, `validation` / `valid` / `val` / `dev`, and `test` / `testing` / `eval` / `evaluation` are recognised split keywords.
+- **Delimiting rule.** A keyword counts only when it is delimited by non-word characters — `test-file.csv` is a test split, `testfile.csv` is not (`-`, `_`, `.`, and whitespace all delimit; a bare run of word characters does not).
+- **Sources, in cascade order** — the first source that yields at least one split wins:
+  1. Top-level directory name — `train/data.csv`, `test/data.csv`
+  2. Filename stem — `train.csv`, `my-train-data.csv`
+  3. Shard pattern — `train-00001-of-00005.parquet` (needs at least two distinct splits to count)
+- **Fallback.** When nothing matches, every file is assigned to a single `train` split.
+- **Exclusions.** `README.md`, `LICENSE`, `.gitattributes`, and `.gitignore` are never treated as data splits. Files that match a keyword group together into that split; anything else is reported as unclassified.
+
+The HF dataset viewer requires a `train` split to auto-load a repository — if detection leaves you without one, name a file or directory with `train` in it.
 
 ## Validation and quality checks
 
