@@ -122,11 +122,11 @@ class TestPrepareConversion:
 
         rc = prepare(cfg, out)
         assert rc == 0
-        assert (out / "data/PROV/train.parquet").is_file()
-        assert (out / "data/DPTO/train.parquet").is_file()
+        assert (out / "data/prov/train.parquet").is_file()
+        assert (out / "data/dpto/train.parquet").is_file()
         # Distinct content — same-stem conversion must not collide.
-        prov = pq.read_table(out / "data/PROV/train.parquet").to_pydict()
-        dpto = pq.read_table(out / "data/DPTO/train.parquet").to_pydict()
+        prov = pq.read_table(out / "data/prov/train.parquet").to_pydict()
+        dpto = pq.read_table(out / "data/dpto/train.parquet").to_pydict()
         assert prov["a"] == [1]
         assert dpto["a"] == [3]
 
