@@ -1016,3 +1016,103 @@ class TestSchemaGroupingSingleUnderscore:
         )
         errors = _assert_cross_file_schema(converted, cfg)
         assert errors == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PRP-09 — orphan pruning on force prepare
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPreparePruneOrphans:
+    """PRP-09: prepare(force=True) prunes orphans, keeps compliance/keep_csv, idempotent."""
+
+    def test_force_true_prunes_stale_parquet(self, tmp_path: Path) -> None:
+        """A stale .parquet from a removed [[file]] entry is deleted on force."""
+        csv_keep = tmp_path / "keep.csv"
+        csv_keep.write_text("x\n1\n", encoding="utf-8-sig")
+        csv_old = tmp_path / "old.csv"
+        csv_old.write_text("y\n1\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv_keep, remote="keep.csv")])
+        out = tmp_path / "build"
+        # First prepare with both files, then second with only keep
+        cfg_both = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=csv_keep, remote="keep.csv"),
+                FileEntry(local=csv_old, remote="old.csv"),
+            ],
+        )
+        assert prepare(cfg_both, out) == 0
+        assert (out / "old.parquet").exists()
+        assert (out / "keep.parquet").exists()
+        # Now prune: force=True with only keep should delete old
+        rc = prepare(cfg, out, force=True)
+        assert rc == 0
+        assert (out / "keep.parquet").exists()
+        assert not (out / "old.parquet").exists()
+
+    def test_force_false_retains_orphan(self, tmp_path: Path) -> None:
+        """Without --force an orphan is not pruned (prepare refuses to overwrite)."""
+        csv = tmp_path / "a.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="a.csv")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        # Inject orphan manually
+        pq.write_table(pa.table({"y": [1]}), out / "stale.parquet")
+        # Without force, prepare should refuse to run due to existing artifacts, but orphan stays
+        # To test force=False no-prune we directly check that stale file would not be deleted
+        # if we could run; instead we verify that force=False path does not call prune
+        # by checking that stale file remains after a failed prepare (rc 1)
+        rc = prepare(cfg, out, force=False)
+        assert rc == 1
+        assert (out / "stale.parquet").exists()
+
+    def test_compliance_survives_force_prune(self, tmp_path: Path) -> None:
+        """README, LICENSE, codebook.md, codebooks/** survive force prune."""
+        csv = tmp_path / "a.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="a.csv")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out, all_files=True) == 0
+        # Inject orphan
+        pq.write_table(pa.table({"y": [1]}), out / "orphan.parquet")
+        rc = prepare(cfg, out, force=True, all_files=True)
+        assert rc == 0
+        assert (out / "README.md").exists()
+        assert (out / "LICENSE").exists()
+        assert (out / "codebook.md").exists()
+        assert (out / "codebooks" / "a.md").exists()
+        assert not (out / "orphan.parquet").exists()
+
+    def test_idempotent_second_force(self, tmp_path: Path) -> None:
+        """Second force run deletes nothing (idempotent)."""
+        csv = tmp_path / "a.csv"
+        csv.write_text("x\n1\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="a.csv")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        pq.write_table(pa.table({"y": [1]}), out / "stale.parquet")
+        assert prepare(cfg, out, force=True) == 0
+        assert not (out / "stale.parquet").exists()
+        # Second force should be idempotent
+        rc2 = prepare(cfg, out, force=True)
+        assert rc2 == 0
+        assert (out / "a.parquet").exists()
+
+    def test_single_underscore_orphan_via_prepare(self, tmp_path: Path) -> None:
+        """Single-underscore sheet orphans are handled via dual guard (prepare force)."""
+        xlsx = tmp_path / "DATA_GOT_ALL.xlsx"
+        _make_xlsx(xlsx, {"aristas": [["id"], [1]], "nodos": [["id"], [1]]})
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="DATA_GOT_ALL.xlsx")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        assert (out / "data_got_all_aristas.parquet").exists()
+        assert (out / "data_got_all_nodos.parquet").exists()
+        # Inject a generic stale file — should be pruned even though single-underscore sheets exist
+        pq.write_table(pa.table({"x": [1]}), out / "stale_single.parquet")
+        rc = prepare(cfg, out, force=True)
+        assert rc == 0
+        assert not (out / "stale_single.parquet").exists()
+        assert (out / "data_got_all_aristas.parquet").exists()
+        assert (out / "data_got_all_nodos.parquet").exists()

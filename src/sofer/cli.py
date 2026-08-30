@@ -145,6 +145,11 @@ def _cmd_publish(args: argparse.Namespace) -> int:
            network access.  Stale or missing artifacts trigger ``prepare``
            automatically; ``--dry-run`` only prints the diff and split
            report.
+        3. When ``--clean`` is given and delivery succeeded (``fail==0``,
+           quality passed, not ``--dry-run``), delete the resolved build
+           directory (``resolve_output_dir(cfg, --output)``) and, with
+           ``--clean-cache``/``--all``, the tool-wide ``cache/``
+           (``cfg._base_dir / config.OUTPUT_DIR``, sibling-shared).
     """
     cfg, report = _load_and_validate(args, verb="publishing")
     if cfg is None or report is None:
@@ -158,6 +163,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         keep_csv=args.keep_csv,
         dry_run=args.dry_run,
         quality_report=report,
+        clean=getattr(args, "clean", False),
+        clean_cache=getattr(args, "clean_cache", False),
     )
 
 
@@ -799,6 +806,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show the repo diff and split report without preparing or uploading.",
+    )
+    pb.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "Delete the build directory after a successful publish (PUB-11). "
+            "Build-only by default; has no effect on --dry-run, quality-gate block, "
+            "or upload failure. Respects --output override via resolve_output_dir."
+        ),
+    )
+    pb.add_argument(
+        "--clean-cache",
+        "--all",
+        dest="clean_cache",
+        action="store_true",
+        help=(
+            "Also delete cache/ (tool-wide OUTPUT_DIR at cfg._base_dir/cache, "
+            "shared across datasets) when used with --clean. Requires explicit "
+            "opt-in; warn: sibling datasets share cache/."
+        ),
     )
     pb.set_defaults(func=_cmd_publish)
 
