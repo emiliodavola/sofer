@@ -8,6 +8,7 @@ Run ``sofer --help`` or ``sofer <command> --help``.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -358,6 +359,8 @@ _INIT_TEMPLATE = """\
 #   sofer prepare {name}.toml   # generate the package locally (build/)
 #   sofer publish {name}.toml   # deliver to HF Hub or a local dir
 #   sofer validate {name}.toml  # check data integrity + quality
+#
+# Source files -> raw/ (scan copies to cache/)
 
 [dataset]
 name = "{name}"
@@ -373,13 +376,14 @@ confidential = false
 source = "TODO: organisation name"
 tags = ["TODO: tag1", "TODO: tag2"]
 
+# Source files -> raw/ (scan copies to cache/)
 # Repeat [[file]] sections for every file/directory you want to publish.
 [[file]]
-local = "TODO: path/to/file.csv"
+local = "TODO: raw/file.csv"
 remote = "file.csv"
 
 [[file]]
-local = "TODO: path/to/directory/"
+local = "TODO: raw/directory/"
 remote = "subfolder/"
 recursive = true
 
@@ -427,13 +431,127 @@ min_total_size_mb = 0.0
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    """Write a ready-to-edit TOML template to disk."""
+    """Write a ready-to-edit TOML template and scaffold ``raw/``.
+
+    Orchestration:
+
+        1. ``mkdir -p RAW_DIR`` idempotently (``exist_ok=True``) before the
+           TOML write — skipped only when ``--move-existing --dry-run`` is
+           active (preview, no mutation).
+        2. When ``--move-existing`` is set: collect depth-1 supported files
+           (``SUPPORTED_FORMATS``, direct children of ``cwd``), run
+           :func:`check_flatten_collisions` against existing ``raw/`` content
+           before any move, honour ``--dry-run`` (preview, no ``raw/`` mkdir
+           when absent, no moves), ``--force`` / ``not isatty`` guard (skip
+           prompt), else prompt ``[y/N]`` and abort on ``N``, then
+           :func:`shutil.move` each file into ``RAW_DIR``.
+    """
     output = Path(f"{args.name}.toml")
     if output.exists():
         print(f"  X  File already exists: {output}")
         return 1
+
+    raw_dir_name: str = config.RAW_DIR
+    raw_dir_path = Path.cwd() / raw_dir_name
+    move_existing: bool = bool(getattr(args, "move_existing", False))
+    dry_run: bool = bool(getattr(args, "dry_run", False))
+    force: bool = bool(getattr(args, "force", False))
+
+    if not move_existing:
+        # Always scaffold raw/ idempotently before TOML write (CLI-R07).
+        raw_dir_path.mkdir(parents=True, exist_ok=True)
+        output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+        print(f"  OK  Created {output}")
+        print("     Edit the file and run:")
+        print(f"       sofer prepare {output.name}")
+        print(f"       sofer publish {output.name}")
+        return 0
+
+    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in cwd.
+    candidates: list[Path] = []
+    for entry in Path.cwd().iterdir():
+        if not entry.is_file():
+            continue
+        if entry.suffix.lower() not in SUPPORTED_FORMATS:
+            continue
+        if entry.name == output.name:
+            continue
+        # Exclude the template's own TOML name and already-tracked raw reuse;
+        # top-level files inside cache/build/raw are not iterdir children, but
+        # guard against a file literally named like those dirs (e.g. "cache").
+        candidates.append(entry.resolve())
+    candidates.sort()
+
+    # Pre-move collision check against existing raw/ content.
+    if candidates:
+        existing: list[Path] = []
+        if raw_dir_path.exists():
+            for q in raw_dir_path.rglob("*"):
+                if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
+                    existing.append(q.resolve())
+        base_dir = Path.cwd().resolve()
+        try:
+            check_flatten_collisions(candidates + existing, base_dir)
+        except ValueError as exc:
+            print(f"  X  {exc}", file=sys.stderr)
+            return 1
+
+    if dry_run:
+        if candidates:
+            print("  DRY RUN  Would move the following files:")
+            for src in candidates:
+                print(f"     {src.name} -> {raw_dir_name}/{src.name}")
+        else:
+            print("  DRY RUN  No supported files to move.")
+        # Preview only: no raw/ mkdir when absent, no moves.
+        output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+        print(f"  OK  Created {output}")
+        print("     Edit the file and run:")
+        print(f"       sofer prepare {output.name}")
+        print(f"       sofer publish {output.name}")
+        return 0
+
+    # Non-dry-run move_existing: honour --force / isatty guard.
+    is_tty = sys.stdin.isatty()
+    if candidates and not force and not is_tty:
+        print(
+            "  !  Skipping move of existing files (non-interactive). Use --force to move.",
+            file=sys.stderr,
+        )
+        raw_dir_path.mkdir(parents=True, exist_ok=True)
+        output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+        print(f"  OK  Created {output}")
+        print("     Edit the file and run:")
+        print(f"       sofer prepare {output.name}")
+        print(f"       sofer publish {output.name}")
+        return 0
+
+    if candidates and not force and is_tty:
+        print(f"\n  The following files will be moved to {raw_dir_name}/:")
+        for src in candidates:
+            print(f"     {src.name} -> {raw_dir_name}/{src.name}")
+        try:
+            answer = input("\n  Continue? [y/N] ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            print("  OK  Aborted move.")
+            raw_dir_path.mkdir(parents=True, exist_ok=True)
+            output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+            print(f"  OK  Created {output}")
+            print("     Edit the file and run:")
+            print(f"       sofer prepare {output.name}")
+            print(f"       sofer publish {output.name}")
+            return 0
+
+    # Proceed: scaffold raw/ then move.
+    raw_dir_path.mkdir(parents=True, exist_ok=True)
     output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
     print(f"  OK  Created {output}")
+    for src in candidates:
+        dest = raw_dir_path / src.name
+        shutil.move(str(src), str(dest))
+        print(f"     moved {src.name} -> {raw_dir_name}/{src.name}")
     print("     Edit the file and run:")
     print(f"       sofer prepare {output.name}")
     print(f"       sofer publish {output.name}")
@@ -687,14 +805,47 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── init ──────────────────────────────────────────────────────
     i = sub.add_parser(
         "init",
-        help="Create a ready-to-edit TOML configuration template.",
+        help="Create a ready-to-edit TOML configuration template and scaffold raw/.",
         description=(
             "Generate a `.toml` file with all the required structure "
-            "and placeholder values.  Edit it to match your data, then "
-            "run ``sofer validate``."
+            "and placeholder values (Source files -> raw/ (scan copies to cache/)) "
+            "and scaffold the raw/ source directory (mkdir -p raw/, idempotent).\n"
+            "\n"
+            "With --move-existing: move depth-1 supported files "
+            "(.csv, .tsv, .parquet, .xlsx, .jsonl) from the current directory "
+            "into raw/; files inside cache/, build/, raw/, or EXCLUSIONS are "
+            "never moved, subdirectories are ignored, and collisions with "
+            "existing raw/ content are checked via check_flatten_collisions "
+            "before any move. --dry-run previews moves without mutation "
+            "(raw/ not created when absent); --force or non-interactive "
+            "(not isatty) skips the [y/N] prompt, else prompt aborts on N.\n"
+            "\n"
+            "Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) "
+            "-> build/ (gitignored); scan flattens raw/DPTO.csv -> cache/DPTO.csv "
+            "via flatten_first_level."
         ),
     )
     i.add_argument("name", help="Short name for the dataset.")
+    i.add_argument(
+        "--move-existing",
+        action="store_true",
+        help=(
+            "Move depth-1 supported files (.csv, .tsv, .parquet, .xlsx, .jsonl) "
+            "from the current directory into raw/ (SUPPORTED_FORMATS, direct "
+            "children only, excluding cache/build/raw/EXCLUSIONS; "
+            "check_flatten_collisions before any move)."
+        ),
+    )
+    i.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview moves (a.csv -> raw/a.csv) without creating raw/ or moving files.",
+    )
+    i.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the [y/N] prompt and move without confirmation (also skipped when not isatty).",
+    )
     i.set_defaults(func=_cmd_init)
 
     # ── scan ───────────────────────────────────────────────────────

@@ -90,6 +90,7 @@ pythonpath = ["scripts"]
 [tool.sofer]
 # ── Scan defaults ──
 output_dir = "cache"
+raw_dir = "raw"
 default_config_name = "dataset.toml"
 
 # ── Parquet defaults ──

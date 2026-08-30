@@ -3030,3 +3030,87 @@ class TestDuplicateWarningRouting:
         assert "col_e" in captured.out
         # Tip for include_in_schema
         assert "include_in_schema" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  RC-Universal-Card — expanded multi-sheet XLSX in card (PUB-10)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestExpandedCard:
+    """build_dataset_card with staging_dir expands XLSX to N remotes (RC-Universal-Card)."""
+
+    def test_card_with_2_sheet_staging_shows_n(self, tmp_path: Path) -> None:
+        """When staging has 2 sheet parquets, card lists both in configs and Structure."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=Path("report.xlsx"), remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__ventas.parquet").touch()
+        (staging / "report__costos.parquet").touch()
+
+        result = build_dataset_card(cfg, schema=[], staging_dir=staging)
+        fm = _parse_frontmatter(result)
+
+        # configs.data_files should list both sheets
+        data_files = [d["path"] for d in fm["configs"][0]["data_files"]]
+        assert "report__ventas.parquet" in data_files
+        assert "report__costos.parquet" in data_files
+        assert "report.parquet" not in data_files
+        # Structure matches configs
+        assert "report__ventas.parquet" in result
+        assert "report__costos.parquet" in result
+        assert result.count("report__") == 4  # 2 in configs + 2 in Structure (approx)
+
+    def test_card_fallback_without_staging_shows_single(self, tmp_path: Path) -> None:
+        """Without staging, XLSX falls back to single report.parquet placeholder."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=Path("report.xlsx"), remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        result = build_dataset_card(cfg, schema=[], staging_dir=None)
+        fm = _parse_frontmatter(result)
+        data_files = [d["path"] for d in fm["configs"][0]["data_files"]]
+        assert data_files == ["report.parquet"]
+        assert "report.parquet" in result
+
+    def test_configs_equals_structure(self, tmp_path: Path) -> None:
+        """configs.data_files equals Structure list when expanded."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=Path("report.xlsx"), remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__a.parquet").touch()
+        (staging / "report__b.parquet").touch()
+
+        result = build_dataset_card(cfg, schema=[], staging_dir=staging)
+        fm = _parse_frontmatter(result)
+        data_files = [d["path"] for d in fm["configs"][0]["data_files"]]
+        # Every data_files entry appears in Structure
+        for path in data_files:
+            assert f"`{path}`" in result
+
+    def test_no_local_path_leak(self, tmp_path: Path) -> None:
+        """Card must not leak local filesystem paths even with staging."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=Path("report.xlsx"), remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__ventas.parquet").touch()
+        result = build_dataset_card(cfg, schema=[], staging_dir=staging)
+        assert str(tmp_path) not in result
+        assert str(staging) not in result
