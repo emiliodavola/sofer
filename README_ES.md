@@ -276,7 +276,7 @@ canalización.
 | Comando | Descripción |
 |---|---|
 | `init <name>` | Genera una plantilla `.toml` lista para editar. |
-| `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. |
+| `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto contenido), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
 | `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml`, `PurePath.suffixes`, colisión `ValueError`), `--force` (guardia de sobreescritura), `--config` (ruta TOML para batch). `--output` relativo anclado al dir TOML (Option B); `cache/` intacto con `--output`. |
@@ -302,6 +302,9 @@ canalización.
 | `--dry-run` | `publish`, `scan` | Previsualiza la ejecución sin efectos secundarios — sin llamadas de red, sin copias de archivos, sin escrituras en el TOML. |
 | `--clean` | `publish` | Elimina el directorio `build` tras un `hf` exitoso (`fail==0`, calidad aprobada, no `--dry-run`); solo `build` por defecto. Anclado vía `resolve_output_dir(cfg, --output)` por lo que `--output ./staging` elimina `./staging`. Para `local`, elimina solo el destino resuelto; sin `--clean` no se elimina nada. |
 | `--clean-cache` / `--all` | `publish` (con `--clean`) | También elimina `cache/` (`cfg._base_dir/cache`, `config.OUTPUT_DIR`, compartido entre datasets). Requiere opt-in explícito; los datasets hermanos comparten `cache/` — avisa antes de usar. |
+| `--all-files` | `codebook`, `prepare`, `profile`, `render` | Modo batch: genera un artefacto por cada entrada `[[file]]` (`cache/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requiere entradas `[[file]]`; las colisiones lanzan `ValueError`. |
+| `--config` | `codebook`, `profile`, `render` | Ruta al TOML para `--all-files` (por defecto: `default_config_name` de `[tool.sofer]`). |
+| `--ext <ext>` | `scan` | Filtra `scan` a extensiones específicas (repetible, p. ej. `--ext csv --ext jsonl`); si se omite, todos los formatos soportados. |
 | `--output DIR` | `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`). `publish --clean` respeta `--output` solo para `build`; `cache/` siempre en `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
 | `--cwd PATH` | `mcp add` | `cwd` absoluto contenido para el servidor; falla con la ruta cuando está fuera de la raíz del scope. |
@@ -600,10 +603,12 @@ herramienta — explicación completa en
 ## Architecture summary
 
 sofer es un único paquete Python (`src/sofer/`) con un módulo por
-responsabilidad: el despacho de la CLI en `cli.py`, la configuración en
-`model.py`, y cada comando tiene su propio módulo de dominio (scanner,
-codebook, prepare, publish, profile, render). El árbol de módulos anotado está
-en [CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
+responsabilidad: el despacho de la CLI en `cli.py` (9 subcomandos), la
+configuración del dataset en `model.py`, los valores por defecto globales en
+`config.py` (`[tool.sofer]` discovery) y cada comando con su propio módulo de
+dominio (scanner, codebook, prepare, publish, profile, render,
+mcp_registration). El árbol de módulos anotado está en
+[CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
 ¿Quieres contribuir? Consulta [CONTRIBUTING.md](CONTRIBUTING.md).
 

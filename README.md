@@ -264,7 +264,7 @@ detector class, no changes to the pipeline.
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
-| `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. |
+| `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml`, `PurePath.suffixes`, collision `ValueError`), `--force` (overwrite guard), `--config` (TOML path for batch). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
@@ -290,6 +290,9 @@ detector class, no changes to the pipeline.
 | `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
 | `--clean` | `publish` | Delete the build directory after a successful `hf` publish (`fail==0`, quality passed, not `--dry-run`); build-only by default. Anchored via `resolve_output_dir(cfg, --output)` so `--output ./staging` deletes `./staging`. For `local`, deletes the resolved destination only; without `--clean` nothing is deleted. |
 | `--clean-cache` / `--all` | `publish` (with `--clean`) | Also delete `cache/` (`cfg._base_dir/cache`, `config.OUTPUT_DIR`, shared tool-wide). Requires explicit opt-in; sibling datasets share `cache/` — warn before use. |
+| `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`cache/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
+| `--config` | `codebook`, `profile`, `render` | Path to the TOML config for `--all-files` (default: `default_config_name` from `[tool.sofer]`). |
+| `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
 | `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
 | `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
@@ -559,9 +562,10 @@ full explanation in
 ## Architecture summary
 
 sofer is a single Python package (`src/sofer/`) with one module per concern:
-CLI dispatch in `cli.py`, configuration in `model.py`, and each command owning
-its domain module (scanner, codebook, prepare, publish, profile, render). The
-annotated module tree lives in
+CLI dispatch in `cli.py` (9 subcommands), dataset configuration in `model.py`,
+tool-wide defaults in `config.py` (`[tool.sofer]` discovery), and each command
+owning its domain module (scanner, codebook, prepare, publish, profile, render,
+mcp_registration). The annotated module tree lives in
 [CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
 Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
