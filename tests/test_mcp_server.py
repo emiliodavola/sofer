@@ -1273,7 +1273,8 @@ class TestCodebookAllBehavior:
         assert envelope["exit_code"] == 0
         assert len(envelope["files"]) >= 2, envelope["files"]
         assert all(Path(f).is_file() for f in envelope["files"])
-        assert (tmp_path / "codebook.md").is_file(), "root index must be generated"
+        assert (tmp_path / "cache" / "codebook.md").is_file(), "root index must be generated"
+        assert not (tmp_path / "codebook.md").exists()
 
     def test_codebook_all_collision_ok_false(self, tmp_path, restore_tool_config):
         root = tmp_path / "root"
