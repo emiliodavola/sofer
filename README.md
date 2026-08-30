@@ -10,7 +10,7 @@ and quality-assessed package — combining automatic inference with human
 knowledge, and publishable to Hugging Face Hub or any local directory.**
 
 [![CI](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/emiliodavola/sofer)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python >=3.10](https://img.shields.io/badge/python-3.10%2B-3776AB)](pyproject.toml)
 
 ## Table of Contents
