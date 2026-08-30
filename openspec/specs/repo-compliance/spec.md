@@ -1190,19 +1190,36 @@ single entry triggers at most one of the two.
 - WHEN schema report builds
 - THEN exactly one `[!]` warning naming `a.parquet` SHALL be emitted and columns SHALL come from TSV fallback
 
-### 4.20 Card data_files reflect universal normalized remotes (RC-Universal-Card) — Added 2026-08-29
+### 4.20 Card data_files reflect universal normalized remotes (RC-Universal-Card) — Modified 2026-08-29, fix-multisheet-parquet-publish
 
-`build_dataset_card` MUST list `configs.data_files` via `_mirror.planned_remotes` so TSV/XLSX/JSONL appear as their normalized `.parquet` remotes (and `report.xlsx` as N entries). `Dataset Structure` section MUST list only normalized repo-relative delivered paths. No local-disk paths SHALL leak. `num_examples` (row-count dict) MUST key by verbatim `entry.remote` for original counts but `configs.data_files` MUST key by normalized parquet remotes; cross-link not required.
+`build_dataset_card` MUST list `configs.data_files` and `Dataset Structure` via `expanded_planned_remotes` when staging directory is available, otherwise via `planned_remotes` fallback. TSV/XLSX/JSONL SHALL appear as normalized `.parquet` remotes; `report.xlsx` with N sheets SHALL appear as N `stem__sheet.parquet` entries. No local-disk paths SHALL leak. `num_examples` row-count dict SHALL remain keyed by verbatim `entry.remote`; `configs.data_files` SHALL be keyed by normalized remotes.
 
-#### Scenario: Card lists converted tsv as parquet
-- GIVEN `data/x.tsv` without opt-out
-- WHEN card is generated
-- THEN `configs.data_files` SHALL list `data/x.parquet` (normalized) and SHALL NOT list `data/x.tsv`
+(Previously: `build_dataset_card` called `planned_remotes` directly, emitting single `report.parquet` phantom for multi-sheet xlsx.)
 
-#### Scenario: Card lists xlsx as N parquet entries
-- GIVEN `report.xlsx` with 2 sheets
-- WHEN card is generated
-- THEN `configs.data_files` SHALL contain `report__ventas.parquet` and `report__costos.parquet`
+#### Scenario: tsv as parquet
+- GIVEN `data/x.tsv`
+- WHEN card generated
+- THEN lists `data/x.parquet` not `x.tsv`
+
+#### Scenario: xlsx N entries
+- GIVEN `report.xlsx` staged 2 sheets
+- WHEN card generated
+- THEN data_files has both `__` remotes
+
+#### Scenario: Structure expanded
+- GIVEN `report.xlsx` 2 sheets
+- WHEN card with staging
+- THEN Structure lists both, no local path
+
+#### Scenario: Fallback before prepare
+- GIVEN `report.xlsx`, `staging=None`
+- WHEN card generated
+- THEN lists `report.parquet`
+
+#### Scenario: configs==Structure
+- GIVEN `report.xlsx` 2 sheets
+- WHEN card with staging
+- THEN data_files equals Structure
 
 ---
 

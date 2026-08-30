@@ -1181,3 +1181,160 @@ class TestCodebookUpload:
         root_idx = staging_root / "codebook.md"
         assert root_idx.is_file(), f"Missing: {root_idx}"
         assert root_idx.read_text(encoding="utf-8") == "# Root index content"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUB-10 — multi-sheet XLSX expansion via mirror (ground truth)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMultiSheetPublish:
+    """Multi-sheet XLSX: diff lists N, per-sheet protection, staging N, splits 2, dry-run N."""
+
+    def test_multi_sheet_diff_and_protection_and_copy(self, tmp_path, monkeypatch, capsys) -> None:
+        """2-sheet staging: diff lists 2, per-sheet protection guards only ventas, staging N."""
+        from sofer.publish import _check_overwrite_protection, _copy_package, _repo_diff_summary
+        from sofer.splits import detect_splits
+
+        xlsx = tmp_path / "report.xlsx"
+        xlsx.write_text("dummy", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="report.xlsx")])
+
+        # Fake staging mirror with 2 sheet parquets
+        source = tmp_path / "build"
+        source.mkdir()
+        (source / "report__ventas.parquet").write_text("parquet", encoding="utf-8")
+        (source / "report__costos.parquet").write_text("parquet", encoding="utf-8")
+        (source / "README.md").write_text("card", encoding="utf-8")
+        (source / "LICENSE").write_text("lic", encoding="utf-8")
+        # Pin mtimes so _needs_prepare sees fresh
+        import os as _os
+
+        for p in source.rglob("*.parquet"):
+            _os.utime(p, (_NEW, _NEW))
+        _os.utime(xlsx, (_OLD, _OLD))
+        toml = tmp_path / "dataset.toml"
+        toml.write_text("[dataset]", encoding="utf-8")
+        _os.utime(toml, (_OLD, _OLD))
+
+        # Diff should list 2 expanded remotes
+        diff = _repo_diff_summary(cfg, existing_files=[], keep_csv=False, staging_dir=source)
+        assert "report__ventas.parquet" in diff
+        assert "report__costos.parquet" in diff
+        assert "report.parquet" not in diff
+
+        # Per-sheet protection: only ventas exists on Hub, without --force
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        protected = _check_overwrite_protection(
+            existing_files=["report__ventas.parquet"],
+            force=False,
+            planned_files=[
+                "report__ventas.parquet",
+                "report__costos.parquet",
+            ],
+        )
+        assert "report__ventas.parquet" in protected
+        assert "report__costos.parquet" not in protected
+
+        # _copy_package stages N files
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        _copy_package(cfg, source, dest, keep_csv=False, protected=set())
+        assert (dest / "report__ventas.parquet").is_file()
+        assert (dest / "report__costos.parquet").is_file()
+
+        # detect_splits count 2
+        report = detect_splits(["report__ventas.parquet", "report__costos.parquet"])
+        # Splits detection groups by directory; count files
+        total = sum(len(s.files) for s in report.splits) + len(report.unclassified)
+        assert total == 2
+
+        # Dry-run: publish dry_run lists N (via diff)
+        from sofer import publish as publish_mod
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", _raise_network)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "report__ventas.parquet" in captured.out
+        assert "report__costos.parquet" in captured.out
+
+    def test_multi_sheet_full_publish_stages_n(self, tmp_path, monkeypatch) -> None:
+        """Full hf publish with 2-sheet staging stages N parquets via upload_folder."""
+        from sofer import publish as publish_mod
+
+        xlsx = tmp_path / "report.xlsx"
+        xlsx.write_text("dummy", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="report.xlsx")])
+        source = tmp_path / "build"
+        source.mkdir()
+        (source / "report__ventas.parquet").write_text("p1", encoding="utf-8")
+        (source / "report__costos.parquet").write_text("p2", encoding="utf-8")
+        (source / "README.md").write_text("card", encoding="utf-8")
+        (source / "LICENSE").write_text("lic", encoding="utf-8")
+        import os as _os
+
+        for p in source.rglob("*.parquet"):
+            _os.utime(p, (_NEW, _NEW))
+        _os.utime(xlsx, (_OLD, _OLD))
+        (tmp_path / "dataset.toml").write_text("[dataset]", encoding="utf-8")
+        _os.utime(tmp_path / "dataset.toml", (_OLD, _OLD))
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        td = _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+        assert rc == 0
+        staging_root = Path(td) / "repo"
+        assert (staging_root / "report__ventas.parquet").is_file()
+        assert (staging_root / "report__costos.parquet").is_file()
+
+
+class TestSingleSheetRegression:
+    """Single-sheet XLSX stays single, no phantom __."""
+
+    def test_single_sheet_no_phantom(self, tmp_path, monkeypatch) -> None:
+        """Staging with only single.parquet shows no __ phantom in diff/copy."""
+        from sofer.publish import _copy_package, _repo_diff_summary
+
+        xlsx = tmp_path / "single.xlsx"
+        xlsx.write_text("dummy", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="single.xlsx")])
+        source = tmp_path / "build"
+        source.mkdir()
+        (source / "single.parquet").write_text("p", encoding="utf-8")
+        (source / "README.md").write_text("card", encoding="utf-8")
+        (source / "LICENSE").write_text("lic", encoding="utf-8")
+        import os as _os
+
+        for p in source.rglob("*.parquet"):
+            _os.utime(p, (_NEW, _NEW))
+        _os.utime(xlsx, (_OLD, _OLD))
+        (tmp_path / "dataset.toml").write_text("[dataset]", encoding="utf-8")
+        _os.utime(tmp_path / "dataset.toml", (_OLD, _OLD))
+
+        diff = _repo_diff_summary(cfg, [], keep_csv=False, staging_dir=source)
+        assert "single.parquet" in diff
+        assert "__" not in diff
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        _copy_package(cfg, source, dest, keep_csv=False, protected=set())
+        assert (dest / "single.parquet").is_file()
+        assert not list(dest.glob("*__*.parquet"))
+
+    def test_expanded_single_fallback(self, tmp_path: Path) -> None:
+        """expanded_planned_remotes with single file returns single, no __."""
+        from sofer._mirror import expanded_planned_remotes
+
+        cfg = _cfg(tmp_path, [FileEntry(local=Path("single.xlsx"), remote="single.xlsx")])
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "single.parquet").touch()
+        result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+        assert result == ["single.parquet"]
+        assert not any("__" in r for r in result)

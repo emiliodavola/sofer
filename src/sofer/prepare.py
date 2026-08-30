@@ -823,6 +823,7 @@ def prepare(
                     recipe_content=recipe_content,
                     study_design_content=study_design_content,
                     row_counts=row_counts,
+                    staging_dir=output_dir,
                 )
         else:
             print("  [i] Generating Dataset Card \u2026")
@@ -832,6 +833,7 @@ def prepare(
                 recipe_content=recipe_content,
                 study_design_content=study_design_content,
                 row_counts=row_counts,
+                staging_dir=output_dir,
             )
 
         print("  [i] Generating LICENSE \u2026")

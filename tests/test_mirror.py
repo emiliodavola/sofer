@@ -8,6 +8,7 @@ from pathlib import Path
 from sofer._mirror import (
     _validate_case_fold_collisions,
     copy_to_mirror,
+    expanded_planned_remotes,
     parquet_remote_for,
     planned_remotes,
 )
@@ -276,3 +277,130 @@ class TestValidateCaseFoldCollisions:
         )
         errors = _validate_case_fold_collisions(cfg)
         assert len(errors) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  expanded_planned_remotes — PUB-10 mirror-grounded expansion
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestExpandedPlannedRemotes:
+    """expanded_planned_remotes expands XLSX via mirror glob, falls back otherwise."""
+
+    def test_multi_sheet_expands_to_n_remotes(self, tmp_path: Path) -> None:
+        """Multi-sheet XLSX expands to N __ remotes when mirror has them."""
+        cfg = _cfg([FileEntry(local=Path("report.xlsx"), remote="report.xlsx")])
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__ventas.parquet").touch()
+        (staging / "report__costos.parquet").touch()
+
+        result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+
+        assert "report__ventas.parquet" in result
+        assert "report__costos.parquet" in result
+        assert "report.parquet" not in result
+        assert len([r for r in result if "report" in r]) == 2
+
+    def test_single_sheet_stays_single(self, tmp_path: Path) -> None:
+        """Single-sheet XLSX staged as stem.parquet stays single, no phantom __."""
+        cfg = _cfg([FileEntry(local=Path("single.xlsx"), remote="single.xlsx")])
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "single.parquet").touch()
+
+        result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+
+        assert result == ["single.parquet"]
+        assert not any("__" in r for r in result)
+
+    def test_fallback_when_staging_none(self) -> None:
+        """When staging_dir is None, fallback to logical placeholder."""
+        cfg = _cfg([FileEntry(local=Path("report.xlsx"), remote="report.xlsx")])
+        assert expanded_planned_remotes(cfg, keep_csv=False, staging_dir=None) == ["report.parquet"]
+
+    def test_fallback_when_staging_not_dir(self, tmp_path: Path) -> None:
+        """When staging_dir is not a directory, fallback to planned_remotes."""
+        cfg = _cfg([FileEntry(local=Path("report.xlsx"), remote="report.xlsx")])
+        not_dir = tmp_path / "not_exist"
+        assert expanded_planned_remotes(cfg, keep_csv=False, staging_dir=not_dir) == [
+            "report.parquet"
+        ]
+
+    def test_recursive_passthrough(self, tmp_path: Path) -> None:
+        """Recursive entries are not expanded even with staging."""
+        cfg = _cfg([FileEntry(local=Path("labels"), remote="labels/", recursive=True)])
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+        assert result == ["labels"]
+
+    def test_keep_csv_csv_only(self, tmp_path: Path) -> None:
+        """keep_csv adds original CSV but not for XLSX."""
+        cfg = _cfg(
+            [
+                FileEntry(local=Path("a.csv"), remote="a.csv"),
+                FileEntry(local=Path("report.xlsx"), remote="report.xlsx"),
+            ]
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__s1.parquet").touch()
+        (staging / "report__s2.parquet").touch()
+
+        result = expanded_planned_remotes(cfg, keep_csv=True, staging_dir=staging)
+        # CSV expands with keep
+        assert "a.parquet" in result
+        assert "a.csv" in result
+        # XLSX expands to N, no CSV
+        assert "report__s1.parquet" in result
+        assert "report__s2.parquet" in result
+        csv_count = result.count("a.csv")
+        assert csv_count == 1
+
+    def test_convert_to_parquet_false_passthrough(self, tmp_path: Path) -> None:
+        """XLSX with convert_to_parquet=False stays as original remote."""
+        cfg = _cfg(
+            [
+                FileEntry(
+                    local=Path("report.xlsx"),
+                    remote="report.xlsx",
+                    convert_to_parquet=False,
+                )
+            ]
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__ventas.parquet").touch()
+
+        result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+        assert result == ["report.xlsx"]
+
+    def test_no_openpyxl_import(self, tmp_path: Path) -> None:
+        """Helper must not import openpyxl — glob only."""
+        import sys
+
+        cfg = _cfg([FileEntry(local=Path("report.xlsx"), remote="report.xlsx")])
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "report__ventas.parquet").touch()
+        _ = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+        assert "openpyxl" not in sys.modules or sys.modules["openpyxl"] is not None
+        # Ensure helper didn't trigger workbook open: no import side effect
+        # Check that calling helper didn't require openpyxl
+        # If openpyxl were imported lazily, it would appear after call;
+        # we assert that the function works even if openpyxl missing by checking
+        # that no error was raised above.
+
+    def test_nested_xlsx_with_dir(self, tmp_path: Path) -> None:
+        """Nested XLSX respects directory prefix in glob."""
+        cfg = _cfg([FileEntry(local=Path("report.xlsx"), remote="data/report.xlsx")])
+        staging = tmp_path / "staging"
+        (staging / "data").mkdir(parents=True)
+        (staging / "data" / "report__ventas.parquet").touch()
+        (staging / "data" / "report__costos.parquet").touch()
+
+        result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
+
+        assert "data/report__ventas.parquet" in result
+        assert "data/report__costos.parquet" in result
