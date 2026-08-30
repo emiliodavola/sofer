@@ -785,3 +785,170 @@ class TestPublishCleanParser:
         assert captured.get("clean") is True
         assert captured.get("clean_cache") is True
         monkeypatch.setattr(cli_mod, "run_publish", orig)
+
+
+# ---------------------------------------------------------------------------
+#  CLI-R03 / CLI-R04 — profile / render flags, batch dispatch, help (feat)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileRenderCliFlags:
+    """CLI-R03/R04 profile/render parser and dispatch."""
+
+    def test_profile_flags_present(self):
+        """profile parser exposes --output/--all-files/--force/--config."""
+        args = cli._build_parser().parse_args(["profile", "data.csv"])
+        assert hasattr(args, "output")
+        assert hasattr(args, "all_files")
+        assert hasattr(args, "force")
+        assert hasattr(args, "config")
+        assert args.all_files is False
+        assert args.force is False
+
+    def test_render_flags_present(self):
+        """render parser exposes same four flags."""
+        args = cli._build_parser().parse_args(["render", "pkg"])
+        assert hasattr(args, "output")
+        assert hasattr(args, "all_files")
+        assert hasattr(args, "force")
+        assert hasattr(args, "config")
+
+    def test_profile_all_files_flag_parses(self):
+        """--all-files is actionable on profile."""
+        args = cli._build_parser().parse_args(["profile", "dataset.toml", "--all-files"])
+        assert args.all_files is True
+        assert args.dataset == "dataset.toml"
+
+    def test_render_all_files_flag_parses(self):
+        """--all-files is actionable on render."""
+        args = cli._build_parser().parse_args(["render", "dataset.toml", "--all-files"])
+        assert args.all_files is True
+
+    def test_help_lists_all_flags_profile(self, capsys):
+        """profile --help lists all four flags and TOML contract."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["profile", "--help"])
+        out = capsys.readouterr().out
+        assert "--output" in out
+        assert "--all-files" in out
+        assert "--force" in out
+        assert "--config" in out
+        assert "[[file]]" in out
+
+    def test_help_lists_all_flags_render(self, capsys):
+        """render --help lists all four flags."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["render", "--help"])
+        out = capsys.readouterr().out
+        assert "--output" in out
+        assert "--all-files" in out
+        assert "--force" in out
+        assert "--config" in out
+        assert "[[file]]" in out
+
+    def test_profile_batch_dispatch(self, tmp_path, restore_tool_config):
+        """sofer profile dataset.toml --all-files dispatches batch and writes profiles."""
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        rc = cli._cmd_profile(
+            cli._build_parser().parse_args(["profile", str(toml), "--all-files"])
+        )
+        assert rc == 0
+        assert (tmp_path / "cache" / "profiles" / "a.metadata.yaml").is_file()
+
+    def test_render_batch_dispatch(self, tmp_path, restore_tool_config):
+        """sofer render dataset.toml --all-files dispatches batch."""
+        import sofer.config as cfg
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        ds_cfg = DatasetConfig.from_toml(toml)
+        generate_all_profiles(ds_cfg)
+        rc = cli._cmd_render(
+            cli._build_parser().parse_args(["render", str(toml), "--all-files"])
+        )
+        assert rc == 0
+        assert (tmp_path / "cache" / "renders" / "a.README.md").is_file()
+
+    def test_toml_without_files_nonzero(self, tmp_path, capsys):
+        """TOML without [[file]] + --all-files exits non-zero mentioning [[file]]."""
+        toml = tmp_path / "dataset.toml"
+        toml.write_text('[dataset]\nname = "x"\nrepo_id = "u/x"\n', encoding="utf-8")
+        rc = cli._cmd_profile(
+            Namespace(dataset=str(toml), output=None, all_files=True, force=False, config=str(toml))
+        )
+        assert rc == 1
+        assert "[[file]]" in capsys.readouterr().err
+        rc2 = cli._cmd_render(
+            Namespace(package=str(toml), output=None, all_files=True, force=False, config=str(toml))
+        )
+        assert rc2 == 1
+
+    def test_profile_and_render_appear_in_help(self, capsys):
+        """sofer --help lists both profile and render subcommands."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["--help"])
+        out = capsys.readouterr().out
+        assert "profile" in out
+        assert "render" in out
+
+    def test_config_flag_overrides_positional(self, tmp_path, restore_tool_config):
+        """--config overrides positional TOML path for batch."""
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        toml_a = tmp_path / "a.toml"
+        toml_a.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        toml_b = tmp_path / "b.toml"
+        toml_b.write_text('[dataset]\nname = "x"\nrepo_id = "u/x"\n', encoding="utf-8")
+        # positional is b.toml (no files) but --config points to a.toml -> should succeed
+        args = cli._build_parser().parse_args(
+            ["profile", str(toml_b), "--all-files", "--config", str(toml_a)]
+        )
+        rc = cli._cmd_profile(args)
+        assert rc == 0
+
+    def test_profile_help_describes_metadata(self, capsys):
+        """profile help mentions metadata.yaml and use --force hint."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["profile", "--help"])
+        out = capsys.readouterr().out
+        assert "metadata.yaml" in out
+        assert "use --force to overwrite" in out
+
+    def test_render_help_describes_readme(self, capsys):
+        """render help mentions README.md and use --force hint."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["render", "--help"])
+        out = capsys.readouterr().out
+        assert "README.md" in out
+        assert "use --force to overwrite" in out

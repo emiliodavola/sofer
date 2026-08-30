@@ -601,3 +601,113 @@ class TestTc08SourceVisibility:
         captured = capsys.readouterr()
         assert "[tool.sofer] source:" not in captured.err
         assert "[tool.sofer] source:" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+#  TC-11 — profile_dir / render_dir (feat-profile-render-all-files)
+# ---------------------------------------------------------------------------
+
+
+class TestTc11ProfileRenderDir:
+    """TC-11 defaults, overrides, reload rebinding, and no-hardcode contract."""
+
+    def test_defaults_are_profiles_renders(self, restore_tool_config, monkeypatch, tmp_path):
+        """No pyproject -> PROFILE_DIR=profiles, RENDER_DIR=renders."""
+        bare = tmp_path / "bare-defaults"
+        bare.mkdir()
+        monkeypatch.chdir(bare)
+        config.reload(bare)
+        assert config.PROFILE_DIR == "profiles"
+        assert config.RENDER_DIR == "renders"
+        assert config._DEFAULTS["profile_dir"] == "profiles"
+        assert config._DEFAULTS["render_dir"] == "renders"
+
+    def test_pyproject_overrides_profile_dir(self, restore_tool_config, pytree):
+        """pyproject profile_dir=docs/profiles -> PROFILE_DIR rebinds."""
+        root = pytree('[tool.sofer]\nprofile_dir = "docs/profiles"\n')
+        config.reload(root)
+        assert config.PROFILE_DIR == "docs/profiles"
+        assert config.SOURCE_PATH == root / "pyproject.toml"
+
+    def test_pyproject_overrides_render_dir(self, restore_tool_config, pytree):
+        """pyproject render_dir=docs/renders -> RENDER_DIR rebinds."""
+        root = pytree('[tool.sofer]\nrender_dir = "docs/renders"\n')
+        config.reload(root)
+        assert config.RENDER_DIR == "docs/renders"
+
+    def test_reload_rebinding(self, restore_tool_config, pytree):
+        """Sequential reloads rebind both dirs without residue."""
+        root_a = pytree('[tool.sofer]\nprofile_dir = "a"\nrender_dir = "ra"\n', at="a")
+        config.reload(root_a)
+        assert config.PROFILE_DIR == "a"
+        assert config.RENDER_DIR == "ra"
+        root_b = pytree('[tool.sofer]\nprofile_dir = "b"\nrender_dir = "rb"\n', at="b")
+        config.reload(root_b)
+        assert config.PROFILE_DIR == "b"
+        assert config.RENDER_DIR == "rb"
+        # fallback to defaults when pyproject has no section
+        root_c = pytree('[project]\nname = "x"\n', at="c")
+        config.reload(root_c)
+        assert config.PROFILE_DIR == "profiles"
+        assert config.RENDER_DIR == "renders"
+
+    def test_empty_string_rejected(self, monkeypatch, tmp_path):
+        """Empty profile_dir/render_dir must raise ValueError."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\nprofile_dir = ""\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
+        with pytest.raises(ValueError, match="profile_dir"):
+            config._load_tool_config()
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\nrender_dir = "  "\n', encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="render_dir"):
+            config._load_tool_config()
+
+    def test_no_hardcodes_in_profile_and_render(self):
+        """profile.py/render.py must not contain hardcoded \"profiles\"/\"renders\"."""
+        profile_src = Path("src/sofer/profile.py").read_text(encoding="utf-8")
+        render_src = Path("src/sofer/render.py").read_text(encoding="utf-8")
+        assert '"profiles"' not in profile_src
+        assert "'profiles'" not in profile_src
+        assert '"renders"' not in render_src
+        assert "'renders'" not in render_src
+        # consumers must read through config
+        assert "config.PROFILE_DIR" in profile_src
+        assert "config.RENDER_DIR" in render_src
+        assert "config.PROFILE_DIR" in render_src
+
+    def test_pyproject_has_profile_render_keys(self):
+        """Repository pyproject.toml declares profile_dir/render_dir under [tool.sofer]."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        with open("pyproject.toml", "rb") as fh:
+            data = _tomli.load(fh)
+        assert data["tool"]["sofer"]["profile_dir"] == "profiles"
+        assert data["tool"]["sofer"]["render_dir"] == "renders"
+
+    def test_mcp_containment_covers_new_dirs(self, tmp_path, restore_tool_config):
+        """profile_dir/render_dir escaping the root must be rejected."""
+        from sofer.mcp_server import _validate_output_targets
+
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            '[tool.sofer]\nprofile_dir = "../../evil"\n', encoding="utf-8"
+        )
+        config.reload(root, stop_at=root)
+        errors = _validate_output_targets(None, root=root, base=root)
+        assert any("profile_dir" in e and "outside" in e for e in errors)
+
+        (root / "pyproject.toml").write_text(
+            '[tool.sofer]\nrender_dir = "../../evil"\n', encoding="utf-8"
+        )
+        config.reload(root, stop_at=root)
+        errors = _validate_output_targets(None, root=root, base=root)
+        assert any("render_dir" in e and "outside" in e for e in errors)

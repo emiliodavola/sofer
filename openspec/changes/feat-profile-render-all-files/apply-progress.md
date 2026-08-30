@@ -19,14 +19,14 @@
 - [x] 3.2 cli.py _cmd_profile/_cmd_render batch branches — DatasetConfig.from_toml, fail if no [[file]], Option B
 - [x] 3.3 mcp_server.py sofer_profile/sofer_render add all_files/force/config params and batch dispatch
 - [x] 3.4 mcp_server.py extend _validate_output_targets + containment for profile_dir/render_dir
-- [x] 4.1 test_config — defaults/override/reload/no hardcodes (verified via manual integration: test_override.py)
-- [x] 4.2 test_profile PRF-05 — N-files, nested Labels/etiquetas_a, collision ValueError after partial write, Option B, cache untouched, [[file]] fail (verified: test_batch.py, test_batch2.py)
-- [x] 4.3 test_profile PRF-06 — exists without --force → FileExistsError+hint; with --force overwrites (verified)
-- [x] 4.4 test_render RND-04/05 — mirror 4.2+4.3 for renders/*.README.md; skip missing metadata.yaml (verified)
-- [x] 4.5 test_cli CLI-R03/R04 — flags present, batch dispatch, [[file]] non-zero, help lists flags (verified via parser and subprocess help)
-- [x] 4.6 test_mcp_server — containment ../../evil, batch success+collision, bounded anchoring (code-level verification, _validate_output_targets covers)
+- [x] 4.1 test_config — defaults profiles/renders, override docs/profiles/renders, reload rebinding, empty-string rejection, no hardcodes (tests/test_config.py::TestTc11ProfileRenderDir — 8 tests) — REMEDIATION 2026-08-30: added covering pytest (was UNTESTED)
+- [x] 4.2 test_profile PRF-05 — N-files, nested Labels/etiquetas_a, collision ValueError after partial write (x.csv+x.parquet), Option B abs/rel, cache untouched, [[file]] fail (tests/test_profile.py::TestProfileBatchPrf05 — 8 tests) — REMEDIATION: landed
+- [x] 4.3 test_profile PRF-06 — exists without --force → FileExistsError+hint; with --force overwrites (tests/test_profile.py::TestProfileForceGuardPrf06 — 4 tests) — REMEDIATION: landed
+- [x] 4.4 test_render RND-04/05 — mirror 4.2+4.3 for renders/*.README.md; skip missing metadata.yaml (tests/test_render.py::TestRenderBatchRnd04 + TestRenderForceGuardRnd05 — 11 tests) — REMEDIATION: landed
+- [x] 4.5 test_cli CLI-R03/R04 — flags present, batch dispatch, [[file]] non-zero, help lists --all-files/--force/--config, config override (tests/test_cli.py::TestProfileRenderCliFlags — 12 tests) — REMEDIATION: landed
+- [x] 4.6 test_mcp_server — containment ../../evil, batch success+collision, bounded anchoring (tests/test_mcp_server.py::TestMcpProfileRenderBatch — 6 tests) — REMEDIATION: landed
 - [x] 5.1 README.md+README_ES.md — update help excerpts, --all-files TOML examples, --force note; headings stay synced
-- [x] 5.2 ruff check src/ tests/ && mypy src/ && pytest tests/ -q (1062 passed, 0 ruff errors)
+- [x] 5.2 ruff check src/ tests/ && mypy src/ && pytest tests/ -q (1113 passed, 2 skipped, 0 ruff errors) — REMEDIATION verified 2026-08-30
 - [x] 5.3 Confirm spec deltas cover PRF-05/06 RND-04/05 TC-11
 
 ## Files Changed
@@ -39,16 +39,22 @@
 | `src/sofer/render.py` | Modified | Added generate_all_renders (mirror profile → renders/*.README.md, skip missing metadata.yaml) + force guard in render() |
 | `src/sofer/cli.py` | Modified | Added --all-files/--force/--config to profile/render parsers (5 flags each), updated description for [[file]] contract + hint, added _cmd_profile/_cmd_render batch branches with DatasetConfig.from_toml, [[file]] validation, Option B anchoring |
 | `src/sofer/mcp_server.py` | Modified | Extended sofer_profile/sofer_render with all_files/force/config params + batch dispatch, extended _validate_output_targets to contain profile_dir/render_dir |
+| `tests/test_config.py` | Modified | Added TestTc11ProfileRenderDir (8 tests): defaults, overrides, reload, empty rejection, no-hardcode grep, pyproject keys, MCP containment |
+| `tests/test_profile.py` | Modified | Added TestProfileBatchPrf05 (8 tests) + TestProfileForceGuardPrf06 (4 tests): N-files, nested, collision (csv+parquet), Option B abs/rel, cache untouched, [[file]] fail, force guard |
+| `tests/test_render.py` | Modified | Added TestRenderBatchRnd04 (7 tests) + TestRenderForceGuardRnd05 (4 tests): mirror batch/collision/Option B/config override/[[file]] fail/skip missing + guard |
+| `tests/test_cli.py` | Modified | Added TestProfileRenderCliFlags (12 tests): flags present, batch dispatch, [[file]] non-zero, help, config override |
+| `tests/test_mcp_server.py` | Modified | Added TestMcpProfileRenderBatch (6 tests): containment ../../evil, batch success+collision (csv+parquet), bounded anchoring |
 | `README.md` | Modified | Updated profiling section with batch examples, --force note; updated command reference rows for profile/render flags; synced headings |
 | `README_ES.md` | Modified | Mirror of README.md changes (Spanish) |
 | `docs/configuration.md` | Modified | Added profile_dir/render_dir to inference tuning example |
 
 ## Verification
 
-- `uv run ruff check src/` → All checks passed!
-- `uv run pytest tests/ -q` → 1062 passed, 2 skipped
-- Manual batch integration: N-files, nested Labels/etiquetas_a, collision ValueError after partial write, Option B abs/rel anchoring, cache/ untouched, [[file]] fail, force guard, --output anchoring — all verified via temp-dir scripts
-- `uv run mypy src/` → not run under 3.10 (requires 3.13 per release.yml); no new type errors introduced
+- `uv run ruff check src/ tests/` → All checks passed! (2026-08-30)
+- `uv run mypy src/` → Success: no issues found in 28 source files
+- `uv run pytest tests/ -q` → 1113 passed, 2 skipped, 13 warnings (was 1062 before remediation; +51 new covering tests) — REMEDIATION 2026-08-30 verified 31/31 scenarios now PASS
+- Manual batch integration: N-files, nested Labels/etiquetas_a, collision ValueError after partial write (csv+parquet), Option B abs/rel anchoring, cache/ untouched, [[file]] fail, force guard, --output anchoring — all verified via temp-dir scripts + pytest
+- Branch feat/91-profile-render-all-files commit 3e05b43 pushed to origin; PR #95 (follow-up to merged #94) open to dev, assignee emiliodavola
 
 ## Deviations from Design
 
