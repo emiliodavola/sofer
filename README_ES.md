@@ -208,10 +208,19 @@ lectura que funciona solo con un archivo de datos — no se necesita ningún TOM
 ```bash
 # 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
 sofer profile raw/contacts.csv
+# Batch: one metadata.yaml per [[file]] under cache/profiles/<rel_stem>.metadata.yaml
+sofer profile dataset.toml --all-files
+sofer profile dataset.toml --all-files --output ./out   # Option B: rel outputs anchor to TOML dir
+# Overwrite guard: without --force an existing destination raises FileExistsError
+sofer profile raw/contacts.csv --output ./out --force    # overwrite
 
 # 2. Render a status-annotated README.md from that metadata
 sofer render raw/            # directory containing metadata.yaml
 sofer render raw/metadata.yaml   # ...or the file directly
+# Batch: one README per [[file]] under cache/renders/<rel_stem>.README.md
+sofer render dataset.toml --all-files
+sofer render dataset.toml --all-files --output ./out
+sofer render raw/ --output ./out --force
 ```
 
 `metadata.yaml` es la fuente de verdad legible por máquina; `render` es una
@@ -268,8 +277,8 @@ canalización.
 |---|---|
 | `init <name>` | Genera una plantilla `.toml` lista para editar. |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. |
-| `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`. |
-| `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`. |
+| `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml`, `PurePath.suffixes`, colisión `ValueError`), `--force` (guardia de sobreescritura), `--config` (ruta TOML para batch). `--output` relativo anclado al dir TOML (Option B); `cache/` intacto con `--output`. |
+| `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md`, omite `metadata.yaml` faltante), `--force`, `--config`. |
 | `codebook <file>` | Genera un codebook en markdown para un archivo. Soporta CSV, TSV, Parquet, Excel, JSONL. |
 | `codebook --all-files` | Genera un codebook por cada entrada `[[file]]` en `cache/codebooks/`, más un índice raíz `cache/codebook.md`. Usa `--config` para especificar el archivo TOML. |
 | `prepare <config.toml>` | Genera el paquete de datos completo localmente: conversión CSV→Parquet, comprobaciones de esquema entre archivos, informe de esquema, Dataset Card (`README.md`), `LICENSE` y — con `--all-files` — codebooks por archivo. Nunca contacta con HF. Flags: `--output DIR` (por defecto `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Limpieza de huérfanos: con `--force` elimina archivos huérfanos que no están en `expanded_planned_remotes` más `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotente; sin `--force` los huérfanos permanecen). |

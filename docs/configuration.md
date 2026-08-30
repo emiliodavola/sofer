@@ -122,4 +122,8 @@ profile_max_sample = 100000
 
 # Confidence is rounded to this many decimal places before it is stored.
 confidence_round_digits = 4
+
+# Batch output layout for profile/render (collision-safe rel_stem).
+profile_dir = "profiles"   # profiles/Labels/etiquetas_a.metadata.yaml
+render_dir = "renders"     # renders/Labels/etiquetas_a.README.md
 ```
