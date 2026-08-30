@@ -550,6 +550,8 @@ def publish(
     dry_run: bool = False,
     quality_report: ValidationReport | None = None,
     protected_out: set[str] | None = None,
+    clean: bool = False,
+    clean_cache: bool = False,
 ) -> int:
     """Deliver the prepared dataset package for *cfg* to *target*.
 
@@ -583,6 +585,17 @@ def publish(
                        ``skipped_protected`` without re-inspecting the repo
                        or parsing output.  ``None`` keeps the legacy behavior
                        (no side channel).
+        clean:         When ``True``, delete the build directory after a
+                       successful ``hf`` upload (PUB-11) or the ``local``
+                       destination after a successful copy.  Default off;
+                       never deletes on ``--dry-run``, quality-gate block,
+                       or upload failure.  Build path is resolved via
+                       :func:`sofer.prepare.resolve_output_dir` so
+                       ``--output`` overrides are honoured.
+        clean_cache:   When ``True`` and *clean* is also ``True``, also
+                       delete ``cache/`` (``config.OUTPUT_DIR`` anchored to
+                       ``cfg._base_dir``, shared tool-wide).  Requires
+                       explicit opt-in via ``--clean-cache``/``--all`` (PUB-11).
 
     Returns:
         Exit code (``0`` success, ``1`` quality-gate failure, prepare
@@ -644,6 +657,15 @@ def publish(
         print(f"\n{'=' * 60}")
         print(f"  Result: package copied to {dest}")
         print(f"{'=' * 60}\n")
+        # PUB-11: local --clean deletes the resolved destination only,
+        # never the source build.  Without --clean, nothing is deleted.
+        if clean and not dry_run:
+            # quality gate applies to hf only; local always has quality_passed
+            from ._clean import clean_build as _clean_build_local
+
+            # clean_build expects a DatasetConfig + override string; for local
+            # we clean the destination resolved from the --output string.
+            _clean_build_local(cfg, output_dir)
         return 0
 
     # ── 4. hf target: quality gate, repo, diff, protection (PUB-01) ──────
@@ -716,4 +738,21 @@ def publish(
     print(f"\n{'=' * 60}")
     print(f"  Result: {ok} uploaded, {fail} failed")
     print(f"{'=' * 60}\n")
+
+    # ── 7. PUB-11 gated cleanup: --clean deletes build only on success ──
+    # Gated on clean && not dry_run && quality_passed && fail==0.  Build is
+    # resolved via resolve_output_dir(cfg, output_dir) so --output overrides
+    # are honoured; cache is tool-wide at cfg._base_dir / config.OUTPUT_DIR
+    # and requires explicit --clean-cache/--all (sibling-shared).
+    quality_passed = quality_report is None or quality_report.passed
+    if clean and not dry_run and quality_passed and fail == 0:
+        from ._clean import clean_build as _clean_build_hf
+        from ._clean import clean_cache as _clean_cache_hf
+
+        # output_dir here is the original string override (None = cfg.build_dir)
+        _clean_build_hf(cfg, output_dir)
+        if clean_cache:
+            base = cfg._base_dir if cfg._base_dir else Path.cwd()
+            _clean_cache_hf(base)
+
     return 0 if fail == 0 else 1

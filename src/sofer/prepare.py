@@ -892,6 +892,18 @@ def prepare(
                 file=sys.stderr,
             )
 
+        # ── 8b. PRP-09: orphan pruning when force=True (idempotent, after staging + codebooks)
+        # Allowlist is expanded_planned_remotes + compliance; dual __/_ guard is
+        # inherited from expanded_planned_remotes (PUB-10).  force=False skips.
+        if force:
+            from ._clean import allowed_output_remotes, prune_orphans
+
+            # keep_csv is False for prepare — the package is the build output,
+            # not the hf upload set.  Any CSV originals staged via keep_csv are
+            # handled at publish time; prepare owns only Parquet + passthrough.
+            allowed = allowed_output_remotes(cfg, keep_csv=False, output_dir=output_dir)
+            prune_orphans(output_dir, allowed)
+
         # ── 9. Report NOT FOUND files ──────────────────────────────────
         not_found: list[str] = []
         for entry in cfg.files:

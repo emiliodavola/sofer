@@ -710,3 +710,78 @@ class TestValidateRanChecks:
             f"Expected passed > 0 but got {passed_count}. "
             f"ran_checks is likely empty (bug).\nOutput:\n{captured.out}"
         )
+
+
+# ── PUB-11 / PRP-09 — CLI publish --clean / --clean-cache / --all ───────────────
+
+
+class TestPublishCleanParser:
+    """publish --help contains --clean/--clean-cache/--all and plumbs correctly."""
+
+    def test_help_contains_clean_flags(self, capsys):
+        """publish --help lists --clean, --clean-cache and --all."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["publish", "--help"])
+        out = capsys.readouterr().out
+        assert "--clean" in out
+        assert "--clean-cache" in out
+        assert "--all" in out
+        assert "cache" in out.lower()
+
+    def test_clean_defaults_off(self):
+        """--clean and --clean-cache default to False."""
+        args = cli._build_parser().parse_args(["publish", "config.toml"])
+        assert args.clean is False
+        assert args.clean_cache is False
+
+    def test_clean_flag_sets_clean(self):
+        """--clean sets clean=True."""
+        args = cli._build_parser().parse_args(["publish", "config.toml", "--clean"])
+        assert args.clean is True
+        assert args.clean_cache is False
+
+    def test_clean_cache_sets_cache(self):
+        """--clean-cache sets clean_cache=True."""
+        args = cli._build_parser().parse_args(
+            ["publish", "config.toml", "--clean", "--clean-cache"]
+        )
+        assert args.clean is True
+        assert args.clean_cache is True
+
+    def test_all_alias_sets_cache(self):
+        """--all is an alias for --clean-cache."""
+        args = cli._build_parser().parse_args(["publish", "config.toml", "--clean", "--all"])
+        assert args.clean_cache is True
+
+    def test_publish_plumbs_flags(self, tmp_path, monkeypatch):
+        """_cmd_publish plumbs --clean/--clean-cache into publish()."""
+        toml_path = tmp_path / "test.toml"
+        toml_content = (
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "a.csv"\nremote = "a.csv"\n'
+        )
+        toml_path.write_text(toml_content, encoding="utf-8")
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        from sofer import publish as publish_mod
+
+        captured: dict[str, object] = {}
+
+        def fake_publish(cfg, **kw):  # type: ignore[no-untyped-def]
+            captured.update(kw)
+            return 0
+
+        monkeypatch.setattr(publish_mod, "publish", fake_publish)
+        # Also patch the cli's run_publish reference
+        import sofer.cli as cli_mod
+
+        orig = cli_mod.run_publish
+        monkeypatch.setattr(cli_mod, "run_publish", fake_publish)
+
+        args = cli._build_parser().parse_args(["publish", str(toml_path), "--clean", "--all"])
+        rc = cli._cmd_publish(args)
+        assert rc == 0
+        assert captured.get("clean") is True
+        assert captured.get("clean_cache") is True
+        monkeypatch.setattr(cli_mod, "run_publish", orig)
