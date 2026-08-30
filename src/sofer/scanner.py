@@ -1,15 +1,22 @@
 """
 File discovery and TOML registration for the ``scan`` command.
 
-Four-phase orchestrator: discover → merge → copy → write.
+MOVE-then-copy orchestrator: discover loose → check collisions → move to
+raw/ → discover → check flatten → merge → copy → write.
 
 Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) -> build/
-(gitignored). ``scan`` is copy-only — it flattens ``raw/DPTO.csv`` to
-``cache/DPTO.csv`` via :func:`flatten_first_level` and never moves or
-deletes sources. ``EXCLUSIONS`` (``.git``, ``__pycache__``, ``.venv``,
-``node_modules``, ``dist``, ``build``) are pruned; ``cache/``
-(``OUTPUT_DIR``) is excluded via ``EXCLUSIONS|{OUTPUT_DIR}``; ``raw/``
-is never excluded.
+(gitignored). ``scan`` MOVEs loose supported files (``.csv``, ``.tsv``,
+``.xlsx``, ``.jsonl``, ``.parquet``) not under ``raw/``/``cache/``/
+``EXCLUSIONS`` into ``raw/`` preserving ``relative_to(base_dir)`` tree
+via :func:`move_to_raw` (``dest = raw_dir / rel``, lazy ``mkdir -p``
+parent), checks raw-dest collisions atomically via
+:func:`check_raw_collisions`, then copies ``raw/`` → ``cache/`` via
+:func:`flatten_first_level` and :func:`copy_files` (``raw/DPTO.csv`` →
+``cache/DPTO.csv``). ``EXCLUSIONS`` (``.git``, ``__pycache__``,
+``.venv``, ``node_modules``, ``dist``, ``build``) are pruned;
+``cache/`` (``OUTPUT_DIR``) excluded via ``EXCLUSIONS|{OUTPUT_DIR}``;
+``raw/`` excluded only during the MOVE discovery phase via
+``EXCLUSIONS|{RAW_DIR, OUTPUT_DIR}``.
 
 All functions are pure logic — they raise on errors; the CLI handler
 catches and translates to exit codes.
@@ -44,6 +51,42 @@ def flatten_first_level(relative: Path) -> Path:
     if len(parts) <= 1:
         return relative
     return Path(*parts[1:])
+
+
+def check_raw_collisions(
+    candidates: list[Path],
+    raw_dir: Path,
+    base_dir: Path,
+) -> None:
+    """Raise :class:`ValueError` if any MOVE destination already exists.
+
+    Each *candidate* is mapped to ``dest = raw_dir / rel`` where
+    ``rel = src.relative_to(base_dir)``, preserving the full relative tree
+    (no flatten). When any ``dest`` already exists on disk, the error names
+    both the source and the destination and the caller must abort before any
+    move.
+
+    Args:
+        candidates: Absolute paths to loose files that would be moved.
+        raw_dir: Absolute path to the ``raw/`` directory.
+        base_dir: Absolute base directory for ``relative_to``.
+
+    Raises:
+        ValueError: When any destination already exists. The message names
+            every colliding source and its destination.
+    """
+    errors: list[str] = []
+    for src in candidates:
+        rel = src.relative_to(base_dir)
+        dest = raw_dir / rel
+        if dest.exists():
+            errors.append(
+                f"Collision in raw/: {dest.as_posix()} already exists "
+                f"(from {src.as_posix()})"
+            )
+
+    if errors:
+        raise ValueError("\n".join(errors))
 
 
 def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
@@ -204,6 +247,45 @@ def merge_entries(
         added += 1
 
     return raw_toml
+
+
+def move_to_raw(
+    candidates: list[Path],
+    base_dir: Path,
+    raw_dir: Path,
+    *,
+    dry_run: bool = False,
+) -> list[tuple[Path, Path]]:
+    """Move *candidates* into ``raw/`` preserving ``relative_to(base_dir)`` tree.
+
+    Each source is moved via :func:`shutil.move` to ``dest = raw_dir /
+    src.relative_to(base_dir)``. Parent directories are created lazily.
+    No flatten is applied — ``a/b/x.csv`` stays ``raw/a/b/x.csv``.
+
+    Args:
+        candidates: Absolute paths to loose files to move.
+        base_dir: Absolute base directory for ``relative_to``.
+        raw_dir: Absolute path to the ``raw/`` directory.
+        dry_run: When ``True``, only compute destinations — do not touch the
+            filesystem.
+
+    Returns:
+        A list of ``(source, destination)`` tuples for every file that was
+        moved (or would have been moved under ``dry_run=True``).
+    """
+    moved: list[tuple[Path, Path]] = []
+
+    for src in candidates:
+        rel = src.relative_to(base_dir)
+        dest = raw_dir / rel
+
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+
+        moved.append((src, dest))
+
+    return moved
 
 
 def copy_files(

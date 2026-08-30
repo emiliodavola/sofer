@@ -181,8 +181,8 @@ expected = ["column_a", "column_b"]
 ## Directory layout
 
 ```
-raw/            raíz de fuentes versionada — coloca CSV/XLSX/JSONL aquí; scan copia a cache/ (p. ej. raw/DPTO.csv -> cache/DPTO.csv)
-cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan; codebook --all-files escribe en cache/codebooks/
+raw/            raíz de fuentes versionada — archivos sueltos CSV/XLSX/JSONL se MUEVEN a raw/<relative> luego scan copia a cache/ (p. ej. raw/DPTO.csv -> cache/DPTO.csv)
+cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan (Phase 2 copy via flatten_first_level); codebook --all-files escribe en cache/codebooks/ + cache/codebook.md
 build/          salida de prepare + entrada de publish (por dataset [dataset] build_dir, por defecto "build")
 ```
 
@@ -195,6 +195,10 @@ raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
 
 `sofer init` crea `raw/` (`mkdir -p raw/`, idempotente); `sofer init --move-existing` mueve
 archivos soportados de profundidad 1 a `raw/` (opt-in, `--dry-run` previsualiza, `--force` omite confirmación).
+`sofer scan` MUEVE archivos soportados sueltos fuera de `raw/`/`cache/`/`EXCLUSIONS` a
+`raw/<relative_to(base_dir)>` preservando árbol (`mkdir -p` parents, `check_raw_collisions`
+antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego
+copia `raw/` → `cache/` (aplanando primer nivel).
 
 ## Profiling and rendering
 
@@ -263,11 +267,11 @@ canalización.
 | Comando | Descripción |
 |---|---|
 | `init <name>` | Genera una plantilla `.toml` lista para editar. |
-| `scan [config.toml]` | Descubre los archivos soportados, aplana el primer segmento de la ruta (`raw/DPTO.csv` → `cache/DPTO.csv`), los registra en el TOML y los copia a `cache/`. Usa `--dry-run` para previsualizar. |
+| `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. |
 | `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`. |
 | `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`. |
 | `codebook <file>` | Genera un codebook en markdown para un archivo. Soporta CSV, TSV, Parquet, Excel, JSONL. |
-| `codebook --all-files` | Genera un codebook por cada entrada `[[file]]` en `cache/codebooks/`, más un índice raíz `codebook.md`. Usa `--config` para especificar el archivo TOML. |
+| `codebook --all-files` | Genera un codebook por cada entrada `[[file]]` en `cache/codebooks/`, más un índice raíz `cache/codebook.md`. Usa `--config` para especificar el archivo TOML. |
 | `prepare <config.toml>` | Genera el paquete de datos completo localmente: conversión CSV→Parquet, comprobaciones de esquema entre archivos, informe de esquema, Dataset Card (`README.md`), `LICENSE` y — con `--all-files` — codebooks por archivo. Nunca contacta con HF. Flags: `--output DIR` (por defecto `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. |
 | `publish <config.toml>` | Entrega el paquete preparado: `--target hf` (por defecto) garantiza el repositorio HF, aplica el control del informe de calidad y sube el paquete en una sola llamada `upload_folder`; `--target local` copia el paquete a `--output` sin red. Prepara automáticamente cuando los artefactos faltan o están desactualizados. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verifica la configuración, la integridad de los datos y los controles de calidad. Nunca contacta con HF. |

@@ -28,10 +28,12 @@ from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
     check_flatten_collisions,
+    check_raw_collisions,
     copy_files,
     discover_files,
     flatten_first_level,
     merge_entries,
+    move_to_raw,
     write_toml,
 )
 
@@ -262,7 +264,33 @@ def _cmd_render(args: argparse.Namespace) -> int:
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
-    """Discover data files, register them in TOML, and copy to ``cache/``."""
+    """MOVE loose files to ``raw/`` then copy ``raw/`` → ``cache/``.
+
+    Orchestration (SCN-07):
+
+        Phase 1 — MOVE loose files preserving ``relative_to(base_dir)`` tree:
+
+            1. Discover loose supported files outside ``raw/``/``cache/``/
+               ``EXCLUSIONS`` (5 exts via ``SUPPORTED_FORMATS``).
+            2. ``mkdir -p raw/`` (skip on ``--dry-run``).
+            3. Pre-flight ``check_raw_collisions`` — atomic abort, exit 1,
+               no mutation when any ``raw/<rel>`` already exists.
+            4. Gate on ``--dry-run`` (preview ``-> raw/<rel>``, no mutation),
+               ``--force`` (skip prompt), else ``[y/N]`` prompt — ``N`` aborts
+               atomically before first move, TOML untouched.
+            5. ``move_to_raw`` — ``mkdir -p`` parents, ``shutil.move``,
+               no flatten.
+
+        Phase 2 — copy ``raw/`` → ``cache/`` (flatten first level):
+
+            6. Discover files excluding ``cache/``/``EXCLUSIONS``,
+               ``check_flatten_collisions``, ``merge_entries``,
+               ``copy_files`` (``raw/DPTO.csv`` → ``cache/DPTO.csv`` via
+               :func:`flatten_first_level` + ``shutil.copy2``), ``write_toml``.
+
+    Atomicity: collision or ``N``/``--dry-run`` leaves TOML and moved files
+    untouched — no partial moves.
+    """
     config_path = Path(args.config).resolve()
 
     if not config_path.exists():
@@ -284,11 +312,78 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     base_dir = config_path.parent.resolve()
     data_dir = base_dir / config.OUTPUT_DIR
-
-    # 2. Discover supported files (exclude cache/ destination directory).
+    raw_dir = base_dir / config.RAW_DIR
     extensions = args.ext if args.ext else None
-    exclude = EXCLUSIONS | frozenset({config.OUTPUT_DIR})
-    discovered = discover_files(base_dir, extensions, exclude_dirs=exclude)
+
+    # ── Phase 1: MOVE loose files → raw/ ─────────────────────────────
+    exclude_move = EXCLUSIONS | frozenset({config.RAW_DIR, config.OUTPUT_DIR})
+    candidates = discover_files(base_dir, extensions, exclude_dirs=exclude_move)
+
+    if candidates:
+        # 1a. Ensure raw/ exists (skip on dry-run — no FS mutation).
+        if not args.dry_run:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1b. Pre-flight collision check — atomic abort before any move.
+        try:
+            check_raw_collisions(candidates, raw_dir, base_dir)
+        except ValueError as exc:
+            print(f"  X  {exc}", file=sys.stderr)
+            return 1
+
+        # 1c. Dry-run preview for MOVE — no mutation, no P2.
+        if args.dry_run:
+            print("  DRY RUN  Would move the following files:")
+            for src in candidates:
+                rel = src.relative_to(base_dir)
+                print(f"     -> raw/{rel.as_posix()}")
+            return 0
+
+        # 1d. Prompt gate — single gate for the MOVE phase.
+        if not args.force:
+            print(f"\n  The following files will be moved to {config.RAW_DIR}/:")
+            for src in candidates:
+                rel = src.relative_to(base_dir)
+                print(f"     -> raw/{rel.as_posix()}")
+            try:
+                answer = input("\n  Continue? [y/N] ").strip().lower()
+            except EOFError:
+                answer = "n"
+            if answer not in ("y", "yes"):
+                print("  OK  Aborted.")
+                return 0
+
+        # 1e. Execute MOVE — preserving relative_to tree.
+        try:
+            moved = move_to_raw(candidates, base_dir, raw_dir, dry_run=False)
+        except Exception as exc:
+            print(f"  X  Failed to move to raw/: {exc}", file=sys.stderr)
+            return 1
+
+        for _src, dest in moved:
+            print(f"     OK  {dest.relative_to(base_dir).as_posix()}")
+
+    else:
+        # No loose files — honor --dry-run for P2 later, but don't exit yet.
+        if args.dry_run and not candidates:
+            # Still need to honor dry-run semantics for P2 — fall through to P2
+            # with dry_run=True so P2 reports without mutation. Don't return yet.
+            pass
+
+    # If Phase 1 had candidates and we are here, we already handled dry-run
+    # (returned) and executed moves. For dry-run with candidates we never reach
+    # here. For the atomic dry-run case with candidates, P2 must NOT run — already
+    # returned. For the no-candidate dry-run case, P2 will report correctly.
+
+    # Dry-run with candidates already returned; if we are in dry-run and had
+    # candidates, we wouldn't be here. But if dry_run and candidates non-empty,
+    # we returned above. So if dry_run is True here, it means no candidates.
+    # However to keep atomic semantics simple: if args.dry_run and candidates:
+    # we returned. So remaining dry_run case is no-candidate.
+
+    # ── Phase 2: discover → check_flatten → merge → copy → write ─────
+    exclude_cache = EXCLUSIONS | frozenset({config.OUTPUT_DIR})
+    discovered = discover_files(base_dir, extensions, exclude_dirs=exclude_cache)
 
     if not discovered:
         print("  OK  No supported files found.")
@@ -313,13 +408,18 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     else:
         print("  OK  All discovered files already registered (idempotent).")
 
-    # 4. Confirm with the user before copying (unless --force or --dry-run).
-    if not args.dry_run and not args.force:
+    # 4. Confirm with the user before copying when Phase 1 had no candidates
+    #    and thus no prompt yet; when Phase 1 moved files, the gate already
+    #    passed so skip a second prompt.
+    if not candidates and not args.dry_run and not args.force:
         print(f"\n  The following files will be copied to {config.OUTPUT_DIR}/:")
         for f in discovered:
             flat = flatten_first_level(f.relative_to(base_dir))
             print(f"     → {config.OUTPUT_DIR}/{flat.as_posix()}")
-        answer = input("\n  Continue? [y/N] ").strip().lower()
+        try:
+            answer = input("\n  Continue? [y/N] ").strip().lower()
+        except EOFError:
+            answer = "n"
         if answer not in ("y", "yes"):
             print("  OK  Aborted.")
             return 0
@@ -852,18 +952,30 @@ def _build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser(
         "scan",
         help=(
-            "Discover data files, flatten directory structure, "
-            "and register them in the TOML config."
+            "Move loose data files to raw/ preserving tree, then copy "
+            "raw/ -> cache/ flattened and register in TOML."
         ),
         description=(
-            "Recursively scan the config file's directory for supported "
-            "data formats (.csv, .tsv, .parquet, .xlsx, .jsonl), flatten "
-            "the first path segment (raw/DPTO.csv → cache/DPTO.csv), register "
-            "new files as [[file]] entries in the TOML, and copy them into "
-            "the cache/ directory.\n"
+            "Two-phase scan for the raw/ -> cache/ -> build/ pipeline.\n"
+            "\n"
+            "Phase 1 — MOVE to raw/: discover supported files outside "
+            "raw/, cache/, and EXCLUSIONS (.git, __pycache__, .venv, "
+            "node_modules, dist, build), then MOVE each loose file to "
+            "raw/<relative_to(base_dir)> via shutil.move preserving the "
+            "full tree (mkdir -p raw/ if missing, mkdir -p parents). "
+            "Collision against existing raw/<rel> fails atomically before "
+            "any move. --dry-run prints '-> raw/<rel>' with no mutation; "
+            "--force skips the [y/N] prompt, else prompt aborts on N with "
+            "no partial moves or TOML write.\n"
+            "\n"
+            "Phase 2 — COPY raw/ -> cache/: recursively scan (excluding "
+            "cache/ and EXCLUSIONS), flatten the first path segment "
+            "(raw/DPTO.csv → cache/DPTO.csv), register new files as "
+            "[[file]] entries in the TOML, and copy them into the cache/ "
+            "directory via flatten_first_level + shutil.copy2.\n"
             "\n"
             "Running scan twice is safe — already-registered files are "
-            "skipped."
+            "skipped (idempotent TOML and cache/)."
         ),
     )
     s.add_argument(
@@ -877,12 +989,20 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report what would be done without modifying the disk or TOML.",
+        help=(
+            "Preview without mutation: Phase 1 prints '-> raw/<rel>' for "
+            "each loose file; Phase 2 prints copy preview. No raw/ mkdir, "
+            "no moves, no cache writes, no TOML update."
+        ),
     )
     s.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing files in cache/ without raising an error.",
+        help=(
+            "Skip the [y/N] prompt and overwrite existing cache/ files; "
+            "also skips the MOVE prompt (atomic: collision still fails "
+            "before any move)."
+        ),
     )
     s.add_argument(
         "--ext",

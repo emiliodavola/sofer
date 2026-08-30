@@ -55,7 +55,13 @@ cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan copies to
 build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
 ```
 
-Scan is copy-only and flattens the first path segment via
+Scan is MOVE-then-copy: Phase 1 MOVEs loose supported files
+(``.csv``, ``.tsv``, ``.xlsx``, ``.jsonl``, ``.parquet``) outside
+``raw/``/``cache/``/``EXCLUSIONS`` into ``raw/`` preserving
+``relative_to(base_dir)`` tree via ``shutil.move`` (``dest = raw_dir /
+rel``, lazy ``mkdir -p`` parent; ``check_raw_collisions`` before any
+move, ``--dry-run`` prints ``-> raw/<rel>``, ``--force``/``[y/N]``
+gate, atomic abort), then Phase 2 flattens the first path segment via
 ``flatten_first_level``:
 
 ```
@@ -63,8 +69,13 @@ raw/DPTO.csv                -> cache/DPTO.csv                -> build/*.parquet
 raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
 ```
 
-``raw/`` is never excluded from discovery; ``cache/`` (``OUTPUT_DIR``) is
-excluded via ``EXCLUSIONS|{OUTPUT_DIR}``. ``sofer init`` scaffolds ``raw/``
+Loose ``DPTO.csv`` at the project root MOVEs to ``raw/DPTO.csv`` then
+copies to ``cache/DPTO.csv``; loose ``sub/b.xlsx`` MOVEs to
+``raw/sub/b.xlsx`` then ``cache/sub/b.xlsx`` (flattened to
+``cache/b.xlsx`` only when top-level is ``raw/``). ``raw/`` is excluded
+from Phase-1 discovery via ``EXCLUSIONS|{RAW_DIR, OUTPUT_DIR}`` and
+included in Phase-2 via ``EXCLUSIONS|{OUTPUT_DIR}``; ``cache/``
+(``OUTPUT_DIR``) is always excluded. ``sofer init`` scaffolds ``raw/``
 (``mkdir -p raw/``, idempotent) and ``--move-existing`` moves depth-1
 supported files into it.
 

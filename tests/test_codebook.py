@@ -553,8 +553,9 @@ class TestGenerateAll:
         assert len(results) >= 3  # 2 per-file + root index
         assert (codebooks_dir / "a.md").exists()
         assert (codebooks_dir / "b.md").exists()
-        root = tmp_path / "codebook.md"
+        root = tmp_path / "cache" / "codebook.md"
         assert root.exists()
+        assert not (tmp_path / "codebook.md").exists()
         root_content = root.read_text(encoding="utf-8")
         assert "Codebook Index" in root_content
         assert "Tables:" in root_content
@@ -570,7 +571,9 @@ class TestGenerateAll:
         cfg = DatasetConfig.from_toml(toml_path)
         generate_all(cfg)
 
-        root = tmp_path / "codebook.md"
+        root = tmp_path / "cache" / "codebook.md"
+        assert root.exists()
+        assert not (tmp_path / "codebook.md").exists()
         content = root.read_text(encoding="utf-8")
         # Root index links are relative to the artifact cache, not base_dir
         assert "[`codebooks/f.md`](codebooks/f.md)" in content
@@ -588,7 +591,9 @@ class TestGenerateAll:
         cfg = DatasetConfig.from_toml(toml_path)
         generate_all(cfg)
 
-        root = tmp_path / "codebook.md"
+        root = tmp_path / "cache" / "codebook.md"
+        assert root.exists()
+        assert not (tmp_path / "codebook.md").exists()
         content = root.read_text(encoding="utf-8")
         assert "[`codebooks/Labels/etiquetas_a.md`](codebooks/Labels/etiquetas_a.md)" in content
 
@@ -676,7 +681,8 @@ class TestGenerateAllOutputDir:
         results = generate_all(cfg)
 
         assert (tmp_path / "cache" / "codebooks" / "DPTO.md").is_file()
-        assert (tmp_path / "codebook.md").is_file()
+        assert (tmp_path / "cache" / "codebook.md").is_file()
+        assert not (tmp_path / "codebook.md").exists()
         assert len(results) == 2  # 1 per-file + root index
 
 
@@ -769,6 +775,7 @@ class TestEdgeCases:
         # Colliding codebook NOT written
         assert not (codebooks_dir / "PROV.md").exists()
         # No root index on failure
+        assert not (tmp_path / "cache" / "codebook.md").exists()
         assert not (tmp_path / "codebook.md").exists()
         captured = capsys.readouterr()
         assert "PROV.csv" in captured.err
@@ -803,6 +810,7 @@ class TestEdgeCases:
         with pytest.raises(ValueError):
             generate_all(cfg)
 
+        assert not (tmp_path / "cache" / "codebook.md").exists()
         assert not (tmp_path / "codebook.md").exists()
 
     def test_rel_stem_under_cache(self, tmp_path):

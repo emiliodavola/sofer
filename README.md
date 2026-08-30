@@ -173,8 +173,8 @@ expected = ["column_a", "column_b"]
 ## Directory layout
 
 ```
-raw/            tracked source root — put CSV/XLSX/JSONL here; scan copies to cache/ (e.g. raw/DPTO.csv -> cache/DPTO.csv)
-cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan destination; codebook --all-files writes cache/codebooks/
+raw/            tracked source root — loose CSV/XLSX/JSONL MOVEs to raw/<relative> then scan copies to cache/ (e.g. raw/DPTO.csv -> cache/DPTO.csv)
+cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan destination (Phase 2 copy via flatten_first_level); codebook --all-files writes cache/codebooks/ + cache/codebook.md
 build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
 ```
 
@@ -187,6 +187,10 @@ raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
 
 `sofer init` scaffolds `raw/` (`mkdir -p raw/`, idempotent); `sofer init --move-existing` moves
 depth-1 supported files into `raw/` (opt-in, `--dry-run` previews, `--force` skips prompt).
+`sofer scan` MOVEs loose supported files outside `raw/`/`cache/`/`EXCLUSIONS` into
+`raw/<relative_to(base_dir)>` preserving tree (`mkdir -p` parents, `check_raw_collisions`
+before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then
+copies `raw/` → `cache/` (flatten first level).
 
 ## Profiling and rendering
 
@@ -251,11 +255,11 @@ detector class, no changes to the pipeline.
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
-| `scan [config.toml]` | Discover supported files, flatten first path segment (`raw/DPTO.csv` → `cache/DPTO.csv`), register in TOML, copy to `cache/`. Use `--dry-run` to preview. |
+| `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`. |
 | `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
-| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `codebook.md` index. Use `--config` to specify the TOML file. |
+| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `cache/codebook.md` index. Use `--config` to specify the TOML file. |
 | `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. |
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |

@@ -373,8 +373,9 @@ class TestCodebookPlaceholderValidation:
             Namespace(all_files=True, config=str(toml_path), csv=None, output=None)
         )
         assert rc == 0
-        root = tmp_path / "codebook.md"
+        root = tmp_path / "cache" / "codebook.md"
         assert root.exists()
+        assert not (tmp_path / "codebook.md").exists()
 
 
 # ── raw-folder organization: init + --move-existing (CLI-R07 / CLI-R08) ────────
@@ -583,6 +584,88 @@ class TestScanParser:
         assert args.dry_run is True
         assert args.force is True
         assert args.ext == [".csv"]
+
+
+class TestScanMoveCLI:
+    """SCN-07 MOVE e2e via _cmd_scan: tree, dry-run, collision, prompt, ext filter."""
+
+    def test_e2e_move_tree(self, tmp_path, monkeypatch):
+        """a.csv + sub/b.xlsx → raw/a.csv + raw/sub/b.xlsx, originals gone."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.xlsx").write_text("x", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 0
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert (tmp_path / "raw" / "sub" / "b.xlsx").exists()
+        assert not (tmp_path / "a.csv").exists()
+        assert not (tmp_path / "sub" / "b.xlsx").exists()
+        assert (tmp_path / "cache" / "a.csv").exists()
+
+    def test_dry_run_no_fs_or_toml(self, tmp_path, monkeypatch, capsys):
+        """--dry-run prints -> raw/... without FS or TOML mutation."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.xlsx").write_text("x", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        original = cfg.read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=True, force=False, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "-> raw/a.csv" in out
+        assert "-> raw/sub/b.xlsx" in out
+        assert (tmp_path / "a.csv").exists()
+        assert not (tmp_path / "raw").exists()
+        assert not (tmp_path / "cache").exists()
+        assert cfg.read_text(encoding="utf-8") == original
+
+    def test_collision_fails_atomically(self, tmp_path, monkeypatch, capsys):
+        """Existing raw/a.csv + loose a.csv → exit 1, names both, no move."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("existing", encoding="utf-8")
+        (tmp_path / "a.csv").write_text("loose", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "a.csv" in err
+        assert (tmp_path / "a.csv").exists()
+
+    def test_prompt_n_aborts_atomically(self, tmp_path, monkeypatch):
+        """Prompt N aborts before move, no FS change."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "b.csv").write_text("y\n2\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _p="": "n")
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 0
+        assert (tmp_path / "a.csv").exists()
+        assert (tmp_path / "b.csv").exists()
+        assert not (tmp_path / "raw" / "a.csv").exists()
+
+    def test_five_exts_vs_txt(self, tmp_path, monkeypatch):
+        """Only 5 exts moved, f.txt stays."""
+        for name in ["a.csv", "b.tsv", "c.xlsx", "d.jsonl", "e.parquet", "f.txt"]:
+            (tmp_path / name).write_text("x", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 0
+        for name in ["a.csv", "b.tsv", "c.xlsx", "d.jsonl", "e.parquet"]:
+            assert (tmp_path / "raw" / name).exists()
+            assert not (tmp_path / name).exists()
+        assert (tmp_path / "f.txt").exists()
+        assert not (tmp_path / "raw" / "f.txt").exists()
 
 
 # ── Fix 1: ran_checks propagation ─────────────────────────────────────────
