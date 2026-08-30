@@ -377,6 +377,158 @@ class TestCodebookPlaceholderValidation:
         assert root.exists()
 
 
+# ── raw-folder organization: init + --move-existing (CLI-R07 / CLI-R08) ────────
+
+
+class TestInitRawFolder:
+    """CLI-R07: init creates raw/ and --move-existing depth-1 SUPPORTED_FORMATS."""
+
+    def test_init_creates_raw_dir(self, tmp_path, monkeypatch):
+        """sofer init creates raw/ and TOML contains raw/ guidance (SCN-07 template)."""
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        assert rc == 0
+        assert (tmp_path / "raw").is_dir()
+        assert (tmp_path / "my-ds.toml").exists()
+        content = (tmp_path / "my-ds.toml").read_text(encoding="utf-8")
+        assert "raw/" in content
+        assert "scan copies to cache" in content.lower() or "Source files -> raw/" in content
+
+    def test_init_idempotent(self, tmp_path, monkeypatch):
+        """Second init succeeds when raw/ already exists with files."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "keep.csv").write_text("a\n1\n", encoding="utf-8")
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        assert rc == 0
+        rc2 = cli._cmd_init(
+            Namespace(name="other", move_existing=False, dry_run=False, force=False)
+        )
+        assert rc2 == 0
+        assert (tmp_path / "raw").is_dir()
+        assert (tmp_path / "raw" / "keep.csv").exists()
+
+    def test_move_existing_depth1_only_supported(self, tmp_path, monkeypatch):
+        """Only depth-1 SUPPORTED_FORMATS move; subdirs, .txt, cache/ stay."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "subdir").mkdir()
+        (tmp_path / "subdir" / "b.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "c.csv").write_text("x\n1\n", encoding="utf-8")
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        assert rc == 0
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert not (tmp_path / "a.csv").exists()
+        assert (tmp_path / "subdir" / "b.csv").exists()
+        assert (tmp_path / "notes.txt").exists()
+        assert (tmp_path / "cache" / "c.csv").exists()
+
+    def test_move_existing_collision_guard(self, tmp_path, monkeypatch, capsys):
+        """Collision with existing raw/ content fails naming both sources."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("existing\n", encoding="utf-8")
+        (tmp_path / "a.csv").write_text("loose\n", encoding="utf-8")
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        assert rc == 1
+        err = capsys.readouterr().err.lower()
+        assert "collision" in err
+        assert "a.csv" in err
+        # no move happened
+        assert (tmp_path / "a.csv").exists()
+        assert (tmp_path / "raw" / "a.csv").exists()
+
+    def test_move_existing_dry_run_no_mutation(self, tmp_path, monkeypatch, capsys):
+        """--dry-run previews moves, creates TOML, but not raw/ when absent nor moves."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        (tmp_path / "b.xlsx").write_text("x", encoding="utf-8")
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=True, force=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "dry run" in out.lower()
+        assert "a.csv" in out
+        assert (tmp_path / "my-ds.toml").exists()
+        # raw/ not created when absent under dry-run
+        assert not (tmp_path / "raw").exists()
+        assert (tmp_path / "a.csv").exists()
+        assert (tmp_path / "b.xlsx").exists()
+
+    def test_move_existing_non_interactive_guard(self, tmp_path, monkeypatch, capsys):
+        """not isatty without --force skips move, creates raw/, hints --force."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "Skipping move" in err
+        assert "--force" in err
+        assert (tmp_path / "raw").is_dir()
+        assert (tmp_path / "a.csv").exists()
+        assert (tmp_path / "my-ds.toml").exists()
+
+    def test_move_existing_prompt_n_aborts(self, tmp_path, monkeypatch, capsys):
+        """TTY + N at prompt aborts move, still creates raw/ and TOML, exit 0."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _p="": "N")
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+        assert (tmp_path / "raw").is_dir()
+        assert (tmp_path / "a.csv").exists()
+
+    def test_move_existing_prompt_y_moves(self, tmp_path, monkeypatch):
+        """TTY + y at prompt moves files into raw/."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=False))
+        assert rc == 0
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert not (tmp_path / "a.csv").exists()
+
+    def test_template_mentions_raw_no_stale_path(self, tmp_path, monkeypatch):
+        """Generated TOML mentions raw/ guidance and no stale path/to hint."""
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        content = (tmp_path / "my-ds.toml").read_text(encoding="utf-8")
+        assert "raw/" in content
+        assert "path/to" not in content
+
+
+class TestInitHelp:
+    """CLI-R08: sofer init --help documents --move-existing, --dry-run, --force."""
+
+    def test_help_lists_flags(self, capsys):
+        """Help shows --move-existing, --dry-run, --force and pipeline."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["init", "--help"])
+        out = capsys.readouterr().out
+        assert "--move-existing" in out
+        assert "--dry-run" in out
+        assert "--force" in out
+        assert "raw/" in out
+
+    def test_help_mentions_pipeline(self, capsys):
+        """Help description mentions raw/ -> cache/ -> build/ pipeline."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["init", "--help"])
+        out = capsys.readouterr().out
+        assert "cache" in out.lower()
+        assert "build" in out.lower()
+
+
 # ── scan subparser ──────────────────────────────────────────────────────────────
 
 

@@ -10,6 +10,7 @@ import pytest
 from sofer import config
 from sofer.model import DatasetConfig
 from sofer.scanner import (
+    EXCLUSIONS,
     check_flatten_collisions,
     copy_files,
     discover_files,
@@ -693,3 +694,128 @@ class TestIntegration:
         # The preview lists flattened paths: "→ cache/a.csv", not "→ cache/raw/a.csv"
         assert "cache/a.csv" in captured
         assert "cache/raw/" not in captured
+
+
+# ------------------------------------------------------------------
+# Raw-folder organization: raw/cache flatten, EXCLUSIONS, e2e
+# ------------------------------------------------------------------
+
+
+class TestRawCacheDiscovery:
+    """SCN-01 MOD: raw discovered, cache excluded; EXCLUSIONS unchanged."""
+
+    def test_raw_discovered_cache_excluded(self, tmp_path: Path) -> None:
+        """raw/a.csv discovered, cache/a.csv and .venv excluded."""
+        _touch(tmp_path / "raw" / "a.csv")
+        _touch(tmp_path / "cache" / "a.csv")
+        _touch(tmp_path / ".venv" / "lib" / "b.csv")
+        exclude = EXCLUSIONS | frozenset({config.OUTPUT_DIR})
+        result = discover_files(tmp_path, exclude_dirs=exclude)
+        names_posix = {p.relative_to(tmp_path).as_posix() for p in result}
+        assert "raw/a.csv" in names_posix
+        assert "cache/a.csv" not in names_posix
+        assert not any(".venv" in n for n in names_posix)
+
+    def test_exclusions_does_not_contain_raw(self) -> None:
+        """EXCLUSIONS must never contain 'raw' (tracked source root)."""
+        assert "raw" not in EXCLUSIONS
+        assert "cache" not in EXCLUSIONS  # cache excluded via OUTPUT_DIR, not EXCLUSIONS
+
+    def test_scanner_module_doc_mentions_raw_cache_build(self) -> None:
+        """scanner.py docstring documents raw/ -> cache/ -> build/ pipeline."""
+        import sofer.scanner as scanner_mod
+
+        doc = scanner_mod.__doc__ or ""
+        assert "raw/" in doc
+        assert "cache/" in doc
+        assert "flatten_first_level" in doc
+
+
+class TestSourceLayoutCopyOnly:
+    """SCN-07: raw/ -> cache/ copy-only, sources untouched."""
+
+    def test_sources_untouched_after_scan(self, tmp_path: Path, monkeypatch) -> None:
+        """raw/DPTO.csv unchanged after scan, cache/DPTO.csv exists."""
+        from argparse import Namespace
+
+        from sofer.cli import _cmd_scan
+
+        raw_file = _touch(tmp_path / "raw" / "DPTO.csv", content="a,b\n1,2\n")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        raw_content_before = raw_file.read_text(encoding="utf-8")
+        rc = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 0
+        assert raw_file.read_text(encoding="utf-8") == raw_content_before
+        assert (tmp_path / "cache" / "DPTO.csv").exists()
+        assert (tmp_path / "cache" / "DPTO.csv").read_text(encoding="utf-8") == raw_content_before
+
+    def test_docs_show_diagram(self) -> None:
+        """README / docs contain raw/->cache/->build diagram."""
+        readme = Path("README.md").read_text(encoding="utf-8")
+        assert "raw/" in readme
+        assert "cache" in readme.lower()
+        docs = Path("docs/configuration.md").read_text(encoding="utf-8")
+        assert "raw/DPTO.csv" in docs or "raw/" in docs
+
+
+class TestE2EInitMoveScan:
+    """SCN-02/03/06 E2E: init --move-existing --force -> scan -> cache flattened."""
+
+    def test_e2e_init_move_scan_flattened(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Loose a.csv moved to raw/, then scan copies to cache/, TOML flattened."""
+        from argparse import Namespace
+
+        from sofer.cli import _cmd_init, _cmd_scan
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+        (tmp_path / "b.parquet").write_text("fake", encoding="utf-8")
+
+        rc = _cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        assert rc == 0
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert not (tmp_path / "a.csv").exists()
+        # raw/b.parquet also supported format -> moved
+        assert (tmp_path / "raw" / "b.parquet").exists()
+
+        cfg = tmp_path / "my-ds.toml"
+        # Patch placeholder repo_id so validation passes (init template uses YOUR_USER).
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace("YOUR_USER/my-ds", "u/my-ds"),
+            encoding="utf-8",
+        )
+        # scan registers raw/ files into TOML and copies to cache/
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        rc2 = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc2 == 0
+        assert (tmp_path / "cache" / "a.csv").exists()
+        assert (tmp_path / "cache" / "b.parquet").exists()
+        # raw sources still exist (copy-only)
+        assert (tmp_path / "raw" / "a.csv").exists()
+
+        parsed = DatasetConfig.from_toml(cfg)
+        # locals should be cache/<flat>
+        locals_posix = {str(f.local).replace("\\", "/") for f in parsed.files}
+        assert "cache/a.csv" in locals_posix
+        assert "cache/b.parquet" in locals_posix
+        assert parsed.validate() == []
+
+    def test_e2e_nested_raw_flatten_preserved(self, tmp_path: Path, monkeypatch) -> None:
+        """raw/Labels/a.csv -> cache/Labels/a.csv preserves subdirs beyond first."""
+        from argparse import Namespace
+
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "Labels" / "a.csv", content="h\n1\n")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        rc = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 0
+        assert (tmp_path / "cache" / "Labels" / "a.csv").exists()
+        parsed = DatasetConfig.from_toml(cfg)
+        assert any("cache/Labels/a.csv" in str(f.local).replace("\\", "/") for f in parsed.files)

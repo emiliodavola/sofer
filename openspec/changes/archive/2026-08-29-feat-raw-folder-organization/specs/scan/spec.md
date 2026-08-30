@@ -1,16 +1,25 @@
-# Scan Specification
+# Delta for scan
 
-## Purpose
+## ADDED Requirements
 
-Automated data-file discovery, copy, and TOML registration. The `scan` command
-eliminates manual `[[file]]` maintenance by discovering supported formats,
-copying them to `cache/` (`OUTPUT_DIR`, gitignored), and writing the updated config.
+### Requirement: Source Layout and Copy-Only (SCN-07)
+System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) → `build/` (gitignored) with diagram `raw/DPTO.csv→cache/DPTO.csv→build/*.parquet`. `scan` MUST copy to `cache/` via `flatten_first_level` and SHALL NOT move/delete sources.
 
-## Requirements
+#### Scenario: Sources untouched
+- GIVEN `raw/DPTO.csv` exists
+- WHEN `scan` completes
+- THEN `raw/DPTO.csv` unchanged and `cache/DPTO.csv` exists
+
+#### Scenario: Docs show diagram
+- GIVEN user views Directory layout
+- WHEN layout rendered
+- THEN `raw/→cache/→build/` and `raw/DPTO.csv→cache/DPTO.csv` SHALL appear
+
+## MODIFIED Requirements
 
 ### Requirement: File Discovery (SCN-01)
-
 System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.jsonl`) from config dir. `EXCLUSIONS` (`.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, `build`) MUST be skipped. `cache/` (`OUTPUT_DIR`) SHALL be excluded; `raw/` SHALL never be excluded. `flatten_first_level` drops first segment.
+(Previously: generic `data/` destination, no explicit `raw/`/`cache/` exclusion.)
 
 #### Scenario: Discover supported
 - GIVEN `raw/survey.csv`, `raw/notes.txt`, `archive/data.parquet`
@@ -32,11 +41,9 @@ System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.js
 - WHEN `scan` executes
 - THEN `raw/a.csv` SHALL be discovered, `cache/a.csv` SHALL NOT
 
----
-
 ### Requirement: TOML Merge (SCN-02)
-
 System MUST load TOML via `tomli`, merge `[[file]]` with `local=cache/<flat>` (`OUTPUT_DIR/<flat>`) and `remote=<flat>` posix, `tomli_w` write. Dedup by resolved absolute path and `remote`. Preserve `[dataset]`,`[meta]`,`[[check]]`,`[[quality]]`. Flatten first segment; root file keeps name.
+(Previously: used `data/` prefix.)
 
 #### Scenario: Merge new files
 - GIVEN `dataset.toml` with 2 `[[file]]` + `[dataset]`/`[meta]`
@@ -65,11 +72,9 @@ System MUST load TOML via `tomli`, merge `[[file]]` with `local=cache/<flat>` (`
 - WHEN merge
 - THEN `local="cache/x.csv"`, `remote="x.csv"`
 
----
-
 ### Requirement: File Copy (SCN-03)
-
 System MUST copy to `cache/` (`OUTPUT_DIR`) flattening first segment (`raw/sub/data.csv→cache/sub/data.csv`, `x.csv→cache/x.csv`). Preserve subdirs beyond first. Use `shutil.copy2`. Sources untouched. Lazy mkdir.
+(Previously: `data/` destination.)
 
 #### Scenario: Flatten copy
 - GIVEN `raw/sub/data.csv`
@@ -91,54 +96,9 @@ System MUST copy to `cache/` (`OUTPUT_DIR`) flattening first segment (`raw/sub/d
 - WHEN `scan --dry-run`
 - THEN report lists flattened `cache/` dests, no files created, TOML unchanged
 
----
-
-### Requirement: CLI Interface (SCN-04)
-
-The system MUST provide `sofer scan [config.toml] [--dry-run] [--force] [--ext .ext]`.
-Default config SHALL be `dataset.toml` in the current directory. `--dry-run`
-MUST report without filesystem changes. `--force` MUST skip the confirmation
-prompt. Exit code 0 on success, 1 on error.
-
-#### Scenario: Default config and interactive confirm
-
-- GIVEN `dataset.toml` in the working directory
-- WHEN `sofer scan` is called
-- THEN `dataset.toml` SHALL be used as config
-- AND the user SHALL be prompted before files are copied
-
-#### Scenario: --force skips confirmation
-
-- GIVEN discovered files and `dataset.toml`
-- WHEN `sofer scan --force` is called
-- THEN files SHALL be copied without prompting
-
-#### Scenario: Explicit config path
-
-- GIVEN `my-project/config.toml` exists
-- WHEN `sofer scan my-project/config.toml` is called
-- THEN that file SHALL be used as the TOML source
-
----
-
-### Requirement: Idempotency (SCN-05)
-
-The system MUST produce identical TOML output on repeated runs with the same
-filesystem state. Two consecutive `scan` invocations with no file changes SHALL
-yield byte-identical `dataset.toml`.
-
-#### Scenario: Repeated scan with no file changes
-
-- GIVEN `dataset.toml` after a successful `scan`
-- AND no files added/removed
-- WHEN `scan` is called a second time
-- THEN the resulting TOML SHALL be identical to the first run's output
-
----
-
 ### Requirement: Error Handling (SCN-06)
-
 System MUST handle missing config, no files, conflicts, malformed TOML. Flatten collision SHALL fail before copy, naming all sources. Exit 1 for errors. No silent overwrite.
+(Previously: collision message used `data/`.)
 
 #### Scenario: Config missing
 - GIVEN no `dataset.toml`
@@ -164,19 +124,3 @@ System MUST handle missing config, no files, conflicts, malformed TOML. Flatten 
 - GIVEN `A/x.csv` and `B/x.csv` → `x.csv`
 - WHEN `scan`
 - THEN error names both, exit 1, no copy
-
----
-
-### Requirement: Source Layout and Copy-Only (SCN-07)
-
-System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) → `build/` (gitignored) with diagram `raw/DPTO.csv→cache/DPTO.csv→build/*.parquet`. `scan` MUST copy to `cache/` via `flatten_first_level` and SHALL NOT move/delete sources.
-
-#### Scenario: Sources untouched
-- GIVEN `raw/DPTO.csv` exists
-- WHEN `scan` completes
-- THEN `raw/DPTO.csv` unchanged and `cache/DPTO.csv` exists
-
-#### Scenario: Docs show diagram
-- GIVEN user views Directory layout
-- WHEN layout rendered
-- THEN `raw/→cache/→build/` and `raw/DPTO.csv→cache/DPTO.csv` SHALL appear

@@ -3,6 +3,14 @@ File discovery and TOML registration for the ``scan`` command.
 
 Four-phase orchestrator: discover → merge → copy → write.
 
+Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) -> build/
+(gitignored). ``scan`` is copy-only — it flattens ``raw/DPTO.csv`` to
+``cache/DPTO.csv`` via :func:`flatten_first_level` and never moves or
+deletes sources. ``EXCLUSIONS`` (``.git``, ``__pycache__``, ``.venv``,
+``node_modules``, ``dist``, ``build``) are pruned; ``cache/``
+(``OUTPUT_DIR``) is excluded via ``EXCLUSIONS|{OUTPUT_DIR}``; ``raw/``
+is never excluded.
+
 All functions are pure logic — they raise on errors; the CLI handler
 catches and translates to exit codes.
 """
