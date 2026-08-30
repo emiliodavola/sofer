@@ -438,7 +438,7 @@ def generate_all(
     # Option B: codebooks written directly into the caller's output dir.
     if output_dir is None:
         write_root = data_dir
-        root_path = base_dir / "codebook.md"
+        root_path = write_root / "codebook.md"
     else:
         # Anchor relative output dirs to the config dir (PRP-06), matching
         # how every other artifact path resolves — never the process CWD.
