@@ -10,7 +10,7 @@ and quality-assessed package — combining automatic inference with human
 knowledge, and publishable to Hugging Face Hub or any local directory.**
 
 [![CI](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/emiliodavola/sofer)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python >=3.10](https://img.shields.io/badge/python-3.10%2B-3776AB)](pyproject.toml)
 
 ## Table of Contents
@@ -264,7 +264,9 @@ detector class, no changes to the pipeline.
 | Command | Description |
 |---|---|
 | `init <name>` | Generate a ready-to-edit `.toml` template. |
-| `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. |
+| `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
+| `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
+| `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml`, `PurePath.suffixes`, collision `ValueError`), `--force` (overwrite guard), `--config` (TOML path for batch). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
 | `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md`, skip missing `metadata.yaml`), `--force`, `--config`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
@@ -288,7 +290,13 @@ detector class, no changes to the pipeline.
 | `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
 | `--clean` | `publish` | Delete the build directory after a successful `hf` publish (`fail==0`, quality passed, not `--dry-run`); build-only by default. Anchored via `resolve_output_dir(cfg, --output)` so `--output ./staging` deletes `./staging`. For `local`, deletes the resolved destination only; without `--clean` nothing is deleted. |
 | `--clean-cache` / `--all` | `publish` (with `--clean`) | Also delete `cache/` (`cfg._base_dir/cache`, `config.OUTPUT_DIR`, shared tool-wide). Requires explicit opt-in; sibling datasets share `cache/` — warn before use. |
+| `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`cache/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
+| `--config` | `codebook`, `profile`, `render` | Path to the TOML config for `--all-files` (default: `default_config_name` from `[tool.sofer]`). |
+| `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
 | `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
+| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
+| `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
+| `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
 
 ## Data format support
 
@@ -453,6 +461,53 @@ claude mcp add sofer -- uv run sofer-mcp
 The server inherits its working directory — pass an explicit root when the
 agent should only reach a specific tree (see below).
 
+### Register sofer-mcp with AI agents (opencode, codex, gemini)
+
+`sofer` can register itself in the three supported agent configs
+idempotently, preserving existing servers and backing up the original to
+`.bak`:
+
+```bash
+sofer mcp add --agent all                 # register in all three
+sofer mcp add --agent opencode --scope project --cwd ./my-proj
+sofer mcp add --agent codex --scope user
+sofer mcp add --agent gemini --scope user --dry-run   # preview, no write
+sofer mcp remove --agent all              # remove from all three
+```
+
+Per-agent locations and shapes:
+
+| Agent | Scope | File | Entry |
+|-------|-------|------|-------|
+| opencode | `--scope project` | `./opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
+| opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
+| codex | `--scope user` | `~/.codex/config.toml` | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
+| codex | `--scope project` | `./.codex/config.toml` | same |
+| gemini | `--scope user` | `~/.config/gemini/settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN,…}}` |
+| gemini | `--scope project` | `./.gemini/settings.json` | same |
+
+- **Idempotency:** re-running with the same `cwd` and env does no write and
+  creates no `.bak`; the file is byte-identical.
+- **Backup:** before the first mutation the original is copied to `<path>.bak`
+  (single file, overwrites any existing `.bak`).
+- **Atomic write:** the new content is written to a temporary file in the
+  same directory and committed via `os.replace`.
+- **Cwd:** `--cwd` is stored as the resolved absolute path and must be
+  contained under the scope root (`Path.resolve()` + `is_relative_to`);
+  otherwise the command exits 1 with the offending path.
+- **Env:** `HF_TOKEN` and `SOFER_MCP_APPROVAL_PHRASE` from the shell are
+  forwarded — codex as an `env_vars` allow-list, gemini as an explicit
+  `env` dict (no shell inheritance). Opencode receives no env.
+- **Delegation:** when a native binary is available (`codex`/`gemini`), its
+  `mcp add`/`remove` is tried first (probe via `shutil.which` + `mcp --help`
+  with a 3 s timeout); on failure or timeout the command falls back to
+  direct file edit. Opencode always uses file-edit.
+- **TOML warning:** edits via `tomli`/`tomli-w` do not preserve comments or
+  formatting in `config.toml` — the file is reformatted and comments are
+  stripped.
+- **Unreadable:** a malformed or unreadable config exits 1 and creates no
+  backup or new file.
+
 ### Security model
 
 - **Path containment (server root).** The server captures a root at build
@@ -507,9 +562,10 @@ full explanation in
 ## Architecture summary
 
 sofer is a single Python package (`src/sofer/`) with one module per concern:
-CLI dispatch in `cli.py`, configuration in `model.py`, and each command owning
-its domain module (scanner, codebook, prepare, publish, profile, render). The
-annotated module tree lives in
+CLI dispatch in `cli.py` (9 subcommands), dataset configuration in `model.py`,
+tool-wide defaults in `config.py` (`[tool.sofer]` discovery), and each command
+owning its domain module (scanner, codebook, prepare, publish, profile, render,
+mcp_registration). The annotated module tree lives in
 [CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
 Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).

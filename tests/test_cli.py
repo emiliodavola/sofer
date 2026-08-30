@@ -952,3 +952,61 @@ class TestProfileRenderCliFlags:
         out = capsys.readouterr().out
         assert "README.md" in out
         assert "use --force to overwrite" in out
+
+
+# ── mcp registration — CLI help (CLI-R09) ─────────────────────────────────
+
+
+class TestMcpCliHelp:
+    """sofer mcp add/remove help per CLI-R09."""
+
+    def test_sofer_help_has_mcp(self, capsys):
+        """sofer --help lists mcp subcommand."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["--help"])
+        out = capsys.readouterr().out
+        assert "mcp" in out
+
+    def test_mcp_help_has_add_remove(self, capsys):
+        """sofer mcp --help lists add and remove."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "--help"])
+        out = capsys.readouterr().out
+        assert "add" in out
+        assert "remove" in out
+
+    def test_mcp_add_help_flags(self, capsys):
+        """sofer mcp add --help lists --agent, --scope, --cwd, --dry-run."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "add", "--help"])
+        out = capsys.readouterr().out
+        assert "--agent" in out
+        assert "--scope" in out
+        assert "--cwd" in out
+        assert "--dry-run" in out
+
+    def test_mcp_remove_help_flags(self, capsys):
+        """sofer mcp remove --help lists --agent, --scope, --dry-run."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "remove", "--help"])
+        out = capsys.readouterr().out
+        assert "--agent" in out
+        assert "--scope" in out
+        assert "--dry-run" in out
+
+    def test_mcp_add_no_cwd_on_remove(self, capsys):
+        """sofer mcp remove --help must NOT list --cwd (only add)."""
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "remove", "--help"])
+        out = capsys.readouterr().out
+        assert "--cwd" not in out

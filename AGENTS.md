@@ -41,7 +41,7 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 ### 6. Tests must match specs
 - Every SDD spec scenario must have a corresponding test.
 - When implementing, run `uv run pytest tests/ -q` after every change batch.
-- 795 tests currently pass — never reduce coverage.
+- 1149 tests currently pass (1151 collected, 2 skipped) — never reduce coverage.
 
 ### 7. CLI help text accuracy
 - When adding a new flag or changing behavior, update the argparse `help=` and `description=` strings.
@@ -60,12 +60,12 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Prefer format-native readers over heavy dependencies (openpyxl over pandas for Excel).
 
 ### 10. Architecture: one module per concern
-- CLI dispatch: `cli.py`
-- Config model: `model.py`
-- Tool config defaults: `config.py`
+- CLI dispatch: `cli.py` (9 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp)
+- Dataset config model: `model.py`
+- Tool config defaults: `config.py` (discovery + reload, profile_dir/render_dir)
 - Format registry: `_formats.py`
-- Each command gets its own domain module: `scanner.py`, `codebook.py`, `uploader.py`
-- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`
+- Each command gets its own domain module: `scanner.py`, `codebook.py`, `prepare.py`, `publish.py`, `profile.py`, `render.py`, `mcp_registration.py`, `mcp_server.py`
+- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`
 
 ### 11. PR template
 - All pull requests must use the template in `.github/PULL_REQUEST_TEMPLATE.md`.

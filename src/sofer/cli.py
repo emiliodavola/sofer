@@ -11,6 +11,7 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
+from typing import cast
 
 from . import config
 from ._formats import SUPPORTED_FORMATS
@@ -18,6 +19,8 @@ from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
+from .mcp_registration import AgentName as _AgentName
+from .mcp_registration import Scope as _Scope
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
@@ -549,6 +552,195 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             return 1
 
     return 0
+
+
+def _cmd_mcp_add(args: argparse.Namespace) -> int:
+    """Register ``sofer-mcp`` with the selected agent(s).
+
+    Orchestration:
+
+        1. Expand ``--agent all`` to the three agents.
+        2. Resolve the desired ``cwd`` (``--cwd`` or ``Path.cwd()``) to an
+           absolute path via ``Path.resolve()`` and validate containment with
+           ``mcp_registration.validate_cwd`` (``is_relative_to`` user/project
+           root) — fail with exit 1 and a path message when outside.
+        3. For each agent: probe native delegation via
+           ``mcp_registration.probe_native`` (``which`` + ``mcp --help``
+           timeout 3s); when available, try ``delegate_add`` first — on
+           success skip file-edit, on failure fall back.
+        4. File-edit path: ``resolve_config_path`` → ``read_config``
+           (unreadable/malformed → print to stderr, return 1, no backup/write)
+           → ``build_entry`` (absolute cwd, env forwarding per agent) →
+           ``merge`` (normalize Codex command string/array, preserve other
+           servers, no write when unchanged) → ``--dry-run`` guard (no
+           mutation) → ``backup`` (single ``.bak`` copy2 overwrite) →
+           ``atomic_write`` (tmp in same dir + ``os.replace``).
+        5. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
+
+    Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
+    from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
+    receives an explicit ``env`` dict, opencode receives no env.
+    """
+    from . import mcp_registration
+
+    # Expand agent
+    raw_agent: str = getattr(args, "agent")
+    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    scope: str = getattr(args, "scope", "user")
+    cwd_raw: str | None = getattr(args, "cwd", None)
+    dry_run: bool = bool(getattr(args, "dry_run", False))
+
+    # Resolve desired cwd for the entry (absolute, contained)
+    if cwd_raw is not None:
+        cwd_resolved = Path(cwd_raw).resolve()
+    else:
+        cwd_resolved = Path.cwd().resolve()
+
+    # Containment check — must be absolute and inside allowed root
+    # validate_cwd uses is_relative_to logic; reject outside
+    if not mcp_registration.validate_cwd(cwd_resolved, cast(_Scope, scope)):
+        print(
+            f"  X  --cwd {cwd_resolved} is outside the allowed root for scope '{scope}'",
+            file=sys.stderr,
+        )
+        return 1
+
+    env = mcp_registration.collect_env()
+    overall = 0
+
+    for agent in agents:
+        _agent = cast(_AgentName, agent)
+        # Prefer native delegation for codex/gemini
+        if mcp_registration.probe_native(_agent, timeout=3.0):
+            try:
+                delegated = mcp_registration.delegate_add(_agent, cwd_resolved, list(env.keys()))
+            except Exception:
+                delegated = False
+            if delegated:
+                print(f"  OK  {agent} delegated via native mcp add")
+                continue
+            print(
+                f"  !  {agent} native delegation failed, falling back to file edit",
+                file=sys.stderr,
+            )
+
+        # File-edit fallback — resolve path (project scope anchored on
+        # cwd_resolved when --cwd given; else Path.cwd())
+        _scope = cast(_Scope, scope)
+        if scope == "project" and cwd_raw is not None:
+            # When project scope with custom cwd, anchor project config under that cwd
+            path = mcp_registration.resolve_config_path(_agent, _scope, cwd_resolved)
+        elif scope == "project":
+            path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        else:
+            path = mcp_registration.resolve_config_path(_agent, _scope, None)
+
+        try:
+            existing, _fmt = mcp_registration.read_config(path)
+        except Exception as exc:
+            print(f"  X  {agent} config unreadable ({path}): {exc}", file=sys.stderr)
+            overall = 1
+            continue
+
+        desired = mcp_registration.build_entry(_agent, cwd_resolved, env)
+        new_doc, changed = mcp_registration.merge(_agent, existing, desired)
+        if not changed:
+            print(f"  OK  {agent} already registered (idempotent)")
+            continue
+        if dry_run:
+            print(f"  DRY RUN  Would register {agent} at {path}")
+            continue
+        # Backup before first mutation
+        try:
+            mcp_registration.backup(path)
+        except Exception as exc:
+            print(f"  X  {agent} backup failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        # Atomic write — fmt from adapter (preserve agent's expected format)
+        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        try:
+            mcp_registration.atomic_write(path, new_doc, fmt_expected)
+        except Exception as exc:
+            print(f"  X  {agent} write failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        print(f"  OK  {agent} registered at {path}")
+
+    return overall
+
+
+def _cmd_mcp_remove(args: argparse.Namespace) -> int:
+    """Remove ``sofer-mcp`` from the selected agent(s).
+
+    Orchestration mirrors :func:`_cmd_mcp_add` without ``--cwd``:
+
+        1. Expand ``--agent all``.
+        2. For each agent: probe native ``delegate_remove`` first;
+           on success skip file-edit, on failure fall back.
+        3. File-edit: ``resolve_config_path`` → ``read_config``
+           (unreadable → exit 1, no backup/write) → ``remove_entry``
+           (preserve other servers, no write when absent) →
+           ``--dry-run`` guard → ``backup`` → ``atomic_write``.
+        4. Aggregate exit codes — 0 iff all succeed else 1.
+
+    No ``--cwd`` flag exists on remove (CLI-R09: only add accepts cwd).
+    """
+    from . import mcp_registration
+
+    raw_agent: str = getattr(args, "agent")
+    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    scope: str = getattr(args, "scope", "user")
+    dry_run: bool = bool(getattr(args, "dry_run", False))
+    overall = 0
+
+    for agent in agents:
+        _agent = cast(_AgentName, agent)
+        _scope = cast(_Scope, scope)
+        if mcp_registration.probe_native(_agent, timeout=3.0):
+            try:
+                delegated = mcp_registration.delegate_remove(_agent)
+            except Exception:
+                delegated = False
+            if delegated:
+                print(f"  OK  {agent} delegated remove via native mcp remove")
+                continue
+            print(
+                f"  !  {agent} native remove failed, falling back to file edit",
+                file=sys.stderr,
+            )
+
+        path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        try:
+            existing, _fmt2 = mcp_registration.read_config(path)
+        except Exception as exc:
+            print(f"  X  {agent} config unreadable ({path}): {exc}", file=sys.stderr)
+            overall = 1
+            continue
+
+        new_doc, changed = mcp_registration.remove_entry(_agent, existing)
+        if not changed:
+            print(f"  OK  {agent} already absent (idempotent)")
+            continue
+        if dry_run:
+            print(f"  DRY RUN  Would remove {agent} at {path}")
+            continue
+        try:
+            mcp_registration.backup(path)
+        except Exception as exc:
+            print(f"  X  {agent} backup failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        try:
+            mcp_registration.atomic_write(path, new_doc, fmt_expected)
+        except Exception as exc:
+            print(f"  X  {agent} write failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        print(f"  OK  {agent} removed from {path}")
+
+    return overall
 
 
 _INIT_TEMPLATE = """\
@@ -1190,6 +1382,83 @@ def _build_parser() -> argparse.ArgumentParser:
         "When omitted, all supported formats are included.",
     )
     s.set_defaults(func=_cmd_scan)
+
+    # ── mcp ───────────────────────────────────────────────────────
+    mcp = sub.add_parser(
+        "mcp",
+        help="Register sofer-mcp with AI agents (opencode, codex, gemini).",
+        description=(
+            "Register or remove the ``sofer-mcp`` MCP server from AI agent "
+            "configurations. Supports ``opencode`` (opencode.json), ``codex`` "
+            "(config.toml), and ``gemini`` (settings.json) with idempotent "
+            "merge, backup to ``.bak``, atomic write, and per-agent env "
+            "forwarding. Use ``--agent all`` to target every agent."
+        ),
+    )
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+
+    mcp_add = mcp_sub.add_parser(
+        "add",
+        help="Register sofer-mcp with the selected agent(s).",
+        description=(
+            "Register ``sofer-mcp`` in the agent config file. Creates the "
+            "config when missing, merges idempotently when present, preserves "
+            "other servers, backs up the original to ``.bak`` (single file, "
+            "overwrites), and writes atomically via tmp+os.replace. "
+            "``--cwd`` sets the server's working directory (absolute, "
+            "contained under the scope root). TOML edits may strip comments."
+        ),
+    )
+    mcp_add.add_argument(
+        "--agent",
+        choices=["opencode", "codex", "gemini", "all"],
+        required=True,
+        help="Target agent or 'all' for every agent.",
+    )
+    mcp_add.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default="user",
+        help="Config scope: 'user' (home directory) or 'project' (current directory).",
+    )
+    mcp_add.add_argument(
+        "--cwd",
+        help="Working directory for the MCP server (absolute, contained under scope root).",
+    )
+    mcp_add.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without writing — no file or .bak is created.",
+    )
+    mcp_add.set_defaults(func=_cmd_mcp_add)
+
+    mcp_remove = mcp_sub.add_parser(
+        "remove",
+        help="Remove sofer-mcp from the selected agent(s).",
+        description=(
+            "Remove the ``sofer`` entry idempotently. Preserves other "
+            "servers, backs up before edit, and does no write when the entry "
+            "is already absent. Prefers native ``mcp remove`` when available."
+        ),
+    )
+    mcp_remove.add_argument(
+        "--agent",
+        choices=["opencode", "codex", "gemini", "all"],
+        required=True,
+        help="Target agent or 'all' for every agent.",
+    )
+    mcp_remove.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default="user",
+        help="Config scope: 'user' (home directory) or 'project' (current directory).",
+    )
+    mcp_remove.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without writing — no file or .bak is created.",
+    )
+    mcp_remove.set_defaults(func=_cmd_mcp_remove)
 
     return parser
 
