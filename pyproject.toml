@@ -139,6 +139,8 @@ min_threshold = 0.5       # confidence >= this -> status "inferred"
 detect_threshold = 0.5    # match_rate below this -> no detection (None)
 profile_max_sample = 100000
 confidence_round_digits = 4
+profile_dir = "profiles"
+render_dir = "renders"
 
 # ── MCP agent resources ──
 # Size guard for sofer://dataset | sofer://codebook | sofer://metadata reads.

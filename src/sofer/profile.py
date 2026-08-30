@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import config
 from ._csv_reader import stream_csv
@@ -36,6 +37,9 @@ from .metadata import (
 from .pii import infer_pii_types
 from .semantic import _is_missing, infer_semantic_types
 
+if TYPE_CHECKING:
+    from .model import DatasetConfig
+
 # Formats read through the bounded streaming CSV reader. TSV uses a tab
 # delimiter; CSV uses the configured delimiter (CSV_DELIMITER).
 _STREAMED_FORMATS = frozenset({".csv", ".tsv"})
@@ -43,7 +47,12 @@ _STREAMED_FORMATS = frozenset({".csv", ".tsv"})
 _METADATA_FILENAME = "metadata.yaml"
 
 
-def profile(dataset_path: Path, output_dir: Path | None = None) -> int:
+def profile(
+    dataset_path: Path,
+    output_dir: Path | None = None,
+    *,
+    force: bool = False,
+) -> int:
     """Profile *dataset_path* read-only and return an exit code.
 
     Orchestration (spec PRF-02):
@@ -70,10 +79,16 @@ def profile(dataset_path: Path, output_dir: Path | None = None) -> int:
         dataset_path: Path to the dataset file to profile.
         output_dir:  Directory for ``metadata.yaml`` (default: the dataset's
             directory).
+        force: When ``False`` and the destination exists, raise
+            ``FileExistsError`` with a ``use --force to overwrite`` hint
+            (PRF-06). When ``True``, overwrite unconditionally.
 
     Returns:
         ``0`` on success, ``1`` when the format is unsupported or the file
         does not exist.
+
+    Raises:
+        FileExistsError: When the destination exists and *force* is ``False``.
     """
     dataset_path = Path(dataset_path)
     suffix = dataset_path.suffix.lower()
@@ -123,6 +138,8 @@ def profile(dataset_path: Path, output_dir: Path | None = None) -> int:
     out_dir = Path(output_dir) if output_dir is not None else dataset_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = out_dir / _METADATA_FILENAME
+    if metadata_path.exists() and not force:
+        raise FileExistsError(f"use --force to overwrite {metadata_path}")
     metadata_path.write_text(serialize(meta), encoding="utf-8")
 
     print(f"  OK  Wrote {metadata_path}")
@@ -130,6 +147,186 @@ def profile(dataset_path: Path, output_dir: Path | None = None) -> int:
     if gaps:
         print(f"  Missing fields (human input): {', '.join(gaps)}")
     return 0
+
+
+def generate_all_profiles(
+    cfg: DatasetConfig,
+    output_dir: str | Path | None = None,
+) -> list[str]:
+    """Generate one ``metadata.yaml`` per ``[[file]]`` entry under ``profiles/``.
+
+    Each profile is written to ``{PROFILE_DIR}/<rel-stem>.metadata.yaml``,
+    where ``<rel-stem>`` is the file's path relative to the ``cache/``
+    directory (falling back to the TOML config directory for files outside
+    ``cache/``). When two or more entries resolve to the same output path the
+    system writes profiles for all non-colliding files first, then raises
+    ``ValueError`` naming every colliding source — no profile is written for
+    any colliding file.
+
+    Args:
+        cfg: A ``DatasetConfig`` loaded from a TOML file.
+        output_dir: When given (Option B), profiles are written under
+            ``output_dir/profiles/`` and the shared ``cache/profiles/``
+            directory is never mutated. When ``None`` (default), profiles go
+            to ``cache/profiles/``.
+
+    Returns:
+        List of generated profile file paths.
+
+    Raises:
+        ValueError: When two or more files resolve to the same output path
+            (after non-colliding profiles have already been written).
+    """
+    from pathlib import PurePath
+
+    base_dir = cfg._base_dir.resolve()
+    data_dir = base_dir / config.OUTPUT_DIR
+
+    if output_dir is None:
+        write_root = data_dir
+    else:
+        out = Path(output_dir)
+        if not out.is_absolute():
+            out = base_dir / out
+        write_root = out.resolve()
+    profiles_dir = write_root / config.PROFILE_DIR
+
+    # ── First pass: collect valid, readable file entries ─────────────
+    entries: list[tuple[Path, str]] = []
+    for file_entry in cfg.files:
+        local = file_entry.resolve(base_dir)
+
+        if local.is_dir():
+            print(f"  \u26a0  Skipping directory: {local}", file=sys.stderr)
+            continue
+
+        if not local.exists():
+            print(f"  \u26a0  Skipping missing file: {local}", file=sys.stderr)
+            continue
+
+        suffix = local.suffix.lower()
+        if suffix not in SUPPORTED_FORMATS:
+            print(f"  \u26a0  Unsupported format, skipping: {local}", file=sys.stderr)
+            continue
+
+        entries.append((local, suffix))
+
+    if not entries:
+        return []
+
+    # ── Pre-compute output paths and detect collisions ───────────────
+    output_paths: dict[Path, Path] = {}
+    collision_sources: dict[Path, list[Path]] = {}
+
+    for local, _suffix in entries:
+        if local.is_relative_to(data_dir):
+            rel_stem = local.relative_to(data_dir)
+        else:
+            rel_stem = local.relative_to(base_dir)
+
+        suffixes = PurePath(rel_stem.name).suffixes
+        if len(suffixes) > 1:
+            target_suffix = "".join(suffixes[:-1]) + ".metadata.yaml"
+        else:
+            target_suffix = ".metadata.yaml"
+        out_path = (profiles_dir / rel_stem).with_suffix(target_suffix)
+
+        output_paths[local] = out_path
+        if out_path not in collision_sources:
+            collision_sources[out_path] = []
+        collision_sources[out_path].append(local)
+
+    # ── Partition: non-colliding vs colliding ────────────────────────
+    colliding_locals: set[Path] = set()
+    for out_path, sources in collision_sources.items():
+        if len(sources) > 1:
+            colliding_locals.update(sources)
+
+    # ── Generate per-file profiles (non-colliding only) ─────────────
+    generated: list[str] = []
+
+    for local, suffix in entries:
+        if local in colliding_locals:
+            continue
+
+        try:
+            headers, columns, rows, encoding, delimiter = _read_dataset_for_profile(local, suffix)
+        except Exception as exc:
+            print(f"  \u2717  Error reading {local}: {exc}", file=sys.stderr)
+            continue
+
+        schema = [_build_column(name, values) for name, values in zip(headers, columns)]
+        meta = Metadata(
+            file=FileMetadata(
+                path=str(local),
+                format=suffix.lstrip("."),
+                encoding=encoding,
+                delimiter=delimiter,
+                rows=rows,
+                columns=len(headers),
+            ),
+            structure=StructureMetadata(schema=schema),
+            generated=GeneratedMetadata(timestamp=_now_iso()),
+        )
+        meta.documentation = DocumentationMetadata(missing_fields=missing_fields(meta))
+
+        output_path = output_paths[local]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(serialize(meta), encoding="utf-8")
+        generated.append(str(output_path))
+        print(f"  OK  {output_path}")
+
+    # ── If collisions exist: raise ValueError after partial write ────
+    if colliding_locals:
+        for out_path, sources in collision_sources.items():
+            if len(sources) > 1:
+                rel_out = (
+                    out_path.relative_to(write_root).as_posix()
+                    if out_path.is_relative_to(write_root)
+                    else str(out_path)
+                )
+                try:
+                    rel_out_disp = out_path.relative_to(base_dir).as_posix()
+                except ValueError:
+                    rel_out_disp = rel_out
+                source_list = ", ".join(
+                    s.relative_to(base_dir).as_posix() if s.is_relative_to(base_dir) else str(s)
+                    for s in sources
+                )
+                print(
+                    f"  X  Collision: {rel_out_disp} is target for: {source_list}",
+                    file=sys.stderr,
+                )
+        raise ValueError(
+            f"Collision detected: {len(colliding_locals)} file(s) "
+            f"share the same output path(s). No profile written "
+            f"for colliding files."
+        )
+
+    return generated
+
+
+def _read_dataset_for_profile(
+    path: Path, suffix: str
+) -> tuple[list[str], list[list[str]], int, str, str]:
+    """Read *path* for profile batch, returning columnar data plus meta.
+
+    Args:
+        path: Absolute path to the dataset file.
+        suffix: Lowercased suffix (already validated against
+            :data:`SUPPORTED_FORMATS`).
+
+    Returns:
+        ``(headers, columns, rows, encoding, delimiter)``.
+    """
+    if suffix in _STREAMED_FORMATS:
+        delimiter = "\t" if suffix == ".tsv" else config.CSV_DELIMITER
+        headers, columns, rows = _stream_columns(path, delimiter)
+        encoding = config.CSV_ENCODING
+        return headers, columns, rows, encoding, delimiter
+    headers, columns, _dtypes = _read_file(str(path))
+    rows = len(columns[0]) if columns else 0
+    return headers, columns, rows, "", ""
 
 
 def _stream_columns(

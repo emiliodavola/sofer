@@ -32,6 +32,8 @@ _DEFAULTS: dict[str, Any] = {
     "output_dir": "cache",
     "raw_dir": "raw",
     "default_config_name": "dataset.toml",
+    "profile_dir": "profiles",
+    "render_dir": "renders",
     "parquet_row_group_size": 100_000,
     "parquet_compression": "zstd",
     "parquet_shard_warning_mb": 500,
@@ -171,6 +173,14 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
             "names to prior probabilities, e.g. semantic_priors = { email = 0.98 }"
         )
 
+    # ``profile_dir`` / ``render_dir`` must be non-empty strings — an empty
+    # value would resolve output writes to the write root itself and silently
+    # collide.
+    for _key in ("profile_dir", "render_dir"):
+        _val = merged.get(_key, "")
+        if not isinstance(_val, str) or not _val.strip():
+            raise ValueError(f"'{_key}' in [tool.sofer] must be a non-empty string")
+
     return merged
 
 
@@ -265,6 +275,8 @@ def _load_tool_config() -> dict[str, Any]:
 
 OUTPUT_DIR: str = _DEFAULTS["output_dir"]
 RAW_DIR: str = _DEFAULTS["raw_dir"]
+PROFILE_DIR: str = _DEFAULTS["profile_dir"]
+RENDER_DIR: str = _DEFAULTS["render_dir"]
 DEFAULT_CONFIG_NAME: str = _DEFAULTS["default_config_name"]
 
 PARQUET_ROW_GROUP_SIZE: int = _DEFAULTS["parquet_row_group_size"]
