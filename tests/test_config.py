@@ -480,6 +480,91 @@ class TestTc07BootstrapKeys:
         assert codebook_args.config == "my.toml"
 
 
+# ---------------------------------------------------------------------------
+#  TC-10 / TC-07-raw_dir — raw_dir bootstrap (delta 2026-08-29)
+# ---------------------------------------------------------------------------
+
+
+class TestTc10RawDirBootstrap:
+    """Raw directory bootstrap key (TC-10) — reload(None) walk-up contract."""
+
+    def test_default_raw_dir_is_raw(self, restore_tool_config, monkeypatch, pytree):
+        """No pyproject raw_dir -> RAW_DIR == 'raw' (built-in default)."""
+        bare = pytree(None, at="bare-default-raw")
+        monkeypatch.chdir(bare)
+        config.reload(None)
+        assert config.RAW_DIR == "raw"
+        assert config._DEFAULTS["raw_dir"] == "raw"
+
+    def test_pyproject_overrides_raw_dir_via_reload_none(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """cwd pyproject raw_dir='data-raw' -> reload(None) rebinds RAW_DIR."""
+        tree = pytree('[tool.sofer]\nraw_dir = "data-raw"\n', at="override-raw")
+        monkeypatch.chdir(tree)
+        config.reload(None)
+        assert config.RAW_DIR == "data-raw"
+        assert config.SOURCE_PATH == tree / "pyproject.toml"
+
+    def test_dataset_dir_wins_over_cwd_for_raw_dir(self, restore_tool_config, monkeypatch, pytree):
+        """Dataset-dir raw_dir beats cwd raw_dir (precedence step 1 > step 2)."""
+        cwd_tree = pytree('[tool.sofer]\nraw_dir = "inputs"\n', at="cwd-inputs")
+        monkeypatch.chdir(cwd_tree)
+        dataset_tree = pytree('[tool.sofer]\nraw_dir = "raw"\n', at="ds-raw")
+        dataset_dir = dataset_tree / "mydata"
+        dataset_dir.mkdir(parents=True)
+        config.reload(dataset_dir)
+        assert config.RAW_DIR == "raw"
+        assert config.SOURCE_PATH == dataset_tree / "pyproject.toml"
+
+    def test_cwd_pyproject_supplies_raw_dir(self, restore_tool_config, monkeypatch, pytree):
+        """cwd-tree raw_dir='inputs' flows into RAW_DIR and init scaffolds inputs/."""
+        from argparse import Namespace
+
+        from sofer.cli import _cmd_init
+
+        tree = pytree('[tool.sofer]\nraw_dir = "inputs"\n', at="cwd-raw-inputs")
+        monkeypatch.chdir(tree)
+        config.reload(None)
+        assert config.RAW_DIR == "inputs"
+        rc = _cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        assert rc == 0
+        assert (tree / "inputs").is_dir()
+        assert not (tree / "raw").exists()
+        # reset RAW_DIR for later tests that assume default
+        config.reload(tree)
+
+    def test_reload_none_walk_up_from_subdir_overrides_raw_dir(
+        self, restore_tool_config, monkeypatch, pytree
+    ):
+        """reload(None) walks up from cwd subdir to find ancestor raw_dir."""
+        root = pytree('[tool.sofer]\nraw_dir = "data-raw"\n', at="walkup-raw")
+        sub = root / "a" / "b"
+        sub.mkdir(parents=True)
+        monkeypatch.chdir(sub)
+        config.reload(None)
+        assert config.RAW_DIR == "data-raw"
+
+    def test_bootstrap_limitation_documented(self):
+        """docs/configuration.md lists raw_dir as cwd-only bootstrap key."""
+        docs = Path("docs/configuration.md").read_text(encoding="utf-8")
+        assert "raw_dir" in docs
+        # bootstrap keys section must name all three cwd-only keys
+        assert "default_config_name" in docs
+        assert "output_dir" in docs or "OUTPUT_DIR" in docs
+
+    def test_pyproject_has_raw_dir_key(self):
+        """Repository pyproject.toml declares raw_dir under [tool.sofer]."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        with open("pyproject.toml", "rb") as fh:
+            data = _tomli.load(fh)
+        assert data["tool"]["sofer"]["raw_dir"] == "raw"
+
+
 class TestTc08SourceVisibility:
     """SOFER_VERBOSE reports the resolved source on stderr; silent by default."""
 

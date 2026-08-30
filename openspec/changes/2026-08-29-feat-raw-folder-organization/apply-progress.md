@@ -43,7 +43,10 @@
 | `docs/configuration.md` | Modified | Bootstrap keys 2->3 (added `raw_dir` cwd-only), added `raw/->cache/->build` diagram and flatten example, documented `raw/` never excluded |
 | `README.md` | Modified | Directory layout `raw/(tracked)->cache/->build/` with diagram, TOML `local` `data/`->`cache/`, profile/codebook examples `data/`->`raw/` |
 | `README_ES.md` | Modified | Mirror of README 5.2 per §13, Spanish prose with English technical content |
-| `openspec/changes/2026-08-29-feat-raw-folder-organization/tasks.md` | Modified | Marked all 18 tasks [x] |
+| `tests/test_config.py` | Modified | Added `TestTc10RawDirBootstrap` — 7 tests: default raw_dir, pyproject override, dataset-dir wins, cwd supplies raw_dir, walk-up, docs, pyproject key |
+| `tests/test_cli.py` | Modified | Added `TestInitRawFolder` (9 tests) + `TestInitHelp` (2 tests): CLI-R07/R08 init mkdir, depth-1 filter, collision, dry-run, force/isatty, prompt N/Y, template, help flags |
+| `tests/test_scanner.py` | Modified | Added `TestRawCacheDiscovery` (3), `TestSourceLayoutCopyOnly` (2), `TestE2EInitMoveScan` (2): raw/cache discover, EXCLUSIONS, copy-only, docs diagram, e2e init→scan flatten |
+| `openspec/changes/2026-08-29-feat-raw-folder-organization/tasks.md` | Modified | Marked all 18 tasks [x] — remediation verifies 4.1-4.4 now honest |
 
 ### Deviations from Design
 
@@ -51,18 +54,18 @@ None — implementation matches design. One clarification: `--dry-run` with `--m
 
 ### Issues Found
 
-None. `ruff check --fix` green, `mypy src/` green, `pytest -q` 959 passed, 2 skipped.
+- Remediation 2026-08-29: verify report 695 FAIL flagged 18/38 scenarios UNTESTED (`git diff dev -- tests/` empty). Ported 18 manual probes into 25 committed tests (config 7, cli 11, scanner 7). No implementation reverted.
 
 ### Remaining Tasks
 
-None — all 18 tasks complete. Ready for verify.
+None — all 18 tasks complete. Ready for verify (remediation).
 
 ### Workload / PR Boundary
 
-- Mode: single PR (fits 2000 budget; 244 lines)
-- Current work unit: single-pr all phases
+- Mode: single PR (fits 2000 budget; ~600 lines with tests)
+- Current work unit: single-pr all phases + remediation tests
 - Boundary: Phase 1 (config) + Phase 2 (cli/scanner) + Phase 3 (wiring) + Phase 4 (test verification) + Phase 5 (docs) — one autonomous PR `feat/raw-folder-organization -> dev`
-- Estimated review budget impact: 244 lines (Low vs 2000, High vs 400 but auto-forecast single PR)
+- Estimated review budget impact: ~600 lines (Low vs 2000, High vs 400 but auto-forecast single PR — remediation adds ~270 test lines)
 
 ### Status
 
@@ -71,7 +74,10 @@ None — all 18 tasks complete. Ready for verify.
 ### Verification
 
 - `uv run ruff check --fix .` → All checks passed
-- `uv run ruff format .` → 64 files unchanged
+- `uv run ruff format .` → 2 files reformatted, 62 unchanged (second pass clean)
 - `uv run mypy src/` → Success: no issues in 27 source files
-- `uv run pytest -q` → 959 passed, 2 skipped
-- Manual checks: `init` creates `raw/`, `--move-existing` depth-1 only, collision fails, `--dry-run` no mutation, `not isatty` skips with hint, `N` aborts, `raw/` discovered / `cache/` excluded, `raw/DPTO.csv->cache/DPTO.csv` flatten
+- `uv run pytest tests/test_config.py tests/test_cli.py tests/test_scanner.py -q` → 152 passed
+- `uv run pytest -q` → 984 passed, 2 skipped (was 959 before remediation — +25 raw-folder tests)
+- `git diff dev -- tests/` → non-empty (shows test_config + test_cli + test_scanner deltas)
+- Manual probes (pre-remediation, still valid): `init` creates `raw/`, `--move-existing` depth-1 only, collision fails, `--dry-run` no mutation, `not isatty` skips with hint, `N` aborts, `raw/` discovered / `cache/` excluded, `raw/DPTO.csv->cache/DPTO.csv` flatten
+- Spec scenarios: 18 previously UNTESTED now covered by committed tests (TC-10 ×3, TC-07 raw_dir, CLI-R07 ×8, CLI-R08, SCN-07 ×2, SCN-01 raw/cache ×1, bootstrap docs)
