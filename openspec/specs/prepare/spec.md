@@ -32,66 +32,95 @@ and MUST succeed without any `HF_TOKEN` or Hub access.
 
 ---
 
-### Requirement: CSV→Parquet conversion preserved in output dir (PRP-02) — Universal (Modified 2026-08-29, convert-all-formats-parquet)
+### Requirement: CSV→Parquet conversion preserved in output dir (PRP-02) — Universal (Modified 2026-08-30, fix-prepare-multisheet-xlsx-copy)
 
-`prepare` SHALL convert every eligible entry among `.csv/.tsv/.xlsx/.jsonl` to Parquet and write the result into the output directory at the **normalized** remote-relative path (extension replaced with `.parquet`; for `.xlsx` with N sheets, N files at `stem__{sanitized}.parquet`). Eligibility: NOT `recursive`, suffix in convertible set, `convert_to_parquet != false` (alias `upload_as_csv` honored for csv with deprecation warning), `local` exists. `.parquet` entries SHALL be passthrough. `prepare._check_local_overwrite` and `_validate_case_fold_collisions` (via `_mirror`) MUST scan all convertible suffixes on normalized keys (`normalize_parquet_remote(...).lower()`), not just `.csv`. Conversion MUST use `config.PARQUET_COMPRESSION` and `config.PARQUET_ROW_GROUP_SIZE`; no hardcoded compression/row-group literals.
+`prepare` SHALL convert every eligible `.csv/.tsv/.xlsx/.jsonl` entry to Parquet at the normalized remote (`normalize_parquet_remote(parquet_remote_for(remote))`). Eligible: NOT `recursive`, suffix in convertible set, `convert_to_parquet != false` (`upload_as_csv` alias for csv with deprecation warning), `local` exists; `.parquet` SHALL be passthrough. Converted keys use normalized form: `__+` → `_` collapses `stem__sheet` → `stem_sheet`, so multisheet XLSX with N sheets SHALL produce N files at `stem_{sanitized}.parquet` (single `_`). Guards (`is_converted` staging check, `_check_local_overwrite`, `_validate_case_fold_collisions`, `_assert_cross_file_schema`, `expanded_planned_remotes` fallback) SHALL match **both** `__` and `_` sheet suffixes. When any XLSX sheet converts, original `.xlsx` SHALL NOT be staged; `build/` SHALL contain only normalized `.parquet` per sheet. Single-sheet XLSX SHALL produce single `stem.parquet` (key == `norm_key`). Overwrite/collision gates MUST scan normalized keys. Conversion MUST use `config.PARQUET_COMPRESSION`/`PARQUET_ROW_GROUP_SIZE`; no hardcoded literals.
 
-(Previously: only `.csv` eligible; `.tsv/.xlsx/.jsonl` staged as-is via `copy_to_mirror`; overwrite/collision gates scanned only `.csv`.)
+(Previously: guards checked `__` only; normalized keys collapse to `_`, so `prepare.py:848/603/364` missed multisheet sheets and leaked the workbook into `build/`.)
 
 #### Scenario: Converted parquets mirror normalized remote layout
-- GIVEN entries `remote="data/PROV/train.csv"` and `remote="data/DPTO/train.TSV"`
-- WHEN `prepare` completes
-- THEN `data/prov/train.parquet` and `data/dpto/train.parquet` SHALL exist in output
 
-#### Scenario: XLSX multi-sheet expanded
-- GIVEN `remote="Report.XLSX"` with sheets `Ventas`, `Costos`
+- GIVEN `data/PROV/train.csv` and `data/DPTO/train.TSV`
 - WHEN `prepare` completes
-- THEN `report__ventas.parquet` and `report__costos.parquet` SHALL exist (flat `__`)
+- THEN `data/prov/train.parquet` and `data/dpto/train.parquet` SHALL exist
+
+#### Scenario: XLSX multi-sheet expanded (normalized)
+
+- GIVEN `Report.XLSX` with sheets `Ventas`, `Costos`
+- WHEN `prepare` completes
+- THEN `report_ventas.parquet` and `report_costos.parquet` SHALL exist (single `_`)
+- AND `report.xlsx` SHALL NOT exist in output
+
+#### Scenario: Multisheet stages only parquet — no source leak
+
+- GIVEN `DATA_GOT_ALL.xlsx` with sheets `aristas`/`nodos`
+- WHEN `sofer prepare` into clean `build/` completes
+- THEN `build/` SHALL contain `data_got_all_aristas.parquet` and `data_got_all_nodos.parquet`
+- AND `build/` SHALL contain no `*.xlsx`
+
+#### Scenario: Single-sheet XLSX unchanged
+
+- GIVEN `dataset.xlsx` with one sheet
+- WHEN `prepare` completes
+- THEN exactly one `dataset.parquet` SHALL exist
+- AND no `dataset_*.parquet` sheet file SHALL exist
 
 #### Scenario: convert_to_parquet=false keeps original suffix
-- GIVEN `[[file]] remote="raw.xlsx" convert_to_parquet=false`
+
+- GIVEN `raw.xlsx` with `convert_to_parquet=false`
 - WHEN `prepare` completes
-- THEN no Parquet SHALL be generated for that entry and `raw.xlsx` SHALL be staged at its declared remote
+- THEN no Parquet SHALL be generated and `raw.xlsx` SHALL be staged
 
 #### Scenario: upload_as_csv alias still honored for csv
-- GIVEN `[[file]] remote="raw.csv" upload_as_csv=true`
+
+- GIVEN `raw.csv` with `upload_as_csv=true`
 - WHEN `prepare` completes
-- THEN deprecation warning SHALL be printed, no Parquet SHALL be generated, and `raw.csv` SHALL be staged
+- THEN deprecation warning SHALL be printed and `raw.csv` SHALL be staged
 
 #### Scenario: Conversion failure falls back to original for any format
+
 - GIVEN `bad.tsv` that fails to parse
 - WHEN `prepare` runs the conversion loop
-- THEN warning SHALL be printed naming `bad.tsv` and original `bad.tsv` SHALL be staged at its remote
+- THEN warning naming `bad.tsv` SHALL be printed and original `bad.tsv` SHALL be staged
 
-#### Scenario: Overwrite protection covers all convertible suffixes normalized
-- GIVEN `data/prov/train.parquet` already exists in output from prior run and a `train.tsv` entry maps to same normalized key
-- WHEN `sofer prepare` executes without `--force`
-- THEN error naming the existing `data/prov/train.parquet` SHALL be printed and exit SHALL be 1
+#### Scenario: Overwrite protection covers all suffixes normalized (XLSX fallback)
+
+- GIVEN `data/prov/train.parquet` exists and `train.tsv` maps to same normalized key
+- WHEN `sofer prepare` without `--force` runs
+- THEN error naming `data/prov/train.parquet` SHALL be printed and exit SHALL be 1
+- AND GIVEN `report_ventas.parquet` (single `_`) exists from prior run
+- WHEN new `Report.XLSX` covering that sheet runs without `--force`
+- THEN guard SHALL detect via `_` fallback glob and refuse with exit 1; with `--force` it SHALL overwrite
 
 #### Scenario: Case-fold collision on normalized remotes refused before write
-- GIVEN entries `Data/Prov/Train.CSV` and `data/prov/train.tsv` normalizing to same `data/prov/train.parquet`
+
+- GIVEN `Data/Prov/Train.CSV` and `data/prov/train.tsv` both normalize to `data/prov/train.parquet`
 - WHEN `prepare` validates
-- THEN hard error naming both remotes SHALL be emitted and exit SHALL be 1 before any staging write
+- THEN error naming both remotes SHALL be emitted and exit SHALL be 1 before write
+
+#### Scenario: Cross-file schema grouping handles both underscore forms
+
+- GIVEN converted keys include `data_got_all_aristas.parquet` (single `_`)
+- WHEN `_assert_cross_file_schema` groups sheets for `DATA_GOT_ALL.xlsx`
+- THEN it SHALL match via both `stem__*` and `stem_*` (excluding `norm_key`) so grouping works regardless of normalization
 
 #### Scenario: Legacy CSV scenarios preserved
 
-- GIVEN `[[file]]` entries with `remote = "data/PROV/train.csv"` and `remote = "data/DPTO/train.csv"` (case-preserving legacy)
+- GIVEN `data/PROV/train.csv` and `data/DPTO/train.csv`
 - WHEN `prepare` completes
 - THEN `data/prov/train.parquet` SHALL exist (normalized lowercase)
 
 #### Scenario: upload_as_csv entries keep their CSV (legacy)
 
-- GIVEN a `[[file]]` entry with `upload_as_csv = true`
+- GIVEN entry with `upload_as_csv=true`
 - WHEN `prepare` completes
-- THEN no Parquet SHALL be generated for that entry
-- AND the original CSV SHALL be staged at its remote path
+- THEN no Parquet SHALL be generated and original CSV SHALL be staged
 
 #### Scenario: Conversion failure falls back to CSV (legacy)
 
-- GIVEN a CSV entry that fails to parse
-- WHEN `prepare` runs the conversion loop
-- THEN a warning SHALL be printed
-- AND the original CSV SHALL be staged at its remote path instead
+- GIVEN CSV entry that fails to parse
+- WHEN conversion loop runs
+- THEN warning SHALL be printed and original CSV SHALL be staged
 
 ### Requirement: Cross-file schema and parity for all formats (PRP-02a) — Added 2026-08-29
 
@@ -266,3 +295,45 @@ silently.
 - WHEN `sofer prepare dataset.toml --force` executes
 - THEN all artifacts SHALL be overwritten
 - AND the exit code SHALL be 0
+
+---
+
+### Requirement: Orphan pruning on force prepare (PRP-09)
+
+`prepare(force=True)` MUST prune orphan files under `output_dir` after staging (converted parquets, codebooks). The allowlist MUST be `allowed_output_remotes = expanded_planned_remotes(cfg, keep_csv, output_dir) ∪ {README.md, LICENSE, codebook.md, codebooks/**} ∪ keep_csv CSV remotes`. `expanded_planned_remotes` MUST reuse `sanitize_sheet_name`/`normalize_parquet_remote` with dual `__`/`_` guard identical to `prepare.py:615-622`, so single-underscore sheets (e.g., `DATA_GOT_ALL.xlsx` → `data_got_all_aristas.parquet`, `data_got_all_nodos.parquet`) are recognized as owned, not orphan. Pruning MUST be idempotent and MUST NOT run when `force` is false.
+
+#### Scenario: Single-underscore orphan deleted on force
+
+- GIVEN `build/` contains `data_got_all_aristas.parquet` but TOML no longer declares that sheet
+- WHEN `prepare(force=True)` completes
+- THEN that orphan file SHALL be removed and only `expanded_planned_remotes` members SHALL remain
+
+#### Scenario: Stale file from removed TOML entry pruned
+
+- GIVEN a prior `[[file]]` entry was removed leaving `old.parquet` in `build/`
+- WHEN `prepare(force=True)` completes
+- THEN `old.parquet` SHALL be removed
+
+#### Scenario: Compliance auto-generated files retained
+
+- GIVEN `build/` contains `README.md`, `LICENSE`, `codebook.md`, `codebooks/a.md`
+- WHEN `prepare(force=True)` completes
+- THEN all compliance files SHALL remain (not treated as orphans)
+
+#### Scenario: keep_csv originals retained
+
+- GIVEN `keep_csv=true` and `build/` contains `data/foo.csv` alongside `data/foo.parquet`
+- WHEN `prepare(force=True)` completes
+- THEN `data/foo.csv` SHALL remain
+
+#### Scenario: Idempotent second force run
+
+- GIVEN `prepare(force=True)` already pruned orphans
+- WHEN `prepare(force=True)` runs again without config change
+- THEN no further files SHALL be deleted and exit SHALL be 0
+
+#### Scenario: Non-force run does not prune
+
+- GIVEN an orphan `stale.parquet` exists in `build/`
+- WHEN `prepare` runs without `--force`
+- THEN `stale.parquet` SHALL remain and orphan scan SHALL not execute

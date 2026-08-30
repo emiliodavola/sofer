@@ -241,3 +241,249 @@ class TestProfileUniqueExcludesSentinels:
         data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
         col = next(c for c in data["structure"]["schema"] if c["name"] == "val")
         assert col["unique"] == 2
+
+
+# ---------------------------------------------------------------------------
+#  PRF-05 / PRF-06 — batch + force guard (feat-profile-render-all-files)
+# ---------------------------------------------------------------------------
+
+
+def _write_dataset_toml(base: object, entries: list[str]):
+    """Write a minimal dataset.toml under *base* with given [[file]] locals."""
+    from pathlib import Path as _Path
+
+    base_p = _Path(base)
+    lines = [
+        "[dataset]",
+        'name = "test-ds"',
+        'repo_id = "user/test-ds"',
+        "",
+    ]
+    for local in entries:
+        lines.extend(["[[file]]", f'local = "{local}"', f'remote = "{local}"', ""])
+    toml_path = base_p / "dataset.toml"
+    toml_path.write_text("\n".join(lines), encoding="utf-8")
+    return toml_path
+
+
+class TestProfileBatchPrf05:
+    """PRF-05 batch profile via --all-files."""
+
+    def test_batch_n_files(self, tmp_path, restore_tool_config):
+        """Two files under cache/ -> two profiles under profiles/."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        for name in ("a.csv", "b.csv"):
+            _write_csv(tmp_path / "cache" / name, [["col"], ["1"]])
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv", "cache/b.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        results = generate_all_profiles(dataset_cfg)
+
+        assert (tmp_path / "cache" / "profiles" / "a.metadata.yaml").is_file()
+        assert (tmp_path / "cache" / "profiles" / "b.metadata.yaml").is_file()
+        assert len(results) == 2
+
+    def test_nested_labels_preserved(self, tmp_path, restore_tool_config):
+        """cache/Labels/etiquetas_a.csv -> profiles/Labels/etiquetas_a.metadata.yaml."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        sub = tmp_path / "cache" / "Labels"
+        sub.mkdir(parents=True)
+        _write_csv(sub / "etiquetas_a.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(tmp_path, ["cache/Labels/etiquetas_a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        generate_all_profiles(dataset_cfg)
+
+        assert (tmp_path / "cache" / "profiles" / "Labels" / "etiquetas_a.metadata.yaml").is_file()
+
+    def test_collision_partial_write_then_value_error(self, tmp_path, restore_tool_config, capsys):
+        """x.csv + x.parquet collide -> non-colliding written, colliding not, ValueError."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        _write_csv(tmp_path / "cache" / "a.csv", [["col"], ["1"]])
+        _write_csv(tmp_path / "cache" / "x.csv", [["col"], ["1"]])
+        # parquet with same stem x -> collision on x.metadata.yaml
+        pq.write_table(pa.table({"col": ["1"]}), tmp_path / "cache" / "x.parquet")
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv", "cache/x.csv", "cache/x.parquet"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        with pytest.raises(ValueError, match="Collision"):
+            generate_all_profiles(dataset_cfg)
+
+        assert (tmp_path / "cache" / "profiles" / "a.metadata.yaml").is_file()
+        assert not (tmp_path / "cache" / "profiles" / "x.metadata.yaml").is_file()
+        err = capsys.readouterr().err
+        assert "x.csv" in err and "x.parquet" in err
+
+    def test_custom_output_absolute(self, tmp_path, restore_tool_config):
+        """--output /tmp/out (absolute) writes under /tmp/out/profiles, cache untouched."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        _write_csv(tmp_path / "cache" / "a.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        out = tmp_path / "outAbs"
+        results = generate_all_profiles(dataset_cfg, output_dir=out)
+
+        assert (out / "profiles" / "a.metadata.yaml").is_file()
+        assert str(out / "profiles" / "a.metadata.yaml") in results
+        assert not (tmp_path / "cache" / "profiles").exists()
+
+    def test_custom_output_relative(self, tmp_path, restore_tool_config, monkeypatch):
+        """Relative --output anchors to cfg._base_dir (Option B), not CWD."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "cache").mkdir()
+        _write_csv(proj / "cache" / "a.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(proj, ["cache/a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        cfg.reload(proj)
+        # Change CWD elsewhere to prove anchoring is to base_dir, not CWD
+        other = tmp_path / "other"
+        other.mkdir()
+        monkeypatch.chdir(other)
+
+        generate_all_profiles(dataset_cfg, output_dir="rel/out")
+
+        assert (proj / "rel" / "out" / "profiles" / "a.metadata.yaml").is_file()
+        assert not (other / "rel" / "out" / "profiles" / "a.metadata.yaml").exists()
+        assert not (proj / "cache" / "profiles").exists()
+
+    def test_config_override_docs_profiles(self, tmp_path, restore_tool_config):
+        """profile_dir=docs/profiles via pyproject -> outputs under docs/profiles/."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\nprofile_dir = "docs/profiles"\n', encoding="utf-8"
+        )
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        _write_csv(tmp_path / "cache" / "a.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        generate_all_profiles(dataset_cfg)
+
+        assert (tmp_path / "cache" / "docs" / "profiles" / "a.metadata.yaml").is_file()
+
+    def test_toml_without_files_fails_via_cli(self, tmp_path, restore_tool_config, capsys):
+        """CLI --all-files with no [[file]] exits non-zero mentioning [[file]]."""
+        toml = tmp_path / "dataset.toml"
+        toml.write_text('[dataset]\nname = "x"\nrepo_id = "u/x"\n', encoding="utf-8")
+        rc = cli._cmd_profile(
+            Namespace(dataset=str(toml), output=None, all_files=True, force=False, config=str(toml))
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "[[file]]" in err
+
+    def test_cache_untouched_when_output_given(self, tmp_path, restore_tool_config):
+        """Batch with --output must never mutate cache/ (cache dir absent)."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        _write_csv(tmp_path / "cache" / "a.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        out = tmp_path / "build"
+        generate_all_profiles(dataset_cfg, output_dir=out)
+
+        assert (out / "profiles" / "a.metadata.yaml").is_file()
+        assert not (tmp_path / "cache" / "profiles").exists()
+
+
+class TestProfileForceGuardPrf06:
+    """PRF-06 single-file force guard."""
+
+    def test_guard_without_force_raises_and_unchanged(self, tmp_path):
+        """Existing dest without --force raises FileExistsError with hint and file unchanged."""
+        csv_path = tmp_path / "data.csv"
+        _write_email_csv(csv_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        # first write
+        rc = profile(csv_path, output_dir=out, force=False)
+        assert rc == 0
+        dest = out / "metadata.yaml"
+        assert dest.is_file()
+        dest.write_text("tampered", encoding="utf-8")
+        # second write without force must raise and leave tampered content
+        with pytest.raises(FileExistsError, match="use --force to overwrite"):
+            profile(csv_path, output_dir=out, force=False)
+        assert dest.read_text(encoding="utf-8") == "tampered"
+        # hint must contain destination path
+        try:
+            profile(csv_path, output_dir=out, force=False)
+        except FileExistsError as exc:
+            assert str(dest) in str(exc)
+
+    def test_overwrite_with_force(self, tmp_path):
+        """With --force the existing file is overwritten and exit 0."""
+        csv_path = tmp_path / "data.csv"
+        _write_email_csv(csv_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        profile(csv_path, output_dir=out, force=False)
+        dest = out / "metadata.yaml"
+        dest.write_text("tampered", encoding="utf-8")
+        rc = profile(csv_path, output_dir=out, force=True)
+        assert rc == 0
+        assert dest.read_text(encoding="utf-8") != "tampered"
+        assert "structure" in dest.read_text(encoding="utf-8")
+
+    def test_cli_guard_without_force_returns_1(self, tmp_path, capsys):
+        """CLI profile without --force on existing dest returns 1 with hint."""
+        csv_path = tmp_path / "data.csv"
+        _write_email_csv(csv_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        rc1 = cli._cmd_profile(Namespace(dataset=str(csv_path), output=str(out), force=False))
+        assert rc1 == 0
+        rc2 = cli._cmd_profile(Namespace(dataset=str(csv_path), output=str(out), force=False))
+        assert rc2 == 1
+        assert "use --force to overwrite" in capsys.readouterr().err
+
+    def test_cli_overwrite_with_force(self, tmp_path):
+        """CLI profile --force overwrites and returns 0."""
+        csv_path = tmp_path / "data.csv"
+        _write_email_csv(csv_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        cli._cmd_profile(Namespace(dataset=str(csv_path), output=str(out), force=False))
+        dest = out / "metadata.yaml"
+        dest.write_text("tampered", encoding="utf-8")
+        rc = cli._cmd_profile(Namespace(dataset=str(csv_path), output=str(out), force=True))
+        assert rc == 0
+        assert dest.read_text(encoding="utf-8") != "tampered"

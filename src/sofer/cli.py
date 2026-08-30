@@ -11,6 +11,7 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
+from typing import cast
 
 from . import config
 from ._formats import SUPPORTED_FORMATS
@@ -18,6 +19,8 @@ from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
+from .mcp_registration import AgentName as _AgentName
+from .mcp_registration import Scope as _Scope
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
@@ -145,6 +148,11 @@ def _cmd_publish(args: argparse.Namespace) -> int:
            network access.  Stale or missing artifacts trigger ``prepare``
            automatically; ``--dry-run`` only prints the diff and split
            report.
+        3. When ``--clean`` is given and delivery succeeded (``fail==0``,
+           quality passed, not ``--dry-run``), delete the resolved build
+           directory (``resolve_output_dir(cfg, --output)``) and, with
+           ``--clean-cache``/``--all``, the tool-wide ``cache/``
+           (``cfg._base_dir / config.OUTPUT_DIR``, sibling-shared).
     """
     cfg, report = _load_and_validate(args, verb="publishing")
     if cfg is None or report is None:
@@ -158,6 +166,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         keep_csv=args.keep_csv,
         dry_run=args.dry_run,
         quality_report=report,
+        clean=getattr(args, "clean", False),
+        clean_cache=getattr(args, "clean_cache", False),
     )
 
 
@@ -217,50 +227,143 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
 def _cmd_profile(args: argparse.Namespace) -> int:
     """Profile a dataset read-only and write a ``metadata.yaml`` document.
 
-    Orchestration (delegated to :func:`sofer.profile.profile`):
+    Orchestration (delegated to :func:`sofer.profile.profile` / ``generate_all_profiles``):
 
-        1. Detect the dataset format from its extension
-           (``sofer._formats.SUPPORTED_FORMATS``).
-        2. Read the dataset: CSV/TSV via ``stream_csv`` (bounded, encoding
-           fallback, config delimiter/encoding); Parquet/XLSX/JSONL via
-           ``codebook._read_file``.
-        3. Infer a coarse storage type, a semantic type (email), and a PII
-           flag per column.
-        4. Assemble and write ``metadata.yaml`` next to the dataset (or to
-           ``--output`` DIR when given).
-        5. Report the missing human-input fields (description, license,
-           source, column descriptions).
+        1. Single-file (default): detect format, read dataset, infer types/PII,
+           assemble ``metadata.yaml`` next to the dataset (or in ``--output``),
+           with ``FileExistsError`` guard gated by ``--force`` (PRF-06).
+        2. Batch (``--all-files``): load ``[[file]]`` entries from the TOML
+           (``DatasetConfig.from_toml``; fail fast when none), derive
+           ``rel_stem`` via ``relative_to(data_dir)``/``base_dir`` +
+           ``PurePath.suffixes``, write each
+           ``<write_root>/profiles/<rel_stem>.metadata.yaml`` via
+           ``config.PROFILE_DIR``, write non-colliding first then raise
+           ``ValueError`` for collisions, honour Option B ``--output``
+           anchoring to ``cfg._base_dir``.
 
     The source dataset is never modified (PRF-03). Returns the exit code from
-    :func:`sofer.profile.profile` (0 on success, 1 on unsupported format).
+    the domain function (0 on success, 1 on error). A missing destination
+    guard without ``--force`` surfaces ``FileExistsError`` as exit 1 with a
+    ``use --force to overwrite`` hint.
     """
-    return run_profile(
-        Path(args.dataset),
-        output_dir=Path(args.output) if args.output else None,
-    )
+    if getattr(args, "all_files", False):
+        # Positional ``dataset`` is the TOML path when --all-files is set;
+        # --config overrides when explicitly provided.
+        config_path_raw = getattr(args, "config", None)
+        dataset_raw = getattr(args, "dataset", None)
+        # Determine effective TOML path: explicit --config wins when non-default
+        toml_arg: str | None = None
+        if config_path_raw is not None and str(config_path_raw) != config.DEFAULT_CONFIG_NAME:
+            toml_arg = str(config_path_raw)
+        elif dataset_raw is not None:
+            toml_arg = str(dataset_raw)
+        else:
+            toml_arg = (
+                str(config_path_raw) if config_path_raw is not None else config.DEFAULT_CONFIG_NAME
+            )
+        try:
+            cfg = DatasetConfig.from_toml(toml_arg)
+        except Exception as exc:
+            print(f"Error: Failed to read TOML: {exc}", file=sys.stderr)
+            return 1
+        validation_errors = cfg.validate()
+        if validation_errors:
+            for err in validation_errors:
+                print(f"Error: {err}", file=sys.stderr)
+            return 1
+        if not cfg.files:
+            print("Error: No [[file]] entries found in configuration.", file=sys.stderr)
+            return 1
+        from .profile import generate_all_profiles as _gen_all
+
+        try:
+            _gen_all(cfg, output_dir=args.output)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    if not getattr(args, "dataset", None):
+        print("Error: Must specify a dataset file or use --all-files.", file=sys.stderr)
+        return 1
+    try:
+        return run_profile(
+            Path(args.dataset),
+            output_dir=Path(args.output) if args.output else None,
+            force=bool(getattr(args, "force", False)),
+        )
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _cmd_render(args: argparse.Namespace) -> int:
     """Render a status-annotated ``README.md`` from a ``metadata.yaml`` document.
 
-    Orchestration (delegated to :func:`sofer.render.render`):
+    Orchestration (delegated to :func:`sofer.render.render` / ``generate_all_renders``):
 
-        1. Resolve ``metadata.yaml`` from the ``<package>`` argument — either
-           the file itself or the directory containing it (RND-01).
-        2. Load the document and project it into ``README.md`` markdown
-           without recomputing any inference (RND-02).
-        3. Write ``README.md`` next to ``metadata.yaml`` (or to ``--output``
-           DIR when given).
+        1. Single-file (default): resolve ``metadata.yaml`` from ``<package>``
+           (file or directory, RND-01), load and project into ``README.md``
+           without recomputing inference (RND-02), write next to metadata
+           (or to ``--output``) with ``FileExistsError`` guard gated by
+           ``--force`` (RND-05).
+        2. Batch (``--all-files``): iterate ``[[file]]`` entries, resolve each
+           entry's ``metadata.yaml`` under ``profile_dir``, write
+           ``<write_root>/renders/<rel_stem>.README.md`` via ``config.RENDER_DIR``,
+           skip missing metadata, collision map + partial-write-then-ValueError,
+           Option B anchoring.
 
     Inference states are rendered distinctly (RND-03): ``confirmed`` as a plain
     label, ``inferred`` as ``<type> (inferred, NN%)``, and ``unknown`` as
-    ``unknown``. Returns the exit code from :func:`sofer.render.render`
-    (0 on success, 1 when no ``metadata.yaml`` is found).
+    ``unknown``. Returns the exit code from the domain function
+    (0 on success, 1 when no ``metadata.yaml`` is found or guard triggers).
     """
-    return run_render(
-        Path(args.package),
-        output_dir=Path(args.output) if args.output else None,
-    )
+    if getattr(args, "all_files", False):
+        config_path_raw = getattr(args, "config", None)
+        package_raw = getattr(args, "package", None)
+        toml_arg: str | None = None
+        if config_path_raw is not None and str(config_path_raw) != config.DEFAULT_CONFIG_NAME:
+            toml_arg = str(config_path_raw)
+        elif package_raw is not None:
+            toml_arg = str(package_raw)
+        else:
+            toml_arg = (
+                str(config_path_raw) if config_path_raw is not None else config.DEFAULT_CONFIG_NAME
+            )
+        try:
+            cfg = DatasetConfig.from_toml(toml_arg)
+        except Exception as exc:
+            print(f"Error: Failed to read TOML: {exc}", file=sys.stderr)
+            return 1
+        validation_errors = cfg.validate()
+        if validation_errors:
+            for err in validation_errors:
+                print(f"Error: {err}", file=sys.stderr)
+            return 1
+        if not cfg.files:
+            print("Error: No [[file]] entries found in configuration.", file=sys.stderr)
+            return 1
+        from .render import generate_all_renders as _gen_all_renders
+
+        try:
+            _gen_all_renders(cfg, output_dir=args.output)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    if not getattr(args, "package", None):
+        print("Error: Must specify a package path or use --all-files.", file=sys.stderr)
+        return 1
+    try:
+        return run_render(
+            Path(args.package),
+            output_dir=Path(args.output) if args.output else None,
+            force=bool(getattr(args, "force", False)),
+        )
+    except FileExistsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -449,6 +552,195 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             return 1
 
     return 0
+
+
+def _cmd_mcp_add(args: argparse.Namespace) -> int:
+    """Register ``sofer-mcp`` with the selected agent(s).
+
+    Orchestration:
+
+        1. Expand ``--agent all`` to the three agents.
+        2. Resolve the desired ``cwd`` (``--cwd`` or ``Path.cwd()``) to an
+           absolute path via ``Path.resolve()`` and validate containment with
+           ``mcp_registration.validate_cwd`` (``is_relative_to`` user/project
+           root) — fail with exit 1 and a path message when outside.
+        3. For each agent: probe native delegation via
+           ``mcp_registration.probe_native`` (``which`` + ``mcp --help``
+           timeout 3s); when available, try ``delegate_add`` first — on
+           success skip file-edit, on failure fall back.
+        4. File-edit path: ``resolve_config_path`` → ``read_config``
+           (unreadable/malformed → print to stderr, return 1, no backup/write)
+           → ``build_entry`` (absolute cwd, env forwarding per agent) →
+           ``merge`` (normalize Codex command string/array, preserve other
+           servers, no write when unchanged) → ``--dry-run`` guard (no
+           mutation) → ``backup`` (single ``.bak`` copy2 overwrite) →
+           ``atomic_write`` (tmp in same dir + ``os.replace``).
+        5. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
+
+    Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
+    from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
+    receives an explicit ``env`` dict, opencode receives no env.
+    """
+    from . import mcp_registration
+
+    # Expand agent
+    raw_agent: str = getattr(args, "agent")
+    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    scope: str = getattr(args, "scope", "user")
+    cwd_raw: str | None = getattr(args, "cwd", None)
+    dry_run: bool = bool(getattr(args, "dry_run", False))
+
+    # Resolve desired cwd for the entry (absolute, contained)
+    if cwd_raw is not None:
+        cwd_resolved = Path(cwd_raw).resolve()
+    else:
+        cwd_resolved = Path.cwd().resolve()
+
+    # Containment check — must be absolute and inside allowed root
+    # validate_cwd uses is_relative_to logic; reject outside
+    if not mcp_registration.validate_cwd(cwd_resolved, cast(_Scope, scope)):
+        print(
+            f"  X  --cwd {cwd_resolved} is outside the allowed root for scope '{scope}'",
+            file=sys.stderr,
+        )
+        return 1
+
+    env = mcp_registration.collect_env()
+    overall = 0
+
+    for agent in agents:
+        _agent = cast(_AgentName, agent)
+        # Prefer native delegation for codex/gemini
+        if mcp_registration.probe_native(_agent, timeout=3.0):
+            try:
+                delegated = mcp_registration.delegate_add(_agent, cwd_resolved, list(env.keys()))
+            except Exception:
+                delegated = False
+            if delegated:
+                print(f"  OK  {agent} delegated via native mcp add")
+                continue
+            print(
+                f"  !  {agent} native delegation failed, falling back to file edit",
+                file=sys.stderr,
+            )
+
+        # File-edit fallback — resolve path (project scope anchored on
+        # cwd_resolved when --cwd given; else Path.cwd())
+        _scope = cast(_Scope, scope)
+        if scope == "project" and cwd_raw is not None:
+            # When project scope with custom cwd, anchor project config under that cwd
+            path = mcp_registration.resolve_config_path(_agent, _scope, cwd_resolved)
+        elif scope == "project":
+            path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        else:
+            path = mcp_registration.resolve_config_path(_agent, _scope, None)
+
+        try:
+            existing, _fmt = mcp_registration.read_config(path)
+        except Exception as exc:
+            print(f"  X  {agent} config unreadable ({path}): {exc}", file=sys.stderr)
+            overall = 1
+            continue
+
+        desired = mcp_registration.build_entry(_agent, cwd_resolved, env)
+        new_doc, changed = mcp_registration.merge(_agent, existing, desired)
+        if not changed:
+            print(f"  OK  {agent} already registered (idempotent)")
+            continue
+        if dry_run:
+            print(f"  DRY RUN  Would register {agent} at {path}")
+            continue
+        # Backup before first mutation
+        try:
+            mcp_registration.backup(path)
+        except Exception as exc:
+            print(f"  X  {agent} backup failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        # Atomic write — fmt from adapter (preserve agent's expected format)
+        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        try:
+            mcp_registration.atomic_write(path, new_doc, fmt_expected)
+        except Exception as exc:
+            print(f"  X  {agent} write failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        print(f"  OK  {agent} registered at {path}")
+
+    return overall
+
+
+def _cmd_mcp_remove(args: argparse.Namespace) -> int:
+    """Remove ``sofer-mcp`` from the selected agent(s).
+
+    Orchestration mirrors :func:`_cmd_mcp_add` without ``--cwd``:
+
+        1. Expand ``--agent all``.
+        2. For each agent: probe native ``delegate_remove`` first;
+           on success skip file-edit, on failure fall back.
+        3. File-edit: ``resolve_config_path`` → ``read_config``
+           (unreadable → exit 1, no backup/write) → ``remove_entry``
+           (preserve other servers, no write when absent) →
+           ``--dry-run`` guard → ``backup`` → ``atomic_write``.
+        4. Aggregate exit codes — 0 iff all succeed else 1.
+
+    No ``--cwd`` flag exists on remove (CLI-R09: only add accepts cwd).
+    """
+    from . import mcp_registration
+
+    raw_agent: str = getattr(args, "agent")
+    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    scope: str = getattr(args, "scope", "user")
+    dry_run: bool = bool(getattr(args, "dry_run", False))
+    overall = 0
+
+    for agent in agents:
+        _agent = cast(_AgentName, agent)
+        _scope = cast(_Scope, scope)
+        if mcp_registration.probe_native(_agent, timeout=3.0):
+            try:
+                delegated = mcp_registration.delegate_remove(_agent)
+            except Exception:
+                delegated = False
+            if delegated:
+                print(f"  OK  {agent} delegated remove via native mcp remove")
+                continue
+            print(
+                f"  !  {agent} native remove failed, falling back to file edit",
+                file=sys.stderr,
+            )
+
+        path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        try:
+            existing, _fmt2 = mcp_registration.read_config(path)
+        except Exception as exc:
+            print(f"  X  {agent} config unreadable ({path}): {exc}", file=sys.stderr)
+            overall = 1
+            continue
+
+        new_doc, changed = mcp_registration.remove_entry(_agent, existing)
+        if not changed:
+            print(f"  OK  {agent} already absent (idempotent)")
+            continue
+        if dry_run:
+            print(f"  DRY RUN  Would remove {agent} at {path}")
+            continue
+        try:
+            mcp_registration.backup(path)
+        except Exception as exc:
+            print(f"  X  {agent} backup failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        try:
+            mcp_registration.atomic_write(path, new_doc, fmt_expected)
+        except Exception as exc:
+            print(f"  X  {agent} write failed: {exc}", file=sys.stderr)
+            overall = 1
+            continue
+        print(f"  OK  {agent} removed from {path}")
+
+    return overall
 
 
 _INIT_TEMPLATE = """\
@@ -800,6 +1092,26 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show the repo diff and split report without preparing or uploading.",
     )
+    pb.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "Delete the build directory after a successful publish (PUB-11). "
+            "Build-only by default; has no effect on --dry-run, quality-gate block, "
+            "or upload failure. Respects --output override via resolve_output_dir."
+        ),
+    )
+    pb.add_argument(
+        "--clean-cache",
+        "--all",
+        dest="clean_cache",
+        action="store_true",
+        help=(
+            "Also delete cache/ (tool-wide OUTPUT_DIR at cfg._base_dir/cache, "
+            "shared across datasets) when used with --clean. Requires explicit "
+            "opt-in; warn: sibling datasets share cache/."
+        ),
+    )
     pb.set_defaults(func=_cmd_publish)
 
     # ── codebook ──────────────────────────────────────────────────
@@ -860,19 +1172,49 @@ def _build_parser() -> argparse.ArgumentParser:
             "records the detected schema, per-column semantic types, and "
             "possible PII findings.  The source dataset is never modified.\n"
             "\n"
-            "metadata.yaml is written next to the dataset by default, or to "
-            "--output DIR when given.  Missing human-input fields "
-            "(description, license, source, and column descriptions) are "
-            "reported after the document is written."
+            "Single-file: metadata.yaml is written next to the dataset by "
+            "default, or to --output DIR when given. Without --force an "
+            "existing destination raises FileExistsError with hint "
+            "'use --force to overwrite <path>'.\n"
+            "\n"
+            "Batch (--all-files): positional DATASET is the TOML file "
+            "containing [[file]] entries (also via --config). Each entry is "
+            "profiled into <write_root>/profiles/<rel_stem>.metadata.yaml "
+            "where <rel_stem> is relative to cache/ (OUTPUT_DIR) or the TOML "
+            "directory and only the last suffix is replaced. Relative "
+            "--output anchors to the TOML directory (Option B); writes never "
+            "mutate cache/ when --output is given. TOML without [[file]] "
+            "fails fast. Collisions write non-colliding first then raise "
+            "ValueError."
         ),
     )
     prf.add_argument(
         "dataset",
-        help="Path to the dataset file to profile (CSV, TSV, Parquet, Excel, or JSON Lines).",
+        nargs="?",
+        help="Path to the dataset file to profile (CSV, TSV, Parquet, Excel, or JSON Lines). "
+        "With --all-files, path to the TOML configuration file containing [[file]] entries.",
     )
     prf.add_argument(
         "--output",
-        help="Output directory for metadata.yaml (default: the dataset's directory).",
+        help="Output directory for metadata.yaml (default: the dataset's directory). "
+        "With --all-files, directory for profiles/<rel_stem>.metadata.yaml (Option B).",
+    )
+    prf.add_argument(
+        "--all-files",
+        action="store_true",
+        help="Profile every [[file]] entry in the TOML config (requires [[file]]).",
+    )
+    prf.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing metadata.yaml without error "
+        "(single-file; hint: use --force to overwrite).",
+    )
+    prf.add_argument(
+        "--config",
+        default=config.DEFAULT_CONFIG_NAME,
+        help="Path to the TOML config file used with --all-files "
+        "(default: default_config_name from [tool.sofer]).",
     )
     prf.set_defaults(func=_cmd_profile)
 
@@ -885,20 +1227,48 @@ def _build_parser() -> argparse.ArgumentParser:
             "README.md from its contents.  The <package> argument is either "
             "the metadata.yaml file itself or the directory containing it.\n"
             "\n"
-            "Inference states are rendered distinctly: confirmed as a plain "
-            "label, inferred as '<type> (inferred, NN%)' with the confidence "
-            "percentage, and unknown as 'unknown'.  README.md is written next "
-            "to metadata.yaml by default, or to --output DIR when given.  The "
-            "metadata.yaml is never modified."
+            "Single-file: README.md is written next to metadata.yaml by "
+            "default, or to --output DIR when given. Without --force an "
+            "existing destination raises FileExistsError with hint "
+            "'use --force to overwrite <path>'.\n"
+            "\n"
+            "Batch (--all-files): positional PACKAGE is the TOML file "
+            "containing [[file]] entries (also via --config). Each entry's "
+            "metadata.yaml under <write_root>/profiles/<rel_stem>.metadata.yaml "
+            "is rendered into <write_root>/renders/<rel_stem>.README.md "
+            "where <rel_stem> mirrors profile. Missing metadata.yaml entries "
+            "are skipped. Relative --output anchors to the TOML directory "
+            "(Option B). TOML without [[file]] fails fast. Collisions raise "
+            "ValueError after partial write."
         ),
     )
     rnd.add_argument(
         "package",
-        help="Path to metadata.yaml, or the directory containing it.",
+        nargs="?",
+        help="Path to metadata.yaml, or the directory containing it. "
+        "With --all-files, path to the TOML configuration file containing [[file]] entries.",
     )
     rnd.add_argument(
         "--output",
-        help="Output directory for README.md (default: the metadata.yaml directory).",
+        help="Output directory for README.md (default: the metadata.yaml directory). "
+        "With --all-files, directory for renders/<rel_stem>.README.md (Option B).",
+    )
+    rnd.add_argument(
+        "--all-files",
+        action="store_true",
+        help="Render every [[file]] entry in the TOML config (requires [[file]]).",
+    )
+    rnd.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing README.md without error "
+        "(single-file; hint: use --force to overwrite).",
+    )
+    rnd.add_argument(
+        "--config",
+        default=config.DEFAULT_CONFIG_NAME,
+        help="Path to the TOML config file used with --all-files "
+        "(default: default_config_name from [tool.sofer]).",
     )
     rnd.set_defaults(func=_cmd_render)
 
@@ -1012,6 +1382,83 @@ def _build_parser() -> argparse.ArgumentParser:
         "When omitted, all supported formats are included.",
     )
     s.set_defaults(func=_cmd_scan)
+
+    # ── mcp ───────────────────────────────────────────────────────
+    mcp = sub.add_parser(
+        "mcp",
+        help="Register sofer-mcp with AI agents (opencode, codex, gemini).",
+        description=(
+            "Register or remove the ``sofer-mcp`` MCP server from AI agent "
+            "configurations. Supports ``opencode`` (opencode.json), ``codex`` "
+            "(config.toml), and ``gemini`` (settings.json) with idempotent "
+            "merge, backup to ``.bak``, atomic write, and per-agent env "
+            "forwarding. Use ``--agent all`` to target every agent."
+        ),
+    )
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+
+    mcp_add = mcp_sub.add_parser(
+        "add",
+        help="Register sofer-mcp with the selected agent(s).",
+        description=(
+            "Register ``sofer-mcp`` in the agent config file. Creates the "
+            "config when missing, merges idempotently when present, preserves "
+            "other servers, backs up the original to ``.bak`` (single file, "
+            "overwrites), and writes atomically via tmp+os.replace. "
+            "``--cwd`` sets the server's working directory (absolute, "
+            "contained under the scope root). TOML edits may strip comments."
+        ),
+    )
+    mcp_add.add_argument(
+        "--agent",
+        choices=["opencode", "codex", "gemini", "all"],
+        required=True,
+        help="Target agent or 'all' for every agent.",
+    )
+    mcp_add.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default="user",
+        help="Config scope: 'user' (home directory) or 'project' (current directory).",
+    )
+    mcp_add.add_argument(
+        "--cwd",
+        help="Working directory for the MCP server (absolute, contained under scope root).",
+    )
+    mcp_add.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without writing — no file or .bak is created.",
+    )
+    mcp_add.set_defaults(func=_cmd_mcp_add)
+
+    mcp_remove = mcp_sub.add_parser(
+        "remove",
+        help="Remove sofer-mcp from the selected agent(s).",
+        description=(
+            "Remove the ``sofer`` entry idempotently. Preserves other "
+            "servers, backs up before edit, and does no write when the entry "
+            "is already absent. Prefers native ``mcp remove`` when available."
+        ),
+    )
+    mcp_remove.add_argument(
+        "--agent",
+        choices=["opencode", "codex", "gemini", "all"],
+        required=True,
+        help="Target agent or 'all' for every agent.",
+    )
+    mcp_remove.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default="user",
+        help="Config scope: 'user' (home directory) or 'project' (current directory).",
+    )
+    mcp_remove.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without writing — no file or .bak is created.",
+    )
+    mcp_remove.set_defaults(func=_cmd_mcp_remove)
 
     return parser
 

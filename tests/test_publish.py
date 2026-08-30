@@ -1338,3 +1338,188 @@ class TestSingleSheetRegression:
         result = expanded_planned_remotes(cfg, keep_csv=False, staging_dir=staging)
         assert result == ["single.parquet"]
         assert not any("__" in r for r in result)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUB-11 — --clean flag (build/cache isolation, gating, anchoring, local)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPublishClean:
+    """PUB-11: --clean deletes build only on success; cache needs --clean-cache."""
+
+    def test_clean_deletes_build_on_success(self, tmp_path: Path, monkeypatch) -> None:
+        """hf success with --clean removes build, cache stays."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        cache = tmp_path / "cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "keep.txt").write_text("x", encoding="utf-8")
+        out.stat().st_mtime  # keep build fresh
+        _mock_hf_api(monkeypatch)
+        # keep staging tmpdir alive to avoid rmtree interference
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        orig_rmtree = _shutil.rmtree
+        monkeypatch.setattr(
+            _shutil,
+            "rmtree",
+            lambda p, **kw: (
+                orig_rmtree(p, **kw) if Path(p) != td and Path(p) != td / "repo" else None
+            ),
+        )
+
+        rc = publish(cfg, target="hf", clean=True, clean_cache=False)
+        assert rc == 0
+        assert not out.exists(), "build should be deleted with --clean"
+        assert cache.exists(), "cache must remain without --clean-cache"
+
+    def test_clean_and_cache_deletes_both(self, tmp_path: Path, monkeypatch) -> None:
+        """--clean --clean-cache deletes build and cache."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        cache = tmp_path / "cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "keep.txt").write_text("x", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        orig_rmtree = _shutil.rmtree
+        monkeypatch.setattr(
+            _shutil,
+            "rmtree",
+            lambda p, **kw: (
+                orig_rmtree(p, **kw) if Path(p) != td and Path(p) != td / "repo" else None
+            ),
+        )
+
+        rc = publish(cfg, target="hf", clean=True, clean_cache=True)
+        assert rc == 0
+        assert not out.exists()
+        assert not cache.exists()
+
+    def test_dry_run_with_clean_does_not_delete(self, tmp_path: Path, monkeypatch) -> None:
+        """--dry-run --clean must not delete build or cache."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        cache = tmp_path / "cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "keep.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", _raise_network)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, dry_run=True, clean=True, clean_cache=True)
+        assert rc == 0
+        assert out.exists()
+        assert cache.exists()
+
+    def test_quality_fail_with_clean_does_not_delete(self, tmp_path: Path, monkeypatch) -> None:
+        """Quality gate failure with --clean must not delete."""
+        from sofer.checks import ValidationReport
+        from sofer.quality import QualityResult
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        report = ValidationReport("test")
+        report.quality_results = [
+            QualityResult(check="corrupt_records", severity="fail", message="bad")
+        ]
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, target="hf", clean=True, quality_report=report)
+        assert rc == 1
+        assert out.exists()
+
+    def test_upload_failure_with_clean_does_not_delete(self, tmp_path: Path, monkeypatch) -> None:
+        """Upload failure with --clean must not delete."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+
+        def _raise(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError("net fail")
+
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise)
+
+        rc = publish(cfg, target="hf", clean=True)
+        assert rc == 1
+        assert out.exists()
+
+    def test_local_without_clean_does_not_delete(self, tmp_path: Path, monkeypatch) -> None:
+        """--target local without --clean must not delete dest nor build."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        rc = publish(cfg, target="local", output_dir="./out", clean=False)
+        assert rc == 0
+        assert (tmp_path / "out").exists()
+        assert out.exists()
+
+    def test_local_with_clean_deletes_destination_not_build(self, tmp_path: Path) -> None:
+        """--target local --clean deletes destination, source build stays."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        prepare(cfg, out)
+        rc = publish(cfg, target="local", output_dir="./out", clean=True)
+        assert rc == 0
+        assert not (tmp_path / "out").exists()
+        assert out.exists()
+
+    def test_custom_output_clean_anchored(self, tmp_path: Path, monkeypatch) -> None:
+        """--output ./staging with --clean deletes ./staging, cache stays."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")], build_dir="build")
+        default_build = tmp_path / "build"
+        default_build.mkdir(exist_ok=True)
+        (default_build / "keep.txt").write_text("x", encoding="utf-8")
+        staging = tmp_path / "staging"
+        # prepare into staging via publish auto-prepare
+        cache = tmp_path / "cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "keep.txt").write_text("x", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        orig_rmtree = _shutil.rmtree
+        monkeypatch.setattr(
+            _shutil,
+            "rmtree",
+            lambda p, **kw: (
+                orig_rmtree(p, **kw) if Path(p) != td and Path(p) != td / "repo" else None
+            ),
+        )
+
+        rc = publish(cfg, target="hf", output_dir="./staging", clean=True, clean_cache=False)
+        assert rc == 0
+        assert not staging.exists()
+        assert cache.exists()
+        # default build was not the publish output, so it stays (ancillary)
+        assert default_build.exists()
