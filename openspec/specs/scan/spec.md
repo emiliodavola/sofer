@@ -4,126 +4,92 @@
 
 Automated data-file discovery, copy, and TOML registration. The `scan` command
 eliminates manual `[[file]]` maintenance by discovering supported formats,
-copying them to `data/`, and writing the updated config.
+copying them to `cache/` (`OUTPUT_DIR`, gitignored), and writing the updated config.
 
 ## Requirements
 
 ### Requirement: File Discovery (SCN-01)
 
-The system MUST recursively discover files with supported extensions from the
-config directory. Supported formats SHALL come from an extensible registry:
-`.csv`, `.tsv`, `.parquet`, `.xlsx`, `.jsonl`. Standard exclusion directories
-MUST be skipped: `.git/`, `__pycache__/`, `.venv/`, `node_modules/`, `dist/`,
-`build/`.
+System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.jsonl`) from config dir. `EXCLUSIONS` (`.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, `build`) MUST be skipped. `cache/` (`OUTPUT_DIR`) SHALL be excluded; `raw/` SHALL never be excluded. `flatten_first_level` drops first segment.
 
-#### Scenario: Discover supported files in a project tree
-
-- GIVEN a directory with `raw/survey.csv`, `raw/notes.txt`, `archive/data.parquet`
+#### Scenario: Discover supported
+- GIVEN `raw/survey.csv`, `raw/notes.txt`, `archive/data.parquet`
 - WHEN `scan` executes
-- THEN `survey.csv` and `data.parquet` SHALL be discovered
-- AND `notes.txt` SHALL be excluded (unsupported extension)
+- THEN `survey.csv`/`data.parquet` SHALL be discovered, `notes.txt` excluded
 
-#### Scenario: Excluded directories are never traversed
-
-- GIVEN a `.venv/lib/data.csv` and `node_modules/pkg/data.jsonl`
+#### Scenario: Excluded dirs skipped
+- GIVEN `.venv/lib/data.csv` and `node_modules/pkg/data.jsonl`
 - WHEN `scan` executes
-- THEN neither file SHALL appear in results
-- AND `.venv/` and `node_modules/` subtrees SHALL be skipped entirely
+- THEN neither SHALL appear
 
-#### Scenario: `--ext .ext` filters to a single extension
-
-- GIVEN files `a.csv`, `b.parquet`, `c.jsonl`
-- WHEN `scan --ext .csv` executes
+#### Scenario: --ext filters
+- GIVEN `a.csv`, `b.parquet`, `c.jsonl`
+- WHEN `scan --ext .csv`
 - THEN only `a.csv` SHALL be discovered
+
+#### Scenario: raw discovered, cache excluded
+- GIVEN `raw/a.csv` and `cache/a.csv`
+- WHEN `scan` executes
+- THEN `raw/a.csv` SHALL be discovered, `cache/a.csv` SHALL NOT
 
 ---
 
 ### Requirement: TOML Merge (SCN-02)
 
-The system MUST load the existing TOML via `tomli`, merge discovered files as
-`[[file]]` entries (with `local` pointing to `data/`-relative paths and `remote`
-using `PurePosixPath`), and write via `tomli_w`. Entries SHALL be deduplicated
-by resolved absolute path. Non-`[[file]]` sections (`[dataset]`, `[meta]`,
-`[[check]]`, `[[quality]]`) MUST be preserved.
+System MUST load TOML via `tomli`, merge `[[file]]` with `local=cache/<flat>` (`OUTPUT_DIR/<flat>`) and `remote=<flat>` posix, `tomli_w` write. Dedup by resolved absolute path and `remote`. Preserve `[dataset]`,`[meta]`,`[[check]]`,`[[quality]]`. Flatten first segment; root file keeps name.
 
-When computing paths for a discovered file, the system MUST flatten the first
-path segment: the top-level directory component of the source path relative to
-the config directory SHALL be dropped. A file at the config root (no directory
-component) SHALL keep only its filename. All remaining subdirectory segments
-SHALL be preserved. `local` SHALL be `data/<flattened relative>`; `remote`
-SHALL be the flattened relative path with `PurePosixPath` separators.
+#### Scenario: Merge new files
+- GIVEN `dataset.toml` with 2 `[[file]]` + `[dataset]`/`[meta]`
+- AND discovered `raw/new.csv`
+- WHEN write
+- THEN `[dataset]`/`[meta]` unchanged, `[[file]]` = 3
 
-#### Scenario: Merge new files into existing TOML
+#### Scenario: Duplicate skipped
+- GIVEN existing `local="cache/survey.csv"` → `/abs/cache/survey.csv`
+- AND discovered `/abs/raw/survey.csv`
+- WHEN merge
+- THEN no duplicate SHALL be created
 
-- GIVEN `dataset.toml` with 2 existing `[[file]]` entries and `[dataset]`/`[meta]` sections
-- AND discovered files `raw/new.csv` and `raw/existing.csv`
-- WHEN `scan` writes TOML
-- THEN `[dataset]` and `[meta]` SHALL be unchanged
-- AND `[[file]]` SHALL contain 3 entries (2 existing + 1 new)
+#### Scenario: No loss
+- GIVEN `dataset.toml` with `[[check]]`,`[[quality]]`
+- WHEN scan writes
+- THEN all `[[check]]`/`[[quality]]` SHALL survive
 
-#### Scenario: Duplicate by resolved path is skipped
+#### Scenario: Flattened paths
+- GIVEN `raw/DPTO.csv` and `raw/Labels/etiquetas_a.csv`
+- WHEN merge
+- THEN `local="cache/DPTO.csv"`/`remote="DPTO.csv"` and `local="cache/Labels/etiquetas_a.csv"`/`remote="Labels/etiquetas_a.csv"`
 
-- GIVEN an existing `[[file]]` entry with `local = "data/survey.csv"` (resolves to `/abs/data/survey.csv`)
-- AND the discovered file `/abs/raw/survey.csv`
-- WHEN `scan` merges
-- THEN no duplicate `[[file]]` entry SHALL be created
-
-#### Scenario: No `[[file]]` loss on merge
-
-- GIVEN `dataset.toml` with `[[file]]`, `[[check]]`, and `[[quality]]` sections
-- WHEN `scan` produces output
-- THEN all `[[check]]` and `[[quality]]` entries SHALL survive the round-trip
-
-#### Scenario: Flattened local and remote paths
-
-- GIVEN discovered files `raw/DPTO.csv` and `raw/Labels/etiquetas_a.csv`
-- WHEN `scan` merges
-- THEN the first entry SHALL have `local = "data/DPTO.csv"` and `remote = "DPTO.csv"`
-- AND the second entry SHALL have `local = "data/Labels/etiquetas_a.csv"` and `remote = "Labels/etiquetas_a.csv"`
-
-#### Scenario: Root-level file keeps its name
-
-- GIVEN discovered file `x.csv` at the config root
-- WHEN `scan` merges
-- THEN the entry SHALL have `local = "data/x.csv"` and `remote = "x.csv"`
+#### Scenario: Root file
+- GIVEN `x.csv` at root
+- WHEN merge
+- THEN `local="cache/x.csv"`, `remote="x.csv"`
 
 ---
 
 ### Requirement: File Copy (SCN-03)
 
-The system MUST copy discovered files to `data/` flattening the first path
-segment: `raw/sub/data.csv` SHALL be copied to `data/sub/data.csv`, and a
-root-level `x.csv` SHALL be copied to `data/x.csv`. Subdirectories beyond the
-first segment SHALL be preserved (`raw/Labels/y.csv` → `data/Labels/y.csv`).
-`shutil.copy2` SHALL be used for metadata preservation. Source files MUST
-remain untouched. Directory creation SHALL be lazy (only when needed).
+System MUST copy to `cache/` (`OUTPUT_DIR`) flattening first segment (`raw/sub/data.csv→cache/sub/data.csv`, `x.csv→cache/x.csv`). Preserve subdirs beyond first. Use `shutil.copy2`. Sources untouched. Lazy mkdir.
 
-#### Scenario: Copy flattens the first path segment
+#### Scenario: Flatten copy
+- GIVEN `raw/sub/data.csv`
+- WHEN copy
+- THEN `cache/sub/data.csv` exists, source unchanged
 
-- GIVEN discovered file `raw/sub/data.csv` configured to `./data/`
-- WHEN `scan` copies files
-- THEN `data/sub/data.csv` SHALL exist
-- AND `raw/sub/data.csv` SHALL be unchanged
+#### Scenario: Root copy
+- GIVEN `x.csv` at root
+- WHEN copy
+- THEN `cache/x.csv` exists
 
-#### Scenario: Root-level file copied to data root
+#### Scenario: Nested preserved
+- GIVEN `raw/Labels/etiquetas_a.csv`
+- WHEN copy
+- THEN `cache/Labels/etiquetas_a.csv` exists
 
-- GIVEN discovered file `x.csv` at the config root
-- WHEN `scan` copies files
-- THEN `data/x.csv` SHALL exist
-
-#### Scenario: Nested source dirs preserved after flatten
-
-- GIVEN discovered file `raw/Labels/etiquetas_a.csv`
-- WHEN `scan` copies files
-- THEN `data/Labels/etiquetas_a.csv` SHALL exist
-
-#### Scenario: Dry-run reports without copying
-
-- GIVEN 3 discovered files
-- WHEN `scan --dry-run` executes
-- THEN a report SHALL list all planned copies using their flattened destinations
-- AND no files SHALL be created under `data/`
-- AND `dataset.toml` SHALL NOT be modified
+#### Scenario: Dry-run
+- GIVEN 3 files
+- WHEN `scan --dry-run`
+- THEN report lists flattened `cache/` dests, no files created, TOML unchanged
 
 ---
 
@@ -172,45 +138,45 @@ yield byte-identical `dataset.toml`.
 
 ### Requirement: Error Handling (SCN-06)
 
-The system MUST handle errors gracefully: missing config, no discovered files,
-destination conflicts, and malformed TOML. All errors SHALL produce exit code 1.
+System MUST handle missing config, no files, conflicts, malformed TOML. Flatten collision SHALL fail before copy, naming all sources. Exit 1 for errors. No silent overwrite.
 
-When two or more discovered files flatten to the same destination path, the
-system MUST fail before any copy occurs, printing an error that names every
-conflicting source path. No deduplication and no silent overwrite SHALL occur.
+#### Scenario: Config missing
+- GIVEN no `dataset.toml`
+- WHEN `scan`
+- THEN error printed, exit 1
 
-#### Scenario: Config file not found
+#### Scenario: No files
+- GIVEN only `.txt`/`.md`
+- WHEN `scan`
+- THEN warning "no supported files" and exit 0
 
-- GIVEN `dataset.toml` does not exist
-- WHEN `sofer scan` is called
-- THEN an error message SHALL be printed
-- AND exit code SHALL be 1
+#### Scenario: Dest exists
+- GIVEN `cache/raw.csv` exists
+- WHEN copy `raw.csv`
+- THEN prompt; `--force` overwrites silently
 
-#### Scenario: No supported files discovered
+#### Scenario: Malformed TOML
+- GIVEN invalid TOML
+- WHEN `scan`
+- THEN parse error with line, exit 1
 
-- GIVEN a directory with only `.txt` and `.md` files
-- WHEN `scan` executes
-- THEN a warning SHALL state "no supported files found"
-- AND exit code SHALL be 0 (not an error)
+#### Scenario: Flatten collision
+- GIVEN `A/x.csv` and `B/x.csv` → `x.csv`
+- WHEN `scan`
+- THEN error names both, exit 1, no copy
 
-#### Scenario: Destination file already exists
+---
 
-- GIVEN `data/raw.csv` already exists (from prior copy)
-- WHEN `scan` attempts to copy `raw.csv` (with different source)
-- THEN the user SHALL be prompted to overwrite
-- AND with `--force`, the file SHALL be overwritten silently
+### Requirement: Source Layout and Copy-Only (SCN-07)
 
-#### Scenario: Malformed TOML cannot be read
+System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) → `build/` (gitignored) with diagram `raw/DPTO.csv→cache/DPTO.csv→build/*.parquet`. `scan` MUST copy to `cache/` via `flatten_first_level` and SHALL NOT move/delete sources.
 
-- GIVEN `dataset.toml` containing invalid TOML syntax
-- WHEN `scan` is called
-- THEN a parse error SHALL be reported with line number
-- AND exit code SHALL be 1
+#### Scenario: Sources untouched
+- GIVEN `raw/DPTO.csv` exists
+- WHEN `scan` completes
+- THEN `raw/DPTO.csv` unchanged and `cache/DPTO.csv` exists
 
-#### Scenario: Flatten collision across source directories
-
-- GIVEN discovered files `A/x.csv` and `B/x.csv` (both flatten to `x.csv`)
-- WHEN `scan` executes
-- THEN an error SHALL be printed naming both `A/x.csv` and `B/x.csv`
-- AND exit code SHALL be 1
-- AND no files SHALL be copied under `data/`
+#### Scenario: Docs show diagram
+- GIVEN user views Directory layout
+- WHEN layout rendered
+- THEN `raw/→cache/→build/` and `raw/DPTO.csv→cache/DPTO.csv` SHALL appear
