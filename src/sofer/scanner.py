@@ -81,8 +81,7 @@ def check_raw_collisions(
         dest = raw_dir / rel
         if dest.exists():
             errors.append(
-                f"Collision in raw/: {dest.as_posix()} already exists "
-                f"(from {src.as_posix()})"
+                f"Collision in raw/: {dest.as_posix()} already exists (from {src.as_posix()})"
             )
 
     if errors:

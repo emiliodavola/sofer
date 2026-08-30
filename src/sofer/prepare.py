@@ -375,6 +375,8 @@ def _assert_cross_file_schema(
                 or k.lower() == norm_stem.lower()
                 or k.startswith(norm_stem + "__")
                 or k.startswith(legacy_key + "__")
+                or (k.startswith(norm_stem + "_") and k != norm_key)
+                or (k.startswith(legacy_key + "_") and k != legacy_key)
             ):
                 matching.append(k)
         for mk in matching:
@@ -606,9 +608,18 @@ def _check_local_overwrite(cfg: DatasetConfig, output_dir: Path, all_files: bool
                 parent = PurePosixPath(normalized).parent
                 search_dir = output_dir / parent if str(parent) != "." else output_dir
                 if search_dir.is_dir():
-                    for p in search_dir.glob(f"{stem}__*.parquet"):
-                        if p.exists():
+                    primary = sorted(search_dir.glob(f"{stem}__*.parquet"))
+                    primary = [p for p in primary if p.is_file()]
+                    if primary:
+                        for p in primary:
                             existing.append(str(p))
+                    else:
+                        # Fallback for single-underscore normalized layout
+                        # (mirrors _mirror.py PUB-10): _*.parquet filtered c.stem != stem
+                        alt = sorted(search_dir.glob(f"{stem}_*.parquet"))
+                        for p in alt:
+                            if p.is_file() and p.stem != stem:
+                                existing.append(str(p))
                     # Also single-sheet case
                     candidate = output_dir / PurePosixPath(normalized)
                     if candidate.exists():
@@ -848,10 +859,17 @@ def prepare(
             # If this entry's normalized remote (or any sheet expansion) was
             # converted, it is already staged — skip
             norm_key = normalize_parquet_remote(parquet_remote_for(entry.remote))
-            is_converted = any(
-                k == norm_key or k.startswith(norm_key.removesuffix(".parquet") + "__")
-                for k in converted
-            )
+            suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+            norm_stem = norm_key.removesuffix(".parquet")
+            if suffix == ".xlsx":
+                is_converted = any(
+                    k == norm_key
+                    or k.startswith(norm_stem + "__")
+                    or (k.startswith(norm_stem + "_") and k != norm_key)
+                    for k in converted
+                )
+            else:
+                is_converted = any(k == norm_key for k in converted)
             if is_converted:
                 continue  # already staged as Parquet above
             local = entry.resolve(base)

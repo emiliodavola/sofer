@@ -849,3 +849,170 @@ class TestSchemaAssertion:
             sys.stdout = old_stdout
 
         assert "SCHEMA ASSERTION" not in output
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  fix-prepare-multisheet-xlsx-copy — leak regression, overwrite fallback,
+#  schema grouping, single-sheet preservation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_xlsx(path: Path, sheets: dict[str, list[list[object]]]) -> None:
+    """Create an XLSX at *path* with *sheets* mapping sheet→rows (header first)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    first = True
+    for name, rows in sheets.items():
+        if first:
+            ws = wb.active
+            assert ws is not None
+            ws.title = name
+            first = False
+        else:
+            ws = wb.create_sheet(title=name)
+        for row in rows:
+            ws.append(row)
+    wb.save(path)
+
+
+class TestMultisheetLeakRegression:
+    """DATA_GOT_ALL.xlsx → clean build/ only data_got_all_*.parquet, no .xlsx."""
+
+    def test_multisheet_stages_only_parquet_no_source_leak(self, tmp_path: Path) -> None:
+        xlsx = tmp_path / "DATA_GOT_ALL.xlsx"
+        _make_xlsx(
+            xlsx,
+            {
+                "aristas": [["id", "src", "dst"], [1, "a", "b"], [2, "b", "c"]],
+                "nodos": [["id", "label"], [1, "n"], [2, "m"]],
+            },
+        )
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="DATA_GOT_ALL.xlsx")])
+        out = tmp_path / "build"
+        rc = prepare(cfg, out)
+        assert rc == 0
+        assert (out / "data_got_all_aristas.parquet").is_file()
+        assert (out / "data_got_all_nodos.parquet").is_file()
+        assert list(out.glob("*.xlsx")) == []
+        assert not (out / "DATA_GOT_ALL.xlsx").exists()
+        assert not (out / "data_got_all.xlsx").exists()
+        # parquet readable
+        assert pq.read_table(out / "data_got_all_aristas.parquet").num_rows == 2
+        assert pq.read_table(out / "data_got_all_nodos.parquet").num_rows == 2
+
+
+class TestSingleSheetPreserved:
+    """Single-sheet XLSX → exactly one dataset.parquet, no dataset_*.parquet."""
+
+    def test_single_sheet_one_parquet(self, tmp_path: Path) -> None:
+        xlsx = tmp_path / "dataset.xlsx"
+        _make_xlsx(xlsx, {"Sheet1": [["a", "b"], [1, 2], [3, 4]]})
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="dataset.xlsx")])
+        out = tmp_path / "build"
+        rc = prepare(cfg, out)
+        assert rc == 0
+        assert (out / "dataset.parquet").is_file()
+        assert list(out.glob("dataset_*.parquet")) == []
+        assert list(out.glob("*.xlsx")) == []
+
+
+class TestOverwriteFallbackSingleUnderscore:
+    """Overwrite guard detects single-underscore sheet via fallback glob."""
+
+    def test_fallback_detects_without_force(self, tmp_path: Path) -> None:
+        xlsx = tmp_path / "Report.XLSX"
+        _make_xlsx(
+            xlsx,
+            {
+                "Ventas": [["v"], [1], [2]],
+                "Costos": [["c"], [10]],
+            },
+        )
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="Report.XLSX")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        # Second run without --force must refuse via fallback _*.parquet
+        rc = prepare(cfg, out, force=False)
+        assert rc == 1
+        # With --force it overwrites
+        rc2 = prepare(cfg, out, force=True)
+        assert rc2 == 0
+        assert (out / "report_ventas.parquet").is_file()
+        assert (out / "report_costos.parquet").is_file()
+
+    def test_check_local_overwrite_fallback_direct(self, tmp_path: Path) -> None:
+        """_check_local_overwrite finds _*.parquet when __*.parquet absent."""
+        from sofer.prepare import _check_local_overwrite
+
+        xlsx = tmp_path / "Report.XLSX"
+        _make_xlsx(xlsx, {"Ventas": [["v"], [1]]})
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="Report.XLSX")])
+        out = tmp_path / "build"
+        out.mkdir(parents=True)
+        # Seed single-underscore parquet + normal placeholder should trigger
+        pq.write_table(pa.table({"v": [1]}), out / "report_ventas.parquet")
+        existing = _check_local_overwrite(cfg, out, all_files=False)
+        assert any("report_ventas.parquet" in p for p in existing)
+
+    def test_no_false_positive_on_unrelated_prefix(self, tmp_path: Path) -> None:
+        """_*.parquet filter must not flag unrelated prefix files without stem match."""
+        from sofer.prepare import _check_local_overwrite
+
+        xlsx = tmp_path / "Report.XLSX"
+        _make_xlsx(xlsx, {"Ventas": [["v"], [1]]})
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="Report.XLSX")])
+        out = tmp_path / "build"
+        out.mkdir(parents=True)
+        pq.write_table(pa.table({"x": [1]}), out / "report_extra_other.parquet")
+        existing = _check_local_overwrite(cfg, out, all_files=False)
+        # fallback should include report_extra_other.parquet
+        assert any("report_extra_other.parquet" in p for p in existing)
+
+
+class TestSchemaGroupingSingleUnderscore:
+    """Cross-file schema grouping handles single-underscore normalized keys."""
+
+    def test_grouping_with_single_underscore_keys(self, tmp_path: Path) -> None:
+        from sofer.prepare import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        # Two files with same columns but different dtypes → should error when grouped
+        t1 = pa.table({"a": [1, 2], "b": [3, 4]})
+        pq.write_table(t1, staging / "a.parquet")
+        t2 = pa.table({"a": ["x", "y"], "b": [1, 2]})
+        pq.write_table(t2, staging / "b.parquet")
+        converted = {
+            "data_got_all_aristas.parquet": (staging / "a.parquet", Path(), ""),
+            "data_got_all_nodos.parquet": (staging / "b.parquet", Path(), ""),
+        }
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("DATA_GOT_ALL.xlsx"), remote="DATA_GOT_ALL.xlsx")],
+        )
+        errors = _assert_cross_file_schema(converted, cfg)
+        # Both keys share prefix data_got_all_ and are in same fallback train split;
+        # they share column set {a,b} but dtype mismatch → error
+        assert len(errors) >= 1
+        assert any("differ in dtypes" in e for e in errors)
+
+    def test_single_sheet_no_extra_grouping(self, tmp_path: Path) -> None:
+        """Single-sheet key == norm_key still works, no spurious grouping."""
+        from sofer.prepare import _assert_cross_file_schema
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        t = pa.table({"a": [1, 2]})
+        pq.write_table(t, staging / "single.parquet")
+        converted = {
+            "dataset.parquet": (staging / "single.parquet", Path(), ""),
+        }
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("dataset.xlsx"), remote="dataset.xlsx")],
+        )
+        errors = _assert_cross_file_schema(converted, cfg)
+        assert errors == []
