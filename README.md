@@ -525,7 +525,7 @@ sofer_publish_confirm(config="dataset.toml", acknowledge_risk=True)
 
 Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file), `output_dir`/`output_file` (override dir/file or `None`), `run_checks` (replaces `no_checks`), `force` (overwrite guard). Batch via `*_all(config)` — no `all_files` flag.
 
-> **Breaking changes (pre-1.0, v0.4):** `output` → `output_file` (sofer_codebook) / `output_dir` (all others); `no_checks` → `run_checks=True`; `sofer_profile`/`sofer_render` split into `sofer_profile`+`sofer_profile_all` and `sofer_render`+`sofer_render_all` (remove `all_files`); `target` is now `Literal["local"]` / `Literal["hf"]` enum; expected failures now return `{ok:false, error_code, message, next, config_errors}` instead of throwing. See `CHANGELOG.md` for migration.
+> **Breaking changes (pre-1.0, v0.4):** `output` → `output_file` (sofer_codebook) / `output_dir` (all others); `no_checks` → `run_checks=True`; `sofer_profile`/`sofer_render` split into `sofer_profile`+`sofer_profile_all` and `sofer_render`+`sofer_render_all` (remove `all_files`); `target` is now `Literal["local"]` / `Literal["hf"]` (single-value const); expected failures now return `{ok:false, error_code, message, next, config_errors}` instead of throwing.
 
 ### Agent setup (example: Claude Code)
 

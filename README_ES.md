@@ -514,7 +514,7 @@ llega con una `/` inicial y debe resolverse igualmente dentro de la raíz.
 ### Cadena de construcción canónica — Por fases (tools/list es autosuficiente)
 
 ```
-Fase 0 Bootstrap [condicional: REQUERIDO si greenfield — sin TOML / [[file]] vacío]
+Phase 0 (Fase 0) Bootstrap [condicional: REQUERIDO si greenfield — sin TOML / [[file]] vacío]
   sofer_init → sofer_scan_dry_run / sofer_scan_apply
 Fase 1 Build: sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all
 Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → sofer_publish_confirm

@@ -137,16 +137,12 @@ class TestParamDescriptions:
         pub = tools["sofer_publish"]
         pub_schema = pub.inputSchema or {}
         target = pub_schema.get("properties", {}).get("target", {})
-        # Should have enum with local
-        assert "enum" in target or "anyOf" in target or target.get("type") == "string"
-        # Check that description mentions target
-        if "enum" in target:
-            assert "local" in target["enum"]
+        # FastMCP 3.4.7 renders single-value Literal as const, not enum
+        assert target.get("enum") == ["local"] or target.get("const") == "local", target
         confirm = tools["sofer_publish_confirm"]
         conf_schema = confirm.inputSchema or {}
         t2 = conf_schema.get("properties", {}).get("target", {})
-        if "enum" in t2:
-            assert "hf" in t2["enum"]
+        assert t2.get("enum") == ["hf"] or t2.get("const") == "hf", t2
 
     def test_run_checks_exists(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
