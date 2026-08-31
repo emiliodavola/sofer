@@ -1639,7 +1639,7 @@ class TestMcpProfileRenderBatch:
         (root / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
         (root / "dataset.toml").write_text(
             '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
-                '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
             encoding="utf-8",
         )
         server = build_server(root=root)
@@ -1661,7 +1661,7 @@ class TestMcpProfileRenderBatch:
         (root / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
         (root / "dataset.toml").write_text(
             '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
-                '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
             encoding="utf-8",
         )
         # need profile first but containment should block before write
@@ -1684,7 +1684,7 @@ class TestMcpProfileRenderBatch:
         (root / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
         (root / "dataset.toml").write_text(
             '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
-                '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
             encoding="utf-8",
         )
         server = build_server(root=root)

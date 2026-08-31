@@ -426,9 +426,7 @@ def delegate_remove(agent: AgentName) -> bool:
     if not exe:
         return False
     try:
-        result = subprocess.run(
-            [exe, "mcp", "remove", "sofer"], timeout=3.0, capture_output=True
-        )
+        result = subprocess.run([exe, "mcp", "remove", "sofer"], timeout=3.0, capture_output=True)
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False

@@ -1120,3 +1120,162 @@ class TestGenerateAllDelimiterSeam:
         content = codebook_path.read_text(encoding="utf-8")
         assert "| 1 | `a`" in content
         assert "| 2 | `b`" in content
+
+
+# ── Multisheet XLSX (CB-R09) ──────────────────────────────────────
+
+
+def _make_xlsx(path: Path, sheets: dict[str, list[list[object]]]) -> None:
+    """Helper: create an xlsx with given sheets mapping name -> rows (header first)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    first = True
+    for name, rows in sheets.items():
+        if first:
+            ws = wb.active
+            ws.title = name
+            first = False
+        else:
+            ws = wb.create_sheet(title=name)
+        for row in rows:
+            ws.append(row)
+    wb.save(path)
+
+
+class TestCodebookMultisheet:
+    def test_read_xlsx_sheets_single(self, tmp_path):
+        p = tmp_path / "a.xlsx"
+        _make_xlsx(p, {"Ventas": [["h1", "h2"], ["a", "b"]]})
+        from sofer.codebook import _read_xlsx_sheets
+
+        sheets = _read_xlsx_sheets(str(p))
+        assert len(sheets) == 1
+        assert "ventas" in sheets
+        headers, _cols, _dtypes = sheets["ventas"]
+        assert headers == ["h1", "h2"]
+
+    def test_read_xlsx_sheets_two(self, tmp_path):
+        p = tmp_path / "rep.xlsx"
+        _make_xlsx(p, {"Ventas": [["a", "b"], ["1", "2"]], "Costos": [["c"], ["3"]]})
+        from sofer.codebook import _read_xlsx_sheets
+
+        sheets = _read_xlsx_sheets(str(p))
+        assert len(sheets) == 2
+        assert "ventas" in sheets
+        assert "costos" in sheets
+
+    def test_dedup_ventas(self, tmp_path):
+        # Use names that sanitize identically but are distinct for openpyxl
+        # (openpyxl auto-renames "Ventas"/"VENTAS" to "Ventas"/"VENTAS1")
+        p = tmp_path / "d.xlsx"
+        _make_xlsx(p, {"Ventas": [["h"], ["x"]], "Ventas!": [["h"], ["y"]]})
+        from sofer.codebook import _read_xlsx_sheets
+
+        sheets = _read_xlsx_sheets(str(p))
+        assert "ventas" in sheets
+        assert "ventas_2" in sheets
+
+    def test_empty_sheet_placeholder(self, tmp_path):
+        p = tmp_path / "e.xlsx"
+        _make_xlsx(p, {"Ventas": [["h"], ["x"]], "Empty": []})
+        from sofer.codebook import _build_markdown, _read_xlsx_sheets
+
+        sheets = _read_xlsx_sheets(str(p))
+        # Empty sheet yields placeholder
+        headers, cols, dtypes = sheets["empty"]
+        assert headers == []
+        # building markdown gives placeholder
+        md = _build_markdown(headers, cols, dtypes, str(p))
+        assert "**No data rows found**" in md
+
+    def test_generate_single_stays_stem(self, tmp_path):
+        from sofer.model import DatasetConfig
+
+        xlsx = tmp_path / "report.xlsx"
+        _make_xlsx(xlsx, {"Ventas": [["a"], ["1"]]})
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        cfg.files.append(
+            __import__("sofer.model", fromlist=["FileEntry"]).FileEntry(
+                local=xlsx, remote="report.xlsx"
+            )
+        )
+        # Use manual cfg with files - bypass from_toml
+        from sofer.codebook import generate_all
+
+        res = generate_all(cfg)
+        # should be stem.md not __ventas
+        assert any("report.md" in r for r in res)
+        assert not any("__ventas" in r for r in res)
+
+    def test_generate_two_files(self, tmp_path):
+        from sofer.model import DatasetConfig, FileEntry
+
+        xlsx = tmp_path / "report.xlsx"
+        _make_xlsx(xlsx, {"Ventas": [["a"], ["1"]], "Costos": [["b"], ["2"]]})
+        cfg = DatasetConfig(
+            name="ds",
+            repo_id="u/ds",
+            files=[FileEntry(local=xlsx, remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        from sofer.codebook import generate_all
+
+        res = generate_all(cfg)
+        assert any("report__ventas.md" in r for r in res)
+        assert any("report__costos.md" in r for r in res)
+        # index counts sheets
+        idx = (tmp_path / "cache" / "codebook.md").read_text(encoding="utf-8")
+        assert "**Tables:** 2" in idx
+
+    def test_batch_n_plus_index(self, tmp_path):
+        from sofer.model import DatasetConfig, FileEntry
+
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        xlsx = tmp_path / "report.xlsx"
+        _make_xlsx(xlsx, {"Ventas": [["a"], ["1"]], "Costos": [["b"], ["2"]]})
+        cfg = DatasetConfig(
+            name="ds",
+            repo_id="u/ds",
+            files=[
+                FileEntry(local=tmp_path / "a.csv", remote="a.csv"),
+                FileEntry(local=xlsx, remote="report.xlsx"),
+            ],
+            _base_dir=tmp_path,
+        )
+        from sofer.codebook import generate_all
+
+        res = generate_all(cfg)
+        # 1 csv + 2 sheets = 3 + index = 4
+        assert len([r for r in res if r.endswith(".md") and "codebook.md" not in r]) == 3
+        idx = (tmp_path / "cache" / "codebook.md").read_text(encoding="utf-8")
+        assert "**Tables:** 3" in idx
+
+    def test_collision_dual_guard(self, tmp_path):
+        import pytest
+
+        from sofer.model import DatasetConfig, FileEntry
+
+        # a_ventas.csv -> a_ventas.md ; a__ventas.xlsx -> a__ventas.md (normalized to a_ventas.md)  # noqa: E501
+        csv_path = tmp_path / "a_ventas.csv"
+        csv_path.write_text("x\n1\n", encoding="utf-8-sig")
+        xlsx = tmp_path / "a.xlsx"
+        _make_xlsx(
+            xlsx, {"Ventas": [["h"], ["x"]], "Costos": [["h2"], ["y"]]}
+        )  # will produce a__ventas and a__costos
+        # Collision: a.xlsx sheet ventas -> a__ventas vs a_ventas.csv -> same normalized  # noqa: E501
+        # rel_stem "a" + "__ventas" vs "a_ventas" -> both normalized to "a_ventas"
+        # So create a.xlsx and a_ventas.csv
+        cfg = DatasetConfig(
+            name="ds",
+            repo_id="u/ds",
+            files=[
+                FileEntry(local=csv_path, remote="a_ventas.csv"),
+                FileEntry(local=xlsx, remote="a.xlsx"),
+            ],
+            _base_dir=tmp_path,
+        )
+        from sofer.codebook import generate_all
+
+        with pytest.raises(ValueError, match="Collision"):
+            generate_all(cfg)

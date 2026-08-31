@@ -124,6 +124,7 @@ sniff_delimiters = [";", ",", "\t"]
 card_fallback_rows_per_file = 100
 card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries", "geospatial", "3d"]
 card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
+card_collapse_threshold = 15
 
 # ── Schema report ──
 # Rows sampled per file for schema inference (schema report + card footnote).
