@@ -166,11 +166,21 @@ class TestMerge:
         if _tomli_w is not None:
             with open(codex_path, "wb") as fh:
                 _tomli_w.dump(
-                    {"mcp_servers": {"sofer": {"command": ["sofer-mcp"], "cwd": str(proj.resolve()), "env_vars": []}}},  # noqa: E501
+                    {
+                        "mcp_servers": {
+                            "sofer": {
+                                "command": ["sofer-mcp"],
+                                "cwd": str(proj.resolve()),
+                                "env_vars": [],
+                            }
+                        }
+                    },
                     fh,
                 )
         else:
-            codex_path.write_text('[mcp_servers.sofer]\ncommand = ["sofer-mcp"]\n', encoding="utf-8")  # noqa: E501
+            codex_path.write_text(
+                '[mcp_servers.sofer]\ncommand = ["sofer-mcp"]\n', encoding="utf-8"
+            )
         # Now add again; should be idempotent (no rewrite, no backup)
         rc = cli._cmd_mcp_add(
             Namespace(agent="codex", scope="project", cwd=str(proj), dry_run=False)

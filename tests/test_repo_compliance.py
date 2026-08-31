@@ -3114,3 +3114,82 @@ class TestExpandedCard:
         result = build_dataset_card(cfg, schema=[], staging_dir=staging)
         assert str(tmp_path) not in result
         assert str(staging) not in result
+
+
+# ── Collapsible Data Fields per sheet (RC-R21) ────────────────────
+
+
+def _make_schema(cols_by_origin: dict[str, int]) -> list[ColumnSchema]:
+    """Helper to make ColumnSchema list: origin -> n cols."""
+    schema: list[ColumnSchema] = []
+    for origin, n in cols_by_origin.items():
+        for i in range(n):
+            schema.append(
+                ColumnSchema(
+                    name=f"col_{origin}_{i}",
+                    dtype="numeric",
+                    nullable=False,
+                    example="1",
+                    unique=1,
+                    missing=0.0,
+                    origin=origin,
+                )
+            )
+    return schema
+
+
+class TestCardCollapsible:
+    def test_single_below_threshold_unwrapped(self, tmp_path):
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        schema = _make_schema({"a.csv": 8})
+        card = build_dataset_card(cfg, schema)
+        assert "### Data Fields" in card
+        assert "<details>" not in card
+
+    def test_single_above_threshold_wrapped(self, tmp_path):
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        schema = _make_schema({"a.csv": 20})
+        card = build_dataset_card(cfg, schema)
+        assert "<details><summary>Data Fields --" in card
+        assert "</summary>\n\n| Column |" in card
+
+    def test_boundary_15_flat_16_wrap(self, tmp_path):
+
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        schema15 = _make_schema({"a.csv": 15})
+        card15 = build_dataset_card(cfg, schema15)
+        assert "<details>" not in card15
+        schema16 = _make_schema({"a.csv": 16})
+        card16 = build_dataset_card(cfg, schema16)
+        assert "<details>" in card16
+
+    def test_multi_sheet_each_details(self, tmp_path):
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        schema = _make_schema({"report__ventas.parquet": 4, "report__costos.parquet": 3})
+        card = build_dataset_card(cfg, schema)
+        # cada tabla por separado: 2 details
+        assert card.count("<details>") == 2
+        assert card.count("</details>") == 2
+        assert "ventas" in card.lower()
+        assert "costos" in card.lower()
+        # blank line after summary
+        assert "</summary>\n\n| Column |" in card
+
+    def test_mixed_small_sheets_still_wrap(self, tmp_path):
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        schema = _make_schema({"s1.parquet": 5, "s2.parquet": 5})
+        card = build_dataset_card(cfg, schema)
+        assert card.count("<details>") == 2
+
+    def test_reload_override(self, tmp_path, monkeypatch):
+        import sofer.config as config
+
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[], _base_dir=tmp_path)
+        schema = _make_schema({"a.csv": 20})
+        # default threshold 15 -> wrapped
+        card = build_dataset_card(cfg, schema)
+        assert "<details>" in card
+        # override to high threshold -> unwrapped
+        monkeypatch.setattr(config, "CARD_COLLAPSE_THRESHOLD", 999)
+        card2 = build_dataset_card(cfg, schema)
+        assert "<details>" not in card2

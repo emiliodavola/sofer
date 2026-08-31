@@ -908,6 +908,71 @@ def build_schema_report_with_rows(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _sheet_label_from_origin(origin: str) -> str:
+    """Derive a human label from a ColumnSchema origin for card summaries."""
+    if not origin:
+        return "unknown"
+    stem = PurePosixPath(origin).stem
+    if not stem:
+        return "unknown"
+    if "__" in origin:
+        # Preserve explicitly namespaced sheet suffix (pre-normalized)
+        return stem.split("__")[-1]
+    return stem
+
+
+def _group_by_origin(schema: list[ColumnSchema]) -> dict[str, list[ColumnSchema]]:
+    """Group ColumnSchema entries by sheet/file origin for per-table card rendering.
+
+    Groups by the verbatim ``origin`` value; display labels are derived from
+    the origin's stem with common-prefix stripping so ``data_got_all_aristas``
+    / ``data_got_all_nodos`` become ``aristas`` / ``nodos`` while ``a`` / ``b``
+    stay ``a`` / ``b``.
+    """
+    if not schema:
+        return {}
+    raw: dict[str, list[ColumnSchema]] = {}
+    for col in schema:
+        key = col.origin if col.origin else "unknown"
+        raw.setdefault(key, []).append(col)
+
+    if len(raw) == 1:
+        origin = next(iter(raw))
+        label = _sheet_label_from_origin(origin)
+        # Single group: keep full stem; label already full stem.
+        return {label: next(iter(raw.values()))}
+
+    # Multiple groups: compute longest common prefix among stems for suffix extraction
+    stems = [PurePosixPath(k).stem if k != "unknown" else "unknown" for k in raw.keys()]
+    prefix = stems[0]
+    for st in stems[1:]:
+        while prefix and not st.startswith(prefix):
+            prefix = prefix[:-1]
+        if not prefix:
+            break
+
+    result: dict[str, list[ColumnSchema]] = {}
+    for (origin, cols), stem in zip(raw.items(), stems):
+        if prefix and stem.startswith(prefix):
+            suffix = stem[len(prefix) :].lstrip("_")
+            label = suffix if suffix else stem
+        else:
+            # No common prefix — if origin was normalized collapsed (``_``) and we
+            # have a sheet-like suffix, try "__" split first, then keep full stem.
+            if "__" in origin:
+                label = stem.split("__")[-1]
+            else:
+                label = stem
+        # Ensure uniqueness of display label
+        base = label
+        n = 2
+        while label in result:
+            label = f"{base}_{n}"
+            n += 1
+        result[label] = cols
+    return result
+
+
 def _infer_language(filename: str) -> str:
     """Infer the programming language for fenced code blocks from a file path."""
     ext = Path(filename).suffix.lower()
@@ -1179,28 +1244,69 @@ def build_dataset_card(
         lines.append("No data files declared.")
         lines.append("")
 
-    # Codebook table
+    # Codebook table — per-sheet collapsible (RC-R21: cada tabla por separado)
     if schema:
-        lines.append("### Data Fields")
-        lines.append("")
-        lines.append(
-            "| Column | Type | File | Nullable | Example | Unique (sample) | Missing (%) |"
-        )
-        lines.append(
-            "|--------|------|------|----------|---------|-----------------|-------------|"
-        )
-        for s in schema:
-            file_cell = s.origin if s.origin else "-"
+        groups = _group_by_origin(schema)
+        thr = config.CARD_COLLAPSE_THRESHOLD
+        # Collapse when per-table exceeds threshold OR when there are multiple tables
+        should_wrap: bool
+        if len(groups) > 1:
+            should_wrap = True
+        elif len(groups) == 1:
+            cols_single = next(iter(groups.values()))
+            should_wrap = len(cols_single) > thr
+        else:
+            should_wrap = False
+
+        if not should_wrap:
+            lines.append("### Data Fields")
+            lines.append("")
             lines.append(
-                f"| `{s.name}` | {s.dtype} | {file_cell} | {'Yes' if s.nullable else 'No'} | "
-                f"`{s.example}` | {s.unique} | {s.missing}% |"
+                "| Column | Type | File | Nullable | Example | Unique (sample) | Missing (%) |"
             )
-        lines.append("")
-        lines.append(
-            f"*Statistics (unique, missing%) based on a {config.SCHEMA_SAMPLE_SIZE:,}-row sample."
-            " Exact counts may differ in the full dataset.*"
-        )
-        lines.append("")
+            lines.append(
+                "|--------|------|------|----------|---------|-----------------|-------------|"
+            )
+            for s in schema:
+                file_cell = s.origin if s.origin else "-"
+                lines.append(
+                    f"| `{s.name}` | {s.dtype} | {file_cell} | {'Yes' if s.nullable else 'No'} | "
+                    f"`{s.example}` | {s.unique} | {s.missing}% |"
+                )
+            lines.append("")
+            lines.append(
+                f"*Statistics (unique, missing%) based on a {config.SCHEMA_SAMPLE_SIZE:,}-row sample."  # noqa: E501
+                " Exact counts may differ in the full dataset.*"
+            )
+            lines.append("")
+        else:
+            lines.append("### Data Fields")
+            lines.append("")
+            for label, cols in groups.items():
+                table_lines = [
+                    "| Column | Type | File | Nullable | Example | Unique (sample) | Missing (%) |",
+                    "|--------|------|------|----------|---------|-----------------|-------------|",
+                ]
+                for s in cols:
+                    file_cell = s.origin if s.origin else "-"
+                    table_lines.append(
+                        f"| `{s.name}` | {s.dtype} | {file_cell} | {'Yes' if s.nullable else 'No'} | "  # noqa: E501
+                        f"`{s.example}` | {s.unique} | {s.missing}% |"
+                    )
+                table_str = "\n".join(table_lines)
+                lines.append(
+                    f"<details><summary>Data Fields -- {label} ({len(cols)} columns)</summary>"
+                )
+                lines.append("")
+                lines.append(table_str)
+                lines.append("")
+                lines.append("</details>")
+                lines.append("")
+            lines.append(
+                f"*Statistics (unique, missing%) based on a {config.SCHEMA_SAMPLE_SIZE:,}-row sample."  # noqa: E501
+                " Exact counts may differ in the full dataset.*"
+            )
+            lines.append("")
 
     # ── Data Quality Notes (empty columns, duplicate rows) ──────────────────
     schema_empty = [s.name for s in schema if s.missing == 100.0]

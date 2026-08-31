@@ -1,0 +1,137 @@
+# Delta for codebook
+
+## ADDED Requirements
+
+### Requirement: Multisheet XLSX codebook per sheet (CB-R09)
+
+The system MUST support `.xlsx` files with multiple sheets by emitting one codebook per sheet at `codebooks/<rel>/<stem>__<sanitized>.md`, reusing `sanitize_sheet_name` verbatim with `seen` dedup (`_<n>`). Single-sheet `.xlsx` MUST remain `codebooks/<rel>/<stem>.md`. Every sheet MUST be read via a shared `_read_xlsx_sheets` helper; `generate()` MUST stay backward compatible (single-sheet path). Empty/header-only sheets MUST emit a placeholder codebook, not crash.
+
+#### Scenario: CB-R09.01 single-sheet stays stem.md
+
+- GIVEN an `.xlsx` with 1 sheet
+- WHEN `generate()` or `generate_all()` processes it
+- THEN exactly one file `codebooks/<stem>.md` SHALL be written
+- AND the file SHALL be identical to the pre-change single-sheet output
+
+#### Scenario: CB-R09.02 multisheet 2 sheets yields 2 files
+
+- GIVEN `Report.xlsx` with sheets `Ventas` and `Costos`
+- WHEN `generate_all()` runs
+- THEN `codebooks/Report__ventas.md` and `codebooks/Report__costos.md` SHALL both exist
+- AND each file's title/table SHALL reflect only that sheet's headers/columns/dtypes
+
+#### Scenario: CB-R09.03 dedup via sanitize_sheet_name + seen
+
+- GIVEN an `.xlsx` with sheets `Ventas` and `VENTAS` (both sanitize to `ventas`)
+- WHEN codebooks are emitted
+- THEN outputs SHALL be `__ventas.md` and `__ventas_2.md`
+- AND a third duplicate SHALL be `__ventas_3.md`
+
+#### Scenario: CB-R09.04 batch --all-files expands to N
+
+- GIVEN `dataset.toml` with `[[file]]` for `data/a.csv` and `data/report.xlsx` (2 sheets)
+- WHEN `sofer codebook --all-files` runs
+- THEN 3 codebooks SHALL be counted (1 + 2 sheets) plus the root index
+
+#### Scenario: CB-R09.05 index counts sheets
+
+- GIVEN the previous batch
+- WHEN the root `codebook.md` is written
+- THEN `**Tables:** 3 | **Total columns:** <sum across all sheets>` SHALL be shown
+- AND `## Contents` SHALL list one link per sheet file relative to `write_root`
+
+#### Scenario: CB-R09.06 empty sheet placeholder
+
+- GIVEN an `.xlsx` where sheet 2 has no rows or `header_row is None`
+- WHEN its codebook is built
+- THEN the file SHALL contain `**No data rows found**`
+- AND the command SHALL NOT raise
+
+#### Scenario: CB-R09.07 sanitize reuse invariant
+
+- GIVEN any sheet name (e.g. `DATA GOT Ano`, `a__b`, `""` → `sheet`)
+- WHEN sanitized for the codebook stem
+- THEN the result SHALL equal `sanitize_sheet_name` from `_converters.py` with identical collapse/strip/fallback
+- AND dedup logic SHALL match `_convert_xlsx_to_parquet` (`seen` dict, `_<n>` suffix)
+
+## MODIFIED Requirements
+
+### Requirement: Batch Generation (CB-R03)
+
+When `--all-files` is specified, the system MUST generate one codebook for every `[[file]]` entry in the TOML config that points to a supported-format file; for `.xlsx` with N sheets it MUST generate N codebooks per § CB-R09. Directories and unsupported formats MUST be skipped with a warning. Each codebook MUST be written to `codebooks/<rel-stem>.md` for single-table formats, or `codebooks/<rel>/<stem>__<sanitized>.md` per sheet for multisheet `.xlsx` (single sheet → `stem.md`). No format suffix SHALL be appended. The collision map MUST be built from sheet-expanded output paths; when two or more expanded outputs collide, the system MUST print an error naming each source file (including sheet suffix), MUST exit 1, and MUST NOT write a codebook for any colliding file; non-colliding files SHALL still be written before the error is raised.
+
+(Previously: single output per TOML entry; collision key ignored sheet suffixes; `.xlsx` emitted only `wb.active`.)
+
+#### Scenario: Batch from TOML config
+
+- GIVEN `dataset.toml` with `[[file]]` entries for `data/a.csv`, `data/b.parquet`, and `data/c.docx`
+- WHEN `sofer codebook --config dataset.toml --all-files` is called
+- THEN `codebooks/a.md` SHALL be generated for `a.csv`
+- AND `codebooks/b.md` SHALL be generated for `b.parquet`
+- AND `c.docx` SHALL be skipped with a warning
+
+#### Scenario: Directory entry skipped
+
+- GIVEN a `[[file]]` entry pointing to a directory
+- WHEN `--all-files` executes
+- THEN a warning SHALL be emitted
+- AND no codebook SHALL be generated for that entry
+
+#### Scenario: Nested file keeps its relative path
+
+- GIVEN a `[[file]]` entry for `data/Labels/etiquetas_a.csv`
+- WHEN `--all-files` executes
+- THEN `codebooks/Labels/etiquetas_a.md` SHALL be generated
+
+#### Scenario: Same-stem collision errors
+
+- GIVEN `data/PROV.csv` and `data/PROV.parquet` in the same folder (both map to `codebooks/PROV.md`)
+- WHEN `--all-files` executes
+- THEN an error SHALL be printed naming both `PROV.csv` and `PROV.parquet`
+- AND exit code SHALL be 1
+- AND no codebook SHALL be written for either file
+
+#### Scenario: Sheet-aware collision via expanded keys
+
+- GIVEN `data/a__ventas.xlsx` sheet `Ventas` (→ `codebooks/a__ventas.md`) and `data/a_ventas.csv` (→ `codebooks/a_ventas.md` normalized via `normalize_parquet_remote` `__+`→`_`)
+- WHEN `--all-files` executes and both resolve to the same normalized key
+- THEN the collision map SHALL treat them as colliding on the expanded key
+- AND the error SHALL name both sources and no file SHALL be written for either
+
+### Requirement: Root Index (CB-R04)
+
+When `--all-files` is used, the system MUST generate the root `codebook.md` at `write_root / "codebook.md"`: `cache/codebook.md` when `output_dir is None` (standalone `codebook --all-files`), `output_dir/codebook.md` when `output_dir` is set (prepare). The index SHALL contain a TOC with relative links under `codebooks/` prefix (matching uploader's HF staging), not `data/codebooks/`, colocated with per-file `codebooks/<rel-stem>.md` (or per-sheet `codebooks/<rel>/<stem>__<sanitized>.md`). System MUST NOT write `base_dir/codebook.md` in standalone mode. `**Tables:**` SHALL count sheets (one per codebook file), and `**Total columns:**` SHALL sum columns across all emitted codebooks.
+
+(Previously: Tables counted TOML entries, not sheets; only `stem.md` links.)
+
+#### Scenario: Standalone batch writes to cache
+
+- GIVEN `dataset.toml` in `/proj/` with `raw/a.csv` and `raw/b.parquet`
+- WHEN `sofer codebook --config dataset.toml --all-files` completes
+- THEN `/proj/cache/codebook.md` SHALL exist, `/proj/cache/codebooks/a.md` and `b.md` SHALL exist
+- AND `/proj/codebook.md` SHALL NOT exist, links SHALL be `codebooks/a.md` and `codebooks/b.md`
+
+#### Scenario: Prepare mode writes to build
+
+- GIVEN `generate_all` called with `output_dir=/proj/build`
+- WHEN `--all-files` executes via prepare
+- THEN `/proj/build/codebook.md` and `/proj/build/codebooks/*.md` SHALL exist
+
+#### Scenario: Nested subdirectories preserved in links
+
+- GIVEN `[[file]]` for `raw/Labels/etiquetas_a.csv`
+- WHEN standalone batch generates index
+- THEN link SHALL be `codebooks/Labels/etiquetas_a.md` (and file at `cache/codebooks/Labels/etiquetas_a.md`)
+
+#### Scenario: Index links are relative paths
+
+- GIVEN generated `cache/codebook.md`
+- WHEN any codebook link is extracted
+- THEN path SHALL be relative (e.g., `codebooks/DPTO.md`) and MUST NOT be an absolute path
+
+#### Scenario: Multisheet index lists per-sheet links
+
+- GIVEN `Report.xlsx` with sheets `Ventas`, `Costos` under `data/`
+- WHEN index is generated
+- THEN it SHALL contain `codebooks/Report__ventas.md — N columns` and `codebooks/Report__costos.md — M columns`
+- AND `**Tables:** 2` SHALL be shown

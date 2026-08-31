@@ -439,13 +439,25 @@ del mismo directorio fuente que resolverían al mismo nombre de salida
 recibiendo su codebook; la ejecución falla con un error que enumera las fuentes
 en colisión.
 
+Para `.xlsx` con varias hojas, se emite un codebook por hoja como
+`codebooks/<rel>/<stem>__<sanitized>.md` reutilizando `sanitize_sheet_name` con
+dedup (`Ventas`/`VENTAS` → `__ventas`, `__ventas_2`); un `.xlsx` de una sola
+hoja permanece como `stem.md`.  El índice raíz `**Tables:**` cuenta hojas y
+`**Total columns:**` suma todas las columnas emitidas.  El `### Data Fields` del
+Dataset Card renderiza tablas colapsables por hoja: cada tabla en su propio
+`<details><summary>Data Fields -- <sheet> (N columns)</summary>` con línea en
+blanco tras `</summary>` para que HF renderice la tabla dentro (compatible con
+HF, *cada tabla por separado*), controlado por `card_collapse_threshold`
+(`[tool.sofer]` por defecto `15`).
+
 ### Codebooks in the package
 
 `prepare --all-files` escribe los codebooks directamente en el directorio de
 salida (Opción B) en lugar de en la `cache/` compartida:
 
 - Los codebooks por archivo se colocan en `build/codebooks/` reflejando sus
-  rutas relativas (p. ej., `raw/DPTO.csv` → `build/codebooks/DPTO.md`).
+  rutas relativas (p. ej., `raw/DPTO.csv` → `build/codebooks/DPTO.md`; `.xlsx`
+  con 2 hojas → `build/codebooks/Report__ventas.md` + `Report__costos.md`).
 - El índice raíz `codebook.md` se escribe en la raíz del directorio de salida.
 - `publish` incorpora estos codebooks después de los archivos de datos, de modo
   que el repositorio termina con `codebooks/**/*.md` más el `codebook.md` raíz.

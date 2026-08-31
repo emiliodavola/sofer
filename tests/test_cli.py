@@ -860,9 +860,7 @@ class TestProfileRenderCliFlags:
             '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
             encoding="utf-8",
         )
-        rc = cli._cmd_profile(
-            cli._build_parser().parse_args(["profile", str(toml), "--all-files"])
-        )
+        rc = cli._cmd_profile(cli._build_parser().parse_args(["profile", str(toml), "--all-files"]))
         assert rc == 0
         assert (tmp_path / "cache" / "profiles" / "a.metadata.yaml").is_file()
 
@@ -884,9 +882,7 @@ class TestProfileRenderCliFlags:
 
         ds_cfg = DatasetConfig.from_toml(toml)
         generate_all_profiles(ds_cfg)
-        rc = cli._cmd_render(
-            cli._build_parser().parse_args(["render", str(toml), "--all-files"])
-        )
+        rc = cli._cmd_render(cli._build_parser().parse_args(["render", str(toml), "--all-files"]))
         assert rc == 0
         assert (tmp_path / "cache" / "renders" / "a.README.md").is_file()
 
