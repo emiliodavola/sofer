@@ -66,6 +66,7 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Format registry: `_formats.py`
 - Each command gets its own domain module: `scanner.py`, `codebook.py`, `prepare.py`, `publish.py`, `profile.py`, `render.py`, `mcp_registration.py`, `mcp_server.py`
 - Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`
+- Windows safety: placeholders use `raw/example.csv` (NTFS-valid, `:` reserved — old `TODO: raw/...` was invalid); MCP `sofer_init(cwd=...)` resolves per-call via `_contained_path` + `is_relative_to` as `effective_root` under server root, never mutating global `_SERVER_ROOT`; TOML paths use forward slashes (`raw/`, `cache/`).
 
 ### 11. PR template
 - All pull requests must use the template in `.github/PULL_REQUEST_TEMPLATE.md`.

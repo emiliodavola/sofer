@@ -131,6 +131,49 @@ sofer publish my-dataset.toml --target local --output ./out/
 `publish` re-runs `prepare` automatically whenever the package is missing or
 stale (the TOML or any declared source file is newer than the newest Parquet).
 
+### Windows notes — CWD, placeholders, and separators
+
+| Topic | What to do | Why / detail |
+|-------|------------|--------------|
+| **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
+| **MCP `cwd` param** | `sofer_init` has an optional `cwd` — `sofer_init(name="test", cwd="C:/Users/elaze/Desktop/test")`. It is resolved via `_contained_path` against the server root as a per-call `effective_root` and never mutates the global root. Same for `sofer_scan_apply(config="test.toml")` / `sofer_scan_dry_run`. | Rejects with `PathOutsideRootError` when `cwd` escapes the server root (no `../` above root, no `C:/evil` outside it, no symlink escape). Back-compat: `cwd=None` keeps the server root. |
+| **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `flatten_first_level`. |
+| **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
+
+Reproducible greenfield chain (run from the correct CWD / `cwd` — issue #113 checklist f):
+
+```bash
+# CLI (from C:\Users\elaze\Desktop\test):
+sofer init test --user emiliodavola
+sofer scan test.toml              # or: sofer scan --dry-run first
+sofer validate test.toml
+sofer prepare test.toml
+sofer codebook --all-files --config test.toml   # or sofer codebook_all via MCP
+# profile/render are optional triage before publish:
+# sofer profile / sofer render --all-files
+sofer publish test.toml --dry-run   # review build/ diff
+# after human approval:
+sofer publish test.toml             # --target hf (needs HF_TOKEN)
+```
+
+```python
+# MCP (server root must contain the dataset dir; cwd stays under root):
+sofer_init(name="test", user="emiliodavola", cwd="C:/Users/elaze/Desktop/test")
+sofer_scan_dry_run(config="test.toml")   # preview — no writes
+sofer_scan_apply(config="test.toml")     # registers DATA_GOT_ALL.xlsx + dataset.xlsx -> cache/
+sofer_validate(config="test.toml")       # must pass before build
+sofer_prepare(config="test.toml")
+sofer_codebook_all(config="test.toml")
+sofer_profile_all(config="test.toml")
+sofer_render_all(config="test.toml")
+sofer_publish(config="test.toml", dry_run=True)   # STOP — human reviews build/
+sofer_auth_status(config="test.toml")             # preflight: token / confidential / approval_phrase
+# after approval:
+sofer_publish_confirm(config="test.toml", acknowledge_risk=True)
+```
+
+> If a previous buggy run left `C:\Users\elaze\Desktop\test.toml` or `C:\Users\elaze\Desktop\raw\` in the parent, delete them — re-running `sofer_init` from the correct `C:\Users\elaze\Desktop\test` is idempotent and will not duplicate parent artifacts.
+
 ## TOML reference
 
 ```toml
@@ -493,7 +536,7 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 
 | Step | Tool | Key args | When to use |
 |------|------|----------|-------------|
-| 0 | `sofer_init` | `name`, `move_existing`, `dry_run`, `force` | Greenfield bootstrap; creates TOML + `raw/`. |
+| 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Greenfield bootstrap; creates TOML + `raw/` (Windows: `cwd` must stay under server root via `_contained_path`; `raw/example.csv` is NTFS-safe). |
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Phase 0 preview/apply after `init`. |
 | 1 | `sofer_validate` | `config` | Quick check; always first for existing datasets. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | After validate; writes Parquet+README+LICENSE. |
@@ -525,7 +568,7 @@ sofer_auth_status(config="dataset.toml")  # preflight: token/confidential/approv
 sofer_publish_confirm(config="dataset.toml", acknowledge_risk=True)
 ```
 
-Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file), `output_dir`/`output_file` (override dir/file or `None`), `run_checks` (replaces `no_checks`), `force` (overwrite guard). Batch via `*_all(config)` — no `all_files` flag.
+Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file), `output_dir`/`output_file` (override dir/file or `None`), `run_checks` (replaces `no_checks`), `force` (overwrite guard), `cwd` on `sofer_init` (per-call `effective_root` under server root, never global). Batch via `*_all(config)` — no `all_files` flag. See [Windows notes](#windows-notes--cwd-placeholders-and-separators) for CWD and placeholder handling.
 
 > **Breaking changes (pre-1.0, v0.4):** `output` → `output_file` (sofer_codebook) / `output_dir` (all others); `no_checks` → `run_checks=True`; `sofer_profile`/`sofer_render` split into `sofer_profile`+`sofer_profile_all` and `sofer_render`+`sofer_render_all` (remove `all_files`); `target` is now `Literal["local"]` / `Literal["hf"]` (single-value const); expected failures now return `{ok:false, error_code, message, next, config_errors}` instead of throwing.
 
