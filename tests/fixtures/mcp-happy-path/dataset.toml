@@ -1,0 +1,17 @@
+[dataset]
+name = "mcp-happy-path"
+repo_id = "user/mcp-happy-path"
+build_dir = "build"
+
+[meta]
+description = "Minimal fixture for offline MCP happy path"
+license = "MIT"
+csv_delimiter = ";"
+csv_encoding = "utf-8-sig"
+
+[[file]]
+local = "data.csv"
+remote = "data.csv"
+
+[[check]]
+min_files = 1
