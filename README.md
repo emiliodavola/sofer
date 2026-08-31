@@ -543,8 +543,15 @@ Per-agent locations and shapes:
   callable that writes to Hugging Face Hub. It requires
   `acknowledge_risk=True`, requires `acknowledge_confidential=True` for
   configs marked `[meta] confidential`, and — when configured — an approval
-  phrase compared with `hmac.compare_digest`. The quality gate runs before
-  the token check (offline, deterministic fail).
+  phrase compared with `hmac.compare_digest`. Token is resolved via
+  `HF_TOKEN` → `HF_HUB_TOKEN` (sofer compat alias) →
+  `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (`hf auth login`
+  cache via `HF_TOKEN_PATH` + OIDC via `HF_OIDC_RESOURCE` + Colab) with
+  `.env` support (`load_dotenv(override=False)`); `HF_HUB_DISABLE_IMPLICIT_TOKEN`
+  truthy skips the file fallback; the token is never logged. The quality
+  gate runs before the token check (offline, deterministic fail). `hf auth login`
+  is a valid alternative to setting `HF_TOKEN`; `HF_HUB_TOKEN` is kept for
+  backward compatibility and `HUGGING_FACE_HUB_TOKEN` is the hub-native name.
 - **Resource size guard.** `sofer://` resources larger than
   `agent_resource_max_bytes` (`[tool.sofer]`, default 50 MB) are refused.
 - **Untrusted content.** Everything sofer returns (TOML, codebooks, data

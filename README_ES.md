@@ -579,8 +579,15 @@ Ubicaciones y formas por agente:
   Requiere `acknowledge_risk=True`, requiere `acknowledge_confidential=True`
   para las configuraciones marcadas como `[meta] confidential` y — cuando está
   configurada — una frase de aprobación comparada con `hmac.compare_digest`. El
-  control de calidad se ejecuta antes de la comprobación del token (fallo
-  determinista sin conexión).
+  token se resuelve vía `HF_TOKEN` → `HF_HUB_TOKEN` (alias compat de sofer) →
+  `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (caché de
+  `hf auth login` vía `HF_TOKEN_PATH` + OIDC vía `HF_OIDC_RESOURCE` + Colab) con
+  soporte `.env` (`load_dotenv(override=False)`); `HF_HUB_DISABLE_IMPLICIT_TOKEN`
+  en verdadero omite el fallback de archivo; el token nunca se registra en logs.
+  El control de calidad se ejecuta antes de la comprobación del token (fallo
+  determinista sin conexión). `hf auth login` es una alternativa válida a
+  `HF_TOKEN`; `HF_HUB_TOKEN` se mantiene por compatibilidad y
+  `HUGGING_FACE_HUB_TOKEN` es el nombre nativo del hub.
 - **Límite de tamaño de recursos.** Se rechazan los recursos `sofer://` mayores
   que `agent_resource_max_bytes` (`[tool.sofer]`, por defecto 50 MB).
 - **Contenido no confiable.** Todo lo que sofer devuelve (TOML, codebooks,

@@ -99,14 +99,16 @@ def _is_auto_generated(remote: str) -> bool:
 # ── Delivery helpers (moved from uploader.py, PR 4) ────────────────────────────
 
 
-def _ensure_repo(cfg: DatasetConfig) -> None:
+def _ensure_repo(cfg: DatasetConfig, api: HfApi | None = None) -> None:
     """Create the HF repository if it doesn't exist (idempotent).
 
     Args:
         cfg: Dataset configuration (``repo_id``, ``repo_type``, ``private``).
+        api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
     """
+    target_api = api if api is not None else _api
     try:
-        _api.create_repo(
+        target_api.create_repo(
             repo_id=cfg.repo_id,
             repo_type=cfg.repo_type,
             private=cfg.private,
@@ -125,6 +127,7 @@ def _hf_upload(
     local_path: str | Path,
     remote_path: str,
     repo_type: str,
+    api: HfApi | None = None,
 ) -> bool:
     """Upload a single file to Hugging Face Hub via ``HfApi.upload_file()``.
 
@@ -133,14 +136,16 @@ def _hf_upload(
         local_path: Local file to upload.
         remote_path: Path of the file inside the repository.
         repo_type:  Repository type (``"dataset"``, ``"model"``, ...).
+        api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
 
     Returns:
         ``True`` on success, ``False`` on failure (error already printed).
     """
+    target_api = api if api is not None else _api
     label = Path(local_path).name
     print(f"  \u2191  {label}  \u2192  {remote_path}")
     try:
-        _api.upload_file(
+        target_api.upload_file(
             path_or_fileobj=str(local_path),
             path_in_repo=remote_path,
             repo_id=repo_id,
@@ -158,6 +163,7 @@ def _hf_upload_folder(
     local_path: str | Path,
     remote_path: str,
     repo_type: str,
+    api: HfApi | None = None,
 ) -> bool:
     """Upload a directory recursively via ``HfApi.upload_folder()``.
 
@@ -166,14 +172,16 @@ def _hf_upload_folder(
         local_path:  Local directory whose contents are uploaded.
         remote_path: Prefix path inside the repository.
         repo_type:   Repository type (``"dataset"``, ``"model"``, ...).
+        api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
 
     Returns:
         ``True`` on success, ``False`` on failure (error already printed).
     """
+    target_api = api if api is not None else _api
     label = Path(local_path).name
     print(f"  \u2191  {label}/  \u2192  {remote_path}")
     try:
-        _api.upload_folder(
+        target_api.upload_folder(
             folder_path=str(local_path),
             path_in_repo=remote_path,
             repo_id=repo_id,
@@ -186,18 +194,20 @@ def _hf_upload_folder(
         return False
 
 
-def _inspect_repo(cfg: DatasetConfig) -> list[str]:
+def _inspect_repo(cfg: DatasetConfig, api: HfApi | None = None) -> list[str]:
     """Query the HF repo and return a list of existing remote file paths.
 
     Args:
         cfg: Dataset configuration (``repo_id``, ``repo_type``).
+        api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
 
     Returns:
         The list of existing remote paths; empty when the repo does not
         exist yet, the network is unavailable, or the call fails.
     """
+    target_api = api if api is not None else _api
     try:
-        existing = _api.list_repo_files(repo_id=cfg.repo_id, repo_type=cfg.repo_type)
+        existing = target_api.list_repo_files(repo_id=cfg.repo_id, repo_type=cfg.repo_type)
         return list(existing)
     except Exception:
         return []
@@ -552,6 +562,7 @@ def publish(
     protected_out: set[str] | None = None,
     clean: bool = False,
     clean_cache: bool = False,
+    token: str | None = None,
 ) -> int:
     """Deliver the prepared dataset package for *cfg* to *target*.
 
@@ -593,9 +604,12 @@ def publish(
                        :func:`sofer.prepare.resolve_output_dir` so
                        ``--output`` overrides are honoured.
         clean_cache:   When ``True`` and *clean* is also ``True``, also
-                       delete ``cache/`` (``config.OUTPUT_DIR`` anchored to
-                       ``cfg._base_dir``, shared tool-wide).  Requires
-                       explicit opt-in via ``--clean-cache``/``--all`` (PUB-11).
+                        delete ``cache/`` (``config.OUTPUT_DIR`` anchored to
+                        ``cfg._base_dir``, shared tool-wide).  Requires
+                        explicit opt-in via ``--clean-cache``/``--all`` (PUB-11).
+        token:       Optional HF token; when given ``HfApi(token=token)`` is
+                     used, otherwise the module-level ``_api`` (no implicit
+                     token). The token is never logged.
 
     Returns:
         Exit code (``0`` success, ``1`` quality-gate failure, prepare
@@ -674,8 +688,9 @@ def publish(
         quality_report.print_summary()
         return 1
 
-    _ensure_repo(cfg)
-    existing_files = _inspect_repo(cfg)
+    api = HfApi(token=token) if token is not None else None
+    _ensure_repo(cfg, api=api)
+    existing_files = _inspect_repo(cfg, api=api)
 
     codebook_remotes = _collect_codebook_remotes(source)
 
@@ -720,7 +735,7 @@ def publish(
         # The try/except that previously wrapped this call was dead code
         # and masked total upload failures as success (ok=staged_count,
         # fail=0 → rc 0).
-        if _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type):
+        if _hf_upload_folder(cfg.repo_id, staging_root, "", cfg.repo_type, api=api):
             ok = staged_count
             fail = 0
         else:
@@ -730,7 +745,7 @@ def publish(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ── 6. Post-upload split report ──────────────────────────────────────
-    updated_files = _inspect_repo(cfg)
+    updated_files = _inspect_repo(cfg, api=api)
     if updated_files:
         report = detect_splits(updated_files)
         _print_split_report(report)
