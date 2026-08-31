@@ -476,7 +476,7 @@ class TestProfileForceGuardPrf06:
         assert "use --force to overwrite" in capsys.readouterr().err
 
     def test_cli_overwrite_with_force(self, tmp_path):
-        """CLI profile --force overwrites and returns 0."""
+        """CLI profile --force overwrites."""
         csv_path = tmp_path / "data.csv"
         _write_email_csv(csv_path)
         out = tmp_path / "out"
@@ -487,3 +487,240 @@ class TestProfileForceGuardPrf06:
         rc = cli._cmd_profile(Namespace(dataset=str(csv_path), output=str(out), force=True))
         assert rc == 0
         assert dest.read_text(encoding="utf-8") != "tampered"
+
+
+# ---------------------------------------------------------------------------
+#  Multisheet 1:N (fix/multisheet-profile-render) — covers UNTESTED spec
+# ---------------------------------------------------------------------------
+
+
+def _make_xlsx(path, sheets: dict[str, list[list[object]]]):
+    """Create an .xlsx at *path* with *sheets* mapping sheet_name -> rows (header first)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    first = True
+    for name, rows in sheets.items():
+        if first:
+            ws = wb.active
+            assert ws is not None
+            ws.title = name
+            first = False
+            sheet_ws = ws
+        else:
+            sheet_ws = wb.create_sheet(title=name)
+        for row in rows:
+            sheet_ws.append(row)
+    wb.save(path)
+
+
+class TestProfileMultisheetPrf05:
+    """PRF-05 multisheet 1:N — Sales/Inventory, sanitize, dedup, collision."""
+
+    def test_multisheet_workbook_2_sheets_yields_2_profiles(self, tmp_path, restore_tool_config):
+        """report.xlsx with Sales(id,amount) + Inventory(sku,qty) -> report__sales + __inventory."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir(parents=True)
+        xlsx = tmp_path / "cache" / "report.xlsx"
+        _make_xlsx(
+            xlsx,
+            {
+                "Sales": [["id", "amount"], [1, 10], [2, 20]],
+                "Inventory": [["sku", "qty"], ["A1", 5], ["B2", 7]],
+            },
+        )
+        toml = _write_dataset_toml(tmp_path, ["cache/report.xlsx"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        results = generate_all_profiles(dataset_cfg)
+
+        sales_meta = tmp_path / "cache" / "profiles" / "report__sales.metadata.yaml"
+        inv_meta = tmp_path / "cache" / "profiles" / "report__inventory.metadata.yaml"
+        assert sales_meta.is_file(), results
+        assert inv_meta.is_file()
+        assert len(results) == 2
+        sales_data = yaml.safe_load(sales_meta.read_text(encoding="utf-8"))
+        inv_data = yaml.safe_load(inv_meta.read_text(encoding="utf-8"))
+        sales_cols = [c["name"] for c in sales_data["structure"]["schema"]]
+        inv_cols = [c["name"] for c in inv_data["structure"]["schema"]]
+        assert sales_cols == ["id", "amount"]
+        assert inv_cols == ["sku", "qty"]
+        assert sales_data["file"]["rows"] == 2
+        assert inv_data["file"]["rows"] == 2
+
+    def test_multisheet_with_output_option_b_relative(
+        self, tmp_path, restore_tool_config, monkeypatch
+    ):
+        """Multisheet relative --output anchored to base_dir (Option B)."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "cache").mkdir()
+        xlsx = proj / "cache" / "report.xlsx"
+        _make_xlsx(
+            xlsx,
+            {
+                "Sales": [["id", "amount"], [1, 10]],
+                "Inventory": [["sku", "qty"], ["A1", 5]],
+            },
+        )
+        toml = _write_dataset_toml(proj, ["cache/report.xlsx"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+        cfg.reload(proj)
+        other = tmp_path / "other"
+        other.mkdir()
+        monkeypatch.chdir(other)
+
+        generate_all_profiles(dataset_cfg, output_dir="rel/out")
+
+        assert (proj / "rel" / "out" / "profiles" / "report__sales.metadata.yaml").is_file()
+        assert (proj / "rel" / "out" / "profiles" / "report__inventory.metadata.yaml").is_file()
+        assert not (other / "rel").exists()
+
+    def test_single_sheet_xlsx_stays_suffix_less(self, tmp_path, restore_tool_config):
+        """Single-sheet .xlsx must emit profiles/<stem>.metadata.yaml (no __sheet), byte-stable."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        xlsx = tmp_path / "cache" / "single.xlsx"
+        _make_xlsx(xlsx, {"Data": [["id", "val"], [1, "a"], [2, "b"]]})
+        toml = _write_dataset_toml(tmp_path, ["cache/single.xlsx"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        results = generate_all_profiles(dataset_cfg)
+
+        expected = tmp_path / "cache" / "profiles" / "single.metadata.yaml"
+        assert expected.is_file()
+        assert len(results) == 1
+        assert str(expected) in results
+        # Ensure no __ sheet suffix was created
+        assert not (tmp_path / "cache" / "profiles" / "single__data.metadata.yaml").exists()
+        data = yaml.safe_load(expected.read_text(encoding="utf-8"))
+        assert [c["name"] for c in data["structure"]["schema"]] == ["id", "val"]
+        assert data["file"]["rows"] == 2
+
+    def test_sanitize_sheet_name_applied(self, restore_tool_config):
+        """sanitize DATA GOT Año->data_got_ano, empty->sheet."""
+        from sofer._converters import sanitize_sheet_name
+
+        assert sanitize_sheet_name("DATA GOT Año") == "data_got_ano"
+        assert sanitize_sheet_name("Ventas 2024!") == "ventas_2024"
+        assert sanitize_sheet_name("") == "sheet"
+        assert sanitize_sheet_name("   ") == "sheet"
+        assert sanitize_sheet_name("DATA GOT Año") == "data_got_ano"
+
+    def test_dedup_via_seen(self, tmp_path, restore_tool_config):
+        """Ventas variants -> ventas, ventas_2, ventas_3 via seen."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        xlsx = tmp_path / "cache" / "dedup.xlsx"
+        # trailing spaces produce same sanitized 'ventas' -> dedup needed
+        _make_xlsx(
+            xlsx,
+            {
+                "Ventas": [["id"], [1]],
+                "Ventas ": [["id"], [2]],
+                "Ventas  ": [["id"], [3]],
+            },
+        )
+        toml = _write_dataset_toml(tmp_path, ["cache/dedup.xlsx"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        generate_all_profiles(dataset_cfg)
+
+        assert (tmp_path / "cache" / "profiles" / "dedup__ventas.metadata.yaml").is_file()
+        assert (tmp_path / "cache" / "profiles" / "dedup__ventas_2.metadata.yaml").is_file()
+        assert (tmp_path / "cache" / "profiles" / "dedup__ventas_3.metadata.yaml").is_file()
+
+    def test_sheet_aware_collision_normalized(self, tmp_path, restore_tool_config, capsys):
+        """a__ventas.xlsx vs a_ventas.csv normalized collision."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        # a__ventas.xlsx single sheet 'Ventas' -> suffix-less profiles/a__ventas.metadata.yaml
+        # normalized __+->_ -> a_ventas.metadata.yaml collides with a_ventas.csv
+        xlsx = tmp_path / "cache" / "a__ventas.xlsx"
+        _make_xlsx(xlsx, {"Ventas": [["id"], [1]]})
+        _write_csv(tmp_path / "cache" / "a_ventas.csv", [["id"], ["9"]])
+        _write_csv(tmp_path / "cache" / "ok.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(
+            tmp_path, ["cache/a__ventas.xlsx", "cache/a_ventas.csv", "cache/ok.csv"]
+        )
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        with pytest.raises(ValueError, match="Collision"):
+            generate_all_profiles(dataset_cfg)
+
+        # non-colliding ok.csv must be persisted
+        assert (tmp_path / "cache" / "profiles" / "ok.metadata.yaml").is_file()
+        # colliding outputs must NOT be written
+        assert not (tmp_path / "cache" / "profiles" / "a_ventas.metadata.yaml").is_file()
+        assert not (tmp_path / "cache" / "profiles" / "a__ventas.metadata.yaml").is_file()
+        err = capsys.readouterr().err
+        assert "a__ventas.xlsx" in err
+        assert "a_ventas.csv" in err
+        assert "::ventas" in err.lower()
+
+    def test_profile_output_helper_purepath_suffixes(self, tmp_path):
+        """_profile_output_for_rel suffixes handling."""
+        from sofer.profile import _profile_output_for_rel
+
+        out = _profile_output_for_rel(tmp_path / "profiles", tmp_path / "a.b", None)
+        assert out.name == "a.metadata.yaml"
+        out2 = _profile_output_for_rel(tmp_path / "profiles", tmp_path / "a.b", "ventas")
+        assert out2.name == "a__ventas.metadata.yaml"
+
+    def test_mcp_containment_profile_dir(self, tmp_path, restore_tool_config):
+        """_validate_output_targets must flag escaping profile_dir (outside server root)."""
+        from sofer.mcp_server import _validate_output_targets
+        from sofer.model import DatasetConfig
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\nprofile_dir = "../../evil"\n', encoding="utf-8"
+        )
+        import sofer.config as cfg
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir(exist_ok=True)
+        _write_csv(tmp_path / "cache" / "a.csv", [["col"], ["1"]])
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        errors = _validate_output_targets(dataset_cfg, root=tmp_path)
+        assert any("profile_dir" in e and "outside the server root" in e for e in errors)
+
+    def test_normalize_collision_key(self):
+        """_normalize_profile_collision_key collapses __+ to _."""
+        from pathlib import Path
+
+        from sofer.profile import _normalize_profile_collision_key
+
+        assert (
+            _normalize_profile_collision_key(Path("a__ventas.metadata.yaml"))
+            == "a_ventas.metadata.yaml"
+        )
+        assert (
+            _normalize_profile_collision_key(Path("a___ventas.metadata.yaml"))
+            == "a_ventas.metadata.yaml"
+        )
+        assert (
+            _normalize_profile_collision_key(Path("a_ventas.metadata.yaml"))
+            == "a_ventas.metadata.yaml"
+        )

@@ -13,16 +13,20 @@ the source dataset (PRF-03).
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
 from . import config
+from ._converters import (
+    sanitize_sheet_name,  # noqa: F401 — re-exported for parity, used via _read_xlsx_sheets
+)
 from ._csv_reader import stream_csv
 from ._formats import SUPPORTED_FORMATS
 from ._sentinels import count_unique_non_missing
-from .codebook import _read_file, infer_column_type
+from .codebook import _read_file, _read_xlsx_sheets, infer_column_type
 from .metadata import (
     ColumnMetadata,
     DocumentationMetadata,
@@ -45,6 +49,50 @@ if TYPE_CHECKING:
 _STREAMED_FORMATS = frozenset({".csv", ".tsv"})
 
 _METADATA_FILENAME = "metadata.yaml"
+
+
+def _profile_output_for_rel(
+    profiles_dir: Path,
+    rel_stem: Path,
+    sheet: str | None,
+) -> Path:
+    """Compute the profile output path for a ``(rel_stem, sheet)`` pair.
+
+    Mirrors ``codebook._codebook_output_for_rel`` — ``PurePath.suffixes``
+    replaces only the last suffix; multisheet inserts ``__<sanitized>``.
+
+    Args:
+        profiles_dir: Base profiles directory (``write_root / PROFILE_DIR``).
+        rel_stem: Relative stem derived from ``relative_to(data_dir)``.
+        sheet: Sanitized sheet name or ``None`` (single-table).
+
+    Returns:
+        Absolute output path for the ``metadata.yaml``.
+    """
+    if sheet is None:
+        suffixes = PurePath(rel_stem.name).suffixes
+        if len(suffixes) > 1:
+            target_suffix = "".join(suffixes[:-1]) + ".metadata.yaml"
+        else:
+            target_suffix = ".metadata.yaml"
+        return (profiles_dir / rel_stem).with_suffix(target_suffix)
+    base_single = _profile_output_for_rel(profiles_dir, rel_stem, None)
+    base_str = str(base_single)
+    base_no_ext = (
+        base_str[: -len(".metadata.yaml")]
+        if base_str.endswith(".metadata.yaml")
+        else str(base_single.with_suffix(""))
+    )
+    return Path(base_no_ext + f"__{sheet}.metadata.yaml")
+
+
+def _normalize_profile_collision_key(path: Path) -> str:
+    """Normalize a profile path for collision detection (``__+`` -> ``_``).
+
+    Mirrors ``_normalize_codebook_collision_key`` so ``a__ventas`` and
+    ``a_ventas`` collide.
+    """
+    return re.sub(r"__+", "_", path.as_posix())
 
 
 def profile(
@@ -158,10 +206,13 @@ def generate_all_profiles(
     Each profile is written to ``{PROFILE_DIR}/<rel-stem>.metadata.yaml``,
     where ``<rel-stem>`` is the file's path relative to the ``cache/``
     directory (falling back to the TOML config directory for files outside
-    ``cache/``). When two or more entries resolve to the same output path the
-    system writes profiles for all non-colliding files first, then raises
-    ``ValueError`` naming every colliding source — no profile is written for
-    any colliding file.
+    ``cache/``). For ``.xlsx`` with N>1 sheets N profiles are emitted as
+    ``profiles/<rel>/<stem>__<sanitized>.metadata.yaml`` (single-sheet
+    stays suffix-less). Sanitization reuses :func:`sanitize_sheet_name`
+    with ``seen`` dedup ``_{n}`` verbatim; collision keys are normalized
+    via ``re.sub(r"__+","_",path)`` so ``a__ventas`` and ``a_ventas``
+    collide. Non-colliding outputs are written before ``ValueError`` is
+    raised naming every colliding source as ``<path>::<sheet>``.
 
     Args:
         cfg: A ``DatasetConfig`` loaded from a TOML file.
@@ -177,8 +228,6 @@ def generate_all_profiles(
         ValueError: When two or more files resolve to the same output path
             (after non-colliding profiles have already been written).
     """
-    from pathlib import PurePath
-
     base_dir = cfg._base_dir.resolve()
     data_dir = base_dir / config.OUTPUT_DIR
 
@@ -214,93 +263,204 @@ def generate_all_profiles(
     if not entries:
         return []
 
-    # ── Pre-compute output paths and detect collisions ───────────────
-    output_paths: dict[Path, Path] = {}
-    collision_sources: dict[Path, list[Path]] = {}
+    # ── Sheet-expanded output paths and normalized collision map ──────
+    expanded: list[tuple[Path, str | None, Path]] = []
+    xlsx_cache: dict[Path, dict[str, tuple[list[str], list[list[str]], dict[str, str] | None]]] = {}
 
-    for local, _suffix in entries:
+    for local, suffix in entries:
         if local.is_relative_to(data_dir):
             rel_stem = local.relative_to(data_dir)
         else:
             rel_stem = local.relative_to(base_dir)
 
-        suffixes = PurePath(rel_stem.name).suffixes
-        if len(suffixes) > 1:
-            target_suffix = "".join(suffixes[:-1]) + ".metadata.yaml"
+        if suffix == ".xlsx":
+            try:
+                sheets = _read_xlsx_sheets(str(local))
+            except Exception as exc:
+                print(f"  \u26a0  Error reading {local}: {exc}", file=sys.stderr)
+                continue
+            if not sheets:
+                out = _profile_output_for_rel(profiles_dir, rel_stem, None)
+                expanded.append((local, None, out))
+                xlsx_cache[local] = sheets
+                continue
+            if len(sheets) == 1:
+                first_key = next(iter(sheets))
+                out = _profile_output_for_rel(profiles_dir, rel_stem, None)
+                expanded.append((local, first_key, out))
+                xlsx_cache[local] = sheets
+            else:
+                for sanitized in sheets:
+                    out = _profile_output_for_rel(profiles_dir, rel_stem, sanitized)
+                    expanded.append((local, sanitized, out))
+                xlsx_cache[local] = sheets
         else:
-            target_suffix = ".metadata.yaml"
-        out_path = (profiles_dir / rel_stem).with_suffix(target_suffix)
+            out = _profile_output_for_rel(profiles_dir, rel_stem, None)
+            expanded.append((local, None, out))
 
-        output_paths[local] = out_path
-        if out_path not in collision_sources:
-            collision_sources[out_path] = []
-        collision_sources[out_path].append(local)
+    if not expanded:
+        return []
 
-    # ── Partition: non-colliding vs colliding ────────────────────────
-    colliding_locals: set[Path] = set()
-    for out_path, sources in collision_sources.items():
-        if len(sources) > 1:
-            colliding_locals.update(sources)
+    collision_map: dict[str, list[tuple[Path, str | None, Path]]] = {}
+    for local, sheet, out in expanded:
+        key = _normalize_profile_collision_key(out)
+        collision_map.setdefault(key, []).append((local, sheet, out))
 
-    # ── Generate per-file profiles (non-colliding only) ─────────────
+    colliding_keys: set[str] = {k for k, v in collision_map.items() if len(v) > 1}
+    colliding_expanded: set[tuple[Path, str | None]] = set()
+    for key in colliding_keys:
+        for local, sheet, _out in collision_map[key]:
+            colliding_expanded.add((local, sheet))
+
+    # ── Generate per-(file,sheet) profiles (non-colliding only) ─────
     generated: list[str] = []
 
     for local, suffix in entries:
-        if local in colliding_locals:
-            continue
-
-        try:
-            headers, columns, rows, encoding, delimiter = _read_dataset_for_profile(local, suffix)
-        except Exception as exc:
-            print(f"  \u2717  Error reading {local}: {exc}", file=sys.stderr)
-            continue
-
-        schema = [_build_column(name, values) for name, values in zip(headers, columns)]
-        meta = Metadata(
-            file=FileMetadata(
-                path=str(local),
-                format=suffix.lstrip("."),
-                encoding=encoding,
-                delimiter=delimiter,
-                rows=rows,
-                columns=len(headers),
-            ),
-            structure=StructureMetadata(schema=schema),
-            generated=GeneratedMetadata(timestamp=_now_iso()),
-        )
-        meta.documentation = DocumentationMetadata(missing_fields=missing_fields(meta))
-
-        output_path = output_paths[local]
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(serialize(meta), encoding="utf-8")
-        generated.append(str(output_path))
-        print(f"  OK  {output_path}")
+        if suffix != ".xlsx":
+            if (local, None) in colliding_expanded:
+                continue
+            out_path = next((o for lo, sh, o in expanded if lo == local and sh is None), None)
+            if out_path is None:
+                continue
+            try:
+                headers, columns, rows, encoding, delimiter = _read_dataset_for_profile(
+                    local, suffix
+                )
+            except Exception as exc:
+                print(f"  \u2717  Error reading {local}: {exc}", file=sys.stderr)
+                continue
+            schema = [_build_column(name, values) for name, values in zip(headers, columns)]
+            meta = Metadata(
+                file=FileMetadata(
+                    path=str(local),
+                    format=suffix.lstrip("."),
+                    encoding=encoding,
+                    delimiter=delimiter,
+                    rows=rows,
+                    columns=len(headers),
+                ),
+                structure=StructureMetadata(schema=schema),
+                generated=GeneratedMetadata(timestamp=_now_iso()),
+            )
+            meta.documentation = DocumentationMetadata(missing_fields=missing_fields(meta))
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(serialize(meta), encoding="utf-8")
+            generated.append(str(out_path))
+            print(f"  OK  {out_path}")
+        else:
+            sheets = xlsx_cache.get(local, {})
+            if not sheets:
+                if (local, None) in colliding_expanded:
+                    continue
+                out_path = next((o for lo, sh, o in expanded if lo == local and sh is None), None)
+                if out_path is None:
+                    continue
+                schema = []
+                meta = Metadata(
+                    file=FileMetadata(
+                        path=str(local),
+                        format="xlsx",
+                        encoding="",
+                        delimiter="",
+                        rows=0,
+                        columns=0,
+                    ),
+                    structure=StructureMetadata(schema=schema),
+                    generated=GeneratedMetadata(timestamp=_now_iso()),
+                )
+                meta.documentation = DocumentationMetadata(missing_fields=missing_fields(meta))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(serialize(meta), encoding="utf-8")
+                generated.append(str(out_path))
+                print(f"  OK  {out_path}")
+                continue
+            if len(sheets) == 1:
+                first_key = next(iter(sheets))
+                if (local, first_key) in colliding_expanded:
+                    continue
+                out_path = next(
+                    (o for lo, sh, o in expanded if lo == local and sh == first_key),
+                    None,
+                )
+                if out_path is None:
+                    continue
+                headers, columns, _dtypes = sheets[first_key]
+                rows = len(columns[0]) if columns else 0
+                schema = [_build_column(name, values) for name, values in zip(headers, columns)]
+                meta = Metadata(
+                    file=FileMetadata(
+                        path=str(local),
+                        format="xlsx",
+                        encoding="",
+                        delimiter="",
+                        rows=rows,
+                        columns=len(headers),
+                    ),
+                    structure=StructureMetadata(schema=schema),
+                    generated=GeneratedMetadata(timestamp=_now_iso()),
+                )
+                meta.documentation = DocumentationMetadata(missing_fields=missing_fields(meta))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(serialize(meta), encoding="utf-8")
+                generated.append(str(out_path))
+                print(f"  OK  {out_path}")
+            else:
+                for sanitized, (headers, columns, _dtypes) in sheets.items():
+                    if (local, sanitized) in colliding_expanded:
+                        continue
+                    out_path = next(
+                        (o for lo, sh, o in expanded if lo == local and sh == sanitized),
+                        None,
+                    )
+                    if out_path is None:
+                        continue
+                    rows = len(columns[0]) if columns else 0
+                    schema = [_build_column(name, values) for name, values in zip(headers, columns)]
+                    meta = Metadata(
+                        file=FileMetadata(
+                            path=str(local),
+                            format="xlsx",
+                            encoding="",
+                            delimiter="",
+                            rows=rows,
+                            columns=len(headers),
+                        ),
+                        structure=StructureMetadata(schema=schema),
+                        generated=GeneratedMetadata(timestamp=_now_iso()),
+                    )
+                    meta.documentation = DocumentationMetadata(missing_fields=missing_fields(meta))
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(serialize(meta), encoding="utf-8")
+                    generated.append(str(out_path))
+                    print(f"  OK  {out_path}")
 
     # ── If collisions exist: raise ValueError after partial write ────
-    if colliding_locals:
-        for out_path, sources in collision_sources.items():
-            if len(sources) > 1:
-                rel_out = (
-                    out_path.relative_to(write_root).as_posix()
-                    if out_path.is_relative_to(write_root)
-                    else str(out_path)
-                )
+    if colliding_expanded:
+        for key in sorted(colliding_keys):
+            entries_for_key = collision_map[key]
+            rep_out = entries_for_key[0][2]
+            try:
+                rel_out = rep_out.relative_to(base_dir).as_posix()
+            except ValueError:
+                rel_out = rep_out.as_posix()
+            parts: list[str] = []
+            for lo, sh, _o in entries_for_key:
                 try:
-                    rel_out_disp = out_path.relative_to(base_dir).as_posix()
+                    base_rel = lo.relative_to(base_dir).as_posix()
                 except ValueError:
-                    rel_out_disp = rel_out
-                source_list = ", ".join(
-                    s.relative_to(base_dir).as_posix() if s.is_relative_to(base_dir) else str(s)
-                    for s in sources
-                )
-                print(
-                    f"  X  Collision: {rel_out_disp} is target for: {source_list}",
-                    file=sys.stderr,
-                )
+                    base_rel = lo.as_posix()
+                if sh is not None:
+                    parts.append(f"{base_rel}::{sh}")
+                else:
+                    parts.append(base_rel)
+            source_list = ", ".join(parts)
+            print(
+                f"  X  Collision: {rel_out} is target for: {source_list}",
+                file=sys.stderr,
+            )
         raise ValueError(
-            f"Collision detected: {len(colliding_locals)} file(s) "
-            f"share the same output path(s). No profile written "
-            f"for colliding files."
+            f"Collision detected: {len(colliding_expanded)} expanded output(s) "
+            f"share the same path(s). No profile written for colliding outputs."
         )
 
     return generated

@@ -215,6 +215,8 @@ sofer profile raw/contacts.csv
 # Batch: one metadata.yaml per [[file]] under cache/profiles/<rel_stem>.metadata.yaml
 sofer profile dataset.toml --all-files
 sofer profile dataset.toml --all-files --output ./out   # Option B: rel outputs anchor to TOML dir
+# For .xlsx with N>1 sheets, N files are emitted as profiles/<rel>/<stem>__<sanitized>.metadata.yaml
+# (single-sheet stays stem.metadata.yaml), reusing sanitize_sheet_name (lower->NFKD->ascii->space->_->[^a-z0-9_-]->_->__+->_->strip, empty->sheet) with seen _{n} dedup and normalized __+->_ collision (partial-write then ValueError naming ::sheet), mirroring codebook/prepare stem__sheet parity
 # Overwrite guard: without --force an existing destination raises FileExistsError
 sofer profile raw/contacts.csv --output ./out --force    # overwrite
 
@@ -224,6 +226,8 @@ sofer render raw/metadata.yaml   # ...or the file directly
 # Batch: one README per [[file]] under cache/renders/<rel_stem>.README.md
 sofer render dataset.toml --all-files
 sofer render dataset.toml --all-files --output ./out
+# For .xlsx with N>1 sheets, N READMEs are emitted as renders/<rel>/<stem>__<sanitized>.README.md
+# (single-sheet stays stem.README.md) with the same sanitization/dedup/collision parity as profile
 sofer render raw/ --output ./out --force
 ```
 
@@ -283,8 +287,8 @@ canalización.
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto contenido), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
-| `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml`, `PurePath.suffixes`, colisión `ValueError`), `--force` (guardia de sobreescritura), `--config` (ruta TOML para batch). `--output` relativo anclado al dir TOML (Option B); `cache/` intacto con `--output`. |
-| `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md`, omite `metadata.yaml` faltante), `--force`, `--config`. |
+| `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` o `__<sanitized>.metadata.yaml` por hoja para `.xlsx` N>1, `PurePath.suffixes`, sanitización + `seen _{n}`, colisión normalizada `__+`→`_` `ValueError` con `::sheet`), `--force` (guardia de sobreescritura), `--config` (ruta TOML para batch). `--output` relativo anclado al dir TOML (Option B); `cache/` intacto con `--output`. |
+| `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` o `__<sanitized>.README.md` por hoja para `.xlsx` N>1 con misma paridad sanitización/dedup/colisión, omite `metadata.yaml` faltante), `--force`, `--config`. |
 | `codebook <file>` | Genera un codebook en markdown para un archivo. Soporta CSV, TSV, Parquet, Excel, JSONL. |
 | `codebook --all-files` | Genera un codebook por cada entrada `[[file]]` en `cache/codebooks/`, más un índice raíz `cache/codebook.md`. Usa `--config` para especificar el archivo TOML. |
 | `prepare <config.toml>` | Genera el paquete de datos completo localmente: conversión CSV→Parquet, comprobaciones de esquema entre archivos, informe de esquema, Dataset Card (`README.md`), `LICENSE` y — con `--all-files` — codebooks por archivo. Nunca contacta con HF. Flags: `--output DIR` (por defecto `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Limpieza de huérfanos: con `--force` elimina archivos huérfanos que no están en `expanded_planned_remotes` más `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotente; sin `--force` los huérfanos permanecen). |
