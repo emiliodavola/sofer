@@ -55,7 +55,12 @@ try:
     from fastmcp import FastMCP as _FastMCP
 except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monkeypatch
     raise ImportError(
-        "sofer's MCP server requires the 'mcp' extra — install it with: pip install 'sofer[mcp]'"
+        "sofer's MCP server requires 'fastmcp' — install with: "
+        "pip install 'sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z' "
+        "or uv tool install 'sofer[mcp] @ "
+        "git+https://github.com/emiliodavola/sofer.git@vX.Y.Z' --force "
+        "/ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z "
+        "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
 from . import config as sofer_config
