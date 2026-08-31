@@ -65,22 +65,23 @@ The built wheel SHALL embed the README, the MIT LICENSE, and the classifiers.
 
 ### Requirement: Installability and entry point (PKG-03)
 
-The build SHALL produce a pure wheel (`py3-none-any`) exposing console script
-`sofer = sofer.cli:main`. Installing the built artifact via pip or
-`uv tool install` SHALL provide a working `sofer` command that runs without
-`uv run`.
+> Modified by `feat-mcp-auto-install` (2026-08-31).
 
-#### Scenario: Entry point present in wheel
+Build SHALL expose `sofer = sofer.cli:main` and `sofer-mcp = sofer.mcp_server:main`. Both SHALL run without `uv run`.
 
-- GIVEN a built wheel
-- WHEN `entry_points.txt` is inspected
-- THEN it SHALL contain `sofer = sofer.cli:main`
+(Previously: only `sofer` asserted.)
 
-#### Scenario: Installed CLI runs standalone
+#### Scenario: Both entry points in wheel
 
-- GIVEN a non-editable install of the built artifact
-- WHEN the installed `sofer --help` runs as a subprocess
-- THEN the exit code SHALL be 0
+- GIVEN built wheel
+- WHEN `entry_points.txt` inspected
+- THEN it SHALL contain both `sofer` and `sofer-mcp` scripts
+
+#### Scenario: Both CLIs run
+
+- GIVEN non-editable install
+- WHEN `sofer --help` and `sofer-mcp --help` run
+- THEN both SHALL exit 0
 
 ---
 
@@ -123,3 +124,23 @@ install paths.
 - WHEN its install section is inspected
 - THEN `pip install sofer` SHALL be documented
 - AND `uv tool install sofer` SHALL be documented
+
+---
+
+### Requirement: MCP runtime dependency included by default (PKG-06)
+
+> Added by `feat-mcp-auto-install` (2026-08-31).
+
+`pyproject.toml` SHALL declare `fastmcp>=3.4,<4` in `dependencies`; MAY retain `mcp` alias with identical pin. `uv.lock` SHALL be regenerated.
+
+#### Scenario: dependencies include fastmcp
+
+- GIVEN `pyproject.toml`
+- WHEN `dependencies` inspected
+- THEN `fastmcp>=3.4,<4` SHALL be present
+
+#### Scenario: Alias identical pin
+
+- GIVEN `pyproject.toml`
+- WHEN `optional-dependencies` inspected
+- THEN `mcp` MAY be present and if so SHALL equal required pin

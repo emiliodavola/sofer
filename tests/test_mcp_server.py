@@ -142,8 +142,13 @@ class TestImportWithoutExtra:
         sys.modules.pop("sofer.mcp_server", None)
         with pytest.raises(ImportError) as excinfo:
             importlib.import_module("sofer.mcp_server")
-        assert "sofer[mcp]" in str(excinfo.value)
-        assert "pip install" in str(excinfo.value)
+        msg = str(excinfo.value)
+        assert "sofer[mcp]" in msg
+        assert "pip install" in msg
+        assert "uv tool" in msg
+        assert "sofer[mcp] @ git+https://" in msg
+        assert "git+https://github.com/emiliodavola/sofer.git@vX.Y.Z[mcp]" not in msg
+        assert "git+...[mcp]" not in msg
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1007,18 @@ class TestWheelPackaging:
             assert metadata, "wheel is missing METADATA"
             meta = zf.read(metadata[0]).decode("utf-8")
             assert "Provides-Extra: mcp" in meta
+            # unconditional Requires-Dist (no extra marker) + alias with marker
             assert "Requires-Dist: fastmcp>=3.4,<4" in meta
+            alias_present = (
+                'Requires-Dist: fastmcp>=3.4,<4; extra == "mcp"' in meta
+                or "Requires-Dist: fastmcp>=3.4,<4; extra == 'mcp'" in meta
+            )
+            assert alias_present
+            # ensure at least one unconditional line exists (without extra ==)
+            req_lines = [ln for ln in meta.splitlines() if ln.startswith("Requires-Dist: fastmcp")]
+            assert any("extra ==" not in ln for ln in req_lines), (
+                f"expected unconditional Requires-Dist, got {req_lines}"
+            )
 
 
 # ---------------------------------------------------------------------------
