@@ -119,6 +119,28 @@ class TestInitCommand:
         content = (tmp_path / "ds.toml").read_text(encoding="utf-8")
         assert "TODO" in content
 
+    def test_init_template_windows_safe_placeholder(self, tmp_path, monkeypatch):
+        """The template [[file]] local MUST be Windows-safe raw/example.csv (INIT-01, CLI-R07)."""
+        import ntpath
+
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="ds-win"))
+        content = (tmp_path / "ds-win.toml").read_text(encoding="utf-8")
+        parsed = _tomli.loads(content)
+        locals_list = [e.get("local", "") for e in parsed.get("file", [])]
+        assert "raw/example.csv" in locals_list
+        for local in locals_list:
+            assert ":" not in local, f"colon in local {local!r}"
+            drive, _tail = ntpath.splitdrive(local)
+            assert drive == "", f"ntpath drive not empty for {local!r}"
+        assert "TODO: raw/file.csv" not in content
+        assert "TODO: raw/directory/" not in content
+
     def test_init_template_has_build_dir(self, tmp_path, monkeypatch):
         """The template declares ``[dataset] build_dir = "build"`` so the
         default prepare/publish output directory is explicit."""

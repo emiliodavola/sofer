@@ -1662,15 +1662,29 @@ def sofer_init(
             description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'); default: YOUR_USER placeholder."
         ),
     ] = None,
+    cwd: Annotated[
+        str | None,
+        Field(
+            description="Working directory for init; must stay under server root. When None, uses server root (back-compat)."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Create <name>.toml from _INIT_TEMPLATE and scaffold raw/.
 
-    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/.
+    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/. When cwd is given, writes are anchored under that directory contained under the server root; when None, uses the server root. Never mutates the global server root.
     Network usage: none.
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
     Example: sofer_init(name="my-dataset", user="myuser")
     Requires: server root writable. Next: sofer_scan_apply to register files.
+
+    Args:
+        name: Dataset name used for ``<name>.toml``.
+        move_existing: When ``True``, move depth-1 supported files into ``raw/``.
+        dry_run: When ``True``, preview without writing ``raw/`` or moving files.
+        force: Overwrite existing ``<name>.toml`` when ``True``.
+        user: Hugging Face username for ``repo_id``.
+        cwd: Working directory for init; must stay under server root. ``None`` keeps back-compat.
     """
     with _tool_execution(), _capture_output() as (out, err):
         if not name.strip():
@@ -1683,16 +1697,23 @@ def sofer_init(
                 "message": "name must be non-empty",
                 "next": {},
             }
-        root = _get_root()
+        # Per-call effective root: None -> _get_root() (back-compat), str -> contained under _SERVER_ROOT.
+        if cwd is None:
+            effective_root = _get_root()
+        else:
+            outer_root = (
+                _SERVER_ROOT.resolve() if _SERVER_ROOT is not None else Path.cwd().resolve()
+            )
+            effective_root = _contained_path(cwd, root=outer_root, what="cwd", must_exist=False)
         toml_path = _contained_path(
             f"{name}.toml",
-            root=root,
+            root=effective_root,
             what="name",
             extensions=_CONFIG_EXTENSIONS,
             must_exist=False,
         )
-        raw_dir = root / sofer_config.RAW_DIR
-        base_dir = root.resolve()
+        raw_dir = effective_root / sofer_config.RAW_DIR
+        base_dir = effective_root.resolve()
         user_val = user.strip() if user and user.strip() else "YOUR_USER"
         if not raw_dir.resolve().is_relative_to(base_dir):
             return {
@@ -1720,7 +1741,7 @@ def sofer_init(
         candidates: list[Path] = []
         existing: list[Path] = []
         if move_existing:
-            for entry in root.iterdir():
+            for entry in effective_root.iterdir():
                 if not entry.is_file():
                     continue
                 if entry.suffix.lower() not in SUPPORTED_FORMATS:

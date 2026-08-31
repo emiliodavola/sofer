@@ -2332,6 +2332,250 @@ class TestInitTreePreserve:
 
 
 # ---------------------------------------------------------------------------
+#  fix-sofer-init-cwd-windows-todo — Windows-safe placeholder + cwd containment
+# ---------------------------------------------------------------------------
+
+
+class TestInitWindowsPlaceholder:
+    """INIT-01 + CLI-R07: _INIT_TEMPLATE uses Windows-safe raw/example.csv."""
+
+    def test_placeholder_no_colon_and_ntpath_drive(self, tmp_path, restore_tool_config):
+        import ntpath
+
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="test")
+        assert envelope["ok"] is True
+        content = (tmp_path / "test.toml").read_text(encoding="utf-8")
+        # No TODO: colon in file locals
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+        parsed = _tomli.loads(content)
+        locals_list = [e.get("local", "") for e in parsed.get("file", [])]
+        assert "raw/example.csv" in locals_list
+        for local in locals_list:
+            assert ":" not in local, f"colon in placeholder local: {local!r}"
+            drive, tail = ntpath.splitdrive(local)
+            assert drive == "", f"ntpath drive not empty for {local!r}: {drive!r}"
+            assert tail == local
+        # Second placeholder is directory
+        assert "raw/example/" in locals_list
+        # TOML parses (already proven by tomli loads)
+        assert parsed["dataset"]["name"] == "test"
+
+    def test_toml_no_todo_colon_in_locals(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        sofer_init(name="test2")
+        content = (tmp_path / "test2.toml").read_text(encoding="utf-8")
+        # file locals must not contain TODO:
+        for line in content.splitlines():
+            if "local =" in line and "TODO:" in line:
+                raise AssertionError(f"TODO: colon still in local line: {line!r}")
+
+
+class TestInitCwdContainment:
+    """INIT-02: cwd None back-compat, contained succeeds, outside/traversal, no mutation."""
+
+    def test_cwd_none_back_compat(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        # Simulate live CWD being child, but cwd=None should still use server root
+        envelope = sofer_init(name="test", cwd=None)
+        assert envelope["ok"] is True
+        assert (parent / "test.toml").exists()
+        assert not (child / "test.toml").exists()
+
+    def test_cwd_contained_succeeds(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        envelope = sofer_init(name="test", cwd=str(child))
+        assert envelope["ok"] is True
+        assert (child / "test.toml").exists()
+        assert (child / "raw").is_dir()
+
+    def test_cwd_outside_rejected(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        build_server(root=parent)
+        outside = "C:/Windows"
+        with pytest.raises(PathOutsideRootError, match="outside the server root"):
+            sofer_init(name="test", cwd=outside)
+        assert not (parent / "test.toml").exists()
+        # via MCP also rejected
+        server = build_server(root=parent)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "test", "cwd": outside})
+
+    def test_cwd_traversal_rejected(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        (parent / "keep").mkdir()
+        build_server(root=parent)
+        traversal = str(parent / ".." / "Windows")
+        with pytest.raises(PathOutsideRootError, match="outside the server root"):
+            sofer_init(name="test", cwd=traversal)
+        # Dotdot via string that escapes root
+        with pytest.raises(PathOutsideRootError):
+            sofer_init(name="test", cwd=str(parent / ".." / "evil"))
+
+    def test_no_global_mutation(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        before = ms._get_root()
+        envelope = sofer_init(name="test", cwd=str(child))
+        assert envelope["ok"] is True
+        after = ms._get_root()
+        assert before == after == parent.resolve()
+        assert after == parent.resolve()
+
+
+class TestInitStaleRoot:
+    """INIT-03: stale-root anchored, idempotent, cleanup not parent."""
+
+    def test_stale_root_anchored(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        envelope = sofer_init(name="test", cwd=str(child))
+        assert envelope["ok"] is True
+        assert (child / "test.toml").exists()
+        assert (child / "raw").is_dir()
+        assert not (parent / "test.toml").exists()
+        assert not (parent / "raw").exists()
+
+    def test_idempotent_preserves_keep(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        sofer_init(name="test", cwd=str(child))
+        # create keep file inside effective raw
+        keep = child / "raw" / "keep.csv"
+        keep.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        # re-run with force should preserve keep
+        envelope = sofer_init(name="test", cwd=str(child), force=True)
+        assert envelope["ok"] is True
+        assert keep.exists()
+        assert keep.read_text(encoding="utf-8-sig") == "a;b\n1;2\n"
+
+    def test_cleanup_not_parent(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        sofer_init(name="test", cwd=str(child))
+        assert (child / "raw").is_dir()
+        assert not (parent / "raw").exists()
+
+
+class TestInitXlsxIntegration:
+    """INIT-04: xlsx discovery after init, validate passes, scan idempotent."""
+
+    def _make_xlsx(self, path: Path) -> None:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.append(["col_a", "col_b"])
+        ws.append([1, 2])
+        ws.append([3, 4])
+        wb.save(path)
+
+    def test_xlsx_registered_validate_passes_and_idempotent(self, tmp_path, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        # create loose xlsx files in effective_root
+        self._make_xlsx(child / "DATA_GOT_ALL.xlsx")
+        self._make_xlsx(child / "dataset.xlsx")
+        build_server(root=parent)
+        envelope = sofer_init(name="test", cwd=str(child), user="testuser")
+        assert envelope["ok"] is True
+        assert (child / "test.toml").exists()
+        # scan (placeholder raw/example.* stripped by merge_entries)
+        scan_env = sofer_scan_apply(str(child / "test.toml"))
+        assert scan_env["ok"] is True, scan_env
+        # cache files exist
+        assert (child / "cache" / "DATA_GOT_ALL.xlsx").is_file()
+        assert (child / "cache" / "dataset.xlsx").is_file()
+        # TOML has both cache entries
+        content = (child / "test.toml").read_text(encoding="utf-8")
+        assert 'local = "cache/DATA_GOT_ALL.xlsx"' in content
+        assert 'local = "cache/dataset.xlsx"' in content
+        # validate passes
+        val = sofer_validate(str(child / "test.toml"))
+        assert val["ok"] is True, val
+        assert val["passed"] is True
+        # rerun scan idempotent - count stays 2 cache xlsx entries (force to overwrite)
+        scan2 = sofer_scan_apply(str(child / "test.toml"), force=True)
+        assert scan2["ok"] is True
+        content2 = (child / "test.toml").read_text(encoding="utf-8")
+        # count cache xlsx occurrences should remain 2
+        assert content2.count('local = "cache/DATA_GOT_ALL.xlsx"') == 1
+        assert content2.count('local = "cache/dataset.xlsx"') == 1
+
+
+class TestInitCwdSchema:
+    """MSP-R03: 14 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+
+    def test_tool_roster_still_fourteen(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                tools = await client.list_tools()
+                return {t.name for t in tools}
+
+        names = _run(_go())
+        assert len(names) == 14
+        assert "sofer_init" in names
+
+    def test_sofer_init_cwd_schema(self, tmp_path):
+        server = build_server(root=tmp_path)
+        schema = _tool_schema(server, "sofer_init")
+        props = schema.get("properties", {})
+        assert "cwd" in props
+        cwd_prop = props["cwd"]
+        # optional, default None, type str or null
+        assert "cwd" not in schema.get("required", [])
+        typ = cwd_prop.get("type")
+        # pydantic may emit anyOf or type array
+        if isinstance(typ, list):
+            assert "string" in typ
+        elif isinstance(typ, str):
+            assert typ == "string"
+        else:
+            # anyOf case
+            anyof = cwd_prop.get("anyOf", [])
+            assert any("string" in str(x) for x in anyof)
+        if "default" in cwd_prop:
+            assert cwd_prop["default"] is None
+
+    def test_cwd_outside_via_mcp_schema_rejected(self, tmp_path):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        server = build_server(root=parent)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "test", "cwd": "C:/Windows"})
+
+
+# ---------------------------------------------------------------------------
 #  feat-mcp-build-clarity — canonical chain, when-to-use, no sofer_build
 # ---------------------------------------------------------------------------
 

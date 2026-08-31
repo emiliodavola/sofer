@@ -110,6 +110,7 @@ Hub, en un almacén de objetos o en un directorio local.
 
 ```bash
 # 1. Crear una plantilla de configuracion (usa --user para definir repo_id "myuser/my-dataset")
+#    La plantilla usa placeholder Windows-safe [[file]] local = "raw/example.csv" (sin colon, NTFS valido)
 sofer init my-dataset --user myuser
 
 # 2. Scan for data files (auto-registers all CSV, Parquet, Excel, JSONL files)
@@ -283,7 +284,7 @@ canalización.
 
 | Comando | Descripción |
 |---|---|
-| `init <name>` | Genera una plantilla `.toml` lista para editar. Flag: `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`; por defecto: marcador `YOUR_USER`). |
+| `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Flag: `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`; por defecto: marcador `YOUR_USER`). |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto contenido), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
