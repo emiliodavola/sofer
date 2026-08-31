@@ -771,11 +771,11 @@ tags = ["TODO: tag1", "TODO: tag2"]
 # Source files -> raw/ (scan copies to cache/)
 # Repeat [[file]] sections for every file/directory you want to publish.
 [[file]]
-local = "TODO: raw/file.csv"
+local = "raw/example.csv"
 remote = "file.csv"
 
 [[file]]
-local = "TODO: raw/directory/"
+local = "raw/example/"
 remote = "subfolder/"
 recursive = true
 

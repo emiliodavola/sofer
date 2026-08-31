@@ -194,8 +194,13 @@ def merge_entries(
     # Strip template entries left over from ``sofer init`` (their local
     # path is a placeholder that starts with ``TODO:`` and would cause
     # spurious errors downstream in validate / prepare / publish).
+    # Also strip Windows-safe placeholder ``raw/example.csv`` / ``raw/example/``
+    # introduced in fix-sofer-init-cwd-windows-todo (INIT-01).
     raw_toml["file"] = [
-        e for e in raw_toml.get("file", []) if not str(e.get("local", "")).startswith("TODO:")
+        e
+        for e in raw_toml.get("file", [])
+        if not str(e.get("local", "")).startswith("TODO:")
+        and not str(e.get("local", "")).startswith("raw/example")
     ]
 
     # Build the set of already-registered resolved destination paths and
