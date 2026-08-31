@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use sofer, please cite it as below."
 title: sofer
 abstract: CLI tool to create and populate Hugging Face Hub dataset repositories with built-in validation, quality checks, and compliance generation.
-version: 0.3.8
+version: 0.3.9
 authors:
   - family-names: Correa Dávola
     given-names: Emilio
