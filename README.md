@@ -476,6 +476,43 @@ Resource URIs are resolved **relative to the server root** — e.g.
 paths are also accepted (rest-pattern templates): `sofer://dataset//tmp/...`
 arrives with a leading `/` and must still resolve inside the root.
 
+### Canonical build chain
+
+MCP agents should follow the canonical pipeline — `sofer_prepare` alone does **not** produce `profiles/`/`renders/`:
+
+```
+validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm
+```
+
+Full order: `sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile(all_files) → sofer_render(all_files) → sofer_publish(dry_run) → sofer_publish_confirm`.
+
+| Step | Tool | Key args | When to use |
+|------|------|----------|-------------|
+| 1 | `sofer_validate` | `config` | Quick check; always first. |
+| 2 | `sofer_prepare` | `config`, `output`, `force` | After validate; writes Parquet+README+LICENSE. |
+| 3 | `sofer_codebook_all` | `config`, `output` | After prepare; batch codebooks. |
+| 4 | `sofer_profile` | `dataset`/`config`, `output`, `all_files`, `force` | `all_files=True` for batch (`profiles/`); single file for triage (`assess_dataset`). |
+| 5 | `sofer_render` | `package`/`config`, `output`, `all_files`, `force` | `all_files=True` for batch (`renders/`); requires profiles. |
+| 6 | `sofer_publish` | `config`, `target`, `output`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
+| 7 | `sofer_publish_confirm` | `config`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval of dry-run plan. |
+
+Prompts `prepare_dataset`, `assess_dataset`, `finalize_and_publish` encode this chain with per-step args and copy-paste examples; `assess_dataset` uses the subset `sofer_validate → sofer_profile(dataset) → sofer_render(package=dataset)` for single-file triage.
+
+Copy-paste chaining example (canonical order — paste into the MCP client):
+
+```python
+sofer_validate(config="dataset.toml")
+sofer_prepare(config="dataset.toml", output=None, force=False)
+sofer_codebook_all(config="dataset.toml", output=None)
+sofer_profile(dataset="dataset.toml", all_files=True, output=None, force=False)
+sofer_render(package="dataset.toml", all_files=True, output=None, force=False)
+sofer_publish(config="dataset.toml", dry_run=True)  # STOP — get approval before sofer_publish_confirm
+# after approval:
+sofer_publish_confirm(config="dataset.toml", acknowledge_risk=True)
+```
+
+Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file or TOML when `all_files=True`), `output` (override dir or `None` for defaults), `force` (overwrite guard), `all_files` (batch vs single).
+
 ### Agent setup (example: Claude Code)
 
 ```bash
