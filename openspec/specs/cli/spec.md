@@ -202,7 +202,9 @@ SHALL fall back to a non-empty derived value.
 
 ### Requirement: init creates raw/ and --move-existing (CLI-R07)
 
-`sofer init <name>` MUST create `raw/` (`RAW_DIR`) via `mkdir -p` idempotently alongside `<name>.toml`. Template SHALL state `# Source files → raw/ (scan copies to cache/)`. `--move-existing` SHALL move depth-1 supported files (`SUPPORTED_FORMATS`, direct children of cwd, excluding `cache`/`build`/`raw`/EXCLUSIONS) into `raw/` with: `check_flatten_collisions` before any move; collision with existing `raw/` content → fail naming sources; `--dry-run` previews no mutation; `--force` or non-interactive skip prompt, else prompt `[y/N]` and abort on `N`. Without flag, loose files stay.
+> Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31).
+
+`sofer init <name>` MUST create `raw/` (`RAW_DIR`) via `mkdir -p` idempotently alongside `<name>.toml`. Template SHALL state `# Source files → raw/ (scan copies to cache/)` and `[[file]] local` MUST be Windows-safe `raw/example.csv` (no `:`, `ntpath.splitdrive` → `""`, valid NTFS). `--move-existing` SHALL move depth-1 supported files (`SUPPORTED_FORMATS`, direct children of cwd, excluding `cache`/`build`/`raw`/EXCLUSIONS) into `raw/` with: `check_flatten_collisions` before any move; collision with existing `raw/` content → fail naming sources; `--dry-run` previews no mutation; `--force` or non-interactive skip prompt, else prompt `[y/N]` and abort on `N`. Without flag, loose files stay.
 
 #### Scenario: init creates raw/
 - GIVEN no `raw/`
@@ -243,6 +245,21 @@ SHALL fall back to a non-empty derived value.
 - GIVEN `sofer init my-ds` done
 - WHEN `my-ds.toml` inspected
 - THEN contains `raw/` guidance, no stale `data/` hint
+
+#### Scenario: Windows-safe placeholder
+- GIVEN `sofer init my-ds`
+- WHEN `my-ds.toml` inspected
+- THEN `local="raw/example.csv"`, no `":"`
+
+#### Scenario: ntpath drive
+- GIVEN `raw/example.csv`
+- WHEN `ntpath.splitdrive` win32
+- THEN `("", "raw/example.csv")`
+
+#### Scenario: scan xlsx after init
+- GIVEN `my-ds.toml` + `DATA_GOT_ALL.xlsx`
+- WHEN `sofer scan` then `validate`
+- THEN `cache/DATA_GOT_ALL.xlsx` registered, validate pass
 
 ### Requirement: Help for init --move-existing (CLI-R08)
 
