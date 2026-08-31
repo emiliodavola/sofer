@@ -95,13 +95,26 @@ class TestDescriptions:
 
 
 class TestParamDescriptions:
+    def _has_description(self, schema: dict) -> bool:
+        """Recursively find description in anyOf/allOf wrappers (Py 3.10 nests differently)."""
+        if not isinstance(schema, dict):
+            return False
+        if schema.get("description"):
+            return True
+        for key in ("anyOf", "allOf", "oneOf"):
+            if key in schema:
+                for sub in schema[key]:
+                    if self._has_description(sub):
+                        return True
+        return False
+
     def test_every_param_has_description(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
         for name, tool in tools.items():
             schema = tool.inputSchema or {}
             props = schema.get("properties", {})
             for pname, pschema in props.items():
-                assert pschema.get("description"), f"{name}.{pname} missing description"
+                assert self._has_description(pschema), f"{name}.{pname} missing description"
 
     def test_no_legacy_params(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
