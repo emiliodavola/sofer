@@ -890,6 +890,66 @@ class TestPrompts:
         assert "sofer_publish_confirm" in text
         assert "UNTRUSTED" in text
 
+    # MCP-BC01/MSP-R08: canonical chain in prompts
+
+    def test_prepare_dataset_canonical_chain(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                p = await client.get_prompt("prepare_dataset", {"config": "ds.toml"})
+                return p.messages[0].content.text
+
+        text = _run(_go())
+        # ordered sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile → sofer_render
+        idx_v = text.index("sofer_validate")
+        idx_p = text.index("sofer_prepare")
+        idx_cb = text.index("sofer_codebook_all")
+        idx_prof = text.index("sofer_profile")
+        idx_rend = text.index("sofer_render")
+        assert idx_v < idx_p < idx_cb < idx_prof < idx_rend
+        # copy-paste args
+        assert "config" in text
+        assert "output" in text
+        assert "all_files=True" in text
+        # when-to-use and canonical arrow
+        assert "when-to-use" in text.lower() or "when to use" in text.lower()
+        assert "assess_dataset" in text
+        assert "UNTRUSTED" in text
+
+    def test_assess_dataset_when_to_use_and_chain(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                p = await client.get_prompt(
+                    "assess_dataset", {"config": "ds.toml", "dataset": "data.csv"}
+                )
+                return p.messages[0].content.text
+
+        text = _run(_go())
+        assert "when-to-use" in text.lower() or "when to use" in text.lower()
+        assert "prepare_dataset" in text
+        assert "sofer_profile" in text
+        assert "sofer_render" in text
+        assert "sofer_validate" in text
+        assert "UNTRUSTED" in text
+
+    def test_finalize_and_publish_dry_run_stop(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                p = await client.get_prompt("finalize_and_publish", {"config": "ds.toml"})
+                return p.messages[0].content.text
+
+        text = _run(_go())
+        assert "dry_run=True" in text
+        assert "STOP" in text
+        assert "sofer_publish_confirm" in text
+        assert "acknowledge_risk" in text
+        assert "UNTRUSTED" in text
+
 
 # ---------------------------------------------------------------------------
 #  7.11 — Empty/headerless codebook marker at the tool level (adv5)
@@ -2166,3 +2226,66 @@ class TestInitTreePreserve:
             server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
         ).data
         assert "a.csv -> raw/a.csv" in envelope["output"]
+
+# ---------------------------------------------------------------------------
+#  feat-mcp-build-clarity — canonical chain, when-to-use, no sofer_build
+# ---------------------------------------------------------------------------
+
+
+class TestBuildClarityToolsList:
+    """MCP-BC02 B branch: no sofer_build, each tool has when-to-use."""
+
+    def test_no_sofer_build_and_when_to_use(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                tools = await client.list_tools()
+                return tools
+
+        tools = _run(_go())
+        names = {t.name for t in tools}
+        assert "sofer_build" not in names, "B branch must not expose sofer_build"
+        for t in tools:
+            desc = (t.description or "").lower()
+            assert "when to use" in desc, f"{t.name} missing when-to-use in description: {t.description!r}"  # noqa: E501
+            assert "validate" in desc or "prepare" in desc or "codebook" in desc or "profile" in desc or "render" in desc or "publish" in desc or "scan" in desc or "canonical" in desc  # noqa: E501
+
+
+class TestBuildClarityReadme:
+    """README grep: canonical chain and copy-paste example."""
+
+    def _read(self, name: str) -> str:
+        repo_root = Path(__file__).resolve().parents[1]
+        return (repo_root / name).read_text(encoding="utf-8")
+
+    def test_readme_contains_canonical_chain_and_example(self):
+        text = self._read("README.md")
+        assert "validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm" in text  # noqa: E501
+        assert "sofer_validate" in text
+        assert "sofer_prepare" in text
+        assert "sofer_codebook_all" in text
+        assert "sofer_profile" in text and "all_files=True" in text
+        assert "sofer_render" in text
+        assert "force" in text.lower()
+        # args table covers config/dataset/package/output/force/all_files
+        for token in ("config", "dataset", "package", "output", "force", "all_files"):
+            assert token in text, f"README missing arg {token}"
+
+    def test_readme_es_contains_canonical_chain_and_example(self):
+        text = self._read("README_ES.md")
+        assert "validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm" in text  # noqa: E501
+        assert "sofer_validate" in text
+        assert "sofer_codebook_all" in text
+        assert "all_files=True" in text
+        assert "force" in text.lower()
+
+
+class TestBuildClarityServerInstructions:
+    def test_instructions_contain_canonical_chain(self, tmp_path):
+        server = build_server(root=tmp_path)
+        instr = server.instructions  # type: ignore[attr-defined]
+        assert "sofer_validate" in instr
+        assert "sofer_prepare" in instr
+        assert "sofer_codebook_all" in instr
+        assert "all_files=True" in instr or "all_files" in instr
