@@ -405,13 +405,25 @@ resolve to the same output stem (collision) are detected before writing — the
 non-colliding files still get their codebook written; the run fails with an
 error listing the colliding sources.
 
+For `.xlsx` with multiple sheets, one codebook per sheet is emitted as
+`codebooks/<rel>/<stem>__<sanitized>.md` reusing `sanitize_sheet_name` dedup
+(`Ventas`/`VENTAS` → `__ventas`, `__ventas_2`); single-sheet `.xlsx` stays
+`stem.md`.  The root index `**Tables:**` counts sheets and `**Total columns:**`
+sums across all emitted codebooks.  The Dataset Card's `### Data Fields`
+renders per-sheet collapsible tables: each table in its own
+`<details><summary>Data Fields -- <sheet> (N columns)</summary>` with a blank
+line after `</summary>` so HF renders the table inside (HF-compatible,
+*cada tabla por separado*), gated by `card_collapse_threshold` (`[tool.sofer]`
+default `15`).
+
 ### Codebooks in the package
 
 `prepare --all-files` writes codebooks directly into the output directory
 (Option B) instead of the shared `cache/`:
 
 - Per-file codebooks land under `build/codebooks/` mirroring their relative
-  paths (e.g., `raw/DPTO.csv` → `build/codebooks/DPTO.md`).
+  paths (e.g., `raw/DPTO.csv` → `build/codebooks/DPTO.md`; `.xlsx` with 2
+  sheets → `build/codebooks/Report__ventas.md` + `Report__costos.md`).
 - The root index `codebook.md` is written to the output root.
 - `publish` stages these codebooks after the data files, so the repo ends up
   with `codebooks/**/*.md` plus the root `codebook.md`.

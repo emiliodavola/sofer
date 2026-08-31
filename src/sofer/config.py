@@ -83,6 +83,9 @@ _DEFAULTS: dict[str, Any] = {
     # sofer://metadata): resources larger than this are refused with a clear
     # error naming the limit instead of being slurped into an LLM context.
     "agent_resource_max_bytes": 50_000_000,
+    # Card collapse threshold: columns per table above which Data Fields
+    # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
+    "card_collapse_threshold": 15,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -180,6 +183,12 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
         _val = merged.get(_key, "")
         if not isinstance(_val, str) or not _val.strip():
             raise ValueError(f"'{_key}' in [tool.sofer] must be a non-empty string")
+
+    # ``card_collapse_threshold`` must be a non-negative integer (tool-wide,
+    # never from per-dataset TOML [meta]).
+    _thr = merged.get("card_collapse_threshold")
+    if not isinstance(_thr, int) or isinstance(_thr, bool) or _thr < 0:
+        raise ValueError("'card_collapse_threshold' in [tool.sofer] must be a non-negative integer")
 
     return merged
 
@@ -318,3 +327,5 @@ CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]
 
 # MCP agent resource size guard (see ``_DEFAULTS["agent_resource_max_bytes"]``).
 AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
+
+CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]

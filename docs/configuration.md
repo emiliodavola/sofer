@@ -100,6 +100,15 @@ Stdout is never modified, so piping/redirecting output stays byte-identical.
 | `parquet_row_group_size` | `100000` | Parquet row group size. |
 | `parquet_shard_warning_mb` | `500` | Warn when a shard exceeds this MB. |
 
+## Dataset Card
+
+| Key | Default | What it does |
+|---|---|---|
+| `card_collapse_threshold` | `15` | Columns per table above which Data Fields collapses; multi-table datasets always per-sheet collapsible (each table in its own `<details>`). Tool-wide `[tool.sofer]` only, not per-dataset `[meta]`. |
+
+HF `<details>` requires a blank line after `</summary>` — the card emits it
+so tables render inside the collapsed block.
+
 ## Metadata inference tuning
 
 The inference pipeline (used by `profile`) is fully configurable in
