@@ -207,6 +207,8 @@ sofer profile raw/contacts.csv
 # Batch: one metadata.yaml per [[file]] under cache/profiles/<rel_stem>.metadata.yaml
 sofer profile dataset.toml --all-files
 sofer profile dataset.toml --all-files --output ./out   # Option B: rel outputs anchor to TOML dir
+# For .xlsx with N>1 sheets, N files are emitted as profiles/<rel>/<stem>__<sanitized>.metadata.yaml
+# (single-sheet stays stem.metadata.yaml), reusing sanitize_sheet_name (lower->NFKD->ascii->space->_->[^a-z0-9_-]->_->__+->_->strip, empty->sheet) with seen _{n} dedup and normalized __+->_ collision (partial-write then ValueError naming ::sheet), mirroring codebook/prepare stem__sheet parity
 # Overwrite guard: without --force an existing destination raises FileExistsError
 sofer profile raw/contacts.csv --output ./out --force    # overwrite
 
@@ -216,6 +218,8 @@ sofer render raw/metadata.yaml   # ...or the file directly
 # Batch: one README per [[file]] under cache/renders/<rel_stem>.README.md
 sofer render dataset.toml --all-files
 sofer render dataset.toml --all-files --output ./out
+# For .xlsx with N>1 sheets, N READMEs are emitted as renders/<rel>/<stem>__<sanitized>.README.md
+# (single-sheet stays stem.README.md) with the same sanitization/dedup/collision parity as profile
 sofer render raw/ --output ./out --force
 ```
 
@@ -271,15 +275,15 @@ detector class, no changes to the pipeline.
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
-| `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml`, `PurePath.suffixes`, collision `ValueError`), `--force` (overwrite guard), `--config` (TOML path for batch). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
-| `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md`, skip missing `metadata.yaml`), `--force`, `--config`. |
+| `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` or `__<sanitized>.metadata.yaml` per sheet for `.xlsx` N>1, `PurePath.suffixes`, sanitization + `seen _{n}`, normalized `__+`→`_` collision `ValueError` with `::sheet`), `--force` (overwrite guard), `--config` (TOML path for batch). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
+| `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` or `__<sanitized>.README.md` per sheet for `.xlsx` N>1 with same sanitization/dedup/collision parity, skip missing `metadata.yaml`), `--force`, `--config`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
 | `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `cache/codebook.md` index. Use `--config` to specify the TOML file. |
 | `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Orphan pruning: with `--force` removes stale files not in `expanded_planned_remotes` plus `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotent; `--force` off leaves orphans). |
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (delete build after successful `hf` upload only when `fail==0`, quality passed, not `--dry-run`; `--output` anchoring via `resolve_output_dir`), `--clean-cache`/`--all` (also delete `cache/` at `cfg._base_dir/cache`, shared tool-wide — sibling datasets may be affected; requires `--clean`). For `--target local`, `--clean` deletes the resolved destination only. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
 | `--help` | Detailed help for any command. |
-| `sofer-mcp` | Launch the MCP server over stdio (10 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
+| `sofer-mcp` | Launch the MCP server over stdio (11 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
 > generation half (offline, inspectable) and the delivery half (network).
@@ -458,10 +462,10 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 10 tool callables (`sofer_validate`, `sofer_prepare`,
+The server exposes 11 tool callables (`sofer_validate`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_render`,
-`sofer_scan_dry_run`, `sofer_scan_apply`), 3 resources
+`sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`), 3 resources
 (`sofer://dataset/{config}`, `sofer://codebook/{data_file}`,
 `sofer://metadata/{data_file}`), and 3 prompts (`prepare_dataset`,
 `assess_dataset`, `finalize_and_publish`). No remote/streamable-http
@@ -471,6 +475,43 @@ Resource URIs are resolved **relative to the server root** — e.g.
 `sofer://dataset/dataset.toml` reads `<root>/dataset.toml`. Absolute POSIX
 paths are also accepted (rest-pattern templates): `sofer://dataset//tmp/...`
 arrives with a leading `/` and must still resolve inside the root.
+
+### Canonical build chain
+
+MCP agents should follow the canonical pipeline — `sofer_prepare` alone does **not** produce `profiles/`/`renders/`:
+
+```
+validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm
+```
+
+Full order: `sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile(all_files) → sofer_render(all_files) → sofer_publish(dry_run) → sofer_publish_confirm`.
+
+| Step | Tool | Key args | When to use |
+|------|------|----------|-------------|
+| 1 | `sofer_validate` | `config` | Quick check; always first. |
+| 2 | `sofer_prepare` | `config`, `output`, `force` | After validate; writes Parquet+README+LICENSE. |
+| 3 | `sofer_codebook_all` | `config`, `output` | After prepare; batch codebooks. |
+| 4 | `sofer_profile` | `dataset`/`config`, `output`, `all_files`, `force` | `all_files=True` for batch (`profiles/`); single file for triage (`assess_dataset`). |
+| 5 | `sofer_render` | `package`/`config`, `output`, `all_files`, `force` | `all_files=True` for batch (`renders/`); requires profiles. |
+| 6 | `sofer_publish` | `config`, `target`, `output`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
+| 7 | `sofer_publish_confirm` | `config`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval of dry-run plan. |
+
+Prompts `prepare_dataset`, `assess_dataset`, `finalize_and_publish` encode this chain with per-step args and copy-paste examples; `assess_dataset` uses the subset `sofer_validate → sofer_profile(dataset) → sofer_render(package=dataset)` for single-file triage.
+
+Copy-paste chaining example (canonical order — paste into the MCP client):
+
+```python
+sofer_validate(config="dataset.toml")
+sofer_prepare(config="dataset.toml", output=None, force=False)
+sofer_codebook_all(config="dataset.toml", output=None)
+sofer_profile(dataset="dataset.toml", all_files=True, output=None, force=False)
+sofer_render(package="dataset.toml", all_files=True, output=None, force=False)
+sofer_publish(config="dataset.toml", dry_run=True)  # STOP — get approval before sofer_publish_confirm
+# after approval:
+sofer_publish_confirm(config="dataset.toml", acknowledge_risk=True)
+```
+
+Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file or TOML when `all_files=True`), `output` (override dir or `None` for defaults), `force` (overwrite guard), `all_files` (batch vs single).
 
 ### Agent setup (example: Claude Code)
 
@@ -543,8 +584,15 @@ Per-agent locations and shapes:
   callable that writes to Hugging Face Hub. It requires
   `acknowledge_risk=True`, requires `acknowledge_confidential=True` for
   configs marked `[meta] confidential`, and — when configured — an approval
-  phrase compared with `hmac.compare_digest`. The quality gate runs before
-  the token check (offline, deterministic fail).
+  phrase compared with `hmac.compare_digest`. Token is resolved via
+  `HF_TOKEN` → `HF_HUB_TOKEN` (sofer compat alias) →
+  `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (`hf auth login`
+  cache via `HF_TOKEN_PATH` + OIDC via `HF_OIDC_RESOURCE` + Colab) with
+  `.env` support (`load_dotenv(override=False)`); `HF_HUB_DISABLE_IMPLICIT_TOKEN`
+  truthy skips the file fallback; the token is never logged. The quality
+  gate runs before the token check (offline, deterministic fail). `hf auth login`
+  is a valid alternative to setting `HF_TOKEN`; `HF_HUB_TOKEN` is kept for
+  backward compatibility and `HUGGING_FACE_HUB_TOKEN` is the hub-native name.
 - **Resource size guard.** `sofer://` resources larger than
   `agent_resource_max_bytes` (`[tool.sofer]`, default 50 MB) are refused.
 - **Untrusted content.** Everything sofer returns (TOML, codebooks, data

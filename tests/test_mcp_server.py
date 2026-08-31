@@ -26,10 +26,12 @@ from sofer import mcp_server as ms
 from sofer.mcp_server import (
     HFTokenError,
     MCPToolError,
+    PathOutsideRootError,
     PublishRefusedError,
     build_server,
     sofer_codebook,
     sofer_codebook_all,
+    sofer_init,
     sofer_prepare,
     sofer_profile,
     sofer_publish,
@@ -84,6 +86,13 @@ def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
     monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
     monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: existing or [])
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+
+    # publish now uses HfApi(token=token) when a token is resolved; keep the
+    # offline seam working by making that construction return the mocked _api.
+    def _fake_hf_api(*_args, **_kwargs):
+        return publish_mod._api
+
+    monkeypatch.setattr(publish_mod, "HfApi", _fake_hf_api)
 
 
 def _call(server: ms._FastMCP, name: str, args: dict | None = None):
@@ -176,16 +185,26 @@ class TestToolRoster:
             "sofer_render",
             "sofer_scan_dry_run",
             "sofer_scan_apply",
+            "sofer_init",
         }
     )
 
-    def test_exactly_ten_callables(self, server):
+    def test_exactly_eleven_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
                 return {t.name for t in tools}
 
         assert _run(_go()) == self._EXPECTED
+        schema = _tool_schema(server, "sofer_init")
+        assert "name" in schema.get("required", [])
+        props = schema.get("properties", {})
+        assert props.get("name", {}).get("type") == "string"
+        for flag in ("move_existing", "dry_run", "force"):
+            assert flag in props
+            assert props[flag].get("type") == "boolean"
+            if "default" in props[flag]:
+                assert props[flag].get("default") is False
 
     def test_validate_round_trip(self, server, tmp_path):
         result = _call(server, "sofer_validate", {"config": str(tmp_path / "dataset.toml")})
@@ -256,7 +275,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 10
+                    assert len(tools.tools) == 11
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -340,8 +359,13 @@ class TestNetworkOffline:
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
+        import huggingface_hub.constants as hf_constants
+
         monkeypatch.setenv("HF_TOKEN", "")
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         build_server(root=tmp_path)
 
         with pytest.raises(HFTokenError, match="HF_TOKEN"):
@@ -866,6 +890,66 @@ class TestPrompts:
         assert "sofer_publish_confirm" in text
         assert "UNTRUSTED" in text
 
+    # MCP-BC01/MSP-R08: canonical chain in prompts
+
+    def test_prepare_dataset_canonical_chain(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                p = await client.get_prompt("prepare_dataset", {"config": "ds.toml"})
+                return p.messages[0].content.text
+
+        text = _run(_go())
+        # ordered sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile → sofer_render
+        idx_v = text.index("sofer_validate")
+        idx_p = text.index("sofer_prepare")
+        idx_cb = text.index("sofer_codebook_all")
+        idx_prof = text.index("sofer_profile")
+        idx_rend = text.index("sofer_render")
+        assert idx_v < idx_p < idx_cb < idx_prof < idx_rend
+        # copy-paste args
+        assert "config" in text
+        assert "output" in text
+        assert "all_files=True" in text
+        # when-to-use and canonical arrow
+        assert "when-to-use" in text.lower() or "when to use" in text.lower()
+        assert "assess_dataset" in text
+        assert "UNTRUSTED" in text
+
+    def test_assess_dataset_when_to_use_and_chain(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                p = await client.get_prompt(
+                    "assess_dataset", {"config": "ds.toml", "dataset": "data.csv"}
+                )
+                return p.messages[0].content.text
+
+        text = _run(_go())
+        assert "when-to-use" in text.lower() or "when to use" in text.lower()
+        assert "prepare_dataset" in text
+        assert "sofer_profile" in text
+        assert "sofer_render" in text
+        assert "sofer_validate" in text
+        assert "UNTRUSTED" in text
+
+    def test_finalize_and_publish_dry_run_stop(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                p = await client.get_prompt("finalize_and_publish", {"config": "ds.toml"})
+                return p.messages[0].content.text
+
+        text = _run(_go())
+        assert "dry_run=True" in text
+        assert "STOP" in text
+        assert "sofer_publish_confirm" in text
+        assert "acknowledge_risk" in text
+        assert "UNTRUSTED" in text
+
 
 # ---------------------------------------------------------------------------
 #  7.11 — Empty/headerless codebook marker at the tool level (adv5)
@@ -1237,6 +1321,255 @@ class TestQualityGateBeforeToken:
 
 
 # ---------------------------------------------------------------------------
+#  fix/mcp-hf-token-fallback — token cascade, dotenv, file/OIDC, never-log,
+#  HfApi wiring and integration (MSP-R05)
+# ---------------------------------------------------------------------------
+
+
+class TestHfTokenFallback:
+    def test_env_prevails_over_alias_and_cache(self, tmp_path, monkeypatch, restore_tool_config):
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setenv("HF_TOKEN", "env-token")
+        monkeypatch.setenv("HF_HUB_TOKEN", "alias-token")
+        monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "native-token")
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "env-token"
+
+    def test_hugging_face_hub_token_alias(self, tmp_path, monkeypatch, restore_tool_config):
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "native-token")
+        # ensure file fallback not taken
+        fake_file = tmp_path / "no-token"
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(fake_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "native-token"
+
+    def test_file_fallback_when_env_absent(self, tmp_path, monkeypatch, restore_tool_config):
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        monkeypatch.delenv("HF_OIDC_RESOURCE", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "file-token"
+
+    def test_empty_whitespace_treated_as_absent(self, tmp_path, monkeypatch, restore_tool_config):
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setenv("HF_TOKEN", "   \r\n  ")
+        monkeypatch.setenv("HF_HUB_TOKEN", "alias-token")
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _clean_token, _get_hf_token
+
+        assert _clean_token("  \r\n ") is None
+        assert _clean_token("  alias-token  \n") == "alias-token"
+        assert _get_hf_token() == "alias-token"
+        # all whitespace -> None
+        monkeypatch.setenv("HF_HUB_TOKEN", "  ")
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        assert _get_hf_token() is None
+
+    def test_hf_hub_disable_skips_file(self, tmp_path, monkeypatch, restore_tool_config):
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.setenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", "true")
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() is None
+        # unset -> file returned
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        assert _get_hf_token() == "file-token"
+
+    def test_oidc_propagates_error(self, tmp_path, monkeypatch, restore_tool_config):
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.setenv("HF_OIDC_RESOURCE", "https://example.com/repo")
+        monkeypatch.delenv("HF_OIDC_ID_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        with pytest.raises(Exception) as excinfo:
+            _get_hf_token()
+        # huggingface_hub raises OIDCError when OIDC resource set but no provider
+        assert "HF_OIDC_RESOURCE" in str(excinfo.value) or "OIDC" in str(excinfo.value)
+
+    def test_dotenv_not_override_env(self, tmp_path, monkeypatch, restore_tool_config):
+        monkeypatch.setenv("HF_TOKEN", "env-token")
+        env_file = tmp_path / ".env"
+        env_file.write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "env-token"
+
+    def test_dotenv_loads_when_env_absent(self, tmp_path, monkeypatch, restore_tool_config):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "from-dotenv"
+
+    def test_never_log_token(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        secret = "hf_super_secret_12345"
+        monkeypatch.setenv("HF_TOKEN", secret)
+        build_server(root=tmp_path)
+        # success case must not contain token in output
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert secret not in envelope["output"]
+        assert secret not in str(envelope)
+        # error case (missing token) also must not leak previous token
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        with pytest.raises(HFTokenError) as excinfo:
+            sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert secret not in str(excinfo.value)
+
+    def test_hfapi_called_with_resolved_token(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        captured: dict[str, str | None] = {}
+
+        def _fake_hf_api(*_args, **kwargs):
+            captured["token"] = kwargs.get("token")
+
+            class _Fake:
+                def create_repo(self, *a, **kw):
+                    pass
+
+                def list_repo_files(self, *a, **kw):
+                    return []
+
+                def upload_folder(self, *a, **kw):
+                    return None
+
+            return _Fake()
+
+        monkeypatch.setattr(publish_mod, "HfApi", _fake_hf_api)
+        monkeypatch.setenv("HF_TOKEN", "tok-123")
+        build_server(root=tmp_path)
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert captured["token"] == "tok-123"
+        assert envelope["ok"] is True
+
+
+class TestHfTokenIntegration:
+    def test_file_only_upload_succeeds(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        _mock_hf_api(monkeypatch)
+        build_server(root=tmp_path)
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+
+    def test_no_token_raises_before_network(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api, "create_repo", lambda *a, **kw: calls.append("create_repo")
+        )
+        monkeypatch.setattr(
+            publish_mod._api, "list_repo_files", lambda *a, **kw: calls.append("list_repo_files")
+        )
+        monkeypatch.setattr(
+            publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
+        )
+        build_server(root=tmp_path)
+        with pytest.raises(HFTokenError):
+            sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert calls == []
+
+    def test_quality_gate_before_token(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        (tmp_path / "data.csv").write_text("col_a;col_b\n1;2\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "dataset.toml").write_text(
+            "[dataset]\nname='test-ds'\nrepo_id='user/test-ds'\n\n[meta]\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n\n"
+            "[[quality]]\ncheck='duplicates'\nseverity='fail'\n",
+            encoding="utf-8",
+        )
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        build_server(root=tmp_path)
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+
+
+# ---------------------------------------------------------------------------
 #  Review fix 4 — behavioral tests for the four untested callables:
 #  sofer_profile (MSP-R09), sofer_render, sofer_codebook_all (collision +
 #  [meta] delimiter injection), sofer_scan_dry_run.
@@ -1418,8 +1751,13 @@ class TestAdvisoryHardening:
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
+        import huggingface_hub.constants as hf_constants
+
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         build_server(root=tmp_path)
 
         with pytest.raises(HFTokenError, match="HF_TOKEN"):
@@ -1484,6 +1822,7 @@ class TestAdvisoryHardening:
             sofer_render,
             sofer_scan_dry_run,
             sofer_scan_apply,
+            sofer_init,
         ]
         for fn in callables:
             src = inspect.getsource(fn)
@@ -1710,3 +2049,243 @@ class TestMcpProfileRenderBatch:
         assert envelope["ok"] is True, envelope
         assert (root / "cache" / "profiles" / "a.metadata.yaml").is_file()
         assert not (tmp_path / "evil").exists()
+
+
+# ---------------------------------------------------------------------------
+#  feat/mcp-init-tool — sofer_init bootstrap tool (INIT-01)
+# ---------------------------------------------------------------------------
+
+
+class TestInitCreatesTomlAndRaw:
+    def test_creates_toml_and_raw(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+        expected = _INIT_TEMPLATE.format(name="my-ds")
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
+        assert (tmp_path / "raw").is_dir()
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.name == "my-ds"
+        assert envelope["config_errors"] == []
+
+    def test_direct_call_creates_toml(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="my-ds")
+        assert envelope["ok"] is True
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
+            name="my-ds"
+        )
+
+
+class TestInitDryRun:
+    def test_dry_run_no_mutation(self, tmp_path, restore_tool_config):
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+        ).data
+        assert envelope["ok"] is True
+        assert not (tmp_path / "raw").exists(), "dry_run must not create raw/"
+        assert (tmp_path / "a.csv").exists(), "dry_run must not move candidate"
+        assert "a.csv -> raw/a.csv" in envelope["output"]
+        # TOML still written
+        assert (tmp_path / "my-ds.toml").is_file()
+        assert not (tmp_path / "raw" / "a.csv").exists()
+
+    def test_dry_run_empty_candidates(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+        ).data
+        assert envelope["ok"] is True
+        assert not (tmp_path / "raw").exists()
+
+
+class TestInitCollision:
+    def test_collision_returns_ok_false_no_move(self, tmp_path, restore_tool_config):
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "move_existing": True}).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert (tmp_path / "a.csv").exists(), "collision must not move file"
+        assert any("Collision" in e for e in envelope["config_errors"])
+
+
+class TestInitTraversal:
+    def test_traversal_dotdot_mcp(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "../evil"})
+
+    def test_traversal_absolute_mcp(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "/abs/evil"})
+
+    def test_traversal_direct_raises(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        with pytest.raises(PathOutsideRootError, match="outside the server root"):
+            sofer_init(name="../evil")
+
+    def test_traversal_win_drive_rejected(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "C:/evil"})
+
+    def test_empty_name_returns_ok_false(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="   ")
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("non-empty" in e for e in envelope["config_errors"])
+        assert not (tmp_path / ".toml").exists()
+
+    def test_empty_name_mcp(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": ""}).data
+        assert envelope["ok"] is False
+        assert not list(tmp_path.glob("*.toml"))
+
+
+class TestInitIdempotencyForce:
+    def test_force_false_does_not_overwrite(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        first = sofer_init(name="my-ds")
+        assert first["ok"] is True
+        (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
+        second = sofer_init(name="my-ds", force=False)
+        assert second["ok"] is False
+        assert second["exit_code"] == 1
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == "custom"
+
+    def test_force_true_overwrites(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        build_server(root=tmp_path)
+        sofer_init(name="my-ds")
+        (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
+        envelope = sofer_init(name="my-ds", force=True)
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
+            name="my-ds"
+        )
+
+    def test_minimal_toml_validation(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        sofer_init(name="my-ds")
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.name == "my-ds"
+
+
+class TestInitTreePreserve:
+    def test_move_existing_preserves_tree(self, tmp_path, restore_tool_config):
+        # Seed a supported file at root depth-1
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        # Also test tree preserve via move_to_raw domain directly for nested case
+        # MCP init only moves depth-1, so nested file should stay untouched and tree
+        # preserve is verified via the domain helper (spec: relative_to(root) tree)
+        build_server(root=tmp_path)
+        # Domain helper directly proves tree preservation for nested paths
+        from sofer.scanner import move_to_raw as _move
+
+        nested = tmp_path / "sub"
+        nested.mkdir()
+        (nested / "x.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        raw_dir = tmp_path / "raw"
+        moved = _move([nested / "x.csv"], tmp_path.resolve(), raw_dir)
+        assert moved[0][1] == raw_dir / "sub" / "x.csv"
+        # Cleanup domain test artifact
+        if (raw_dir / "sub" / "x.csv").exists():
+            (raw_dir / "sub" / "x.csv").unlink()
+            try:
+                (raw_dir / "sub").rmdir()
+                raw_dir.rmdir()
+            except OSError:
+                pass
+
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "move_existing": True}).data
+        assert envelope["ok"] is True
+        assert (tmp_path / "raw" / "a.csv").is_file()
+        assert not (tmp_path / "a.csv").exists()
+        assert (tmp_path / "my-ds.toml").is_file()
+
+    def test_move_existing_dry_run_tree_preview(self, tmp_path, restore_tool_config):
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+        ).data
+        assert "a.csv -> raw/a.csv" in envelope["output"]
+
+# ---------------------------------------------------------------------------
+#  feat-mcp-build-clarity — canonical chain, when-to-use, no sofer_build
+# ---------------------------------------------------------------------------
+
+
+class TestBuildClarityToolsList:
+    """MCP-BC02 B branch: no sofer_build, each tool has when-to-use."""
+
+    def test_no_sofer_build_and_when_to_use(self, tmp_path):
+        server = build_server(root=tmp_path)
+
+        async def _go():
+            async with Client(server) as client:
+                tools = await client.list_tools()
+                return tools
+
+        tools = _run(_go())
+        names = {t.name for t in tools}
+        assert "sofer_build" not in names, "B branch must not expose sofer_build"
+        for t in tools:
+            desc = (t.description or "").lower()
+            assert "when to use" in desc, f"{t.name} missing when-to-use in description: {t.description!r}"  # noqa: E501
+            assert "validate" in desc or "prepare" in desc or "codebook" in desc or "profile" in desc or "render" in desc or "publish" in desc or "scan" in desc or "canonical" in desc  # noqa: E501
+
+
+class TestBuildClarityReadme:
+    """README grep: canonical chain and copy-paste example."""
+
+    def _read(self, name: str) -> str:
+        repo_root = Path(__file__).resolve().parents[1]
+        return (repo_root / name).read_text(encoding="utf-8")
+
+    def test_readme_contains_canonical_chain_and_example(self):
+        text = self._read("README.md")
+        assert "validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm" in text  # noqa: E501
+        assert "sofer_validate" in text
+        assert "sofer_prepare" in text
+        assert "sofer_codebook_all" in text
+        assert "sofer_profile" in text and "all_files=True" in text
+        assert "sofer_render" in text
+        assert "force" in text.lower()
+        # args table covers config/dataset/package/output/force/all_files
+        for token in ("config", "dataset", "package", "output", "force", "all_files"):
+            assert token in text, f"README missing arg {token}"
+
+    def test_readme_es_contains_canonical_chain_and_example(self):
+        text = self._read("README_ES.md")
+        assert "validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm" in text  # noqa: E501
+        assert "sofer_validate" in text
+        assert "sofer_codebook_all" in text
+        assert "all_files=True" in text
+        assert "force" in text.lower()
+
+
+class TestBuildClarityServerInstructions:
+    def test_instructions_contain_canonical_chain(self, tmp_path):
+        server = build_server(root=tmp_path)
+        instr = server.instructions  # type: ignore[attr-defined]
+        assert "sofer_validate" in instr
+        assert "sofer_prepare" in instr
+        assert "sofer_codebook_all" in instr
+        assert "all_files=True" in instr or "all_files" in instr
