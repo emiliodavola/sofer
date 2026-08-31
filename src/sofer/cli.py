@@ -756,7 +756,7 @@ _INIT_TEMPLATE = """\
 
 [dataset]
 name = "{name}"
-repo_id = "YOUR_USER/{name}"
+repo_id = "{user}/{name}"
 repo_type = "dataset"
 private = true
 build_dir = "build"
@@ -848,11 +848,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     move_existing: bool = bool(getattr(args, "move_existing", False))
     dry_run: bool = bool(getattr(args, "dry_run", False))
     force: bool = bool(getattr(args, "force", False))
+    user_val: str = getattr(args, "user", None) or "YOUR_USER"
+    toml_text = _INIT_TEMPLATE.format(name=args.name, user=user_val)
 
     if not move_existing:
         # Always scaffold raw/ idempotently before TOML write (CLI-R07).
         raw_dir_path.mkdir(parents=True, exist_ok=True)
-        output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+        output.write_text(toml_text, encoding="utf-8")
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
@@ -896,7 +898,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         else:
             print("  DRY RUN  No supported files to move.")
         # Preview only: no raw/ mkdir when absent, no moves.
-        output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+        output.write_text(toml_text, encoding="utf-8")
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
@@ -911,7 +913,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         raw_dir_path.mkdir(parents=True, exist_ok=True)
-        output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+        output.write_text(toml_text, encoding="utf-8")
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
@@ -929,7 +931,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if answer not in ("y", "yes"):
             print("  OK  Aborted move.")
             raw_dir_path.mkdir(parents=True, exist_ok=True)
-            output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+            output.write_text(toml_text, encoding="utf-8")
             print(f"  OK  Created {output}")
             print("     Edit the file and run:")
             print(f"       sofer prepare {output.name}")
@@ -938,7 +940,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     # Proceed: scaffold raw/ then move.
     raw_dir_path.mkdir(parents=True, exist_ok=True)
-    output.write_text(_INIT_TEMPLATE.format(name=args.name), encoding="utf-8")
+    output.write_text(toml_text, encoding="utf-8")
     print(f"  OK  Created {output}")
     for src in candidates:
         dest = raw_dir_path / src.name
@@ -1296,6 +1298,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     i.add_argument("name", help="Short name for the dataset.")
+    i.add_argument(
+        "--user",
+        default=None,
+        help=(
+            "Hugging Face username or organization for repo_id "
+            "(e.g. --user myuser -> repo_id 'myuser/<name>'); "
+            "default: YOUR_USER placeholder."
+        ),
+    )
     i.add_argument(
         "--move-existing",
         action="store_true",

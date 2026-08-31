@@ -235,7 +235,14 @@ def _capture_output() -> Iterator[tuple[io.StringIO, io.StringIO]]:
 
 
 def _captured_text(out: io.StringIO, err: io.StringIO) -> str:
-    """Combine captured stdout/stderr into one envelope ``output`` string."""
+    """Combine captured stdout/stderr into one envelope ``output`` string.
+
+    TODO(perf): output envelope is currently unbounded — large codebooks or
+    validation reports could exceed agent context limits. Consider truncating to
+    ``agent_resource_max_bytes`` or a dedicated ``output_max_bytes`` config
+    and documenting truncation in ``output_schema``. For now this is a known
+    limitation; callers should handle large ``output`` payloads.
+    """
     text = out.getvalue()
     stderr_text = err.getvalue()
     if stderr_text:
@@ -1115,14 +1122,17 @@ def sofer_codebook_all(
                 delimiter=cfg.csv_delimiter,
                 encoding=cfg.csv_encoding,
             )
-        except ValueError:
-            return {
-                "ok": False,
-                "exit_code": 1,
-                "output": _captured_text(out, err),
-                "confidential": cfg.confidential,
-                "config_errors": config_errors,
-            }
+        except ValueError as exc:
+            return _error_envelope(
+                "CONFIG_ERROR",
+                str(exc),
+                next_hint={"action": "rename source files to avoid collision"},
+                config_errors=[str(exc)],
+                extra={
+                    "output": _captured_text(out, err),
+                    "confidential": cfg.confidential,
+                },
+            )
         return {
             "ok": True,
             "exit_code": 0,
@@ -1429,7 +1439,10 @@ def sofer_auth_status(
             )
         _bound_discovery(cfg._base_dir)
         config_errors = cfg.validate()
-        # Do not enforce file containment for auth_status — it's a preflight; still surface errors if any
+        # Also surface containment errors for file entries and output targets to
+        # avoid false ok:true on malicious TOML (Risk W1).
+        config_errors.extend(_validate_file_entries(cfg))
+        config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
         token = _get_hf_token()
         token_status = "present" if token is not None else "missing"
         requires_ack_confidential = bool(cfg.confidential)
@@ -1643,6 +1656,12 @@ def sofer_init(
         bool, Field(description="When true, preview creation without writing raw/ or moving files.")
     ] = False,
     force: Annotated[bool, Field(description="Overwrite existing <name>.toml when true.")] = False,
+    user: Annotated[
+        str | None,
+        Field(
+            description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'); default: YOUR_USER placeholder."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Create <name>.toml from _INIT_TEMPLATE and scaffold raw/.
 
@@ -1650,7 +1669,7 @@ def sofer_init(
     Network usage: none.
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
-    Example: sofer_init(name="my-dataset")
+    Example: sofer_init(name="my-dataset", user="myuser")
     Requires: server root writable. Next: sofer_scan_apply to register files.
     """
     with _tool_execution(), _capture_output() as (out, err):
@@ -1674,6 +1693,7 @@ def sofer_init(
         )
         raw_dir = root / sofer_config.RAW_DIR
         base_dir = root.resolve()
+        user_val = user.strip() if user and user.strip() else "YOUR_USER"
         if not raw_dir.resolve().is_relative_to(base_dir):
             return {
                 "ok": False,
@@ -1734,7 +1754,9 @@ def sofer_init(
                         print(f"     {src.name} -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
                 else:
                     print("  DRY RUN  No supported files to move.")
-                Path(toml_path).write_text(_INIT_TEMPLATE.format(name=name), encoding="utf-8")
+                Path(toml_path).write_text(
+                    _INIT_TEMPLATE.format(name=name, user=user_val), encoding="utf-8"
+                )
                 print(f"  OK  Created {toml_path.name}")
                 print("     Edit the file and run:")
                 print(f"       sofer prepare {toml_path.name}")
@@ -1746,7 +1768,9 @@ def sofer_init(
                     "config_errors": [],
                 }
         if dry_run and not move_existing:
-            Path(toml_path).write_text(_INIT_TEMPLATE.format(name=name), encoding="utf-8")
+            Path(toml_path).write_text(
+                _INIT_TEMPLATE.format(name=name, user=user_val), encoding="utf-8"
+            )
             print(f"  OK  Created {toml_path.name}")
             print("     Edit the file and run:")
             print(f"       sofer prepare {toml_path.name}")
@@ -1758,7 +1782,9 @@ def sofer_init(
                 "config_errors": [],
             }
         raw_dir.mkdir(parents=True, exist_ok=True)
-        Path(toml_path).write_text(_INIT_TEMPLATE.format(name=name), encoding="utf-8")
+        Path(toml_path).write_text(
+            _INIT_TEMPLATE.format(name=name, user=user_val), encoding="utf-8"
+        )
         print(f"  OK  Created {toml_path.name}")
         if move_existing and candidates:
             moved = move_to_raw(candidates, base_dir, raw_dir)
@@ -1778,16 +1804,6 @@ def sofer_init(
 
 def _register_tools(server: _FastMCP) -> None:
     """Register the 14 tool callables on *server*."""
-    # Common output_schema base
-    _base_out = {
-        "type": "object",
-        "properties": {
-            "ok": {"type": "boolean"},
-            "exit_code": {"type": "integer"},
-            "output": {"type": "string"},
-        },
-        "required": ["ok", "exit_code", "output"],
-    }
     server.tool(
         sofer_validate,
         annotations={

@@ -2135,7 +2135,7 @@ class TestInitCreatesTomlAndRaw:
         envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
-        expected = _INIT_TEMPLATE.format(name="my-ds")
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
         assert (tmp_path / "raw").is_dir()
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
@@ -2149,8 +2149,40 @@ class TestInitCreatesTomlAndRaw:
         envelope = sofer_init(name="my-ds")
         assert envelope["ok"] is True
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
-            name="my-ds"
+            name="my-ds", user="YOUR_USER"
         )
+
+
+class TestInitUserFlag:
+    def test_user_sets_repo_id_mcp(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "user": "alice"}).data
+        assert envelope["ok"] is True
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="alice")
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.repo_id == "alice/my-ds"
+
+    def test_user_sets_repo_id_direct(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="my-ds", user="bob")
+        assert envelope["ok"] is True
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
+            name="my-ds", user="bob"
+        )
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.repo_id == "bob/my-ds"
+
+    def test_default_user_placeholder(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="my-ds")
+        assert envelope["ok"] is True
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.repo_id == "YOUR_USER/my-ds"
 
 
 class TestInitDryRun:
@@ -2247,7 +2279,7 @@ class TestInitIdempotencyForce:
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
-            name="my-ds"
+            name="my-ds", user="YOUR_USER"
         )
 
     def test_minimal_toml_validation(self, tmp_path, restore_tool_config):
