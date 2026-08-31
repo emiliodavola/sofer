@@ -279,7 +279,7 @@ detector class, no changes to the pipeline.
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (delete build after successful `hf` upload only when `fail==0`, quality passed, not `--dry-run`; `--output` anchoring via `resolve_output_dir`), `--clean-cache`/`--all` (also delete `cache/` at `cfg._base_dir/cache`, shared tool-wide — sibling datasets may be affected; requires `--clean`). For `--target local`, `--clean` deletes the resolved destination only. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
 | `--help` | Detailed help for any command. |
-| `sofer-mcp` | Launch the MCP server over stdio (10 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
+| `sofer-mcp` | Launch the MCP server over stdio (11 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
 > generation half (offline, inspectable) and the delivery half (network).
@@ -458,10 +458,10 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 10 tool callables (`sofer_validate`, `sofer_prepare`,
+The server exposes 11 tool callables (`sofer_validate`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_render`,
-`sofer_scan_dry_run`, `sofer_scan_apply`), 3 resources
+`sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`), 3 resources
 (`sofer://dataset/{config}`, `sofer://codebook/{data_file}`,
 `sofer://metadata/{data_file}`), and 3 prompts (`prepare_dataset`,
 `assess_dataset`, `finalize_and_publish`). No remote/streamable-http

@@ -291,7 +291,7 @@ canalización.
 | `publish <config.toml>` | Entrega el paquete preparado: `--target hf` (por defecto) garantiza el repositorio HF, aplica el control del informe de calidad y sube el paquete en una sola llamada `upload_folder`; `--target local` copia el paquete a `--output` sin red. Prepara automáticamente cuando los artefactos faltan o están desactualizados. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (elimina `build` tras un `hf` exitoso solo si `fail==0`, calidad aprobada y no `--dry-run`; anclaje de `--output` vía `resolve_output_dir`), `--clean-cache`/`--all` (también elimina `cache/` en `cfg._base_dir/cache`, compartido entre datasets — requiere `--clean`). Para `--target local`, `--clean` elimina solo el destino resuelto. |
 | `validate <config.toml>` | Verifica la configuración, la integridad de los datos y los controles de calidad. Nunca contacta con HF. |
 | `--help` | Ayuda detallada para cualquier comando. |
-| `sofer-mcp` | Lanza el servidor MCP por stdio (10 herramientas, 3 recursos, 3 prompts). Requiere el extra mcp — ver AI and MCP server. |
+| `sofer-mcp` | Lanza el servidor MCP por stdio (11 herramientas, 3 recursos, 3 prompts). Requiere el extra mcp — ver AI and MCP server. |
 
 > `sofer upload` se eliminó en favor de `prepare` + `publish` — la mitad de
 > generación (sin conexión, inspeccionable) y la mitad de entrega (red).
@@ -493,10 +493,10 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 10 callables de herramientas (`sofer_validate`,
+El servidor expone 11 callables de herramientas (`sofer_validate`,
 `sofer_prepare`, `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_render`, `sofer_scan_dry_run`,
-`sofer_scan_apply`), 3 recursos (`sofer://dataset/{config}`,
+`sofer_scan_apply`, `sofer_init`), 3 recursos (`sofer://dataset/{config}`,
 `sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`) y 3 prompts
 (`prepare_dataset`, `assess_dataset`, `finalize_and_publish`). No se expone
 transporte remoto/streamable-http en v1.

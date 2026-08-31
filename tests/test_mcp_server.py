@@ -26,10 +26,12 @@ from sofer import mcp_server as ms
 from sofer.mcp_server import (
     HFTokenError,
     MCPToolError,
+    PathOutsideRootError,
     PublishRefusedError,
     build_server,
     sofer_codebook,
     sofer_codebook_all,
+    sofer_init,
     sofer_prepare,
     sofer_profile,
     sofer_publish,
@@ -176,16 +178,26 @@ class TestToolRoster:
             "sofer_render",
             "sofer_scan_dry_run",
             "sofer_scan_apply",
+            "sofer_init",
         }
     )
 
-    def test_exactly_ten_callables(self, server):
+    def test_exactly_eleven_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
                 return {t.name for t in tools}
 
         assert _run(_go()) == self._EXPECTED
+        schema = _tool_schema(server, "sofer_init")
+        assert "name" in schema.get("required", [])
+        props = schema.get("properties", {})
+        assert props.get("name", {}).get("type") == "string"
+        for flag in ("move_existing", "dry_run", "force"):
+            assert flag in props
+            assert props[flag].get("type") == "boolean"
+            if "default" in props[flag]:
+                assert props[flag].get("default") is False
 
     def test_validate_round_trip(self, server, tmp_path):
         result = _call(server, "sofer_validate", {"config": str(tmp_path / "dataset.toml")})
@@ -256,7 +268,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 10
+                    assert len(tools.tools) == 11
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -1484,6 +1496,7 @@ class TestAdvisoryHardening:
             sofer_render,
             sofer_scan_dry_run,
             sofer_scan_apply,
+            sofer_init,
         ]
         for fn in callables:
             src = inspect.getsource(fn)
@@ -1710,3 +1723,180 @@ class TestMcpProfileRenderBatch:
         assert envelope["ok"] is True, envelope
         assert (root / "cache" / "profiles" / "a.metadata.yaml").is_file()
         assert not (tmp_path / "evil").exists()
+
+
+# ---------------------------------------------------------------------------
+#  feat/mcp-init-tool — sofer_init bootstrap tool (INIT-01)
+# ---------------------------------------------------------------------------
+
+
+class TestInitCreatesTomlAndRaw:
+    def test_creates_toml_and_raw(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+        expected = _INIT_TEMPLATE.format(name="my-ds")
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
+        assert (tmp_path / "raw").is_dir()
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.name == "my-ds"
+        assert envelope["config_errors"] == []
+
+    def test_direct_call_creates_toml(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="my-ds")
+        assert envelope["ok"] is True
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
+            name="my-ds"
+        )
+
+
+class TestInitDryRun:
+    def test_dry_run_no_mutation(self, tmp_path, restore_tool_config):
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+        ).data
+        assert envelope["ok"] is True
+        assert not (tmp_path / "raw").exists(), "dry_run must not create raw/"
+        assert (tmp_path / "a.csv").exists(), "dry_run must not move candidate"
+        assert "a.csv -> raw/a.csv" in envelope["output"]
+        # TOML still written
+        assert (tmp_path / "my-ds.toml").is_file()
+        assert not (tmp_path / "raw" / "a.csv").exists()
+
+    def test_dry_run_empty_candidates(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+        ).data
+        assert envelope["ok"] is True
+        assert not (tmp_path / "raw").exists()
+
+
+class TestInitCollision:
+    def test_collision_returns_ok_false_no_move(self, tmp_path, restore_tool_config):
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "move_existing": True}).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert (tmp_path / "a.csv").exists(), "collision must not move file"
+        assert any("Collision" in e for e in envelope["config_errors"])
+
+
+class TestInitTraversal:
+    def test_traversal_dotdot_mcp(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "../evil"})
+
+    def test_traversal_absolute_mcp(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "/abs/evil"})
+
+    def test_traversal_direct_raises(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        with pytest.raises(PathOutsideRootError, match="outside the server root"):
+            sofer_init(name="../evil")
+
+    def test_traversal_win_drive_rejected(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "C:/evil"})
+
+    def test_empty_name_returns_ok_false(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        envelope = sofer_init(name="   ")
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("non-empty" in e for e in envelope["config_errors"])
+        assert not (tmp_path / ".toml").exists()
+
+    def test_empty_name_mcp(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": ""}).data
+        assert envelope["ok"] is False
+        assert not list(tmp_path.glob("*.toml"))
+
+
+class TestInitIdempotencyForce:
+    def test_force_false_does_not_overwrite(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        first = sofer_init(name="my-ds")
+        assert first["ok"] is True
+        (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
+        second = sofer_init(name="my-ds", force=False)
+        assert second["ok"] is False
+        assert second["exit_code"] == 1
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == "custom"
+
+    def test_force_true_overwrites(self, tmp_path, restore_tool_config):
+        from sofer.cli import _INIT_TEMPLATE
+
+        build_server(root=tmp_path)
+        sofer_init(name="my-ds")
+        (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
+        envelope = sofer_init(name="my-ds", force=True)
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
+            name="my-ds"
+        )
+
+    def test_minimal_toml_validation(self, tmp_path, restore_tool_config):
+        build_server(root=tmp_path)
+        sofer_init(name="my-ds")
+        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
+        assert cfg.name == "my-ds"
+
+
+class TestInitTreePreserve:
+    def test_move_existing_preserves_tree(self, tmp_path, restore_tool_config):
+        # Seed a supported file at root depth-1
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        # Also test tree preserve via move_to_raw domain directly for nested case
+        # MCP init only moves depth-1, so nested file should stay untouched and tree
+        # preserve is verified via the domain helper (spec: relative_to(root) tree)
+        build_server(root=tmp_path)
+        # Domain helper directly proves tree preservation for nested paths
+        from sofer.scanner import move_to_raw as _move
+
+        nested = tmp_path / "sub"
+        nested.mkdir()
+        (nested / "x.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        raw_dir = tmp_path / "raw"
+        moved = _move([nested / "x.csv"], tmp_path.resolve(), raw_dir)
+        assert moved[0][1] == raw_dir / "sub" / "x.csv"
+        # Cleanup domain test artifact
+        if (raw_dir / "sub" / "x.csv").exists():
+            (raw_dir / "sub" / "x.csv").unlink()
+            try:
+                (raw_dir / "sub").rmdir()
+                raw_dir.rmdir()
+            except OSError:
+                pass
+
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "move_existing": True}).data
+        assert envelope["ok"] is True
+        assert (tmp_path / "raw" / "a.csv").is_file()
+        assert not (tmp_path / "a.csv").exists()
+        assert (tmp_path / "my-ds.toml").is_file()
+
+    def test_move_existing_dry_run_tree_preview(self, tmp_path, restore_tool_config):
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+        ).data
+        assert "a.csv -> raw/a.csv" in envelope["output"]
