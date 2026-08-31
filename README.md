@@ -102,8 +102,8 @@ in an object store, or in a local directory.
 ## Typical workflow
 
 ```bash
-# 1. Create a configuration template
-sofer init my-dataset
+# 1. Create a configuration template (use --user to set repo_id "myuser/my-dataset")
+sofer init my-dataset --user myuser
 
 # 2. Scan for data files (auto-registers all CSV, Parquet, Excel, JSONL files)
 sofer scan my-dataset.toml
@@ -271,7 +271,7 @@ detector class, no changes to the pipeline.
 
 | Command | Description |
 |---|---|
-| `init <name>` | Generate a ready-to-edit `.toml` template. |
+| `init <name>` | Generate a ready-to-edit `.toml` template. Flag: `--user USER` (HF username/org for `repo_id "USER/<name>"`; default: `YOUR_USER` placeholder). |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
@@ -301,6 +301,7 @@ detector class, no changes to the pipeline.
 | `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`cache/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
 | `--config` | `codebook`, `profile`, `render` | Path to the TOML config for `--all-files` (default: `default_config_name` from `[tool.sofer]`). |
 | `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
+| `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); default: `YOUR_USER` placeholder. |
 | `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
 | `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
@@ -462,56 +463,70 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 11 tool callables (`sofer_validate`, `sofer_prepare`,
+The server exposes 14 tool callables (`sofer_validate`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
-`sofer_codebook_all`, `sofer_profile`, `sofer_render`,
-`sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`), 3 resources
-(`sofer://dataset/{config}`, `sofer://codebook/{data_file}`,
-`sofer://metadata/{data_file}`), and 3 prompts (`prepare_dataset`,
-`assess_dataset`, `finalize_and_publish`). No remote/streamable-http
-transport is exposed in v1.
+`sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
+`sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
+`sofer_auth_status`), 3 resources (`sofer://dataset/{config}`,
+`sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`), and 3
+prompts (`prepare_dataset`, `assess_dataset`, `finalize_and_publish`). No
+remote/streamable-http transport is exposed in v1.
 
 Resource URIs are resolved **relative to the server root** — e.g.
 `sofer://dataset/dataset.toml` reads `<root>/dataset.toml`. Absolute POSIX
 paths are also accepted (rest-pattern templates): `sofer://dataset//tmp/...`
 arrives with a leading `/` and must still resolve inside the root.
 
-### Canonical build chain
-
-MCP agents should follow the canonical pipeline — `sofer_prepare` alone does **not** produce `profiles/`/`renders/`:
+### Canonical build chain — Phased (tools/list is self-sufficient)
 
 ```
-validate → prepare → codebook_all → profile(all_files) → render(all_files) → publish(dry_run) → publish_confirm
+Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]
+  sofer_init → sofer_scan_dry_run / sofer_scan_apply
+Phase 1 Build: sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all
+Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer_publish_confirm
 ```
 
-Full order: `sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile(all_files) → sofer_render(all_files) → sofer_publish(dry_run) → sofer_publish_confirm`.
+- **Phase 0** `init→scan` is REQUIRED for greenfield (no `.toml` or empty `[[file]]`), optional otherwise. Build assumes `[[file]]` entries exist.
+- Each tool lists `Requires:` and `Next:` so `tools/list` alone teaches the order; server `instructions` is the single source for the phased diagram and the UNTRUSTED disclaimer.
+- `sofer_auth_status` is the preflight: checks `token`/`confidential`/`approval_phrase` without network.
 
 | Step | Tool | Key args | When to use |
 |------|------|----------|-------------|
-| 1 | `sofer_validate` | `config` | Quick check; always first. |
-| 2 | `sofer_prepare` | `config`, `output`, `force` | After validate; writes Parquet+README+LICENSE. |
-| 3 | `sofer_codebook_all` | `config`, `output` | After prepare; batch codebooks. |
-| 4 | `sofer_profile` | `dataset`/`config`, `output`, `all_files`, `force` | `all_files=True` for batch (`profiles/`); single file for triage (`assess_dataset`). |
-| 5 | `sofer_render` | `package`/`config`, `output`, `all_files`, `force` | `all_files=True` for batch (`renders/`); requires profiles. |
-| 6 | `sofer_publish` | `config`, `target`, `output`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
-| 7 | `sofer_publish_confirm` | `config`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval of dry-run plan. |
+| 0 | `sofer_init` | `name`, `move_existing`, `dry_run`, `force` | Greenfield bootstrap; creates TOML + `raw/`. |
+| 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Phase 0 preview/apply after `init`. |
+| 1 | `sofer_validate` | `config` | Quick check; always first for existing datasets. |
+| 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | After validate; writes Parquet+README+LICENSE. |
+| 3 | `sofer_codebook_all` | `config`, `output_dir` | After prepare; batch codebooks. |
+| 4a | `sofer_profile` | `dataset`, `output_dir`, `force` | Single-file triage (`assess_dataset`). |
+| 4b | `sofer_profile_all` | `config`, `output_dir` | Phase 1 step 4 batch (`profiles/`). |
+| 5a | `sofer_render` | `package`, `output_dir`, `force` | Single-file render after `sofer_profile`. |
+| 5b | `sofer_render_all` | `config`, `output_dir` | Phase 1 step 5 batch (`renders/`); requires `profile_all`. |
+| 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
+| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval. |
+| * | `sofer_auth_status` | `config` | Preflight without publish; `readOnlyHint:true`. |
+| * | `sofer_codebook` | `path`, `output_file`, `max_sample` | Single-file codebook. |
 
-Prompts `prepare_dataset`, `assess_dataset`, `finalize_and_publish` encode this chain with per-step args and copy-paste examples; `assess_dataset` uses the subset `sofer_validate → sofer_profile(dataset) → sofer_render(package=dataset)` for single-file triage.
+Prompts `prepare_dataset`, `assess_dataset`, `finalize_and_publish` encode this chain with per-step args and copy-paste examples; `assess_dataset` uses the subset `sofer_validate → sofer_profile(dataset) → sofer_render(package)` for single-file triage.
 
 Copy-paste chaining example (canonical order — paste into the MCP client):
 
 ```python
 sofer_validate(config="dataset.toml")
-sofer_prepare(config="dataset.toml", output=None, force=False)
-sofer_codebook_all(config="dataset.toml", output=None)
-sofer_profile(dataset="dataset.toml", all_files=True, output=None, force=False)
-sofer_render(package="dataset.toml", all_files=True, output=None, force=False)
-sofer_publish(config="dataset.toml", dry_run=True)  # STOP — get approval before sofer_publish_confirm
+sofer_prepare(config="dataset.toml", output_dir=None, run_checks=True)
+sofer_codebook_all(config="dataset.toml", output_dir=None)
+sofer_profile_all(config="dataset.toml", output_dir=None)
+sofer_render_all(config="dataset.toml", output_dir=None)
+sofer_publish(
+    config="dataset.toml", dry_run=True
+)  # STOP — get approval before sofer_publish_confirm
+sofer_auth_status(config="dataset.toml")  # preflight: token/confidential/approval
 # after approval:
 sofer_publish_confirm(config="dataset.toml", acknowledge_risk=True)
 ```
 
-Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file or TOML when `all_files=True`), `output` (override dir or `None` for defaults), `force` (overwrite guard), `all_files` (batch vs single).
+Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file), `output_dir`/`output_file` (override dir/file or `None`), `run_checks` (replaces `no_checks`), `force` (overwrite guard). Batch via `*_all(config)` — no `all_files` flag.
+
+> **Breaking changes (pre-1.0, v0.4):** `output` → `output_file` (sofer_codebook) / `output_dir` (all others); `no_checks` → `run_checks=True`; `sofer_profile`/`sofer_render` split into `sofer_profile`+`sofer_profile_all` and `sofer_render`+`sofer_render_all` (remove `all_files`); `target` is now `Literal["local"]` / `Literal["hf"]` (single-value const); expected failures now return `{ok:false, error_code, message, next, config_errors}` instead of throwing.
 
 ### Agent setup (example: Claude Code)
 

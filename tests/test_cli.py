@@ -22,6 +22,12 @@ class TestParser:
         assert args.name == "my-dataset"
         assert callable(args.func)
 
+    def test_init_user_flag(self):
+        """`sofer init my-dataset --user alice` should parse user."""
+        args = cli._build_parser().parse_args(["init", "my-dataset", "--user", "alice"])
+        assert args.name == "my-dataset"
+        assert args.user == "alice"
+
     def test_validate_command(self):
         """`sofer validate path/to/file.toml` should parse correctly."""
         args = cli._build_parser().parse_args(["validate", "config.toml"])
@@ -126,6 +132,33 @@ class TestInitCommand:
         content = (tmp_path / "build-ds.toml").read_text(encoding="utf-8")
         parsed = _tomli.loads(content)
         assert parsed["dataset"]["build_dir"] == "build"
+
+    def test_init_user_sets_repo_id(self, tmp_path, monkeypatch):
+        """`sofer init myds --user alice` creates repo_id alice/myds."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_init(Namespace(name="myds", user="alice"))
+        assert rc == 0
+        content = (tmp_path / "myds.toml").read_text(encoding="utf-8")
+        parsed = _tomli.loads(content)
+        assert parsed["dataset"]["repo_id"] == "alice/myds"
+
+    def test_init_default_user_placeholder(self, tmp_path, monkeypatch):
+        """Without --user the repo_id placeholder stays YOUR_USER."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="myds2"))
+        content = (tmp_path / "myds2.toml").read_text(encoding="utf-8")
+        parsed = _tomli.loads(content)
+        assert parsed["dataset"]["repo_id"] == "YOUR_USER/myds2"
 
 
 # ─── Entry point smoke test ────────────────────────────────────────────────────
