@@ -1943,6 +1943,7 @@ wheels = [
 name = "sofer"
 source = { editable = "." }
 dependencies = [
+    { name = "fastmcp" },
     { name = "huggingface-hub" },
     { name = "openpyxl" },
     { name = "pyarrow" },
@@ -1968,6 +1969,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastmcp", specifier = ">=3.4,<4" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3.4,<4" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "openpyxl", specifier = ">=3.1" },

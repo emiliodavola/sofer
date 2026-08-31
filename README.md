@@ -43,9 +43,13 @@ the git tag of the release you want. Replace `X.Y.Z` with the latest version
 
 ```bash
 # with uv (isolated tool install):
-uv tool install git+https://github.com/emiliodavola/sofer.git@vX.Y.Z
+uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
 # or with pip:
-pip install git+https://github.com/emiliodavola/sofer.git@vX.Y.Z
+pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+# alias — same wheel, explicit extra:
+pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+# transient run without installing:
+uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
 
 Then run `sofer --help`. `sofer --version` always matches the release tag
@@ -430,18 +434,22 @@ default `15`).
 
 ## AI and MCP server
 
-sofer ships an optional Model Context Protocol (MCP) server that exposes the
+sofer ships a Model Context Protocol (MCP) server that exposes the
 same deterministic pipeline (validate → prepare → codebook → profile →
 render → publish) to AI agents over stdio — no LLM is called, and the only
 network access is the Hugging Face upload inside `sofer_publish_confirm`.
 
-### Install the `mcp` extra
+### Install
 
-The base install stays lean — `fastmcp` is an optional extra:
+`fastmcp` is included by default — `sofer[mcp]` is now an alias:
 
 ```bash
-# install the mcp extra from the release tag:
-pip install 'git+https://github.com/emiliodavola/sofer.git@vX.Y.Z[mcp]'
+pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+# alias still works (same wheel):
+pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
+uv tool install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
+uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
 
 ### Launch

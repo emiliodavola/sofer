@@ -45,9 +45,13 @@ Instálala desde la etiqueta git (git tag) de la versión que quieras. Sustituye
 
 ```bash
 # with uv (isolated tool install):
-uv tool install git+https://github.com/emiliodavola/sofer.git@vX.Y.Z
+uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
 # or with pip:
-pip install git+https://github.com/emiliodavola/sofer.git@vX.Y.Z
+pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+# alias — mismo wheel, extra explícito:
+pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+# ejecución transitoria sin instalar:
+uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
 
 A continuación, ejecuta `sofer --help`. `sofer --version` siempre coincide con
@@ -464,19 +468,23 @@ salida (Opción B) en lugar de en la `cache/` compartida:
 
 ## AI and MCP server
 
-sofer incluye un servidor opcional del Model Context Protocol (MCP) que expone
+sofer incluye un servidor del Model Context Protocol (MCP) que expone
 el mismo pipeline determinista (validate → prepare → codebook → profile →
 render → publish) a agentes de IA a través de stdio — no se llama a ningún LLM,
 y el único acceso a la red es la subida a Hugging Face dentro de
 `sofer_publish_confirm`.
 
-### Install the `mcp` extra
+### Install
 
-La instalación base se mantiene ligera — `fastmcp` es un extra opcional:
+`fastmcp` viene incluido por defecto — `sofer[mcp]` es ahora un alias:
 
 ```bash
-# install the mcp extra from the release tag:
-pip install 'git+https://github.com/emiliodavola/sofer.git@vX.Y.Z[mcp]'
+pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+# el alias sigue funcionando (mismo wheel):
+pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
+uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
+uv tool install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
+uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
 
 ### Launch
