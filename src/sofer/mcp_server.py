@@ -1665,13 +1665,13 @@ def sofer_init(
     cwd: Annotated[
         str | None,
         Field(
-            description="Working directory for init; must stay under server root. When None, uses server root (back-compat)."
+            description="Working directory for init; must stay under server root. When None, auto-detects live Path.cwd() when inside the server root, otherwise falls back to the server root."
         ),
     ] = None,
 ) -> dict[str, Any]:
     """Create <name>.toml from _INIT_TEMPLATE and scaffold raw/.
 
-    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/. When cwd is given, writes are anchored under that directory contained under the server root; when None, uses the server root. Never mutates the global server root.
+    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/. When cwd is given, writes are anchored under that directory contained under the server root; when None, auto-detects the live Path.cwd() when it is inside the server root, otherwise falls back to the server root. Never mutates the global server root.
     Network usage: none.
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
@@ -1684,7 +1684,7 @@ def sofer_init(
         dry_run: When ``True``, preview without writing ``raw/`` or moving files.
         force: Overwrite existing ``<name>.toml`` when ``True``.
         user: Hugging Face username for ``repo_id``.
-        cwd: Working directory for init; must stay under server root. ``None`` keeps back-compat.
+        cwd: Working directory for init; must stay under server root. ``None`` auto-detects live CWD when inside the server root, otherwise uses the server root.
     """
     with _tool_execution(), _capture_output() as (out, err):
         if not name.strip():
@@ -1697,9 +1697,19 @@ def sofer_init(
                 "message": "name must be non-empty",
                 "next": {},
             }
-        # Per-call effective root: None -> _get_root() (back-compat), str -> contained under _SERVER_ROOT.
+        # Per-call effective root: None -> auto-detect live CWD when inside server root (Approach 2), str -> contained under _SERVER_ROOT.
         if cwd is None:
-            effective_root = _get_root()
+            live = Path.cwd().resolve()
+            try:
+                root_resolved = (
+                    _SERVER_ROOT.resolve() if _SERVER_ROOT is not None else _get_root().resolve()
+                )
+                if live.is_relative_to(root_resolved):
+                    effective_root = live
+                else:
+                    effective_root = _get_root()
+            except Exception:
+                effective_root = _get_root()
         else:
             outer_root = (
                 _SERVER_ROOT.resolve() if _SERVER_ROOT is not None else Path.cwd().resolve()

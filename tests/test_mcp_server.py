@@ -2482,6 +2482,56 @@ class TestInitStaleRoot:
         assert not (parent / "raw").exists()
 
 
+class TestInitAutoCwd:
+    """Approach 2: auto-detect live CWD when inside server root, fallback otherwise."""
+
+    def test_auto_cwd_inside_root(self, tmp_path, monkeypatch, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        monkeypatch.chdir(child)
+        envelope = sofer_init(name="test")
+        assert envelope["ok"] is True
+        assert (child / "test.toml").exists()
+        assert (child / "raw").is_dir()
+        assert not (parent / "test.toml").exists()
+        assert not (parent / "raw").exists()
+        # global root never mutated
+        assert ms._get_root() == parent.resolve()
+
+    def test_auto_cwd_outside_fallback(self, tmp_path, monkeypatch, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        build_server(root=parent)
+        monkeypatch.chdir(outside)
+        envelope = sofer_init(name="test")
+        assert envelope["ok"] is True
+        assert (parent / "test.toml").exists()
+        assert not (outside / "test.toml").exists()
+        assert not (child / "test.toml").exists()
+
+    def test_explicit_cwd_still_overrides_auto(self, tmp_path, monkeypatch, restore_tool_config):
+        parent = tmp_path / "Desktop"
+        parent.mkdir()
+        child = parent / "test"
+        child.mkdir()
+        build_server(root=parent)
+        monkeypatch.chdir(child)
+        # explicit cwd should still be honoured (even if live already inside)
+        other = parent / "other"
+        other.mkdir()
+        envelope = sofer_init(name="test", cwd=str(other))
+        assert envelope["ok"] is True
+        assert (other / "test.toml").exists()
+        assert not (child / "test.toml").exists()
+
+
 class TestInitXlsxIntegration:
     """INIT-04: xlsx discovery after init, validate passes, scan idempotent."""
 
