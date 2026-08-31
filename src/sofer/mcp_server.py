@@ -478,18 +478,90 @@ def _load_dataset(
     return cfg, report, config_errors
 
 
-def _require_hf_token() -> None:
+def _load_dotenv_if_available() -> None:
+    """Load ``.env`` without overriding existing env vars (best-effort).
+
+    Tries ``python-dotenv``'s :func:`load_dotenv` with ``override=False`` so
+    an env var already set in the shell prevails over a ``.env`` entry.
+    Explicitly tries ``Path.cwd() / \".env\"`` first (so a ``.env`` in the
+    current working directory is found even when ``find_dotenv(usecwd=False)``
+    would miss it), then falls back to the default search. Silently no-ops
+    when the package is not installed.
+    """
+    try:
+        from pathlib import Path
+
+        from dotenv import load_dotenv
+
+        # Explicit cwd .env — covers the case where find_dotenv(usecwd=False)
+        # misses a tmp_path .env (e.g. pytest tmp_path with monkeypatch.chdir).
+        load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
+        load_dotenv(override=False)
+    except ImportError:
+        pass
+
+
+def _is_truthy_env(name: str) -> bool:
+    """Return ``True`` when env var *name* is a truthy flag.
+
+    Mirrors ``huggingface_hub`` truthy check: ``"1"``, ``"true"``,
+    ``"yes"``, ``"on"`` (case-insensitive, stripped).
+    """
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _clean_token(t: str | None) -> str | None:
+    """Strip ``\\r``/``\\n``/whitespace and treat empty as absent.
+
+    Mirrors ``huggingface_hub.utils._auth._clean_token``: removes carriage
+    returns and newlines, strips surrounding whitespace, and returns ``None``
+    for empty results.
+    """
+    if t is None:
+        return None
+    cleaned = t.replace("\r", "").replace("\n", "").strip()
+    return cleaned or None
+
+
+def _get_hf_token() -> str | None:
+    """Resolve an HF token via the full fallback chain.
+
+    Order: ``HF_TOKEN`` -> ``HF_HUB_TOKEN`` (sofer compat alias) ->
+    ``HUGGING_FACE_HUB_TOKEN`` (hub native) -> ``huggingface_hub.get_token()``
+    (file via ``HF_TOKEN_PATH`` + OIDC via ``HF_OIDC_RESOURCE`` + Colab).
+    Each env value is cleaned via :func:`_clean_token`; empty/whitespace-only
+    is treated as absent. ``load_dotenv(override=False)`` runs first when
+    available. ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` truthy skips the file/Colab
+    fallback; OIDC errors propagate.
+    """
+    _load_dotenv_if_available()
+    for env_name in ("HF_TOKEN", "HF_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        token = _clean_token(os.environ.get(env_name))
+        if token is not None:
+            return token
+    if _is_truthy_env("HF_HUB_DISABLE_IMPLICIT_TOKEN"):
+        return None
+    try:
+        from huggingface_hub import get_token
+    except ImportError:
+        return None
+    return _clean_token(get_token())
+
+
+def _require_hf_token() -> str:
     """Ensure an HF token is available, raising :class:`HFTokenError` otherwise.
 
-    Accepts ``HF_TOKEN`` (canonical) and ``HF_HUB_TOKEN`` (alias —
-    huggingface_hub honors it). An empty string fails identically to an
-    absent variable (adv7). The token itself is never logged or returned.
+    Delegates to :func:`_get_hf_token` and raises a static, token-free
+    :class:`HFTokenError` when no token resolves (fail-closed, before any
+    network call). The token itself is never logged or returned in the error.
     """
-    if not (os.environ.get("HF_TOKEN") or os.environ.get("HF_HUB_TOKEN")):
+    token = _get_hf_token()
+    if token is None:
         raise HFTokenError(
             "HF_TOKEN is not set — publishing to Hugging Face Hub requires "
             "one. Set HF_TOKEN (or HF_HUB_TOKEN) in the environment."
         )
+    return token
 
 
 def _quality_result_to_dict(result: QualityResult) -> dict[str, Any]:
@@ -688,7 +760,11 @@ def sofer_publish_confirm(
     MSP-R05): ensures the repository, stages the planned artifacts, and
     pushes them with a single ``upload_folder`` call; with force=True,
     existing remote files are overwritten. Network usage: HF upload;
-    requires HF_TOKEN (or the HF_HUB_TOKEN alias).
+    requires a token resolved via ``HF_TOKEN`` -> ``HF_HUB_TOKEN`` (sofer
+    compat alias) -> ``HUGGING_FACE_HUB_TOKEN`` -> ``huggingface_hub.get_token()``
+    (file via ``HF_TOKEN_PATH`` + OIDC + Colab) with ``.env`` support
+    (``load_dotenv(override=False)``). ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` truthy
+    skips the file fallback; the token is never logged.
 
     Authorization ladder (fail-closed, CF-1 — enforced in code, refusals
     raise :class:`PublishRefusedError`, never warnings):
@@ -737,8 +813,9 @@ def sofer_publish_confirm(
                 "config_errors": config_errors,
             }
 
-        # Token before the acknowledgment checks (pinned ordering).
-        _require_hf_token()
+        # Token after quality gate, before the acknowledgment checks (pinned ordering).
+        # Resolved once via _get_hf_token() cascade; passed as HfApi(token=...).
+        token = _require_hf_token()
 
         if not acknowledge_risk:
             raise PublishRefusedError(
@@ -774,6 +851,7 @@ def sofer_publish_confirm(
             dry_run=False,
             quality_report=report,
             protected_out=protected,
+            token=token,
         )
         return {
             "ok": rc == 0,

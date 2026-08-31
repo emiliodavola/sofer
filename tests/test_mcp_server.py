@@ -87,6 +87,13 @@ def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
     monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: existing or [])
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
+    # publish now uses HfApi(token=token) when a token is resolved; keep the
+    # offline seam working by making that construction return the mocked _api.
+    def _fake_hf_api(*_args, **_kwargs):
+        return publish_mod._api
+
+    monkeypatch.setattr(publish_mod, "HfApi", _fake_hf_api)
+
 
 def _call(server: ms._FastMCP, name: str, args: dict | None = None):
     """Call a tool through an in-memory client; returns the CallToolResult."""
@@ -352,8 +359,13 @@ class TestNetworkOffline:
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
+        import huggingface_hub.constants as hf_constants
+
         monkeypatch.setenv("HF_TOKEN", "")
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         build_server(root=tmp_path)
 
         with pytest.raises(HFTokenError, match="HF_TOKEN"):
@@ -1249,6 +1261,255 @@ class TestQualityGateBeforeToken:
 
 
 # ---------------------------------------------------------------------------
+#  fix/mcp-hf-token-fallback — token cascade, dotenv, file/OIDC, never-log,
+#  HfApi wiring and integration (MSP-R05)
+# ---------------------------------------------------------------------------
+
+
+class TestHfTokenFallback:
+    def test_env_prevails_over_alias_and_cache(self, tmp_path, monkeypatch, restore_tool_config):
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setenv("HF_TOKEN", "env-token")
+        monkeypatch.setenv("HF_HUB_TOKEN", "alias-token")
+        monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "native-token")
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "env-token"
+
+    def test_hugging_face_hub_token_alias(self, tmp_path, monkeypatch, restore_tool_config):
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "native-token")
+        # ensure file fallback not taken
+        fake_file = tmp_path / "no-token"
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(fake_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "native-token"
+
+    def test_file_fallback_when_env_absent(self, tmp_path, monkeypatch, restore_tool_config):
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        monkeypatch.delenv("HF_OIDC_RESOURCE", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "file-token"
+
+    def test_empty_whitespace_treated_as_absent(self, tmp_path, monkeypatch, restore_tool_config):
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setenv("HF_TOKEN", "   \r\n  ")
+        monkeypatch.setenv("HF_HUB_TOKEN", "alias-token")
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _clean_token, _get_hf_token
+
+        assert _clean_token("  \r\n ") is None
+        assert _clean_token("  alias-token  \n") == "alias-token"
+        assert _get_hf_token() == "alias-token"
+        # all whitespace -> None
+        monkeypatch.setenv("HF_HUB_TOKEN", "  ")
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        assert _get_hf_token() is None
+
+    def test_hf_hub_disable_skips_file(self, tmp_path, monkeypatch, restore_tool_config):
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.setenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", "true")
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() is None
+        # unset -> file returned
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        assert _get_hf_token() == "file-token"
+
+    def test_oidc_propagates_error(self, tmp_path, monkeypatch, restore_tool_config):
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.setenv("HF_OIDC_RESOURCE", "https://example.com/repo")
+        monkeypatch.delenv("HF_OIDC_ID_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        with pytest.raises(Exception) as excinfo:
+            _get_hf_token()
+        # huggingface_hub raises OIDCError when OIDC resource set but no provider
+        assert "HF_OIDC_RESOURCE" in str(excinfo.value) or "OIDC" in str(excinfo.value)
+
+    def test_dotenv_not_override_env(self, tmp_path, monkeypatch, restore_tool_config):
+        monkeypatch.setenv("HF_TOKEN", "env-token")
+        env_file = tmp_path / ".env"
+        env_file.write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "env-token"
+
+    def test_dotenv_loads_when_env_absent(self, tmp_path, monkeypatch, restore_tool_config):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "from-dotenv"
+
+    def test_never_log_token(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        secret = "hf_super_secret_12345"
+        monkeypatch.setenv("HF_TOKEN", secret)
+        build_server(root=tmp_path)
+        # success case must not contain token in output
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert secret not in envelope["output"]
+        assert secret not in str(envelope)
+        # error case (missing token) also must not leak previous token
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        with pytest.raises(HFTokenError) as excinfo:
+            sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert secret not in str(excinfo.value)
+
+    def test_hfapi_called_with_resolved_token(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        captured: dict[str, str | None] = {}
+
+        def _fake_hf_api(*_args, **kwargs):
+            captured["token"] = kwargs.get("token")
+
+            class _Fake:
+                def create_repo(self, *a, **kw):
+                    pass
+
+                def list_repo_files(self, *a, **kw):
+                    return []
+
+                def upload_folder(self, *a, **kw):
+                    return None
+
+            return _Fake()
+
+        monkeypatch.setattr(publish_mod, "HfApi", _fake_hf_api)
+        monkeypatch.setenv("HF_TOKEN", "tok-123")
+        build_server(root=tmp_path)
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert captured["token"] == "tok-123"
+        assert envelope["ok"] is True
+
+
+class TestHfTokenIntegration:
+    def test_file_only_upload_succeeds(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        _mock_hf_api(monkeypatch)
+        build_server(root=tmp_path)
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+
+    def test_no_token_raises_before_network(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api, "create_repo", lambda *a, **kw: calls.append("create_repo")
+        )
+        monkeypatch.setattr(
+            publish_mod._api, "list_repo_files", lambda *a, **kw: calls.append("list_repo_files")
+        )
+        monkeypatch.setattr(
+            publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
+        )
+        build_server(root=tmp_path)
+        with pytest.raises(HFTokenError):
+            sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert calls == []
+
+    def test_quality_gate_before_token(self, tmp_path, monkeypatch, restore_tool_config):
+        _make_dataset(tmp_path)
+        (tmp_path / "data.csv").write_text("col_a;col_b\n1;2\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "dataset.toml").write_text(
+            "[dataset]\nname='test-ds'\nrepo_id='user/test-ds'\n\n[meta]\n\n"
+            "[[file]]\nlocal='data.csv'\nremote='data.csv'\n\n"
+            "[[quality]]\ncheck='duplicates'\nseverity='fail'\n",
+            encoding="utf-8",
+        )
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        build_server(root=tmp_path)
+        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+
+
+# ---------------------------------------------------------------------------
 #  Review fix 4 — behavioral tests for the four untested callables:
 #  sofer_profile (MSP-R09), sofer_render, sofer_codebook_all (collision +
 #  [meta] delimiter injection), sofer_scan_dry_run.
@@ -1430,8 +1691,13 @@ class TestAdvisoryHardening:
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
+        import huggingface_hub.constants as hf_constants
+
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         build_server(root=tmp_path)
 
         with pytest.raises(HFTokenError, match="HF_TOKEN"):
