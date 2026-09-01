@@ -51,12 +51,12 @@ Retarget/rebase child PRs showing parent-slice changes.
 
 ## Phase 4: Process module — config states + handoff (PR 4)
 
-- [ ] 4.1 Empty config: validate via client → documented empty-config result (PB-04).
-- [ ] 4.2 Existing config: happy-path TOML validates without re-registration (PB-04).
-- [ ] 4.3 Greenfield + triage: init → scan_apply → validate passes; scan_dry_run lists, copies nothing, TOML unchanged (PB-04).
-- [ ] 4.4 Malformed: validate via client → refusal with `config_errors` (PB-04).
-- [ ] 4.5 Handoff: validate→prepare→codebook→profile→render→publish(dry)→publish_confirm; `_api` mocked + `HF_TOKEN`; reaches upload (PB-04/06).
-- [ ] 4.6 Gate: suite passes without `HF_TOKEN` (PB-06); full gates (PB-07/08).
+- [x] 4.1 Empty config: validate via client → documented empty-config result (PB-04).
+- [x] 4.2 Existing config: happy-path TOML validates without re-registration (PB-04).
+- [x] 4.3 Greenfield + triage: init → scan_apply → validate passes; scan_dry_run lists, copies nothing, TOML unchanged (PB-04).
+- [x] 4.4 Malformed: validate via client → refusal with `config_errors` (PB-04).
+- [x] 4.5 Handoff: validate→prepare→codebook→profile→render→publish(dry)→publish_confirm; `_api` mocked + `HF_TOKEN`; reaches upload (PB-04/06).
+- [x] 4.6 Gate: suite passes without `HF_TOKEN` (PB-06); full gates (PB-07/08).
 
 ## Phase 5: CLI subprocess + CI + final gates (PR 5)
 
