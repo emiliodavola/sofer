@@ -59,6 +59,22 @@ def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
     return result
 
 
+def _strip_hf_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Remove every HF token source so ``_require_hf_token`` fails closed.
+
+    Mirrors the established pattern in ``tests/test_mcp_server.py``: drops the
+    env aliases and points ``HF_TOKEN_PATH`` at a missing file so no token can
+    resolve from the environment, the cache file, or dotenv.
+    """
+    import huggingface_hub.constants as hf_constants
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+    monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+
+
 class TestStdioFraming:
     """PB-01: real stdio transport with clean JSON-RPC framing (one spawn)."""
 
@@ -81,9 +97,7 @@ class TestStdioFraming:
                     assert init is not None
                     tools = await session.list_tools()
                     assert len(tools.tools) == 14
-                    result = await session.call_tool(
-                        "sofer_validate", {"config": "dataset.toml"}
-                    )
+                    result = await session.call_tool("sofer_validate", {"config": "dataset.toml"})
                     assert not result.isError
                     envelope = json.loads(result.content[0].text)
                     assert envelope["ok"] is True
@@ -114,3 +128,84 @@ class TestNestedCwd:
         assert (nested / "raw").is_dir()
         assert not (parent / "nested-ds.toml").exists()
         assert not (parent / "raw").exists()
+
+
+class TestRecoveryPublishConfirm:
+    """PB-03: replay the documented risk-gate hint past the risk gate."""
+
+    def test_replay_acknowledge_risk_progresses_to_token_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_tool_config: Any
+    ) -> None:
+        """First call refused at the risk gate; the replayed call (with the
+        documented ``acknowledge_risk=True`` hint) must fail at a DIFFERENT
+        gate — the now-stripped token — proving it progressed past risk."""
+        _write_minimal_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path)
+        args: dict[str, Any] = {"config": str(tmp_path / "dataset.toml")}
+
+        first = _call(server, "sofer_publish_confirm", args).data
+        assert first["ok"] is False
+        assert first["acknowledge_risk"] is False
+        # Boundary-visible refusal (output_schema drops error_code/next): the
+        # reason is the human-readable message naming the required hint.
+        assert "acknowledge_risk=True" in first["output"]
+
+        # Replay with the documented next hint for the risk gate
+        # (mcp_server.py: {"acknowledge_risk": True}), token now stripped.
+        _strip_hf_token(monkeypatch, tmp_path)
+
+        replayed = _call(server, "sofer_publish_confirm", {**args, "acknowledge_risk": True}).data
+        assert replayed["ok"] is False
+        assert "HF_TOKEN" in replayed["output"]
+        assert "acknowledge_risk=True" not in replayed["output"]
+
+
+class TestRecoveryInit:
+    """PB-03: init refusals replayed with the documented corrections."""
+
+    def test_replay_force_past_file_exists(self, tmp_path: Path, restore_tool_config: Any) -> None:
+        """File-exists refusal replayed with the documented ``force=True``
+        hint reaches the intended branch (template overwritten)."""
+        from sofer.cli import _INIT_TEMPLATE
+
+        server = build_server(root=tmp_path)
+        args: dict[str, Any] = {"name": "my-ds"}
+
+        first = _call(server, "sofer_init", args).data
+        assert first["ok"] is True
+        (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
+
+        refused = _call(server, "sofer_init", args).data
+        assert refused["ok"] is False
+        assert refused["exit_code"] == 1
+        assert any("File already exists" in e for e in refused["config_errors"])
+
+        # Documented next hint for the file-exists refusal (mcp_server.py:
+        # {"force": True}) merged into the replayed args.
+        replayed = _call(server, "sofer_init", {**args, "force": True}).data
+        assert replayed["ok"] is True
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
+
+    def test_replay_corrected_name_past_name_empty(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """Name-empty refusal (documented hint ``{}``) replayed with a
+        corrected non-empty name reaches the intended branch."""
+        from sofer.cli import _INIT_TEMPLATE
+
+        server = build_server(root=tmp_path)
+
+        refused = _call(server, "sofer_init", {"name": "   "}).data
+        assert refused["ok"] is False
+        assert refused["exit_code"] == 1
+        assert any("non-empty" in e for e in refused["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+
+        # Documented next hint for the name-empty refusal is {} — the
+        # correction is a non-empty name in the replayed args.
+        replayed = _call(server, "sofer_init", {"name": "my-ds"}).data
+        assert replayed["ok"] is True
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
