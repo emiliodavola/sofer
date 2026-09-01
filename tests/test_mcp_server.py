@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import mcp_payload
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -94,59 +95,7 @@ def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
 
 def _unwrap(data: object) -> object:  # type: ignore[no-untyped-def]
     """Unwrap FastMCP Root model to plain dict when output_schema is present."""
-    if data is None:
-        return None
-    if hasattr(data, "ok") and not isinstance(data, dict):
-        try:
-            result: dict[str, object] = {}
-            for k in (
-                "ok",
-                "exit_code",
-                "output",
-                "config_errors",
-                "error_code",
-                "message",
-                "next",
-                "passed",
-                "errors",
-                "warnings",
-                "quality_failures",
-                "quality_warnings",
-                "ran_checks",
-                "confidential",
-                "target",
-                "dry_run",
-                "acknowledge_risk",
-                "acknowledge_confidential",
-                "skipped_protected",
-                "partial",
-                "files",
-                "pii_findings",
-                "discovered",
-                "registered",
-                "copied",
-                "output_path",
-                "token",
-                "requires_ack_confidential",
-                "requires_approval_phrase",
-            ):
-                if hasattr(data, k):
-                    result[k] = getattr(data, k)
-            if result:
-                return result
-        except Exception:
-            pass
-    if hasattr(data, "model_dump"):
-        try:
-            dumped = data.model_dump()  # type: ignore[attr-defined,union-attr]
-            if isinstance(dumped, dict) and "root" in dumped and len(dumped) == 1:
-                return dumped["root"]
-            return dumped
-        except Exception:
-            pass
-    if hasattr(data, "root"):
-        return getattr(data, "root")  # type: ignore[attr-defined]
-    return data
+    return mcp_payload(data)
 
 
 def _call(server: ms._FastMCP, name: str, args: dict | None = None):
