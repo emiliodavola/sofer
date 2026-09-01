@@ -1,10 +1,13 @@
-"""Process-boundary regression suite: stdio transport, nested CWD, recovery replay.
+"""Process-boundary regression suite: stdio, CWD, recovery, config states.
 
-Phase 3 (PR 3) of the ``test-mcp-cli-regression-suite`` change (#119). Proves
-the registered MCP server through the real stdio transport (PB-01), the
-nested-dataset CWD containment of ``sofer_init`` (PB-04), and the recovery
-contract of PB-03 — executing the documented ``next`` hints and asserting the
-replayed call reaches a different gate or the intended branch.
+Phases 3-4 (PRs 3-4) of the ``test-mcp-cli-regression-suite`` change (#119).
+Proves the registered MCP server through the real stdio transport (PB-01),
+the nested-dataset CWD containment of ``sofer_init`` (PB-04), the recovery
+contract of PB-03 (executing the documented ``next`` hints and asserting the
+replayed call reaches a different gate or the intended branch), the
+config-state scenarios of PB-04 (empty / existing / greenfield / triage /
+malformed configs plus the delivery handoff), and the offline guarantee of
+PB-06 (``publish._api`` monkeypatched, no real credentials).
 
 Boundary contract (PR 2 gate review): FastMCP projects tool results through
 each tool's declared ``output_schema``, so ``error_code`` / ``message`` /
@@ -18,13 +21,17 @@ different gate or returning ``ok:True``.
 
 Lean-spawn contract (PB-09): one module-scoped stdio spawn via the shared
 ``mcp_stdio_server`` fixture; every in-process test builds its own server via
-``build_server()``; async uses ``asyncio.run`` (no pytest-asyncio).
+``build_server()``; async uses ``asyncio.run`` (no pytest-asyncio). Config
+fixtures come from ``tests/fixtures/`` (``mcp-config-states/`` for the
+deliberately empty/malformed TOMLs, ``mcp-happy-path/`` for the offline
+delivery handoff) — never re-implemented here.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +40,11 @@ from conftest import _write_minimal_dataset, mcp_payload
 from fastmcp import Client
 
 from sofer.mcp_server import build_server
+
+#: Offline happy-path fixture tree (dataset.toml + data.csv), PB-04.
+MCP_HAPPY_PATH = Path(__file__).parent / "fixtures" / "mcp-happy-path"
+#: Deliberately empty and malformed dataset TOMLs, PB-04.
+MCP_CONFIG_STATES = Path(__file__).parent / "fixtures" / "mcp-config-states"
 
 
 def _run(coro: Any) -> Any:
@@ -200,3 +212,118 @@ class TestRecoveryInit:
         assert replayed["ok"] is True
         expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
+
+
+class TestConfigStates:
+    """PB-04: config-state scenarios through the client boundary.
+
+    Uses the real fixture TOMLs (``mcp-config-states/`` for the deliberately
+    empty and malformed configs, ``mcp-happy-path/`` for the registered
+    happy-path tree) — never dataclass or private-helper construction alone.
+    """
+
+    def test_empty_config_documented_result(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """Empty TOML (valid, no ``[[file]]``) validates to the documented
+        empty-config refusal: ``ok:False`` + ``config_errors`` naming the
+        missing file entries."""
+        shutil.copy2(MCP_CONFIG_STATES / "empty.toml", tmp_path / "empty.toml")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_validate", {"config": str(tmp_path / "empty.toml")}).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any(
+            "No [[file]] entries" in error for error in envelope["config_errors"]
+        ), envelope["config_errors"]
+        # The human-readable refusal is the boundary-visible ``output``
+        # (error_code/message/next are dropped by output_schema).
+        assert "No [[file]] entries" in envelope["output"]
+
+    def test_existing_config_validates_without_registration(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """The happy-path TOML (registered files) validates through the client
+        WITHOUT re-registration: no scan, files already declared on disk."""
+        shutil.copy2(MCP_HAPPY_PATH / "dataset.toml", tmp_path / "dataset.toml")
+        shutil.copy2(MCP_HAPPY_PATH / "data.csv", tmp_path / "data.csv")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_validate", {"config": str(tmp_path / "dataset.toml")}).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0
+        assert envelope["config_errors"] == []
+
+    def test_greenfield_bootstrap_init_scan_apply_validate(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """Greenfield bootstrap: ``sofer_init`` scaffolds TOML + ``raw/``,
+        ``sofer_scan_apply`` registers the discovered file and copies it into
+        ``cache/``, and ``sofer_validate`` then passes.
+
+        ``user`` is passed so the generated ``repo_id`` carries a real user
+        (the init template's ``YOUR_USER`` placeholder would otherwise trip
+        validation); the template's placeholder ``[[file]]`` entries are
+        stripped by the scanner's merge (scanner.merge_entries).
+        """
+        server = build_server(root=tmp_path)
+
+        init = _call(server, "sofer_init", {"name": "green-ds", "user": "myuser"}).data
+        assert init["ok"] is True, init
+        assert (tmp_path / "green-ds.toml").is_file()
+        assert (tmp_path / "raw").is_dir()
+
+        (tmp_path / "raw" / "data.csv").write_text(
+            "col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig"
+        )
+        applied = _call(
+            server, "sofer_scan_apply", {"config": str(tmp_path / "green-ds.toml")}
+        ).data
+        assert applied["ok"] is True, applied
+        assert applied["copied"] == 1
+        assert (tmp_path / "cache" / "data.csv").is_file()
+
+        validated = _call(
+            server, "sofer_validate", {"config": str(tmp_path / "green-ds.toml")}
+        ).data
+        assert validated["ok"] is True, validated
+
+    def test_triage_scan_dry_run_preview_read_only(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """Triage preview: ``sofer_scan_dry_run`` lists the candidates it
+        would register/copy WITHOUT copying files or writing the TOML."""
+        _write_minimal_dataset(tmp_path)
+        (tmp_path / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        preview = _call(
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert preview["ok"] is True, preview
+        assert preview["discovered"] == 2  # data.csv (registered) + new.csv
+        assert preview["registered"] == 1  # only new.csv is new
+        assert "new.csv" in preview["output"]  # candidates are listed
+        assert "->" in preview["output"]
+        assert not (tmp_path / "cache").exists(), "dry-run must not copy files"
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
+
+    def test_malformed_config_refuses_with_config_errors(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """Unparseable TOML validates to a refusal envelope carrying
+        ``config_errors`` naming the parse failure."""
+        shutil.copy2(MCP_CONFIG_STATES / "malformed.toml", tmp_path / "malformed.toml")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_validate", {"config": str(tmp_path / "malformed.toml")}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("Failed to read TOML" in error for error in envelope["config_errors"]), (
+            envelope["config_errors"]
+        )
+        assert "Failed to read TOML" in envelope["output"]
