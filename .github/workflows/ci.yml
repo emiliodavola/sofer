@@ -37,6 +37,12 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # ── Complete-suite test gate (PB-05) ──────────────────────────────
+      # `uv run pytest -v` runs the FULL suite — unit, integration, and the
+      # process-boundary modules (stdio MCP transport + CLI subprocess). This
+      # step is the deliberate test gate: no focused-only command (e.g. a
+      # single test file) may replace it, or cross-module regressions would
+      # go unseen. Keep the invocation exactly as-is.
       - name: Run tests
         run: uv run pytest -v
 
