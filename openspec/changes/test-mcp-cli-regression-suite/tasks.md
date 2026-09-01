@@ -10,6 +10,8 @@ Chain strategy: feature-branch-chain
 
 Slices 1 (270–500) and 2 (450–550) each brush/exceed the 400-line guard, so both split into two PRs; `mcp-config-states/` fixtures move to PR 3 for slice-2 independence.
 
+Forecast note (PR 3 planning): PR 2 landed at 436 changed lines (260 insertions + 168 deletions) vs the ~250–350 forecast — a 1.25–1.7× miss; plan later slices against the upper bound of each range or higher.
+
 ### Suggested Work Units (feature-branch-chain on `test/mcp-cli-regression-suite`)
 
 | Unit | Goal | PR | Base |
@@ -40,12 +42,12 @@ Retarget/rebase child PRs showing parent-slice changes.
 
 ## Phase 3: Process module — stdio, CWD, recovery (PR 3)
 
-- [ ] 3.1 Create `tests/fixtures/mcp-config-states/{empty,malformed}.toml`, out of `mcp-happy-path/` (PB-04).
-- [ ] 3.2 Stdio framing: `initialize → tools/list (14) → tools/call`; clean JSON-RPC, no stray stdout (PB-01).
-- [ ] 3.3 Nested CWD: `build_server(parent)` + `chdir(nested)`; init lands under nested — assert paths (PB-04).
-- [ ] 3.4 Recovery: publish_confirm refusal → replay `next` → past risk gate (PB-03).
-- [ ] 3.5 Recovery: init refusals (file-exists/name-empty) → replay → intended branch (PB-03).
-- [ ] 3.6 Gate: focused `test_mcp_process.py`, then full suite + ruff + mypy + `git diff --check` (PB-07); win32 skips reuse `_make_link` (D6).
+- [x] 3.1 Create `tests/fixtures/mcp-config-states/{empty,malformed}.toml`, out of `mcp-happy-path/` (PB-04).
+- [x] 3.2 Stdio framing: `initialize → tools/list (14) → tools/call`; clean JSON-RPC, no stray stdout (PB-01).
+- [x] 3.3 Nested CWD: `build_server(parent)` + `chdir(nested)`; init lands under nested — assert paths (PB-04).
+- [x] 3.4 Recovery: publish_confirm refusal → replay `next` → past risk gate (PB-03).
+- [x] 3.5 Recovery: init refusals (file-exists/name-empty) → replay → intended branch (PB-03).
+- [x] 3.6 Gate: focused `test_mcp_process.py`, then full suite + ruff + mypy + `git diff --check` (PB-07); win32 skips reuse `_make_link` (D6).
 
 ## Phase 4: Process module — config states + handoff (PR 4)
 

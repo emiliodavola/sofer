@@ -10,7 +10,7 @@ Test-only harness (PB-01…PB-09) proving sofer's MCP server and CLI through the
 |---|---|---|---|---|
 | D1 | Layout (PB-09) | New `tests/test_mcp_process.py`; helpers in `conftest.py` | Extend modules in place | One home for process boundaries; siblings #116–#122 reuse |
 | D2 | Root-unwrap | Conftest `mcp_payload`; `test_mcp_server._unwrap` delegates to it | Duplicate per module | PB-09 "no re-implementation"; output_schema Root wrapping is the one tricky seam |
-| D3 | Conversions (PB-01) | Route `sofer_publish_confirm`/`sofer_init`/`sofer_validate` direct calls + `test_offline_happy_path` through `Client(server)` | Keep direct calls | Envelopes identical post-unwrap; boundary no longer hidden |
+| D3 | Conversions (PB-01) | Route `sofer_publish_confirm`/`sofer_init`/`sofer_validate` direct calls + `test_offline_happy_path` through `Client(server)` | Keep direct calls | Boundary no longer hidden; refusal envelopes DIFFER at the client boundary — FastMCP projects results through each tool's `output_schema`, which drops `error_code`/`message`/`next`, and non-`hf` `target` values surface as schema `ToolError` (see Open Questions) |
 | D4 | CLI subprocess (PB-02) | `[sys.executable, "-m", "sofer.cli", …]`, `PYTHONIOENCODING=cp1252`, `encoding="cp1252", errors="strict"` | Windows CI job | Cross-platform; proven by reference; ubuntu-only matrix |
 | D5 | Isolation (PB-06/09) | One `build_server()` per test; one module-scoped stdio fixture; `asyncio.run`; no pytest-asyncio | Shared server; async plugin | `_SERVER_ROOT`/`_APPROVAL_PHRASE` are process globals; zero new deps |
 | D6 | win32 safety | Reuse `_make_link` junction-fallback pattern; skip without privileges | Fail on win32 | PB-02 "skip without privileges" |
@@ -22,7 +22,8 @@ Test-only harness (PB-01…PB-09) proving sofer's MCP server and CLI through the
     test → module stdio fixture: spawn [sys.executable, -c "from sofer.mcp_server import main; main()"] cwd=root
          → initialize → tools/list (14) → tools/call → clean JSON-RPC framing
     test → run_cli([...]) → argparse subprocess → rc + stdout (cp1252 strict)
-    Recovery: refused = call(tool, args); hint = refused["next"]; replayed = call(tool, {**args, **hint}) → assert branch
+    Recovery (direct): refused = call(tool, args); hint = refused["next"]; replayed = call(tool, {**args, **hint}) → assert branch
+    Recovery (client boundary): refused = call_tool(tool, args); hint = DOCUMENTED constant for that refusal (next is not boundary-visible); replayed = call_tool(tool, {**args, **hint}) → assert a DIFFERENT gate or ok:True
 
 ## File Changes
 
@@ -80,4 +81,18 @@ No migration. Rollback: delete `tests/test_mcp_process.py`, revert conftest/test
 
 ## Open Questions
 
-None blocking — spec PB-03's `next={acknowledge_risk:true}` matches the actual risk-gate hint (mcp_server.py:963).
+Boundary envelope behavior (documented deviation, confirmed by the PR 2 gate
+review): FastMCP projects each tool result through the tool's declared
+`output_schema`, so the refusal envelopes for `sofer_publish_confirm` /
+`sofer_init` / `sofer_validate` DIFFER at the client boundary from the
+direct-call envelopes — `error_code`, `message`, and `next` are dropped (the
+schema IS the documented contract), and non-`hf` `target` values surface as a
+schema `ToolError` ("Input should be 'hf'") instead of the `TARGET_INVALID`
+envelope branch. PB-03 recovery replay therefore keys off boundary-visible
+signals: the human-readable refusal message in `output` plus the
+deterministic, documented `next` hint VALUES (risk gate →
+`{"acknowledge_risk": True}`, confidential → `{"acknowledge_confidential":
+True}`, approval → `{"approval_phrase": ...}`, init file-exists →
+`{"force": True}`, init name-empty → `{}`), merged into the replayed call.
+Branch progression is asserted by the second call failing at a DIFFERENT gate
+or reaching `ok:True`.
