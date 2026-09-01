@@ -4,8 +4,10 @@
 
 Phase 1 (PR 1) complete — tasks 1.1–1.5 done. Phase 2 (PR 2) complete —
 tasks 2.1–2.5 done. Phase 3 (PR 3) complete — tasks 3.1–3.6 done. Phase 4
-(PR 4) complete — tasks 4.1–4.6 done. Standard mode (`strict_tdd=false` per
-`openspec/config.yaml`); Work Unit Evidence recorded below.
+(PR 4) complete — tasks 4.1–4.6 done. Phase 5 (PR 5) complete — tasks
+5.1–5.5 done. Standard mode (`strict_tdd=false` per
+`openspec/config.yaml`); Work Unit Evidence recorded below. All 20/20 tasks
+of the change are complete.
 
 ## Completed Tasks
 
@@ -43,13 +45,21 @@ tasks 2.1–2.5 done. Phase 3 (PR 3) complete — tasks 3.1–3.6 done. Phase 4
 - [x] 4.5 Handoff: validate→prepare→codebook→profile→render→publish(dry)→publish_confirm; `_api` mocked + `HF_TOKEN`; reaches upload (PB-04/06).
 - [x] 4.6 Gate: suite passes without `HF_TOKEN` (PB-06); full gates (PB-07/08).
 
+### Phase 5 (PR 5)
+
+- [x] 5.1 Add `TestSubprocessBoundary` to `tests/test_cli.py`: `--help` subprocess → rc 0, lists all subcommands (PB-02).
+- [x] 5.2 cp1252: `PYTHONIOENCODING=cp1252` + `errors="strict"` → rc 0, strict-decodable; no non-cp1252 glyphs; win32-only skips (PB-02).
+- [x] 5.3 Dispatch: unknown command subprocess → argparse rc 2 (PB-02).
+- [x] 5.4 `ci.yml`: comment-only annotation on `uv run pytest -v` as complete gate (PB-05, D7).
+- [x] 5.5 Final gate: full pytest (count stable) + ruff + mypy + `git diff --check`; `SOFER_TRACE.md` untracked/unstaged (PB-07/08); one spawn per module (PB-09).
+
 ## Work Unit Evidence
 
 | Evidence | Required value |
 |---|---|
-| Focused test command and exact result | PR 2: `uv run pytest tests/test_mcp_server.py -q` → **137 passed, 2 skipped**; `uv run pytest tests/test_mcp_schema.py -q` → **15 passed**. PR 3: `uv run pytest tests/test_mcp_process.py -q` → **5 passed** (stdio framing, nested CWD, publish risk replay, init force replay, init name replay). PR 4: `uv run pytest tests/test_mcp_process.py -q` → **11 passed** (5 Phase 3 + 6 Phase 4: empty config, existing config, greenfield bootstrap, triage preview, malformed config, delivery handoff) |
-| Runtime harness command/scenario and exact result | PR 2: in-process `Client(server)` boundary — `sofer_publish_confirm` no-ack refusal → envelope `{ok:False, exit_code:1, acknowledge_risk:False}` with refusal message in `output`; `target="local"` → schema `literal_error` ToolError "Input should be 'hf'" (TARGET_INVALID envelope branch is unreachable through the boundary); `sofer_init` dotdot/C:/evil → ToolError "outside the server root"; `sofer_validate` missing config → `ok:False` + `config_errors` (throwaway probe in temp dir, not committed). PR 3: real stdio subprocess (`mcp_stdio_server.spawn()` → `stdio_client` → `ClientSession`) — `initialize` ok, `tools/list` = 14, `sofer_validate(config="dataset.toml")` payload `json.loads` clean envelope `{ok:True, exit_code:0, config_errors:[]}`; nested-CWD `sofer_init` with cwd unset auto-detects live CWD → TOML + `raw/` land under the nested dir, not the parent root; publish_confirm replay (`acknowledge_risk=True`, token present, approval_phrase server) fails at the APPROVAL gate ("approval phrase" message, no "acknowledge_risk=True") — the literal next check after risk — proving the risk gate accepted the acknowledgment; init replay `{"force": True}` after file-exists refusal and corrected-name replay after name-empty refusal both reach `ok:True`. PR 4: `sofer_validate` on `mcp-config-states/empty.toml` → `{ok:False, exit_code:1, output:"No [[file]] entries found in configuration.", config_errors:["No [[file]] entries found in configuration."]}`; happy-path TOML → `{ok:True, exit_code:0, config_errors:[]}` without any scan; greenfield `sofer_init(name="green-ds", user="myuser")` → `ok:True`, then `sofer_scan_apply` (`copied:1`, `cache/data.csv` written) → `sofer_validate` `ok:True`; `sofer_scan_dry_run` on `_write_minimal_dataset` + `new.csv` → `{ok:True, discovered:2, registered:1}`, output lists `-> cache/new.csv`, no `cache/` dir, TOML byte-identical; malformed TOML → `{ok:False, exit_code:1, config_errors:["Failed to read TOML: ..."]}`; handoff chain validate→prepare→codebook_all→profile_all→render_all→`publish(dry_run=True)` (`{ok:True, dry_run:True}`) → `publish_confirm(acknowledge_risk=True)` with mocked `_api` + `HF_TOKEN` → `{ok:True, acknowledge_risk:True}` and the `upload_folder` spy recorded ≥1 call (upload branch reached, offline) |
-| Rollback boundary | PR 2: revert commits `354b9e9` + `cdc95f3` (or `git revert` them). PR 3: revert commits `f5ef349` + `8d0c4f8` + `3237aee` + `6baa813` (or `git revert` them). PR 4: revert commits `3d85368` + `5e70b84` + the Phase 4 chore commit (or `git revert` them) — zero production surface (`src/sofer/` untouched, verified by `git diff --stat` showing only `tests/` + `openspec/`) |
+| Focused test command and exact result | PR 2: `uv run pytest tests/test_mcp_server.py -q` → **137 passed, 2 skipped**; `uv run pytest tests/test_mcp_schema.py -q` → **15 passed**. PR 3: `uv run pytest tests/test_mcp_process.py -q` → **5 passed** (stdio framing, nested CWD, publish risk replay, init force replay, init name replay). PR 4: `uv run pytest tests/test_mcp_process.py -q` → **11 passed** (5 Phase 3 + 6 Phase 4: empty config, existing config, greenfield bootstrap, triage preview, malformed config, delivery handoff). PR 5: `uv run pytest tests/test_cli.py::TestSubprocessBoundary -v` → **3 passed** (help lists every subcommand, cp1252 strict help, unknown command rc 2); full `uv run pytest tests/test_cli.py -q` → **82 passed** |
+| Runtime harness command/scenario and exact result | PR 2: in-process `Client(server)` boundary — `sofer_publish_confirm` no-ack refusal → envelope `{ok:False, exit_code:1, acknowledge_risk:False}` with refusal message in `output`; `target="local"` → schema `literal_error` ToolError "Input should be 'hf'" (TARGET_INVALID envelope branch is unreachable through the boundary); `sofer_init` dotdot/C:/evil → ToolError "outside the server root"; `sofer_validate` missing config → `ok:False` + `config_errors` (throwaway probe in temp dir, not committed). PR 3: real stdio subprocess (`mcp_stdio_server.spawn()` → `stdio_client` → `ClientSession`) — `initialize` ok, `tools/list` = 14, `sofer_validate(config="dataset.toml")` payload `json.loads` clean envelope `{ok:True, exit_code:0, config_errors:[]}`; nested-CWD `sofer_init` with cwd unset auto-detects live CWD → TOML + `raw/` land under the nested dir, not the parent root; publish_confirm replay (`acknowledge_risk=True`, token present, approval_phrase server) fails at the APPROVAL gate ("approval phrase" message, no "acknowledge_risk=True") — the literal next check after risk — proving the risk gate accepted the acknowledgment; init replay `{"force": True}` after file-exists refusal and corrected-name replay after name-empty refusal both reach `ok:True`. PR 4: `sofer_validate` on `mcp-config-states/empty.toml` → `{ok:False, exit_code:1, output:"No [[file]] entries found in configuration.", config_errors:["No [[file]] entries found in configuration."]}`; happy-path TOML → `{ok:True, exit_code:0, config_errors:[]}` without any scan; greenfield `sofer_init(name="green-ds", user="myuser")` → `ok:True`, then `sofer_scan_apply` (`copied:1`, `cache/data.csv` written) → `sofer_validate` `ok:True`; `sofer_scan_dry_run` on `_write_minimal_dataset` + `new.csv` → `{ok:True, discovered:2, registered:1}`, output lists `-> cache/new.csv`, no `cache/` dir, TOML byte-identical; malformed TOML → `{ok:False, exit_code:1, config_errors:["Failed to read TOML: ..."]}`; handoff chain validate→prepare→codebook_all→profile_all→render_all→`publish(dry_run=True)` (`{ok:True, dry_run:True}`) → `publish_confirm(acknowledge_risk=True)` with mocked `_api` + `HF_TOKEN` → `{ok:True, acknowledge_risk:True}` and the `upload_folder` spy recorded ≥1 call (upload branch reached, offline). PR 5: real CLI subprocess (`run_cli` → `[sys.executable, "-m", "sofer.cli", ...]`) — `--help` → rc 0, stdout lists all 9 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp); `PYTHONIOENCODING=cp1252` + `encoding="cp1252", errors="strict"` → rc 0, stdout strict-decodable and fully cp1252-encodable (no non-cp1252 glyphs — verified by live probe BEFORE writing the test, per task 5.2); unknown command → rc 2 with "invalid choice" on stderr (argparse dispatch) |
+| Rollback boundary | PR 2: revert commits `354b9e9` + `cdc95f3` (or `git revert` them). PR 3: revert commits `f5ef349` + `8d0c4f8` + `3237aee` + `6baa813` (or `git revert` them). PR 4: revert commits `3d85368` + `5e70b84` + the Phase 4 chore commit (or `git revert` them) — zero production surface (`src/sofer/` untouched, verified by `git diff --stat` showing only `tests/` + `openspec/`). PR 5: revert the Phase 5 commits (test_cli + ci.yml + chore) — zero production surface (`src/sofer/` untouched across ALL phases, verified by `git diff --stat dev...HEAD`) |
 
 ## Files Changed
 
@@ -60,10 +70,14 @@ tasks 2.1–2.5 done. Phase 3 (PR 3) complete — tasks 3.1–3.6 done. Phase 4
 | `tests/test_mcp_process.py` | Created | (PR 3) Process-boundary module: `TestStdioFraming` (real stdio transport via shared `mcp_stdio_server` fixture — first real consumer, PB-09), `TestNestedCwd` (PB-04), `TestRecoveryPublishConfirm` + `TestRecoveryInit` (PB-03 replay of documented hints); module-local thin `_call`/`_run` adapters delegating unwrap to conftest `mcp_payload`; post-review `6baa813` strengthened `TestRecoveryPublishConfirm` to stop the replay at the approval gate and dropped the then-unused `_strip_hf_token` |
 | `tests/fixtures/mcp-config-states/empty.toml` | Created | (PR 3) Valid TOML with no `[[file]]` entries (PB-04 empty-config fixture), kept out of `mcp-happy-path/` |
 | `tests/fixtures/mcp-config-states/malformed.toml` | Created | (PR 3) Unparseable TOML (unclosed table header) for the PB-04 malformed-config scenario |
-| `openspec/changes/test-mcp-cli-regression-suite/tasks.md` | Modified | (PR 2 + PR 3 + PR 4) Marked 2.1–2.5, 3.1–3.6, and 4.1–4.6 `[x]`; added forecast note (PR 2 actual 436 lines vs ~250–350 forecast) |
+| `openspec/changes/test-mcp-cli-regression-suite/tasks.md` | Modified | (PR 2 + PR 3 + PR 4 + PR 5) Marked 2.1–2.5, 3.1–3.6, 4.1–4.6, and 5.1–5.5 `[x]`; added forecast note (PR 2 actual 436 lines vs ~250–350 forecast) |
 | `openspec/changes/test-mcp-cli-regression-suite/design.md` | Modified | (PR 3) Corrected D3 premise + Open Questions + Data Flow recovery line: refusal envelopes DIFFER at the client boundary (`output_schema` drops `error_code`/`message`/`next`; non-`hf` targets surface as schema `ToolError`); recovery replay keys off boundary-visible refusal message + documented hint VALUES |
 | `openspec/changes/test-mcp-cli-regression-suite/apply-progress.md` | Modified | (PR 2 + PR 3 + PR 4) Merged Phase 2, Phase 3, and Phase 4 progress into this artifact (cumulative with Phase 1) |
 | `tests/test_mcp_process.py` | Modified | (PR 4) Added `TestConfigStates` (empty config 4.1, existing config 4.2, greenfield bootstrap 4.3, triage preview 4.3, malformed config 4.4 — all through `Client(server)`, real fixture TOMLs from `mcp-config-states/` + `mcp-happy-path/`) and `TestDeliveryHandoff` (4.5: validate→prepare→codebook_all→profile_all→render_all→publish(dry_run)→publish_confirm with `publish._api` monkeypatched, `HF_TOKEN` set, `upload_folder` spy proving the upload branch); module docstring extended to Phase 4 |
+| `tests/test_cli.py` | Modified | (PR 5) Added `TestSubprocessBoundary` (PB-02): `--help` subprocess exits 0 and lists ALL 9 subcommands (5.1); `PYTHONIOENCODING=cp1252` + `encoding="cp1252"` (strict via `run_cli`) → rc 0, stdout re-encodable as cp1252 proving no non-cp1252 glyphs (5.2); unknown command → rc 2 with "invalid choice" in stderr (5.3). Reuses conftest `run_cli` (PB-09 — second real consumer after PR 1's harness probe); module docstring + import updated |
+| `.github/workflows/ci.yml` | Modified | (PR 5) Comment-only annotation above the `Run tests` step: `uv run pytest -v` IS the deliberate complete-suite gate (PB-05/D7); no focused-only command may replace it. Verified comment-only via `git diff`; YAML still parses |
+| `openspec/changes/test-mcp-cli-regression-suite/tasks.md` | Modified | (PR 5) Marked 5.1–5.5 `[x]` — ALL 20 tasks of the change now complete |
+| `openspec/changes/test-mcp-cli-regression-suite/apply-progress.md` | Modified | (PR 5) Merged Phase 5 progress into this artifact (cumulative with Phases 1–4) |
 
 ## Deviations from Design
 
@@ -146,6 +160,23 @@ tasks 2.1–2.5 done. Phase 3 (PR 3) complete — tasks 3.1–3.6 done. Phase 4
   at validate; passing a real user keeps the bootstrap chain green (same
   reason `test_e2e_init_move_scan_flattened` patches the placeholder TOML
   inline).
+- **D6 not exercised in PR 5** (win32 skip): `TestSubprocessBoundary` is pure
+  subprocess output — no links, junctions, or privilege-dependent operations —
+  so the `_make_link` skip-without-privileges pattern was not needed, exactly
+  as the task brief predicted. The cp1252 test is cross-platform by design
+  (`PYTHONIOENCODING` + strict decode, D4), so it runs on the ubuntu CI
+  matrix without any win32 branch.
+- **PR 5 verified the live probe BEFORE writing the test** (task 5.2
+  mandate): `sofer --help` under `PYTHONIOENCODING=cp1252` with
+  `encoding="cp1252", errors="strict"` exits 0, strict-decodes, and
+  re-encodes as cp1252 — the current help text contains NO non-cp1252 glyphs,
+  so no test weakening was needed (no finding to report). The test's explicit
+  `stdout.encode("cp1252")` re-encode assertion pins that contract so a future
+  help-text glyph (em dash, arrow, check mark) fails loudly.
+- **PR 5 asserts "invalid choice" in stderr** for the unknown-command test:
+  argparse error messages are not localized, so the deterministic English
+  `argument command: invalid choice: ...` line is stable across the CI
+  matrix; the primary assertion remains `returncode == 2` (PB-02).
 
 ## Issues Found
 
@@ -161,23 +192,31 @@ tasks 2.1–2.5 done. Phase 3 (PR 3) complete — tasks 3.1–3.6 done. Phase 4
 - Pre-existing note (from PR 1): `tests/test_mcp_server.py::_make_dataset`
   and conftest's `_write_minimal_dataset` remain near-duplicates;
   refactoring is deferred out of scope (flagged in tasks).
+- PR 5 (no findings): the cp1252 live probe confirmed the help text is fully
+  cp1252-encodable, so no non-cp1252 glyph issue exists to report; full-suite
+  count landed exactly at the forecast (1269 baseline + 3 = 1272 collected;
+  1270 passed + 2 skipped).
 
 ## Remaining Tasks (later PRs in the chain)
 
-- [ ] 5.1–5.5 Phase 5 (PR 5): test_cli subprocess + CI
+None — ALL 20 tasks (Phases 1–5, PRs 1–5) are complete. The change is ready
+for sdd-verify.
 
 ## Workload / PR Boundary
 
 - Mode: chained PR slice (feature-branch-chain on `test/mcp-cli-regression-suite`)
-- Current work unit: PR 4 — config states + delivery handoff
-- Boundary: PR 3 (stdio/CWD/recovery + config-state fixtures) → this PR adds
-  the Phase 4 config-state and handoff tests (6 tests in
-  `tests/test_mcp_process.py`); planning trail ships with the code (repo
-  `chore(sdd):` convention)
-- Estimated review budget impact: 211 insertions + 7 deletions (218 changed
-  lines) in `tests/test_mcp_process.py` alone, plus ~50 more in the two
-  openspec artifacts — comfortably under the 400-line guard
+- Current work unit: PR 5 — CLI subprocess boundary + CI annotation (final slice)
+- Boundary: PR 4 (config states + delivery handoff) → this PR adds
+  `TestSubprocessBoundary` to `tests/test_cli.py` (3 tests, PB-02) and the
+  comment-only complete-gate annotation in `.github/workflows/ci.yml`
+  (PB-05/D7); planning trail ships with the code (repo `chore(sdd):`
+  convention)
+- Estimated review budget impact: ~80 insertions across `tests/test_cli.py`
+  (3 tests + class + import) + 6 comment lines in `ci.yml` + ~60 in the two
+  openspec artifacts — well under the 400-line guard
 
 ## Status
 
-16/16 tasks complete (Phases 1–4). Ready for review of PR 4; next batch = PR 5 (Phase 5).
+20/20 tasks complete (Phases 1–5, PRs 1–5). Full suite **1270 passed,
+2 skipped** (1269 baseline + 3), ruff/mypy/`git diff --check` all clean,
+`SOFER_TRACE.md` untouched. Ready for sdd-verify of the whole change.

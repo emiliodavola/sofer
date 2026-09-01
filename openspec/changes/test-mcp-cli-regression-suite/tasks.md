@@ -60,8 +60,8 @@ Retarget/rebase child PRs showing parent-slice changes.
 
 ## Phase 5: CLI subprocess + CI + final gates (PR 5)
 
-- [ ] 5.1 Add `TestSubprocessBoundary` to `tests/test_cli.py`: `--help` subprocess → rc 0, lists all subcommands (PB-02).
-- [ ] 5.2 cp1252: `PYTHONIOENCODING=cp1252` + `errors="strict"` → rc 0, strict-decodable; no non-cp1252 glyphs; win32-only skips (PB-02).
-- [ ] 5.3 Dispatch: unknown command subprocess → argparse rc 2 (PB-02).
-- [ ] 5.4 `ci.yml`: comment-only annotation on `uv run pytest -v` as complete gate (PB-05, D7).
-- [ ] 5.5 Final gate: full pytest (count stable) + ruff + mypy + `git diff --check`; `SOFER_TRACE.md` untracked/unstaged (PB-07/08); one spawn per module (PB-09).
+- [x] 5.1 Add `TestSubprocessBoundary` to `tests/test_cli.py`: `--help` subprocess → rc 0, lists all subcommands (PB-02).
+- [x] 5.2 cp1252: `PYTHONIOENCODING=cp1252` + `errors="strict"` → rc 0, strict-decodable; no non-cp1252 glyphs; win32-only skips (PB-02).
+- [x] 5.3 Dispatch: unknown command subprocess → argparse rc 2 (PB-02).
+- [x] 5.4 `ci.yml`: comment-only annotation on `uv run pytest -v` as complete gate (PB-05, D7).
+- [x] 5.5 Final gate: full pytest (count stable) + ruff + mypy + `git diff --check`; `SOFER_TRACE.md` untracked/unstaged (PB-07/08); one spawn per module (PB-09).
