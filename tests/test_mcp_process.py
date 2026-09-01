@@ -59,22 +59,6 @@ def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
     return result
 
 
-def _strip_hf_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Remove every HF token source so ``_require_hf_token`` fails closed.
-
-    Mirrors the established pattern in ``tests/test_mcp_server.py``: drops the
-    env aliases and points ``HF_TOKEN_PATH`` at a missing file so no token can
-    resolve from the environment, the cache file, or dotenv.
-    """
-    import huggingface_hub.constants as hf_constants
-
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
-    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
-    monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
-    monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
-
-
 class TestStdioFraming:
     """PB-01: real stdio transport with clean JSON-RPC framing (one spawn)."""
 
@@ -133,15 +117,22 @@ class TestNestedCwd:
 class TestRecoveryPublishConfirm:
     """PB-03: replay the documented risk-gate hint past the risk gate."""
 
-    def test_replay_acknowledge_risk_progresses_to_token_gate(
+    def test_replay_acknowledge_risk_progresses_to_approval_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_tool_config: Any
     ) -> None:
         """First call refused at the risk gate; the replayed call (with the
-        documented ``acknowledge_risk=True`` hint) must fail at a DIFFERENT
-        gate — the now-stripped token — proving it progressed past risk."""
+        documented ``acknowledge_risk=True`` hint, token still present) must
+        be refused at the APPROVAL gate — the literal next check AFTER the
+        risk gate in ``sofer_publish_confirm`` (mcp_server.py) — proving the
+        risk gate accepted the acknowledgment and progression continued.
+
+        (A token-stripped replay cannot prove this: the token check is pinned
+        BEFORE the risk gate, so it would only show a different gate by
+        ordering, never that ``acknowledge_risk=True`` was accepted.)
+        """
         _write_minimal_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="s3cret")
         args: dict[str, Any] = {"config": str(tmp_path / "dataset.toml")}
 
         first = _call(server, "sofer_publish_confirm", args).data
@@ -151,13 +142,13 @@ class TestRecoveryPublishConfirm:
         # reason is the human-readable message naming the required hint.
         assert "acknowledge_risk=True" in first["output"]
 
-        # Replay with the documented next hint for the risk gate
-        # (mcp_server.py: {"acknowledge_risk": True}), token now stripped.
-        _strip_hf_token(monkeypatch, tmp_path)
-
+        # Replay with the documented next hint for the risk gate (mcp_server
+        # risk gate: {"acknowledge_risk": True}); the token is STILL present.
         replayed = _call(server, "sofer_publish_confirm", {**args, "acknowledge_risk": True}).data
         assert replayed["ok"] is False
-        assert "HF_TOKEN" in replayed["output"]
+        # The approval gate (the next check after risk) refuses now — not the
+        # risk message — proving the risk gate accepted the acknowledgment.
+        assert "approval phrase" in replayed["output"].lower()
         assert "acknowledge_risk=True" not in replayed["output"]
 
 
