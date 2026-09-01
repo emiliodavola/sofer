@@ -32,11 +32,11 @@ Retarget/rebase child PRs showing parent-slice changes.
 
 ## Phase 2: Route registered tools through Client(server) (PR 2)
 
-- [ ] 2.1 Convert ~22 `sofer_publish_confirm` direct calls in `tests/test_mcp_server.py` to `_call(server, ...)` + unwrap (PB-01).
-- [ ] 2.2 Convert ~16 `sofer_init` direct calls to `_call(server, ...)` (PB-01).
-- [ ] 2.3 Convert remaining direct `sofer_validate` calls; drop unused imports (PB-01).
-- [ ] 2.4 `test_mcp_schema.py`: convert direct validate/publish_confirm calls; route `test_offline_happy_path` via `Client(server)`, keep `_api` mock + `HF_TOKEN` (PB-01/06).
-- [ ] 2.5 Gate: no new boundary-hiding direct calls (PB-01); count not regressed (PB-07).
+- [x] 2.1 Convert ~22 `sofer_publish_confirm` direct calls in `tests/test_mcp_server.py` to `_call(server, ...)` + unwrap (PB-01).
+- [x] 2.2 Convert ~16 `sofer_init` direct calls to `_call(server, ...)` (PB-01).
+- [x] 2.3 Convert remaining direct `sofer_validate` calls; drop unused imports (PB-01).
+- [x] 2.4 `test_mcp_schema.py`: convert direct validate/publish_confirm calls; route `test_offline_happy_path` via `Client(server)`, keep `_api` mock + `HF_TOKEN` (PB-01/06).
+- [x] 2.5 Gate: no new boundary-hiding direct calls (PB-01); count not regressed (PB-07).
 
 ## Phase 3: Process module — stdio, CWD, recovery (PR 3)
 
