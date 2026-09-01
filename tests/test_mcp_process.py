@@ -327,3 +327,80 @@ class TestConfigStates:
             envelope["config_errors"]
         )
         assert "Failed to read TOML" in envelope["output"]
+
+
+class TestDeliveryHandoff:
+    """PB-04/PB-06: the full offline delivery chain through the client."""
+
+    def test_handoff_pipeline_reaches_upload_branch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_tool_config: Any,
+    ) -> None:
+        """validate -> prepare -> codebook_all -> profile_all -> render_all ->
+        publish(dry_run=True) -> publish_confirm through the client, with
+        ``publish._api`` monkeypatched and ``HF_TOKEN`` set (PB-06): the
+        dry-run plan is returned and the confirm reaches the upload branch
+        (proven by the ``upload_folder`` spy, never by real network).
+        """
+        for item in MCP_HAPPY_PATH.iterdir():
+            dest = tmp_path / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+
+        import sofer.config as cfg
+
+        cfg.reload(tmp_path)
+
+        import sofer.publish as pub_mod
+
+        monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        upload_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        def _fake_upload(*a: Any, **kw: Any) -> None:
+            upload_calls.append((a, kw))
+
+        monkeypatch.setattr(pub_mod._api, "upload_folder", _fake_upload)
+
+        def _fake_hf_api(*_a: Any, **_kw: Any) -> Any:
+            return pub_mod._api
+
+        monkeypatch.setattr(pub_mod, "HfApi", _fake_hf_api)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path)
+        config_arg = str(tmp_path / "dataset.toml")
+
+        validated = _call(server, "sofer_validate", {"config": config_arg}).data
+        assert validated["ok"] is True, validated
+
+        prepared = _call(server, "sofer_prepare", {"config": config_arg}).data
+        assert prepared["ok"] is True, prepared
+
+        codebooks = _call(server, "sofer_codebook_all", {"config": config_arg}).data
+        assert codebooks["ok"] is True, codebooks
+
+        profiles = _call(server, "sofer_profile_all", {"config": config_arg}).data
+        assert profiles["ok"] is True, profiles
+
+        renders = _call(server, "sofer_render_all", {"config": config_arg}).data
+        assert renders["ok"] is True, renders
+
+        plan = _call(server, "sofer_publish", {"config": config_arg, "dry_run": True}).data
+        assert plan["ok"] is True, plan
+        assert plan["dry_run"] is True
+
+        # confidential=false in the fixture, so acknowledge_risk alone
+        # satisfies the acknowledgments (no confidential ack, no approval
+        # phrase on this server).
+        confirmed = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": config_arg, "acknowledge_risk": True},
+        ).data
+        assert confirmed["ok"] is True, confirmed
+        assert confirmed["acknowledge_risk"] is True
+        assert upload_calls, "publish_confirm must reach the upload branch"
