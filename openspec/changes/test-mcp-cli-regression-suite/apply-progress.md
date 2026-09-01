@@ -39,8 +39,8 @@ recorded below.
 | Evidence | Required value |
 |---|---|
 | Focused test command and exact result | PR 2: `uv run pytest tests/test_mcp_server.py -q` → **137 passed, 2 skipped**; `uv run pytest tests/test_mcp_schema.py -q` → **15 passed**. PR 3: `uv run pytest tests/test_mcp_process.py -q` → **5 passed** (stdio framing, nested CWD, publish risk replay, init force replay, init name replay) |
-| Runtime harness command/scenario and exact result | PR 2: in-process `Client(server)` boundary — `sofer_publish_confirm` no-ack refusal → envelope `{ok:False, exit_code:1, acknowledge_risk:False}` with refusal message in `output`; `target="local"` → schema `literal_error` ToolError "Input should be 'hf'" (TARGET_INVALID envelope branch is unreachable through the boundary); `sofer_init` dotdot/C:/evil → ToolError "outside the server root"; `sofer_validate` missing config → `ok:False` + `config_errors` (throwaway probe in temp dir, not committed). PR 3: real stdio subprocess (`mcp_stdio_server.spawn()` → `stdio_client` → `ClientSession`) — `initialize` ok, `tools/list` = 14, `sofer_validate(config="dataset.toml")` payload `json.loads` clean envelope `{ok:True, exit_code:0, config_errors:[]}`; nested-CWD `sofer_init` with cwd unset auto-detects live CWD → TOML + `raw/` land under the nested dir, not the parent root; publish_confirm replay (`acknowledge_risk=True`, token stripped) fails at the token gate ("HF_TOKEN" message, no "acknowledge_risk=True"); init replay `{"force": True}` after file-exists refusal and corrected-name replay after name-empty refusal both reach `ok:True` |
-| Rollback boundary | PR 2: revert commits `354b9e9` + `cdc95f3` (or `git revert` them). PR 3: revert commits `f5ef349` + `8d0c4f8` + `3237aee` (or `git revert` them): delete the two fixture files and `tests/test_mcp_process.py` plus the chore commit — zero production surface (`src/sofer/` untouched, verified by `git diff --stat` showing only `tests/` + `openspec/`) |
+| Runtime harness command/scenario and exact result | PR 2: in-process `Client(server)` boundary — `sofer_publish_confirm` no-ack refusal → envelope `{ok:False, exit_code:1, acknowledge_risk:False}` with refusal message in `output`; `target="local"` → schema `literal_error` ToolError "Input should be 'hf'" (TARGET_INVALID envelope branch is unreachable through the boundary); `sofer_init` dotdot/C:/evil → ToolError "outside the server root"; `sofer_validate` missing config → `ok:False` + `config_errors` (throwaway probe in temp dir, not committed). PR 3: real stdio subprocess (`mcp_stdio_server.spawn()` → `stdio_client` → `ClientSession`) — `initialize` ok, `tools/list` = 14, `sofer_validate(config="dataset.toml")` payload `json.loads` clean envelope `{ok:True, exit_code:0, config_errors:[]}`; nested-CWD `sofer_init` with cwd unset auto-detects live CWD → TOML + `raw/` land under the nested dir, not the parent root; publish_confirm replay (`acknowledge_risk=True`, token present, approval_phrase server) fails at the APPROVAL gate ("approval phrase" message, no "acknowledge_risk=True") — the literal next check after risk — proving the risk gate accepted the acknowledgment; init replay `{"force": True}` after file-exists refusal and corrected-name replay after name-empty refusal both reach `ok:True` |
+| Rollback boundary | PR 2: revert commits `354b9e9` + `cdc95f3` (or `git revert` them). PR 3: revert commits `f5ef349` + `8d0c4f8` + `3237aee` + `6baa813` (or `git revert` them): delete the two fixture files and `tests/test_mcp_process.py` plus the chore commits — zero production surface (`src/sofer/` untouched, verified by `git diff --stat` showing only `tests/` + `openspec/`) |
 
 ## Files Changed
 
@@ -48,7 +48,7 @@ recorded below.
 |---|---|---|
 | `tests/test_mcp_server.py` | Modified | (PR 2) Converted 22 `sofer_publish_confirm`, 25 `sofer_init`, 1 `sofer_validate` direct calls to `_call(server, ...)` + `mcp_payload` unwrap; refusal assertions moved to boundary-visible fields; dropped `PathOutsideRootError` import |
 | `tests/test_mcp_schema.py` | Modified | (PR 2) Added module-local `_call` (delegates unwrap to conftest `mcp_payload`); converted `test_refusal_envelope`, `test_publish_risk_envelope`, `test_offline_happy_path` through `Client(server)`; dropped unused `sofer_publish` import |
-| `tests/test_mcp_process.py` | Created | (PR 3) Process-boundary module: `TestStdioFraming` (real stdio transport via shared `mcp_stdio_server` fixture — first real consumer, PB-09), `TestNestedCwd` (PB-04), `TestRecoveryPublishConfirm` + `TestRecoveryInit` (PB-03 replay of documented hints); module-local thin `_call`/`_run`/`_strip_hf_token` adapters delegating unwrap to conftest `mcp_payload` |
+| `tests/test_mcp_process.py` | Created | (PR 3) Process-boundary module: `TestStdioFraming` (real stdio transport via shared `mcp_stdio_server` fixture — first real consumer, PB-09), `TestNestedCwd` (PB-04), `TestRecoveryPublishConfirm` + `TestRecoveryInit` (PB-03 replay of documented hints); module-local thin `_call`/`_run` adapters delegating unwrap to conftest `mcp_payload`; post-review `6baa813` strengthened `TestRecoveryPublishConfirm` to stop the replay at the approval gate and dropped the then-unused `_strip_hf_token` |
 | `tests/fixtures/mcp-config-states/empty.toml` | Created | (PR 3) Valid TOML with no `[[file]]` entries (PB-04 empty-config fixture), kept out of `mcp-happy-path/` |
 | `tests/fixtures/mcp-config-states/malformed.toml` | Created | (PR 3) Unparseable TOML (unclosed table header) for the PB-04 malformed-config scenario |
 | `openspec/changes/test-mcp-cli-regression-suite/tasks.md` | Modified | (PR 2 + PR 3) Marked 2.1–2.5 and 3.1–3.6 `[x]`; added forecast note (PR 2 actual 436 lines vs ~250–350 forecast) |
@@ -103,6 +103,17 @@ recorded below.
 - **D6 not exercised in PR 3**: no test in this slice creates links, so the
   `_make_link` skip-without-privileges pattern was not needed; it remains in
   `tests/test_mcp_server.py` for any later slice that needs it.
+- **Gate-review WARNING fixed post-review (`6baa813`)**: the original PR 3
+  `TestRecoveryPublishConfirm` replay stripped the token, so the replayed call
+  was stopped at the TOKEN gate — which production pins BEFORE the risk gate
+  (`mcp_server.py:948`, "Token after quality gate, before acknowledgments").
+  That proved a different gate only by ordering, never that
+  `acknowledge_risk=True` was accepted. Strengthened: the server now carries
+  `approval_phrase="s3cret"` and the token stays present, so the replayed call
+  is refused at the APPROVAL gate — the literal next check AFTER the risk gate
+  (`mcp_server.py:987`) — with the refusal message switching from the risk
+  message to "approval phrase required". Deterministic and offline (no
+  network, no real credentials; approval gate is a `build_server` param).
 - **PR 3 uses conftest's `_write_minimal_dataset`** for the publish recovery
   fixture instead of a third `_make_dataset` copy (AGENTS.md rule 4 — no
   duplicated logic; the helper already lived in conftest and now has a second
