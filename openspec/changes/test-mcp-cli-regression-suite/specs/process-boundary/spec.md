@@ -58,18 +58,18 @@ Tests in `tests/test_cli.py` SHALL invoke `[sys.executable, "-m", "sofer.cli", .
 
 ### Requirement: Recovery replay executes returned calls (PB-03)
 
-Recovery tests SHALL execute the `next` hint returned by a refusal and SHALL assert the replayed (second) call reaches the intended branch — not merely that the hint is present.
+Recovery tests SHALL execute the documented `next` hint arguments for a refusal (the hint VALUES are deterministic and pinned by the production gates; `next` itself is not exposed at the client boundary because the declared `output_schema` projects envelopes) and SHALL assert the replayed (second) call reaches the intended branch — not merely that the hint is present.
 
 #### Scenario: publish_confirm replay
 
-- GIVEN `sofer_publish_confirm` refused with `next={acknowledge_risk:true}`
-- WHEN the `next` arguments are executed as a second call
-- THEN the call SHALL proceed past the risk gate to the next check
+- GIVEN `sofer_publish_confirm` refused at the risk gate (`ok:False`; the boundary-visible `output` message states `acknowledge_risk=True` is required)
+- WHEN the documented hint arguments (`{"acknowledge_risk": True}`) are replayed as a second call with the token still present
+- THEN the call SHALL be refused at the NEXT check after the risk gate (the approval gate) — proving the risk gate accepted the acknowledgment
 
 #### Scenario: init refusal replay
 
-- GIVEN `sofer_init` returning a refusal
-- WHEN the corrected arguments are replayed
+- GIVEN `sofer_init` returning a boundary-visible refusal (`config_errors`/`output` state the required correction: file-exists → replay `{"force": True}`; name-empty → replay a non-empty name)
+- WHEN the documented hint arguments are replayed
 - THEN the intended branch SHALL be reached
 
 ### Requirement: Config-state scenario coverage (PB-04)
