@@ -240,9 +240,7 @@ class TestEnvelope:
         assert envelope["acknowledge_risk"] is False
         assert "acknowledge_risk=True" in envelope["output"]
 
-    def test_auth_status_no_leak(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auth_status_no_leak(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
         (tmp_path / "dataset.toml").write_text(
             '[dataset]\nname="x"\nrepo_id="u/x"\n\n[[file]]\nlocal="data.csv"\nremote="data.csv"\n',
