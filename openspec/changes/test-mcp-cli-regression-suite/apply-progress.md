@@ -6,7 +6,7 @@ Phase 1 (PR 1) complete — tasks 1.1–1.5 done. Phase 2 (PR 2) complete —
 tasks 2.1–2.5 done. Phase 3 (PR 3) complete — tasks 3.1–3.6 done. Phase 4
 (PR 4) complete — tasks 4.1–4.6 done. Phase 5 (PR 5) complete — tasks
 5.1–5.5 done. Standard mode (`strict_tdd=false` per
-`openspec/config.yaml`); Work Unit Evidence recorded below. All 20/20 tasks
+`openspec/config.yaml`); Work Unit Evidence recorded below. All 27/27 tasks
 of the change are complete.
 
 ## Completed Tasks
@@ -76,7 +76,7 @@ of the change are complete.
 | `tests/test_mcp_process.py` | Modified | (PR 4) Added `TestConfigStates` (empty config 4.1, existing config 4.2, greenfield bootstrap 4.3, triage preview 4.3, malformed config 4.4 — all through `Client(server)`, real fixture TOMLs from `mcp-config-states/` + `mcp-happy-path/`) and `TestDeliveryHandoff` (4.5: validate→prepare→codebook_all→profile_all→render_all→publish(dry_run)→publish_confirm with `publish._api` monkeypatched, `HF_TOKEN` set, `upload_folder` spy proving the upload branch); module docstring extended to Phase 4 |
 | `tests/test_cli.py` | Modified | (PR 5) Added `TestSubprocessBoundary` (PB-02): `--help` subprocess exits 0 and lists ALL 9 subcommands (5.1); `PYTHONIOENCODING=cp1252` + `encoding="cp1252"` (strict via `run_cli`) → rc 0, stdout re-encodable as cp1252 proving no non-cp1252 glyphs (5.2); unknown command → rc 2 with "invalid choice" in stderr (5.3). Reuses conftest `run_cli` (PB-09 — second real consumer after PR 1's harness probe); module docstring + import updated |
 | `.github/workflows/ci.yml` | Modified | (PR 5) Comment-only annotation above the `Run tests` step: `uv run pytest -v` IS the deliberate complete-suite gate (PB-05/D7); no focused-only command may replace it. Verified comment-only via `git diff`; YAML still parses |
-| `openspec/changes/test-mcp-cli-regression-suite/tasks.md` | Modified | (PR 5) Marked 5.1–5.5 `[x]` — ALL 20 tasks of the change now complete |
+| `openspec/changes/test-mcp-cli-regression-suite/tasks.md` | Modified | (PR 5) Marked 5.1–5.5 `[x]` — ALL 27 tasks of the change now complete |
 | `openspec/changes/test-mcp-cli-regression-suite/apply-progress.md` | Modified | (PR 5) Merged Phase 5 progress into this artifact (cumulative with Phases 1–4) |
 
 ## Deviations from Design
@@ -199,7 +199,7 @@ of the change are complete.
 
 ## Remaining Tasks (later PRs in the chain)
 
-None — ALL 20 tasks (Phases 1–5, PRs 1–5) are complete. The change is ready
+None — ALL 27 tasks (Phases 1–5, PRs 1–5) are complete. The change is ready
 for sdd-verify.
 
 ## Workload / PR Boundary
@@ -284,11 +284,46 @@ stable). Commits `c5125f2`, `1da70aa`, `2679158`.
 | Runtime harness command/scenario and exact result | Full suite `uv run pytest tests/ -q` → **1270 passed, 2 skipped**: every client-boundary call (in-memory `Client(server)` and real stdio `ClientSession` with 30s read timeout) still unwraps through the shared `call_tool`/`mcp_payload`; the risk-envelope refusal still surfaces `acknowledge_risk: False` + `"acknowledge_risk=True"` in `output` with `HF_TOKEN` set via monkeypatch |
 | Rollback boundary | Revert commits `c5125f2`, `1da70aa`, `2679158` (or `git revert`) — zero production surface (`src/sofer/` untouched; `git diff --stat` shows only `tests/` + this artifact) |
 
+## Verifier response
+
+External verifier blocked the PR chain (issue #119) with 4 blockers + 3 risks,
+all diagnosed and addressed surgically in this pass:
+
+- **Blocker 1 — spec PB-03 boundary reality**: amended PB-03 to
+  boundary-observable framing — recovery tests execute the documented `next`
+  hint VALUES (deterministic, pinned by the production gates) because `next`
+  itself is not client-visible (`output_schema` projects envelopes), and
+  assert the replayed call reaches the intended branch (Fix D). The tests
+  already implemented exactly this framing; the spec now matches.
+- **Blocker 2 — ruff format gate**: `uv run ruff format src/ tests/`
+  reformatted the 3 files ruff flagged (`tests/conftest.py`,
+  `tests/test_mcp_process.py`, `tests/test_mcp_server.py` — single-line
+  `_call`/`call_tool` aliases); formatting only, no behavior change (Fix A).
+- **Blocker 3 — evidence count + verify report**: task count corrected to
+  27/27 (tasks.md has 27 tasks, all `[x]`) and `verify-report.md` committed
+  with the batch so the evidence ships with the change (Fixes E/G).
+- **Blocker 4 — CI on every branch**: `ci.yml` gained a `push` trigger on
+  `branches: ['**']` — the `pull_request` `branches:` filter applies to the
+  PR BASE, so chained slice branches never got CI; design.md D7 updated to
+  match (Fix F).
+- **Risk 2 — env hygiene**: `test_auth_status_no_leak` converted from raw
+  `os.environ` set/`del` to the `monkeypatch` fixture (`setenv` +
+  `delenv(..., raising=False)`); the in-function `import os` dropped (Fix B).
+- **Risk 3 — upload args**: `test_handoff_pipeline_reaches_upload_branch`
+  strengthened from the bare `assert upload_calls` to an exact-count +
+  repo_id + staging-contract assertion (Fix C).
+- **Risk 1 (4R)** — already resolved by the earlier hardening pass (R2 `_call`
+  consolidation, R4 timeouts); re-verified in this batch.
+
 ## Status
 
-20/20 tasks complete (Phases 1–5, PRs 1–5). Full suite **1270 passed,
+27/27 tasks complete (Phases 1–5, PRs 1–5). Full suite **1270 passed,
 2 skipped** (1269 baseline + 3), ruff/mypy/`git diff --check` all clean,
 `SOFER_TRACE.md` untouched. Ready for sdd-verify of the whole change.
 Post-verify: 4R hardening pass complete (commits `c5125f2`, `1da70aa`,
 `2679158`) — full suite still **1270 passed, 2 skipped**, all gates green,
 zero production surface.
+Verifier response: all 4 blockers + 3 risks addressed (commits `12ef381`,
+`484e63d`, `209f9a3`, `c04a99f`, `3cf6075`, `ddb4dc9`, plus this chore
+commit) — full suite **1270 passed, 2 skipped**, `ruff format --check`
+clean, zero production surface.
