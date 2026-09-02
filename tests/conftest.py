@@ -158,9 +158,7 @@ def mcp_payload(result: Any) -> Any:
     return result
 
 
-def call_tool(
-    server: Any, name: str, arguments: dict[str, Any] | None = None
-) -> Any:
+def call_tool(server: Any, name: str, arguments: dict[str, Any] | None = None) -> Any:
     """Call a registered tool through an in-memory ``Client(server)`` (PB-01).
 
     Shared implementation of the client-boundary call wrapper (PB-09): opens a

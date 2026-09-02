@@ -213,9 +213,7 @@ class TestConfigStates:
     happy-path tree) — never dataclass or private-helper construction alone.
     """
 
-    def test_empty_config_documented_result(
-        self, tmp_path: Path, restore_tool_config: Any
-    ) -> None:
+    def test_empty_config_documented_result(self, tmp_path: Path, restore_tool_config: Any) -> None:
         """Empty TOML (valid, no ``[[file]]``) validates to the documented
         empty-config refusal: ``ok:False`` + ``config_errors`` naming the
         missing file entries."""
@@ -225,9 +223,9 @@ class TestConfigStates:
         envelope = _call(server, "sofer_validate", {"config": str(tmp_path / "empty.toml")}).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
-        assert any(
-            "No [[file]] entries" in error for error in envelope["config_errors"]
-        ), envelope["config_errors"]
+        assert any("No [[file]] entries" in error for error in envelope["config_errors"]), envelope[
+            "config_errors"
+        ]
         # The human-readable refusal is the boundary-visible ``output``
         # (error_code/message/next are dropped by output_schema).
         assert "No [[file]] entries" in envelope["output"]
@@ -265,9 +263,7 @@ class TestConfigStates:
         assert (tmp_path / "green-ds.toml").is_file()
         assert (tmp_path / "raw").is_dir()
 
-        (tmp_path / "raw" / "data.csv").write_text(
-            "col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig"
-        )
+        (tmp_path / "raw" / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
         applied = _call(
             server, "sofer_scan_apply", {"config": str(tmp_path / "green-ds.toml")}
         ).data
@@ -314,9 +310,9 @@ class TestConfigStates:
         ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
-        assert any("Failed to read TOML" in error for error in envelope["config_errors"]), (
-            envelope["config_errors"]
-        )
+        assert any("Failed to read TOML" in error for error in envelope["config_errors"]), envelope[
+            "config_errors"
+        ]
         assert "Failed to read TOML" in envelope["output"]
 
 
