@@ -14,6 +14,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -272,7 +273,12 @@ class TestStdioSmoke:
                 cwd=str(tmp_path),
             )
             async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
+                # read_timeout_seconds (mcp 1.29.x ClientSession kwarg) makes a
+                # server that never responds fail this test loudly via a
+                # timeout instead of hanging CI indefinitely (R4 hardening).
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=30)
+                ) as session:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
