@@ -197,6 +197,7 @@ def run_cli(
     cwd: Path,
     env: dict[str, str] | None = None,
     encoding: str = "utf-8",
+    timeout: float | None = 30.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run the sofer CLI as an executable subprocess (PB-02).
 
@@ -213,6 +214,9 @@ def run_cli(
         cwd: Working directory for the subprocess.
         env: Extra environment variables layered over ``os.environ``.
         encoding: Text decoding used for stdout/stderr (e.g. ``"cp1252"``).
+        timeout: Wall-clock budget for the subprocess; ``None`` disables it.
+            Defaults to 30s so a hung CLI fails the test loudly via
+            ``TimeoutExpired`` (PB-02 hardening) instead of stalling CI.
 
     Returns:
         The completed subprocess result with text-mode stdout/stderr.
@@ -229,6 +233,7 @@ def run_cli(
         encoding=encoding,
         errors="strict",
         check=False,
+        timeout=timeout,
     )
 
 

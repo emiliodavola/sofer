@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,12 @@ class TestStdioFraming:
             from mcp.client.stdio import stdio_client
 
             async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
+                # read_timeout_seconds (mcp 1.29.1 ClientSession kwarg) makes a
+                # server that never responds fail this test loudly via a
+                # timeout instead of hanging CI indefinitely (R4 hardening).
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=30)
+                ) as session:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
