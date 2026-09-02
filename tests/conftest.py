@@ -8,13 +8,15 @@ nested trees), and ``restore_tool_config``, which snapshots and restores the
 so global state never leaks between tests.
 
 Also hosts the shared process-boundary helpers (PB-01..PB-09): ``mcp_payload``
-(the Root-model unwrap), ``run_cli`` (executable CLI subprocess), and the
-module-scoped ``mcp_stdio_server`` fixture (one stdio spawn config per module).
+(the Root-model unwrap), ``call_tool`` (shared client-boundary call wrapper),
+``run_cli`` (executable CLI subprocess), and the module-scoped
+``mcp_stdio_server`` fixture (one stdio spawn config per module).
 Sibling test modules reuse these helpers instead of re-implementing them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastmcp import Client
 from mcp import StdioServerParameters
 
 import sofer.config as config
@@ -152,6 +155,39 @@ def mcp_payload(result: Any) -> Any:
             pass
     if hasattr(result, "root"):
         return getattr(result, "root")
+    return result
+
+
+def call_tool(
+    server: Any, name: str, arguments: dict[str, Any] | None = None
+) -> Any:
+    """Call a registered tool through an in-memory ``Client(server)`` (PB-01).
+
+    Shared implementation of the client-boundary call wrapper (PB-09): opens a
+    ``Client(server)`` context, invokes ``client.call_tool(name, arguments)``,
+    and delegates the Root-model unwrap to :func:`mcp_payload`. Sibling
+    modules keep a module-local ``_call`` thin alias that delegates here
+    (AGENTS.md rule 4 — the wrapper lives in exactly one place).
+
+    Args:
+        server: The FastMCP server instance to connect an in-memory client to.
+        name: The registered tool name (e.g. ``"sofer_validate"``).
+        arguments: Tool input arguments; ``None`` for tools that take none.
+
+    Returns:
+        The ``CallToolResult`` with ``data`` unwrapped to a plain dict when
+        the result carries an envelope (via :func:`mcp_payload`).
+    """
+
+    async def _go() -> Any:
+        async with Client(server) as client:
+            return await client.call_tool(name, arguments)
+
+    result = asyncio.run(_go())
+    if result.data is not None:
+        unwrapped = mcp_payload(result.data)
+        if isinstance(unwrapped, dict):
+            result.data = unwrapped  # type: ignore[attr-defined]
     return result
 
 

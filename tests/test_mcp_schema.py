@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
-from conftest import mcp_payload
+from conftest import call_tool
 from fastmcp import Client
 
 from sofer.mcp_server import build_server, sofer_auth_status
@@ -23,19 +24,9 @@ def _run(coro):  # type: ignore[no-untyped-def]
     return asyncio.run(coro)
 
 
-def _call(server, name: str, args: dict | None = None):  # type: ignore[no-untyped-def]
-    """Call a registered tool through an in-memory Client(server) (PB-01)."""
-
-    async def _go():
-        async with Client(server) as client:
-            return await client.call_tool(name, args)
-
-    result = _run(_go())
-    if result.data is not None:
-        unwrapped = mcp_payload(result.data)
-        if isinstance(unwrapped, dict):
-            result.data = unwrapped  # type: ignore[attr-defined]
-    return result
+def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
+    """Call a registered tool through the shared client wrapper (PB-09)."""
+    return call_tool(server, name, args)
 
 
 async def _list_tools(server):  # type: ignore[no-untyped-def]

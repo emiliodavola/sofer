@@ -15,9 +15,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
-from conftest import mcp_payload
+from conftest import call_tool, mcp_payload
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -97,19 +98,11 @@ def _unwrap(data: object) -> object:  # type: ignore[no-untyped-def]
     return mcp_payload(data)
 
 
-def _call(server: ms._FastMCP, name: str, args: dict | None = None):
-    """Call a tool through an in-memory client; returns the CallToolResult."""
-
-    async def _go():
-        async with Client(server) as client:
-            return await client.call_tool(name, args)
-
-    result = _run(_go())
-    if result.data is not None:
-        unwrapped = _unwrap(result.data)
-        if isinstance(unwrapped, dict):
-            result.data = unwrapped  # type: ignore[attr-defined]
-    return result
+def _call(
+    server: ms._FastMCP, name: str, args: dict[str, Any] | None = None
+) -> Any:
+    """Call a tool through the shared in-memory client wrapper (PB-09)."""
+    return call_tool(server, name, args)
 
 
 def _tool_schema(server: ms._FastMCP, name: str) -> dict:

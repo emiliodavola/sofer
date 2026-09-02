@@ -36,8 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import _write_minimal_dataset, mcp_payload
-from fastmcp import Client
+from conftest import _write_minimal_dataset, call_tool
 
 from sofer.mcp_server import build_server
 
@@ -53,22 +52,8 @@ def _run(coro: Any) -> Any:
 
 
 def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
-    """Call a registered tool through an in-memory ``Client(server)`` (PB-01).
-
-    Delegates the Root-model unwrap to the shared ``mcp_payload`` helper
-    (PB-09/D2) so this module never re-implements the boundary seam.
-    """
-
-    async def _go() -> Any:
-        async with Client(server) as client:
-            return await client.call_tool(name, args)
-
-    result = _run(_go())
-    if result.data is not None:
-        unwrapped = mcp_payload(result.data)
-        if isinstance(unwrapped, dict):
-            result.data = unwrapped  # type: ignore[attr-defined]
-    return result
+    """Call a registered tool through the shared client wrapper (PB-09)."""
+    return call_tool(server, name, args)
 
 
 class TestStdioFraming:
