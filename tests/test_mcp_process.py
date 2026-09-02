@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import tempfile
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -390,4 +391,17 @@ class TestDeliveryHandoff:
         ).data
         assert confirmed["ok"] is True, confirmed
         assert confirmed["acknowledge_risk"] is True
-        assert upload_calls, "publish_confirm must reach the upload branch"
+        assert len(upload_calls) == 1, f"expected 1 upload_folder call, got {len(upload_calls)}"
+        # The mocked boundary receives the real HfApi.upload_folder call, which
+        # publish.py:184 issues keyword-only (folder_path/path_in_repo/repo_id/
+        # repo_type), so the spy's positional tuple is empty and the args live
+        # in the kwargs dict. publish.py:716-719 stages into
+        # tempfile.mkdtemp()/"repo" and rmtree()s that tmpdir in a finally
+        # right after the upload call (publish.py:745), so the staging dir no
+        # longer exists at assert time — pin the staging contract instead:
+        # a "repo" leaf directly under a mkdtemp dir under the system temp.
+        upload_kwargs = upload_calls[0][1]
+        assert upload_kwargs["repo_id"] == "user/mcp-happy-path", upload_kwargs
+        staging = Path(upload_kwargs["folder_path"])
+        assert staging.name == "repo", upload_kwargs
+        assert staging.parent.parent == Path(tempfile.gettempdir()), upload_kwargs
