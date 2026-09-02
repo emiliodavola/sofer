@@ -215,8 +215,80 @@ for sdd-verify.
   (3 tests + class + import) + 6 comment lines in `ci.yml` + ~60 in the two
   openspec artifacts — well under the 400-line guard
 
+## 4R Hardening (post-verify corrective pass)
+
+Post-verify hardening driven by the pre-PR 4R review findings (R1/R2/R3/R4);
+the change had already passed sdd-verify (PASS, 26/26 scenarios). Three
+surgical fixes — tests-only (zero production surface in `src/sofer/`), no
+behavior or assertion changes — re-verified with the full gate suite (count
+stable). Commits `c5125f2`, `1da70aa`, `2679158`.
+
+### Fix 1 — HF_TOKEN env hygiene (R1/R3/R4)
+
+- **Before**: `tests/test_mcp_schema.py::test_publish_risk_envelope` set
+  `os.environ["HF_TOKEN"] = "hf_test_token"` then `del os.environ["HF_TOKEN"]`
+  — leak-on-failure (a failing assert skips the `del`) and a key-deletion
+  side effect on the real environment.
+- **After**: `monkeypatch.setenv("HF_TOKEN", "hf_test_token")` (fixture arg,
+  matching every sibling test) — no leak, no `del`, no key side effect; the
+  in-function `import os` was dropped. Test behavior identical.
+- Commit: `c5125f2` (`test(mcp): fix HF_TOKEN env hygiene in risk envelope test`).
+
+### Fix 2 — consolidate the triplicated `_call` helper (R2: PB-09 + AGENTS.md rule 4 + PB-07)
+
+- **Before**: three ~12-line `_call(server, name, args)` wrappers
+  (`test_mcp_server.py` pre-existing; `test_mcp_schema.py` new and UNTYPED
+  with `# type: ignore[no-untyped-def]`; `test_mcp_process.py` new, typed)
+  each re-implemented `Client(server)` context → `call_tool(name, args)` →
+  unwrap via `mcp_payload`.
+- **After**: ONE fully-typed
+  `call_tool(server: Any, name: str, arguments: dict[str, Any] | None = None) -> Any`
+  in `tests/conftest.py` (next to `mcp_payload`, delegating unwrap to it);
+  the three module `_call`s are thin fully-typed aliases
+  (`return call_tool(server, name, args)`) so ~38 call sites needed no edits.
+  `test_mcp_server._unwrap` unchanged (already delegates to `mcp_payload`).
+  Dropped the now-unused `fastmcp.Client` / `mcp_payload` imports.
+- Commit: `1da70aa` (`test(mcp): consolidate call_tool helper in conftest`).
+
+### Fix 3 — timeouts at subprocess/stdio boundaries (R4: CI deadlock protection)
+
+- **Before**: `run_cli` (`subprocess.run`) had no timeout; `TestStdioFraming`
+  created `ClientSession(read, write)` with no read timeout — a hung server or
+  CLI would stall CI indefinitely.
+- **After**: `run_cli(..., timeout: float | None = 30.0)` passed to
+  `subprocess.run(..., timeout=timeout)` — NO try/except, so `TimeoutExpired`
+  fails the test loudly (the desired behavior); existing call sites keep the
+  30s default. `ClientSession(read, write, read_timeout_seconds=timedelta(seconds=30))`
+  — kwarg verified against installed mcp 1.29.1 (`ClientSession.__init__`
+  signature checked before writing; `read_timeout_seconds` is a documented
+  `timedelta | None` param).
+- Commit: `2679158` (`test(mcp): add timeouts to subprocess and stdio boundaries`).
+
+### Verification (final committed state)
+
+| Gate | Result |
+|---|---|
+| Focused `pytest tests/test_mcp_server.py tests/test_mcp_schema.py tests/test_mcp_process.py tests/test_cli.py -q` | **245 passed, 2 skipped** |
+| Full `pytest tests/ -q` | **1270 passed, 2 skipped** (1272 collected — count stable, no tests added/removed) |
+| `ruff check src/ tests/` | **All checks passed** |
+| `mypy src/ scripts/` | **Success: no issues found in 30 source files** |
+| `git diff --check` | exit 0 |
+| `SOFER_TRACE.md` | still untracked (`??`), never staged |
+| Grep on the diff | no `os.environ["HF_TOKEN"]` set/`del` (remaining matches are deletions only); no `# type: ignore[no-untyped-def]` in the new helpers |
+
+### Work Unit Evidence (4R hardening)
+
+| Evidence | Required value |
+|---|---|
+| Focused test command and exact result | `uv run pytest tests/test_mcp_server.py tests/test_mcp_schema.py tests/test_mcp_process.py tests/test_cli.py -q` → **245 passed, 2 skipped** |
+| Runtime harness command/scenario and exact result | Full suite `uv run pytest tests/ -q` → **1270 passed, 2 skipped**: every client-boundary call (in-memory `Client(server)` and real stdio `ClientSession` with 30s read timeout) still unwraps through the shared `call_tool`/`mcp_payload`; the risk-envelope refusal still surfaces `acknowledge_risk: False` + `"acknowledge_risk=True"` in `output` with `HF_TOKEN` set via monkeypatch |
+| Rollback boundary | Revert commits `c5125f2`, `1da70aa`, `2679158` (or `git revert`) — zero production surface (`src/sofer/` untouched; `git diff --stat` shows only `tests/` + this artifact) |
+
 ## Status
 
 20/20 tasks complete (Phases 1–5, PRs 1–5). Full suite **1270 passed,
 2 skipped** (1269 baseline + 3), ruff/mypy/`git diff --check` all clean,
 `SOFER_TRACE.md` untouched. Ready for sdd-verify of the whole change.
+Post-verify: 4R hardening pass complete (commits `c5125f2`, `1da70aa`,
+`2679158`) — full suite still **1270 passed, 2 skipped**, all gates green,
+zero production surface.
