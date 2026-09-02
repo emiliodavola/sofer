@@ -257,7 +257,12 @@ class TestEnvelope:
 
 
 class TestHappyPath:
-    def test_offline_happy_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_offline_happy_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_tool_config: Any,
+    ):
         """Happy path offline with mocked publish._api, via Client(server) (PB-01/PB-06)."""
         import shutil
 
