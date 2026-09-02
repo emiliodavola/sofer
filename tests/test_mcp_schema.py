@@ -9,17 +9,24 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
+from conftest import call_tool
 from fastmcp import Client
 
-from sofer.mcp_server import build_server, sofer_auth_status, sofer_publish
+from sofer.mcp_server import build_server, sofer_auth_status
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "mcp-happy-path"
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
     return asyncio.run(coro)
+
+
+def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
+    """Call a registered tool through the shared client wrapper (PB-09)."""
+    return call_tool(server, name, args)
 
 
 async def _list_tools(server):  # type: ignore[no-untyped-def]
@@ -202,17 +209,14 @@ class TestOutputSchema:
 
 class TestEnvelope:
     def test_refusal_envelope(self, tmp_path: Path):
-        build_server(root=tmp_path)
-        # bad config should give error_code CONFIG_ERROR
-        from sofer.mcp_server import sofer_validate
-
-        envelope = sofer_validate(str(tmp_path / "nope.toml"))
+        server = build_server(root=tmp_path)
+        # bad config should give ok:False with config_errors
+        envelope = _call(server, "sofer_validate", {"config": str(tmp_path / "nope.toml")}).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "CONFIG_ERROR"
         assert "config_errors" in envelope
-        assert "next" in envelope or "config_errors" in envelope
+        assert len(envelope["config_errors"]) >= 1
 
-    def test_publish_risk_envelope(self, tmp_path: Path):
+    def test_publish_risk_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         # Create minimal dataset
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
         (tmp_path / "dataset.toml").write_text(
@@ -224,41 +228,42 @@ class TestEnvelope:
 
         cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
         dom_prepare(cfg, tmp_path / "build")
-        import os
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path)
 
-        os.environ["HF_TOKEN"] = "hf_test_token"
-        build_server(root=tmp_path)
-        from sofer.mcp_server import sofer_publish_confirm
-
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"))
+        envelope = _call(
+            server, "sofer_publish_confirm", {"config": str(tmp_path / "dataset.toml")}
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "PUBLISH_RISK_NOT_ACKD"
-        assert envelope["next"]["acknowledge_risk"] is True
-        del os.environ["HF_TOKEN"]
+        # The output_schema boundary contract carries the refusal reason in
+        # the human-readable output field (error_code/next are not exposed).
+        assert envelope["acknowledge_risk"] is False
+        assert "acknowledge_risk=True" in envelope["output"]
 
-    def test_auth_status_no_leak(self, tmp_path: Path):
+    def test_auth_status_no_leak(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
         (tmp_path / "dataset.toml").write_text(
             '[dataset]\nname="x"\nrepo_id="u/x"\n\n[[file]]\nlocal="data.csv"\nremote="data.csv"\n',
             encoding="utf-8",
         )
-        import os
-
-        os.environ["HF_TOKEN"] = "secret123"
+        monkeypatch.setenv("HF_TOKEN", "secret123")
         build_server(root=tmp_path, approval_phrase="phrase123")
         envelope = sofer_auth_status(str(tmp_path / "dataset.toml"))
         assert envelope["token"] in ("present", "missing")
         assert "secret123" not in str(envelope)
         assert "phrase123" not in str(envelope)
         assert envelope["requires_approval_phrase"] is True
-        del os.environ["HF_TOKEN"]
-        if "SOFER_MCP_APPROVAL_PHRASE" in os.environ:
-            del os.environ["SOFER_MCP_APPROVAL_PHRASE"]
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
 
 
 class TestHappyPath:
-    def test_offline_happy_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        """Happy path offline with mocked publish._api."""
+    def test_offline_happy_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_tool_config: Any,
+    ):
+        """Happy path offline with mocked publish._api, via Client(server) (PB-01/PB-06)."""
         import shutil
 
         # Copy fixture into tmp_path
@@ -272,18 +277,10 @@ class TestHappyPath:
         import sofer.config as cfg
 
         cfg.reload(tmp_path)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        # Use direct function calls for determinism (MCP client would also work)
-        # Mock publish._api
+        # Mock publish._api so the HF path stays offline and deterministic
         import sofer.publish as pub_mod
-        from sofer.mcp_server import (
-            sofer_codebook_all,
-            sofer_prepare,
-            sofer_profile_all,
-            sofer_render_all,
-            sofer_validate,
-        )
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
@@ -295,27 +292,29 @@ class TestHappyPath:
         monkeypatch.setattr(pub_mod, "HfApi", _fake_hf_api)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
 
-        v = sofer_validate(str(tmp_path / "dataset.toml"))
+        v = _call(server, "sofer_validate", {"config": str(tmp_path / "dataset.toml")}).data
         assert v["ok"] is True, v
 
-        p = sofer_prepare(str(tmp_path / "dataset.toml"))
+        p = _call(server, "sofer_prepare", {"config": str(tmp_path / "dataset.toml")}).data
         assert p["ok"] is True, p
 
-        cb = sofer_codebook_all(str(tmp_path / "dataset.toml"))
+        cb = _call(server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}).data
         assert cb["ok"] is True, cb
 
-        prof = sofer_profile_all(str(tmp_path / "dataset.toml"))
+        prof = _call(server, "sofer_profile_all", {"config": str(tmp_path / "dataset.toml")}).data
         assert prof["ok"] is True, prof
         assert len(prof.get("files", [])) >= 1
 
-        rend = sofer_render_all(str(tmp_path / "dataset.toml"))
+        rend = _call(server, "sofer_render_all", {"config": str(tmp_path / "dataset.toml")}).data
         assert rend["ok"] is True, rend
 
-        pub = sofer_publish(str(tmp_path / "dataset.toml"), dry_run=True)
+        pub = _call(
+            server, "sofer_publish", {"config": str(tmp_path / "dataset.toml"), "dry_run": True}
+        ).data
         assert pub["ok"] is True
         assert pub["dry_run"] is True
 
-        auth = sofer_auth_status(str(tmp_path / "dataset.toml"))
+        auth = _call(server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}).data
         assert auth["ok"] is True
         assert auth["token"] == "present"
 

@@ -14,9 +14,12 @@ import importlib.util
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
+from conftest import call_tool, mcp_payload
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -24,7 +27,6 @@ import sofer.config as config
 import sofer.publish as publish_mod
 from sofer import mcp_server as ms
 from sofer.mcp_server import (
-    PathOutsideRootError,
     build_server,
     sofer_codebook,
     sofer_codebook_all,
@@ -94,74 +96,12 @@ def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
 
 def _unwrap(data: object) -> object:  # type: ignore[no-untyped-def]
     """Unwrap FastMCP Root model to plain dict when output_schema is present."""
-    if data is None:
-        return None
-    if hasattr(data, "ok") and not isinstance(data, dict):
-        try:
-            result: dict[str, object] = {}
-            for k in (
-                "ok",
-                "exit_code",
-                "output",
-                "config_errors",
-                "error_code",
-                "message",
-                "next",
-                "passed",
-                "errors",
-                "warnings",
-                "quality_failures",
-                "quality_warnings",
-                "ran_checks",
-                "confidential",
-                "target",
-                "dry_run",
-                "acknowledge_risk",
-                "acknowledge_confidential",
-                "skipped_protected",
-                "partial",
-                "files",
-                "pii_findings",
-                "discovered",
-                "registered",
-                "copied",
-                "output_path",
-                "token",
-                "requires_ack_confidential",
-                "requires_approval_phrase",
-            ):
-                if hasattr(data, k):
-                    result[k] = getattr(data, k)
-            if result:
-                return result
-        except Exception:
-            pass
-    if hasattr(data, "model_dump"):
-        try:
-            dumped = data.model_dump()  # type: ignore[attr-defined,union-attr]
-            if isinstance(dumped, dict) and "root" in dumped and len(dumped) == 1:
-                return dumped["root"]
-            return dumped
-        except Exception:
-            pass
-    if hasattr(data, "root"):
-        return getattr(data, "root")  # type: ignore[attr-defined]
-    return data
+    return mcp_payload(data)
 
 
-def _call(server: ms._FastMCP, name: str, args: dict | None = None):
-    """Call a tool through an in-memory client; returns the CallToolResult."""
-
-    async def _go():
-        async with Client(server) as client:
-            return await client.call_tool(name, args)
-
-    result = _run(_go())
-    if result.data is not None:
-        unwrapped = _unwrap(result.data)
-        if isinstance(unwrapped, dict):
-            result.data = unwrapped  # type: ignore[attr-defined]
-    return result
+def _call(server: ms._FastMCP, name: str, args: dict[str, Any] | None = None) -> Any:
+    """Call a tool through the shared in-memory client wrapper (PB-09)."""
+    return call_tool(server, name, args)
 
 
 def _tool_schema(server: ms._FastMCP, name: str) -> dict:
@@ -333,7 +273,12 @@ class TestStdioSmoke:
                 cwd=str(tmp_path),
             )
             async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
+                # read_timeout_seconds (mcp 1.29.x ClientSession kwarg) makes a
+                # server that never responds fail this test loudly via a
+                # timeout instead of hanging CI indefinitely (R4 hardening).
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=30)
+                ) as session:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
@@ -382,9 +327,13 @@ class TestNetworkOffline:
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
         assert envelope["skipped_protected"] == []
@@ -409,9 +358,13 @@ class TestNetworkOffline:
         # returned ok:True/exit_code:0 on a total upload failure.
         monkeypatch.setattr(publish_mod._api, "upload_folder", _boom)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert envelope["partial"] is False
@@ -428,11 +381,15 @@ class TestNetworkOffline:
         monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
         monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
         monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "HF_TOKEN" in envelope["output"]
 
     def test_hf_hub_token_alias_accepted(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
@@ -440,9 +397,13 @@ class TestNetworkOffline:
         _mock_hf_api(monkeypatch)
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.setenv("HF_HUB_TOKEN", "alias_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is True
 
 
@@ -455,63 +416,85 @@ class TestPublishAuthorizationLadder:
     def test_refuses_without_acknowledge_risk(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"))
+        envelope = _call(
+            server, "sofer_publish_confirm", {"config": str(tmp_path / "dataset.toml")}
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "PUBLISH_RISK_NOT_ACKD"
+        # The output_schema boundary contract drops error_code; the refusal
+        # reason is carried in the human-readable output field.
+        assert envelope["acknowledge_risk"] is False
+        assert "acknowledge_risk=True" in envelope["output"]
 
     def test_refuses_confidential_without_acknowledge(
         self, tmp_path, monkeypatch, restore_tool_config
     ):
         _make_dataset(tmp_path, confidential=True)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "PUBLISH_CONFIDENTIAL_NOT_ACKD"
+        assert envelope["confidential"] is True
+        assert "confidential" in envelope["output"].lower()
 
     def test_confidential_acknowledged_proceeds(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path, confidential=True)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"),
-            acknowledge_risk=True,
-            acknowledge_confidential=True,
-        )
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "acknowledge_confidential": True,
+            },
+        ).data
         assert envelope["ok"] is True
         assert envelope["confidential"] is True
 
     def test_phrase_mismatch_refused(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path, approval_phrase="s3cret")
+        server = build_server(root=tmp_path, approval_phrase="s3cret")
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"),
-            acknowledge_risk=True,
-            approval_phrase="wrong",
-        )
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "wrong",
+            },
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "PUBLISH_APPROVAL_REQUIRED"
+        assert "approval phrase" in envelope["output"].lower()
 
     def test_phrase_match_proceeds(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path, approval_phrase="s3cret")
+        server = build_server(root=tmp_path, approval_phrase="s3cret")
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"),
-            acknowledge_risk=True,
-            approval_phrase="s3cret",
-        )
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "s3cret",
+            },
+        ).data
         assert envelope["ok"] is True
 
     def test_phrase_from_env(self, tmp_path, monkeypatch, restore_tool_config):
@@ -520,16 +503,24 @@ class TestPublishAuthorizationLadder:
         _mock_hf_api(monkeypatch)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "env-phrase")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "PUBLISH_APPROVAL_REQUIRED"
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"),
-            acknowledge_risk=True,
-            approval_phrase="env-phrase",
-        )
+        assert "approval phrase" in envelope["output"].lower()
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "env-phrase",
+            },
+        ).data
         assert envelope["ok"] is True
 
 
@@ -1066,9 +1057,13 @@ class TestVerifyAndProtected:
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch, existing=["data.parquet"])
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is True
         assert envelope["partial"] is True
         assert "data.parquet" in envelope["skipped_protected"]
@@ -1384,9 +1379,13 @@ class TestQualityGateBeforeToken:
         )
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
 
@@ -1530,9 +1529,13 @@ class TestHfTokenFallback:
         _mock_hf_api(monkeypatch)
         secret = "hf_super_secret_12345"
         monkeypatch.setenv("HF_TOKEN", secret)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
         # success case must not contain token in output
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert secret not in envelope["output"]
         assert secret not in str(envelope)
         # error case (missing token) also must not leak previous token
@@ -1543,7 +1546,11 @@ class TestHfTokenFallback:
         monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
         monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
         assert secret not in str(envelope)
 
@@ -1569,8 +1576,12 @@ class TestHfTokenFallback:
 
         monkeypatch.setattr(publish_mod, "HfApi", _fake_hf_api)
         monkeypatch.setenv("HF_TOKEN", "tok-123")
-        build_server(root=tmp_path)
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert captured["token"] == "tok-123"
         assert envelope["ok"] is True
 
@@ -1589,8 +1600,12 @@ class TestHfTokenIntegration:
         monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
         monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         _mock_hf_api(monkeypatch)
-        build_server(root=tmp_path)
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
 
@@ -1614,10 +1629,14 @@ class TestHfTokenIntegration:
         monkeypatch.setattr(
             publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
         )
-        build_server(root=tmp_path)
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "HF_TOKEN" in envelope["output"]
         assert calls == []
 
     def test_quality_gate_before_token(self, tmp_path, monkeypatch, restore_tool_config):
@@ -1635,8 +1654,12 @@ class TestHfTokenIntegration:
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
         monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
         monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
-        build_server(root=tmp_path)
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
 
@@ -1830,37 +1853,50 @@ class TestAdvisoryHardening:
         monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
         monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
         monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(str(tmp_path / "dataset.toml"), acknowledge_risk=True)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+        ).data
         assert envelope["ok"] is False
-        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "HF_TOKEN" in envelope["output"]
 
     def test_confirm_refuses_local_target(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"),
-            target="local",
-            acknowledge_risk=True,  # type: ignore[arg-type]
-        )
-        assert envelope["ok"] is False
-        assert envelope["error_code"] == "TARGET_INVALID"
+        # The tool schema restricts target to Literal["hf"], so a non-hf value
+        # is rejected at the boundary (ToolError) before the tool body runs —
+        # the TARGET_INVALID envelope branch is unreachable through Client.
+        with pytest.raises(ToolError, match="Input should be 'hf'"):
+            _call(
+                server,
+                "sofer_publish_confirm",
+                {
+                    "config": str(tmp_path / "dataset.toml"),
+                    "target": "local",
+                    "acknowledge_risk": True,
+                },
+            )
 
     def test_confirm_refuses_unknown_target(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish_confirm(
-            str(tmp_path / "dataset.toml"),
-            target="aws",
-            acknowledge_risk=True,  # type: ignore[arg-type]
-        )
-        assert envelope["ok"] is False
-        assert envelope["error_code"] == "TARGET_INVALID"
+        with pytest.raises(ToolError, match="Input should be 'hf'"):
+            _call(
+                server,
+                "sofer_publish_confirm",
+                {
+                    "config": str(tmp_path / "dataset.toml"),
+                    "target": "aws",
+                    "acknowledge_risk": True,
+                },
+            )
 
     def test_build_server_docstring_warns_one_server_per_process(self):
         import inspect
@@ -2142,11 +2178,11 @@ class TestInitCreatesTomlAndRaw:
         assert cfg.name == "my-ds"
         assert envelope["config_errors"] == []
 
-    def test_direct_call_creates_toml(self, tmp_path, restore_tool_config):
+    def test_client_call_creates_toml(self, tmp_path, restore_tool_config):
         from sofer.cli import _INIT_TEMPLATE
 
-        build_server(root=tmp_path)
-        envelope = sofer_init(name="my-ds")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
         assert envelope["ok"] is True
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
             name="my-ds", user="YOUR_USER"
@@ -2165,11 +2201,11 @@ class TestInitUserFlag:
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
         assert cfg.repo_id == "alice/my-ds"
 
-    def test_user_sets_repo_id_direct(self, tmp_path, restore_tool_config):
+    def test_user_sets_repo_id_client(self, tmp_path, restore_tool_config):
         from sofer.cli import _INIT_TEMPLATE
 
-        build_server(root=tmp_path)
-        envelope = sofer_init(name="my-ds", user="bob")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "user": "bob"}).data
         assert envelope["ok"] is True
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
             name="my-ds", user="bob"
@@ -2178,8 +2214,8 @@ class TestInitUserFlag:
         assert cfg.repo_id == "bob/my-ds"
 
     def test_default_user_placeholder(self, tmp_path, restore_tool_config):
-        build_server(root=tmp_path)
-        envelope = sofer_init(name="my-ds")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
         assert envelope["ok"] is True
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
         assert cfg.repo_id == "YOUR_USER/my-ds"
@@ -2233,10 +2269,10 @@ class TestInitTraversal:
         with pytest.raises(ToolError, match="outside the server root"):
             _call(server, "sofer_init", {"name": "/abs/evil"})
 
-    def test_traversal_direct_raises(self, tmp_path, restore_tool_config):
-        build_server(root=tmp_path)
-        with pytest.raises(PathOutsideRootError, match="outside the server root"):
-            sofer_init(name="../evil")
+    def test_traversal_client_raises(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "../evil"})
 
     def test_traversal_win_drive_rejected(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
@@ -2244,8 +2280,8 @@ class TestInitTraversal:
             _call(server, "sofer_init", {"name": "C:/evil"})
 
     def test_empty_name_returns_ok_false(self, tmp_path, restore_tool_config):
-        build_server(root=tmp_path)
-        envelope = sofer_init(name="   ")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "   "}).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert any("non-empty" in e for e in envelope["config_errors"])
@@ -2260,11 +2296,11 @@ class TestInitTraversal:
 
 class TestInitIdempotencyForce:
     def test_force_false_does_not_overwrite(self, tmp_path, restore_tool_config):
-        build_server(root=tmp_path)
-        first = sofer_init(name="my-ds")
+        server = build_server(root=tmp_path)
+        first = _call(server, "sofer_init", {"name": "my-ds"}).data
         assert first["ok"] is True
         (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
-        second = sofer_init(name="my-ds", force=False)
+        second = _call(server, "sofer_init", {"name": "my-ds", "force": False}).data
         assert second["ok"] is False
         assert second["exit_code"] == 1
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == "custom"
@@ -2272,10 +2308,10 @@ class TestInitIdempotencyForce:
     def test_force_true_overwrites(self, tmp_path, restore_tool_config):
         from sofer.cli import _INIT_TEMPLATE
 
-        build_server(root=tmp_path)
-        sofer_init(name="my-ds")
+        server = build_server(root=tmp_path)
+        _call(server, "sofer_init", {"name": "my-ds"})
         (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
-        envelope = sofer_init(name="my-ds", force=True)
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "force": True}).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
@@ -2283,8 +2319,8 @@ class TestInitIdempotencyForce:
         )
 
     def test_minimal_toml_validation(self, tmp_path, restore_tool_config):
-        build_server(root=tmp_path)
-        sofer_init(name="my-ds")
+        server = build_server(root=tmp_path)
+        _call(server, "sofer_init", {"name": "my-ds"})
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
         assert cfg.name == "my-ds"
 
@@ -2342,8 +2378,8 @@ class TestInitWindowsPlaceholder:
     def test_placeholder_no_colon_and_ntpath_drive(self, tmp_path, restore_tool_config):
         import ntpath
 
-        build_server(root=tmp_path)
-        envelope = sofer_init(name="test")
+        server = build_server(root=tmp_path)
+        envelope = _call(server, "sofer_init", {"name": "test"}).data
         assert envelope["ok"] is True
         content = (tmp_path / "test.toml").read_text(encoding="utf-8")
         # No TODO: colon in file locals
@@ -2365,8 +2401,8 @@ class TestInitWindowsPlaceholder:
         assert parsed["dataset"]["name"] == "test"
 
     def test_toml_no_todo_colon_in_locals(self, tmp_path, restore_tool_config):
-        build_server(root=tmp_path)
-        sofer_init(name="test2")
+        server = build_server(root=tmp_path)
+        _call(server, "sofer_init", {"name": "test2"})
         content = (tmp_path / "test2.toml").read_text(encoding="utf-8")
         # file locals must not contain TODO:
         for line in content.splitlines():
@@ -2382,9 +2418,9 @@ class TestInitCwdContainment:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
+        server = build_server(root=parent)
         # Simulate live CWD being child, but cwd=None should still use server root
-        envelope = sofer_init(name="test", cwd=None)
+        envelope = _call(server, "sofer_init", {"name": "test", "cwd": None}).data
         assert envelope["ok"] is True
         assert (parent / "test.toml").exists()
         assert not (child / "test.toml").exists()
@@ -2394,8 +2430,8 @@ class TestInitCwdContainment:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
-        envelope = sofer_init(name="test", cwd=str(child))
+        server = build_server(root=parent)
+        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(child)}).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2403,36 +2439,32 @@ class TestInitCwdContainment:
     def test_cwd_outside_rejected(self, tmp_path, restore_tool_config):
         parent = tmp_path / "Desktop"
         parent.mkdir()
-        build_server(root=parent)
-        outside = "C:/Windows"
-        with pytest.raises(PathOutsideRootError, match="outside the server root"):
-            sofer_init(name="test", cwd=outside)
-        assert not (parent / "test.toml").exists()
-        # via MCP also rejected
         server = build_server(root=parent)
+        outside = "C:/Windows"
         with pytest.raises(ToolError, match="outside the server root"):
             _call(server, "sofer_init", {"name": "test", "cwd": outside})
+        assert not (parent / "test.toml").exists()
 
     def test_cwd_traversal_rejected(self, tmp_path, restore_tool_config):
         parent = tmp_path / "Desktop"
         parent.mkdir()
         (parent / "keep").mkdir()
-        build_server(root=parent)
+        server = build_server(root=parent)
         traversal = str(parent / ".." / "Windows")
-        with pytest.raises(PathOutsideRootError, match="outside the server root"):
-            sofer_init(name="test", cwd=traversal)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "test", "cwd": traversal})
         # Dotdot via string that escapes root
-        with pytest.raises(PathOutsideRootError):
-            sofer_init(name="test", cwd=str(parent / ".." / "evil"))
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(server, "sofer_init", {"name": "test", "cwd": str(parent / ".." / "evil")})
 
     def test_no_global_mutation(self, tmp_path, restore_tool_config):
         parent = tmp_path / "Desktop"
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
+        server = build_server(root=parent)
         before = ms._get_root()
-        envelope = sofer_init(name="test", cwd=str(child))
+        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(child)}).data
         assert envelope["ok"] is True
         after = ms._get_root()
         assert before == after == parent.resolve()
@@ -2447,8 +2479,8 @@ class TestInitStaleRoot:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
-        envelope = sofer_init(name="test", cwd=str(child))
+        server = build_server(root=parent)
+        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(child)}).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2460,13 +2492,15 @@ class TestInitStaleRoot:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
-        sofer_init(name="test", cwd=str(child))
+        server = build_server(root=parent)
+        _call(server, "sofer_init", {"name": "test", "cwd": str(child)})
         # create keep file inside effective raw
         keep = child / "raw" / "keep.csv"
         keep.write_text("a;b\n1;2\n", encoding="utf-8-sig")
         # re-run with force should preserve keep
-        envelope = sofer_init(name="test", cwd=str(child), force=True)
+        envelope = _call(
+            server, "sofer_init", {"name": "test", "cwd": str(child), "force": True}
+        ).data
         assert envelope["ok"] is True
         assert keep.exists()
         assert keep.read_text(encoding="utf-8-sig") == "a;b\n1;2\n"
@@ -2476,8 +2510,8 @@ class TestInitStaleRoot:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
-        sofer_init(name="test", cwd=str(child))
+        server = build_server(root=parent)
+        _call(server, "sofer_init", {"name": "test", "cwd": str(child)})
         assert (child / "raw").is_dir()
         assert not (parent / "raw").exists()
 
@@ -2490,9 +2524,9 @@ class TestInitAutoCwd:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
+        server = build_server(root=parent)
         monkeypatch.chdir(child)
-        envelope = sofer_init(name="test")
+        envelope = _call(server, "sofer_init", {"name": "test"}).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2508,9 +2542,9 @@ class TestInitAutoCwd:
         child.mkdir()
         outside = tmp_path / "outside"
         outside.mkdir()
-        build_server(root=parent)
+        server = build_server(root=parent)
         monkeypatch.chdir(outside)
-        envelope = sofer_init(name="test")
+        envelope = _call(server, "sofer_init", {"name": "test"}).data
         assert envelope["ok"] is True
         assert (parent / "test.toml").exists()
         assert not (outside / "test.toml").exists()
@@ -2521,12 +2555,12 @@ class TestInitAutoCwd:
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
-        build_server(root=parent)
+        server = build_server(root=parent)
         monkeypatch.chdir(child)
         # explicit cwd should still be honoured (even if live already inside)
         other = parent / "other"
         other.mkdir()
-        envelope = sofer_init(name="test", cwd=str(other))
+        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(other)}).data
         assert envelope["ok"] is True
         assert (other / "test.toml").exists()
         assert not (child / "test.toml").exists()
@@ -2554,8 +2588,10 @@ class TestInitXlsxIntegration:
         # create loose xlsx files in effective_root
         self._make_xlsx(child / "DATA_GOT_ALL.xlsx")
         self._make_xlsx(child / "dataset.xlsx")
-        build_server(root=parent)
-        envelope = sofer_init(name="test", cwd=str(child), user="testuser")
+        server = build_server(root=parent)
+        envelope = _call(
+            server, "sofer_init", {"name": "test", "cwd": str(child), "user": "testuser"}
+        ).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         # scan (placeholder raw/example.* stripped by merge_entries)
@@ -2569,7 +2605,7 @@ class TestInitXlsxIntegration:
         assert 'local = "cache/DATA_GOT_ALL.xlsx"' in content
         assert 'local = "cache/dataset.xlsx"' in content
         # validate passes
-        val = sofer_validate(str(child / "test.toml"))
+        val = _call(server, "sofer_validate", {"config": str(child / "test.toml")}).data
         assert val["ok"] is True, val
         assert val["passed"] is True
         # rerun scan idempotent - count stays 2 cache xlsx entries (force to overwrite)

@@ -2,12 +2,16 @@
 
 The upload and validate commands depend on Hugging Face credentials and real
 filesystem state, so they are integration-level.  Here we test everything
-that can be verified without network calls or real data.
+that can be verified without network calls or real data, including
+user-visible output through an executable CLI subprocess (PB-02) via the
+shared ``conftest.run_cli`` helper (PB-09).
 """
 
 import csv
 import sys
 from argparse import Namespace
+
+from conftest import run_cli
 
 from sofer import cli
 
@@ -1061,3 +1065,63 @@ class TestMcpCliHelp:
             cli._build_parser().parse_args(["mcp", "remove", "--help"])
         out = capsys.readouterr().out
         assert "--cwd" not in out
+
+
+# ── subprocess boundary: user-visible output via executable CLI (PB-02) ───────
+
+
+class TestSubprocessBoundary:
+    """CLI output through a real ``python -m sofer.cli`` subprocess (PB-02).
+
+    Uses the shared ``conftest.run_cli`` helper (PB-09) — subprocess spawning
+    is never re-implemented here — so help text, console encoding, and
+    dispatch behavior are observed through the same boundary real users hit,
+    not through in-process parser calls.
+    """
+
+    #: Every subcommand the CLI exposes (the ``--help`` roster, PB-02).
+    SUBCOMMANDS = (
+        "init",
+        "scan",
+        "validate",
+        "prepare",
+        "publish",
+        "codebook",
+        "profile",
+        "render",
+        "mcp",
+    )
+
+    def test_help_exits_zero_and_lists_every_subcommand(self, tmp_path) -> None:
+        """``python -m sofer.cli --help`` exits 0 and lists all subcommands."""
+        result = run_cli(["--help"], cwd=tmp_path)
+        assert result.returncode == 0
+        for command in self.SUBCOMMANDS:
+            assert command in result.stdout, f"{command!r} missing from --help"
+
+    def test_help_strict_cp1252(self, tmp_path) -> None:
+        """``--help`` under cp1252 exits 0 and has no non-cp1252 glyphs.
+
+        ``PYTHONIOENCODING=cp1252`` forces the child to encode its stdout as
+        cp1252; ``run_cli`` decodes it with ``errors="strict"``, so any byte
+        the child could not encode (a non-cp1252 glyph would crash the child
+        with ``UnicodeEncodeError`` and a non-zero exit) fails loudly here.
+        Re-encoding the decoded text pins the "no non-cp1252 glyphs" contract
+        explicitly.
+        """
+        result = run_cli(
+            ["--help"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0
+        # Every glyph must be representable in cp1252 — a glyph outside the
+        # codec (e.g. an em dash or arrow) raises UnicodeEncodeError here.
+        result.stdout.encode("cp1252")
+
+    def test_unknown_command_exits_2(self, tmp_path) -> None:
+        """``python -m sofer.cli <unknown-command>`` exits 2 via argparse."""
+        result = run_cli(["definitely-not-a-command"], cwd=tmp_path)
+        assert result.returncode == 2
+        assert "invalid choice" in result.stderr

@@ -1,0 +1,12 @@
+# Deliberately empty dataset config: valid TOML with NO [[file]] entries
+# (PB-04 "Empty config" scenario). Consumed by the Phase 4 config-state
+# tests. Kept OUT of mcp-happy-path/ because test_mcp_schema.py copies that
+# tree wholesale into its per-test tmp dirs.
+
+[dataset]
+name = "empty-ds"
+repo_id = "user/empty-ds"
+
+[meta]
+description = "Empty config fixture: valid TOML, no [[file]] entries"
+confidential = false
