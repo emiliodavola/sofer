@@ -327,3 +327,81 @@ Verifier response: all 4 blockers + 3 risks addressed (commits `12ef381`,
 `484e63d`, `209f9a3`, `c04a99f`, `3cf6075`, `ddb4dc9`, plus this chore
 commit) — full suite **1270 passed, 2 skipped**, `ruff format --check`
 clean, zero production surface.
+Verifier round 2: 3 code-level blockers addressed (commits `8d1ebe8`,
+`869d92d`, `7573ba5`) — full suite still **1270 passed, 2 skipped**, all
+gates green, zero production surface.
+
+## Verifier round 2 (post-verify corrective pass)
+
+Second verifier pass on issue #119 — 3 code-level blockers on the committed
+test surface, all fixed surgically (tests-only; zero production surface in
+`src/sofer/`). Commits `8d1ebe8`, `869d92d`, `7573ba5`.
+
+### Fix 1 — config isolation leak (test_mcp_schema.py)
+
+- **Before**: `test_offline_happy_path` called `cfg.reload(tmp_path)` —
+  mutating module-global `sofer.config` constants — WITHOUT the
+  `restore_tool_config` conftest fixture, so the reloaded values leaked to
+  later tests.
+- **After**: `restore_tool_config: Any` added as a fixture parameter (the
+  only test in the file that calls `cfg.reload` — grep-verified). Test
+  behavior identical.
+- Commit: `8d1ebe8` (`test(mcp): restore tool config in schema happy-path tests`).
+
+### Fix 2 — non-lossy envelope unwrap (tests/conftest.py)
+
+- **Before**: `mcp_payload` extracted a FIXED ~30-key allowlist via
+  `hasattr` with a broad `except Exception: pass` — any future envelope
+  field not in the list was silently dropped from assertions.
+- **After**: non-lossy unwrap with no allowlist and no swallowed exceptions —
+  (1) `root`-attribute dict (pydantic `RootModel`) → the FULL root dict;
+  (2) `model_dump()` → the FULL dumped dict (`dumped["root"]` when the dump
+  is the single-key `{"root": <dict>}` wrapper); (3) FastMCP `types.Root`
+  dataclass (the ACTUAL current wrapper — see Finding below) →
+  `dataclasses.asdict` full field dict. Docstring states the deliberate
+  no-field-filtering contract (prevents silent loss of future schema fields).
+- Commit: `869d92d` (`test(mcp): make mcp_payload unwrap non-lossy`).
+
+### Fix 3 — stdio smoke test timeout (tests/test_mcp_server.py)
+
+- **Before**: `TestStdioSmoke.test_spawned_server_handshake_clean_framing`
+  created `ClientSession(read, write)` with NO read timeout — a hung server
+  could hang CI forever.
+- **After**: `ClientSession(read, write, read_timeout_seconds=timedelta(seconds=30))`
+  — kwarg verified against the installed mcp 1.29.x
+  (`ClientSession.__init__`, `read_timeout_seconds: timedelta | None`); the
+  stdlib `timedelta` import added at module top.
+- Commit: `7573ba5` (`test(mcp): add read timeout to stdio smoke test`).
+
+### Finding (reported, not silently weakened)
+
+The Fix 2 diagnosis assumed the envelope wrapper is a pydantic `RootModel`
+(`.root` attr / `model_dump()`). The ACTUAL wrapper in this stack (mcp
+1.29.x + FastMCP) is `types.Root` — a plain dataclass whose fields ARE the
+envelope (no `.root` attribute, no `model_dump`), which is exactly why the
+old allowlist existed. The first attempt (the two prescribed paths only)
+broke 87 call sites with `TypeError: 'Root' object is not subscriptable`;
+fixed by adding the dataclass path (`dataclasses.is_dataclass` +
+`asdict`) alongside the two prescribed paths. NO test asserted an absent
+key, so nothing was weakened — current envelopes unwrap to the identical
+field set the allowlist produced (full suite unchanged at 1270 passed).
+
+### Verification (final committed state)
+
+| Gate | Result |
+|---|---|
+| Focused `pytest tests/test_mcp_server.py tests/test_mcp_schema.py tests/test_mcp_process.py -q` | **163 passed, 2 skipped** |
+| Full `pytest tests/ -q` | **1270 passed, 2 skipped** (1272 collected — count stable, no tests added/removed) |
+| `ruff check src/ tests/` | **All checks passed** |
+| `ruff format --check src/ tests/` | **58 files already formatted** |
+| `mypy src/ scripts/` | **Success: no issues found in 30 source files** |
+| `git diff --check` | exit 0 |
+| `SOFER_TRACE.md` | still untracked (`??`), never staged |
+
+### Work Unit Evidence (verifier round 2)
+
+| Evidence | Required value |
+|---|---|
+| Focused test command and exact result | `uv run pytest tests/test_mcp_server.py tests/test_mcp_schema.py tests/test_mcp_process.py -q` → **163 passed, 2 skipped** |
+| Runtime harness command/scenario and exact result | Full suite `uv run pytest tests/ -q` → **1270 passed, 2 skipped**: every client-boundary envelope (in-memory `Client(server)` and real stdio `ClientSession` with 30s read timeout) still unwraps through the shared `call_tool`/`mcp_payload` to the full envelope dict — `types.Root` dataclass unwrapped via `asdict`, no allowlist, no swallowed exceptions |
+| Rollback boundary | Revert commits `8d1ebe8`, `869d92d`, `7573ba5` (or `git revert`) — zero production surface (`src/sofer/` untouched; `git diff --stat` shows only `tests/` + this artifact) |
