@@ -240,24 +240,22 @@ class TestEnvelope:
         assert envelope["acknowledge_risk"] is False
         assert "acknowledge_risk=True" in envelope["output"]
 
-    def test_auth_status_no_leak(self, tmp_path: Path):
+    def test_auth_status_no_leak(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
         (tmp_path / "dataset.toml").write_text(
             '[dataset]\nname="x"\nrepo_id="u/x"\n\n[[file]]\nlocal="data.csv"\nremote="data.csv"\n',
             encoding="utf-8",
         )
-        import os
-
-        os.environ["HF_TOKEN"] = "secret123"
+        monkeypatch.setenv("HF_TOKEN", "secret123")
         build_server(root=tmp_path, approval_phrase="phrase123")
         envelope = sofer_auth_status(str(tmp_path / "dataset.toml"))
         assert envelope["token"] in ("present", "missing")
         assert "secret123" not in str(envelope)
         assert "phrase123" not in str(envelope)
         assert envelope["requires_approval_phrase"] is True
-        del os.environ["HF_TOKEN"]
-        if "SOFER_MCP_APPROVAL_PHRASE" in os.environ:
-            del os.environ["SOFER_MCP_APPROVAL_PHRASE"]
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
 
 
 class TestHappyPath:
