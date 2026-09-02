@@ -225,7 +225,7 @@ class TestEnvelope:
         assert "config_errors" in envelope
         assert len(envelope["config_errors"]) >= 1
 
-    def test_publish_risk_envelope(self, tmp_path: Path):
+    def test_publish_risk_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         # Create minimal dataset
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
         (tmp_path / "dataset.toml").write_text(
@@ -237,9 +237,7 @@ class TestEnvelope:
 
         cfg = DatasetConfig.from_toml(tmp_path / "dataset.toml")
         dom_prepare(cfg, tmp_path / "build")
-        import os
-
-        os.environ["HF_TOKEN"] = "hf_test_token"
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         server = build_server(root=tmp_path)
 
         envelope = _call(
@@ -250,7 +248,6 @@ class TestEnvelope:
         # the human-readable output field (error_code/next are not exposed).
         assert envelope["acknowledge_risk"] is False
         assert "acknowledge_risk=True" in envelope["output"]
-        del os.environ["HF_TOKEN"]
 
     def test_auth_status_no_leak(self, tmp_path: Path):
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
