@@ -14,7 +14,7 @@ Test-only harness (PB-01…PB-09) proving sofer's MCP server and CLI through the
 | D4 | CLI subprocess (PB-02) | `[sys.executable, "-m", "sofer.cli", …]`, `PYTHONIOENCODING=cp1252`, `encoding="cp1252", errors="strict"` | Windows CI job | Cross-platform; proven by reference; ubuntu-only matrix |
 | D5 | Isolation (PB-06/09) | One `build_server()` per test; one module-scoped stdio fixture; `asyncio.run`; no pytest-asyncio | Shared server; async plugin | `_SERVER_ROOT`/`_APPROVAL_PHRASE` are process globals; zero new deps |
 | D6 | win32 safety | Reuse `_make_link` junction-fallback pattern; skip without privileges | Fail on win32 | PB-02 "skip without privileges" |
-| D7 | CI (PB-05) | Keep `uv run pytest -v`; comment-only annotation | Focused-only gate | Spec SHALL keep the complete run |
+| D7 | CI (PB-05) | Keep `uv run pytest -v` as the complete-suite gate, triggered on every branch push | Focused-only gate; PR-only trigger | Spec SHALL keep the complete run; a `push` trigger (branches `['**']`) gives chained slice branches CI — the `pull_request` `branches:` filter applies to the PR BASE, so slice PRs targeting `test/...` branches would otherwise never run the gate |
 
 ## Data Flow
 
@@ -35,7 +35,7 @@ Test-only harness (PB-01…PB-09) proving sofer's MCP server and CLI through the
 | `tests/test_mcp_schema.py` | Modify | `test_offline_happy_path` through `Client(server)`; keep `publish._api` monkeypatch |
 | `tests/test_cli.py` | Modify | Add `TestSubprocessBoundary`: `--help` lists all subcommands; cp1252 rc=0 strict-decode; unknown command rc=2 |
 | `tests/fixtures/mcp-config-states/` | Create | Deliberately `malformed.toml` + `empty.toml` configs for PB-04 — kept out of `mcp-happy-path/`, which `test_mcp_schema.py` copies wholesale |
-| `.github/workflows/ci.yml` | Modify (comment) | Annotate `uv run pytest -v` as the deliberate complete gate |
+| `.github/workflows/ci.yml` | Modify | Annotate `uv run pytest -v` as the deliberate complete gate (D7); add a `push` trigger on all branches so chained slice branches run the gate |
 | `src/sofer/mcp_server.py`, `src/sofer/cli.py` | Read-only | Boundary reference; no production change |
 
 Note — PB-08: no operation of the suite, fixtures, or CI reads, modifies, or stages
