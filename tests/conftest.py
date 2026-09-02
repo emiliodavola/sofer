@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +87,7 @@ def restore_tool_config():
 
 
 def mcp_payload(result: Any) -> Any:
-    """Unwrap a FastMCP Root model to a plain dict when ``output_schema`` is set.
+    """Unwrap a FastMCP Root model to the full envelope dict when ``output_schema`` is set.
 
     FastMCP wraps tool results in a Root model whose single field holds the
     tool's envelope when the tool declares an ``output_schema``. This shared
@@ -96,65 +96,36 @@ def mcp_payload(result: Any) -> Any:
     single home for the unwrap logic — module-level unwrappers delegate here
     (D2) instead of re-implementing it.
 
+    The unwrap is deliberately NON-LOSSY: the whole envelope is returned
+    WITHOUT field filtering, so future schema fields added to an envelope
+    survive into assertions instead of being silently dropped by an allowlist.
+    Three wrapper shapes are unwrapped: a pydantic ``RootModel`` whose ``root``
+    value is the envelope dict, a pydantic model exposing ``model_dump()``, and
+    FastMCP's ``types.Root`` dataclass whose fields ARE the envelope.
+
     Args:
         result: The raw ``CallToolResult.data`` value from a client call.
 
     Returns:
-        A plain dict when the result is a Root model carrying known envelope
-        fields; otherwise the unwrapped ``root`` value or the input unchanged.
+        The full envelope dict for the wrapper shapes above; ``None``
+        unchanged; otherwise the input unchanged.
     """
     if result is None:
         return None
-    if hasattr(result, "ok") and not isinstance(result, dict):
-        try:
-            unwrapped: dict[str, Any] = {}
-            for key in (
-                "ok",
-                "exit_code",
-                "output",
-                "config_errors",
-                "error_code",
-                "message",
-                "next",
-                "passed",
-                "errors",
-                "warnings",
-                "quality_failures",
-                "quality_warnings",
-                "ran_checks",
-                "confidential",
-                "target",
-                "dry_run",
-                "acknowledge_risk",
-                "acknowledge_confidential",
-                "skipped_protected",
-                "partial",
-                "files",
-                "pii_findings",
-                "discovered",
-                "registered",
-                "copied",
-                "output_path",
-                "token",
-                "requires_ack_confidential",
-                "requires_approval_phrase",
-            ):
-                if hasattr(result, key):
-                    unwrapped[key] = getattr(result, key)
-            if unwrapped:
-                return unwrapped
-        except Exception:
-            pass
+    root = getattr(result, "root", None)
+    if isinstance(root, dict):
+        # pydantic RootModel — the root value IS the whole envelope.
+        return root
     if hasattr(result, "model_dump"):
-        try:
-            dumped = getattr(result, "model_dump")()
-            if isinstance(dumped, dict) and "root" in dumped and len(dumped) == 1:
-                return dumped["root"]
-            return dumped
-        except Exception:
-            pass
-    if hasattr(result, "root"):
-        return getattr(result, "root")
+        dumped = result.model_dump()
+        if isinstance(dumped, dict) and "root" in dumped and len(dumped) == 1:
+            # model_dump() wraps the envelope under a single "root" key.
+            return dumped["root"]
+        return dumped
+    if is_dataclass(result) and not isinstance(result, type):
+        # FastMCP types.Root — the dataclass fields ARE the envelope fields;
+        # asdict() converts every field non-lossily (no allowlist to go stale).
+        return asdict(result)
     return result
 
 
