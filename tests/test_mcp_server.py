@@ -3003,6 +3003,106 @@ class TestOutputAnchoringMspR10:
         assert (proj / "build" / "README.md").is_file()
         assert not (tmp_path / "build").exists(), "must not anchor to the server root"
 
+    def test_codebook_single_file_output_anchors_to_input_parent(
+        self, tmp_path, restore_tool_config
+    ):
+        """sofer_codebook(path='proj/data.csv', output_file='out.md') writes
+        <proj>/out.md — the relative output_file anchors to the data file's
+        parent, never the server root."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_codebook",
+            {"path": str(proj / "data.csv"), "output_file": "out.md"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (proj / "out.md").is_file()
+        assert not (tmp_path / "out.md").exists(), "must not anchor to the server root"
+
+    def test_profile_single_file_output_anchors_to_input_parent(
+        self, tmp_path, restore_tool_config
+    ):
+        """sofer_profile(dataset='proj/data.csv', output_dir='out') writes
+        <proj>/out/metadata.yaml — relative output_dir anchors to the
+        dataset's parent, never the server root."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_profile",
+            {"dataset": str(proj / "data.csv"), "output_dir": "out"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (proj / "out" / "metadata.yaml").is_file()
+        assert not (tmp_path / "out" / "metadata.yaml").exists(), (
+            "must not anchor to the server root"
+        )
+
+    def test_codebook_all_output_dir_anchors_to_config_dir(self, tmp_path, restore_tool_config):
+        """sofer_codebook_all(output_dir='out') writes under <base_dir>/out/,
+        NOT <root>/out/."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_codebook_all",
+            {"config": str(proj / "dataset.toml"), "output_dir": "out"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (proj / "out" / "codebooks" / "data.md").is_file()
+        assert (proj / "out" / "codebook.md").is_file()
+        assert not (tmp_path / "out").exists(), "must not anchor to the server root"
+
+    def test_profile_all_output_dir_anchors_to_config_dir(self, tmp_path, restore_tool_config):
+        """sofer_profile_all(output_dir='out') writes under <base_dir>/out/,
+        NOT <root>/out/."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_profile_all",
+            {"config": str(proj / "dataset.toml"), "output_dir": "out"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (proj / "out" / "profiles" / "data.metadata.yaml").is_file()
+        assert not (tmp_path / "out").exists(), "must not anchor to the server root"
+
+    def test_render_all_output_dir_anchors_to_config_dir(self, tmp_path, restore_tool_config):
+        """sofer_render_all(output_dir='out') writes under <base_dir>/out/,
+        sourcing profiles from the same write_root — NOT <root>/out/."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        server = build_server(root=tmp_path)
+
+        profiled = _call(
+            server,
+            "sofer_profile_all",
+            {"config": str(proj / "dataset.toml"), "output_dir": "out"},
+        ).data
+        assert profiled["ok"] is True, profiled
+        envelope = _call(
+            server,
+            "sofer_render_all",
+            {"config": str(proj / "dataset.toml"), "output_dir": "out"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (proj / "out" / "renders" / "data.README.md").is_file()
+        assert not (tmp_path / "out").exists(), "must not anchor to the server root"
+
 
 class TestDocPathContainment:
     """PRP-03 / B2: auxiliary doc paths resolve against the TOML's directory

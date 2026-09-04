@@ -1243,6 +1243,33 @@ class TestSubprocessBoundary:
         assert (tmp_path / "data" / "out.md").is_file(), "output must land next to the input"
         assert not (tmp_path / "out.md").exists(), "output must not land in cwd"
 
+    def test_profile_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file profile ``--output`` anchors to the INPUT's
+        parent (metadata.yaml lands in ``data/out/``, never ``<cwd>/out/``)."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        result = run_cli(["profile", "data/sample.csv", "--output", "out"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "data" / "out" / "metadata.yaml").is_file(), (
+            "output must land next to the input"
+        )
+        assert not (tmp_path / "out" / "metadata.yaml").exists(), "output must not land in cwd"
+
+    def test_render_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file render ``--output`` anchors to the package's
+        parent (README.md lands in ``data/out/``, never ``<cwd>/out/``)."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        profiled = run_cli(["profile", "data/sample.csv"], cwd=tmp_path)
+        assert profiled.returncode == 0, profiled.stderr
+        assert (tmp_path / "data" / "metadata.yaml").is_file()
+        result = run_cli(["render", "data/metadata.yaml", "--output", "out"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "data" / "out" / "README.md").is_file(), (
+            "output must land next to the package"
+        )
+        assert not (tmp_path / "out" / "README.md").exists(), "output must not land in cwd"
+
     def test_prepare_reads_relative_readme_from_toml_dir(self, tmp_path) -> None:
         """CLI prepare resolves a relative [meta] readme against the TOML's
         directory (PRP-03), never the process cwd.
