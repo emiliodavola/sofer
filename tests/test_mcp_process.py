@@ -110,7 +110,7 @@ class TestNestedCwd:
         server = build_server(root=parent)
         monkeypatch.chdir(nested)
 
-        envelope = _call(server, "sofer_init", {"name": "nested-ds"}).data
+        envelope = _call(server, "sofer_init", {"name": "nested-ds", "user": "testuser"}).data
         assert envelope["ok"] is True, envelope
         assert (nested / "nested-ds.toml").is_file()
         assert (nested / "raw").is_dir()
@@ -165,7 +165,7 @@ class TestRecoveryInit:
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        args: dict[str, Any] = {"name": "my-ds"}
+        args: dict[str, Any] = {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
 
         first = _call(server, "sofer_init", args).data
         assert first["ok"] is True
@@ -180,7 +180,7 @@ class TestRecoveryInit:
         # {"force": True}) merged into the replayed args.
         replayed = _call(server, "sofer_init", {**args, "force": True}).data
         assert replayed["ok"] is True
-        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="testuser")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
 
     def test_replay_corrected_name_past_name_empty(
@@ -192,7 +192,9 @@ class TestRecoveryInit:
 
         server = build_server(root=tmp_path)
 
-        refused = _call(server, "sofer_init", {"name": "   "}).data
+        refused = _call(
+            server, "sofer_init", {"name": "   ", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert refused["ok"] is False
         assert refused["exit_code"] == 1
         assert any("non-empty" in e for e in refused["config_errors"])
@@ -200,9 +202,11 @@ class TestRecoveryInit:
 
         # Documented hint VALUE for the name-empty refusal is {} — the
         # correction is a non-empty name in the replayed args.
-        replayed = _call(server, "sofer_init", {"name": "my-ds"}).data
+        replayed = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert replayed["ok"] is True
-        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="testuser")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
 
 
@@ -259,7 +263,11 @@ class TestConfigStates:
         """
         server = build_server(root=tmp_path)
 
-        init = _call(server, "sofer_init", {"name": "green-ds", "user": "myuser"}).data
+        init = _call(
+            server,
+            "sofer_init",
+            {"name": "green-ds", "user": "myuser", "cwd": str(tmp_path)},
+        ).data
         assert init["ok"] is True, init
         assert (tmp_path / "green-ds.toml").is_file()
         assert (tmp_path / "raw").is_dir()
