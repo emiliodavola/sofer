@@ -19,6 +19,7 @@ from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
+from .execution_context import resolve_dataset_root, validate_identity
 from .mcp_registration import AgentName as _AgentName
 from .mcp_registration import Scope as _Scope
 from .model import DatasetConfig
@@ -827,28 +828,43 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     Orchestration:
 
-        1. ``mkdir -p RAW_DIR`` idempotently (``exist_ok=True``) before the
+        1. Validate the identity pre-write via :func:`validate_identity`
+           (INIT-05 / CLI-R07): a missing/blank/placeholder/unsafe ``name``
+           or ``user`` prints each error to stderr and exits 1 — neither
+           the TOML nor ``raw/`` is created.
+        2. Resolve the dataset root — no bound, so the live working
+           directory (:func:`resolve_dataset_root` mode (a)) — and derive
+           ``<root>/<name>.toml`` and ``<root>/RAW_DIR`` from it; refuse to
+           overwrite an existing TOML.
+        3. ``mkdir -p RAW_DIR`` idempotently (``exist_ok=True``) before the
            TOML write — skipped only when ``--move-existing --dry-run`` is
            active (preview, no mutation).
-        2. When ``--move-existing`` is set: collect depth-1 supported files
-           (``SUPPORTED_FORMATS``, direct children of ``cwd``), run
+        4. When ``--move-existing`` is set: collect depth-1 supported files
+           (``SUPPORTED_FORMATS``, direct children of the dataset root), run
            :func:`check_flatten_collisions` against existing ``raw/`` content
            before any move, honour ``--dry-run`` (preview, no ``raw/`` mkdir
            when absent, no moves), ``--force`` / ``not isatty`` guard (skip
            prompt), else prompt ``[y/N]`` and abort on ``N``, then
            :func:`shutil.move` each file into ``RAW_DIR``.
     """
-    output = Path(f"{args.name}.toml")
+    errors = validate_identity(args.name, getattr(args, "user", None))
+    if errors:
+        for err in errors:
+            print(f"  X  {err}", file=sys.stderr)
+        return 1
+
+    dataset_root = resolve_dataset_root(None, live_cwd=Path.cwd().resolve())
+    output = dataset_root / f"{args.name}.toml"
     if output.exists():
         print(f"  X  File already exists: {output}")
         return 1
 
     raw_dir_name: str = config.RAW_DIR
-    raw_dir_path = Path.cwd() / raw_dir_name
+    raw_dir_path = dataset_root / raw_dir_name
     move_existing: bool = bool(getattr(args, "move_existing", False))
     dry_run: bool = bool(getattr(args, "dry_run", False))
     force: bool = bool(getattr(args, "force", False))
-    user_val: str = getattr(args, "user", None) or "YOUR_USER"
+    user_val: str = args.user
     toml_text = _INIT_TEMPLATE.format(name=args.name, user=user_val)
 
     if not move_existing:
@@ -861,9 +877,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f"       sofer publish {output.name}")
         return 0
 
-    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in cwd.
+    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in the dataset root.
     candidates: list[Path] = []
-    for entry in Path.cwd().iterdir():
+    for entry in dataset_root.iterdir():
         if not entry.is_file():
             continue
         if entry.suffix.lower() not in SUPPORTED_FORMATS:
@@ -883,7 +899,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
             for q in raw_dir_path.rglob("*"):
                 if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
                     existing.append(q.resolve())
-        base_dir = Path.cwd().resolve()
+        base_dir = dataset_root
         try:
             check_flatten_collisions(candidates + existing, base_dir)
         except ValueError as exc:
@@ -963,7 +979,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "validation.\n"
             "\n"
             "Every dataset is configured via a TOML file.  Run:\n"
-            "  sofer init my-dataset      # create a template\n"
+            "  sofer init my-dataset --user myuser # create a template\n"
             "  sofer prepare dataset.toml # generate the package locally (build/)\n"
             "  sofer publish dataset.toml # deliver to HF Hub or a local dir"
         ),
@@ -1300,11 +1316,12 @@ def _build_parser() -> argparse.ArgumentParser:
     i.add_argument("name", help="Short name for the dataset.")
     i.add_argument(
         "--user",
-        default=None,
+        required=True,
         help=(
             "Hugging Face username or organization for repo_id "
-            "(e.g. --user myuser -> repo_id 'myuser/<name>'); "
-            "default: YOUR_USER placeholder."
+            "(e.g. --user myuser -> repo_id 'myuser/<name>'). Required: "
+            "a missing --user exits 2, and placeholder (YOUR_USER) or "
+            "unsafe values are rejected with exit 1 before any write."
         ),
     )
     i.add_argument(
