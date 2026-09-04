@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import sofer.config as config
 from sofer.model import DatasetConfig, FileEntry, InferenceStatus
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -211,6 +212,52 @@ csv_encoding = "latin-1"
         cfg = DatasetConfig.from_toml(p)
         # When not set, pretty_name is empty; fallback to name happens in the card
         assert cfg.pretty_name == ""
+
+
+# ── TC-05: from_toml discovery_root bound ────────────────────────────────────
+
+
+class TestFromTomlDiscoveryRoot:
+    """DatasetConfig.from_toml honors the optional discovery_root bound."""
+
+    MINIMAL_TOML = '[dataset]\nname = "x"\nrepo_id = "u/x"\n'
+
+    def test_discovery_root_applies_at_or_below(self, restore_tool_config, pytree):
+        """Values from a pyproject at/below discovery_root apply; above-root
+        overrides do not (TC-05 scenario 2)."""
+        pytree("[tool.sofer]\nschema_sample_size = 999\n", at="outer")
+        discovery_root = pytree(None, at="outer/proj")
+        inner = pytree("[tool.sofer]\nschema_sample_size = 250\n", at="outer/proj/data")
+        toml_path = inner / "dataset.toml"
+        toml_path.write_text(self.MINIMAL_TOML, encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path, discovery_root=discovery_root)
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == 250
+
+    def test_discovery_root_blocks_above_root_override(self, restore_tool_config, pytree):
+        """Without a pyproject at/below discovery_root, an above-root
+        override must NOT apply — built-in defaults do."""
+        pytree("[tool.sofer]\nschema_sample_size = 999\n", at="outer")
+        discovery_root = pytree(None, at="outer/proj")
+        toml_path = discovery_root / "dataset.toml"
+        toml_path.write_text(self.MINIMAL_TOML, encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path, discovery_root=discovery_root)
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == config._DEFAULTS["schema_sample_size"]
+
+    def test_omitted_discovery_root_stays_unbounded(self, restore_tool_config, pytree):
+        """CLI compatibility: without a bound the walk-up applies above-root
+        pyproject overrides (TC-05 scenario 1)."""
+        pytree("[tool.sofer]\nschema_sample_size = 250\n", at="outer")
+        data_dir = pytree(None, at="outer/proj/data")
+        toml_path = data_dir / "dataset.toml"
+        toml_path.write_text(self.MINIMAL_TOML, encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path)
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == 250
 
 
 # ── Validation ────────────────────────────────────────────────────────────────

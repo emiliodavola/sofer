@@ -320,7 +320,7 @@ class DatasetConfig:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> DatasetConfig:
+    def from_toml(cls, path: str | Path, discovery_root: Path | None = None) -> DatasetConfig:
         """Parse a TOML file and return a :class:`DatasetConfig`.
 
         The TOML format is::
@@ -358,6 +358,10 @@ class DatasetConfig:
 
         Args:
             path: Path to the TOML configuration file.
+            discovery_root: Optional upper bound for ``[tool.sofer]``
+                discovery (TC-05): the walk-up never passes this directory,
+                so overrides declared above it do not apply. ``None`` keeps
+                the unbounded CLI behavior.
 
         Returns:
             A fully populated :class:`DatasetConfig` instance.
@@ -374,8 +378,10 @@ class DatasetConfig:
         # the dataset TOML's directory so every subsequent read of a module
         # constant (config.X) reflects the dataset-tree overrides for this
         # invocation (TC-04/TC-05). Harmless if called repeatedly — resolution
-        # is a pure function of (anchor, filesystem).
-        config.reload(base_dir)
+        # is a pure function of (anchor, filesystem). The optional
+        # ``discovery_root`` bounds the walk-up (TC-05): discovery never
+        # passes it, so overrides declared above the bound do not apply.
+        config.reload(base_dir, stop_at=discovery_root)
 
         with open(path, "rb") as fh:
             data = _tomli.load(fh)
