@@ -152,6 +152,22 @@ class TestResolveDatasetRoot:
         resolved = resolve_dataset_root(str(child), live_cwd=tmp_path, server_root=tmp_path)
         assert resolved == child.resolve()
 
+    def test_explicit_cwd_expanduser_tilde(self, tmp_path, monkeypatch):
+        """Mode (b): '~' is expanded before absolutizing against the root (D5:
+        expanduser → absolutize → resolve → is_relative_to)."""
+        child = tmp_path / "child"
+        child.mkdir()
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
+        monkeypatch.setenv("HOME", str(tmp_path))  # POSIX
+        resolved = resolve_dataset_root("~/child", live_cwd=tmp_path, server_root=tmp_path)
+        assert resolved == child.resolve()
+
+    def test_explicit_cwd_equal_root_accepted(self, tmp_path):
+        """Mode (b): cwd equal to the root is contained (is_relative_to) —
+        unlike mode (c), which requires a STRICT descendant."""
+        resolved = resolve_dataset_root(str(tmp_path), live_cwd=tmp_path, server_root=tmp_path)
+        assert resolved == tmp_path.resolve()
+
     def test_explicit_cwd_escape_rejected(self, tmp_path):
         """Mode (b): an absolute cwd escaping the root is refused."""
         evil = tmp_path.parent / "evil"
