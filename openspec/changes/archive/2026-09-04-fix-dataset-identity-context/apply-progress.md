@@ -426,3 +426,73 @@ The audit's conditional ("update the live spec IF INIT-01/INIT-02 or the tool de
 ## Status
 
 2/2 pre-merge alignment work units complete. Branch `fix/116-dataset-identity-context` is **merge-ready** (subject to orchestrator/PR review): full suite 1344 passed / 2 skipped, all gates green, resilience WARNINGs #2 and #3 closed, SOFER_TRACE.md untouched.
+
+---
+
+# Merge-review blockers (2026-09-04) — applied on fix/116-pr4 (PR #137)
+
+**Context**: The maintainer's merge review of the chained PRs (#134/#136/#135/#137) for issue #116 found 6 evidence-verified blockers. All 6 fixed on `fix/116-pr4` (head of PR #137 — commits update that PR automatically; no new PRs, no merge). Strict TDD disabled (Standard mode). Each blocker fixed + tested + spec-updated in its own work-unit commit; all gates re-run after.
+
+## Work Units
+
+| Unit | Blocker | Commit | Notes |
+|------|---------|--------|-------|
+| 1 | B1 — symlinks in scanner discovery | `99750e5 fix(scan): exclude symlinks from file discovery` | `discover_files` skips symlinked entries AND entries reached through a linked ancestor (`_is_link` covers symlinks + Windows junctions via `FILE_ATTRIBUTE_REPARSE_POINT` — junction `is_symlink()` is False on 3.10-3.12, where `rglob` follows directory links). Module docstring states symlink exclusion; SCN-01 spec updated. +3 tests (external file symlink not discovered; external dir junction not traversed — VERIFIED on this Windows 3.11 host where `mklink /J` works; regular file still discovered; 2 file-symlink tests skip where privileges unavailable) |
+| 2 | B2 — auxiliary doc paths without containment | `548a227 fix(prepare): resolve and contain auxiliary documentation paths` | `[meta] readme/study_design/recipe` now resolve against `cfg._base_dir` (new `model.resolve_doc_path`, used by `model.validate()` and `prepare.py` L809-830 — never process cwd; "declared but not found" warning kept). MCP: new `_validate_doc_files(cfg)` containment-check wired into `_load_dataset` + sofer_profile_all/render_all/auth_status (collected errors, never silent). PRP-03 spec updated. +8 tests (3 prepare-domain relative-resolution + 1 missing-relative fallback + 3 MCP boundary incl. `../../outside.md` refused ok:False + 1 CLI subprocess prepare-from-TOML-dir) |
+| 3 | B3 — Windows-invalid names + reserved names + partial state | `1fde058 fix(context): reject Windows-invalid names and reserved device names` | `validate_identity` name checks add: Windows-invalid chars `<>:"/\|?*` (char-level `:` pinned with `a1:b` — `a:b`/`1:b` already caught by `ntpath.splitdrive`) and reserved device names (`CON/PRN/AUX/NUL/COM1-9/LPT1-9`, stem-matched case-insensitive — `CON.txt` rejected too since dots are legal). Init write-order hardened: TOML written BEFORE `raw/` mkdir in `_cmd_init` (4 sites) and `sofer_init` — no orphan raw/ on write failure. INIT-05 + INIT-03 spec updated. +22 tests (18 unit cells + 2 MCP boundary + 2 CLI subprocess) |
+| 4 | B4 — publish remote fail-open | `a5f2365 fix(publish): fail closed when remote inspection fails` | `_inspect_repo`: `RepositoryNotFoundError` (huggingface_hub.utils) → `[]`; ANY other exception → raise. `_ensure_repo`: raise on non-"already exists" `create_repo` errors. `publish()` wraps the remote prologue → clear error + rc 1 BEFORE any staging/upload; post-upload inspection failure warns + skips the split report (never fails a completed upload). PUB-05 spec updated (fail-closed scenarios). +4 tests (not-found → [], RuntimeError → raises, publish refuses before upload, ensure_repo raises) |
+| 5 | B6 — missing direct output-anchor tests | `49f0fd8 test(cli,mcp): cover remaining output-anchor contracts` | CLI: `profile`/`render` single-file `--output` anchor to input parent (`--output` — the long form profile/render accept; codebook `-o` already covered). MCP: `sofer_codebook` output_file → input parent; `sofer_profile` output_dir → input parent; `sofer_codebook_all`/`profile_all`/`render_all` relative output_dir → `cfg._base_dir` (NOT server root). +7 tests |
+| 6 | B5 — inconsistent test evidence | `625c98c docs(sdd): reconcile final test baseline to 1344` | verify-report.md gains "Merge-review evidence reconciliation (2026-09-04)": FINAL baseline 1344 passed/2 skipped; 1342→1344 = +2 CLI dry-run tests landed in `a1cb36f` AFTER the re-verify; per-slice gates (1318/1325/1330/1332) recorded as historical. Saved to Engram (topic `sdd/fix-dataset-identity-context/verify-report`, MERGE) |
+
+## New test arithmetic (1344 → 1385 passed, 2 → 4 skipped)
+
++43 cells total: B1 +3 (1 passes + 2 Windows file-symlink skips), B2 +7, B3 +22, B4 +4, B6 +7 = 43. Arithmetic confirmed: 1344+41 passed + 2 new skips = **1385 passed / 4 skipped**.
+
+## Verification (final gates, ACTUAL output)
+
+| Command | Result |
+|---------|--------|
+| uv run pytest tests/ -q (FULL suite) | **1385 passed, 4 skipped, 0 failed** — 1344 baseline + 41 new passed + 2 new skips (Windows file-symlink capability); re-baselined |
+| uv run pytest tests/test_scanner.py tests/test_prepare.py tests/test_publish.py tests/test_execution_context.py tests/test_mcp_server.py tests/test_cli.py -q | 512 passed, 4 skipped |
+| uv run mypy src/ | Success: no issues found in 30 source files |
+| uv run ruff check src/ tests/ | All checks passed |
+| uv run ruff format --check src/ tests/ | 60 files already formatted |
+| git diff --check | clean |
+| git status | SOFER_TRACE.md untracked (`??`), mtime 2026-08-31 17:40, length 17210 — UNTOUCHED (PB-08); all 6 commits pushed to origin/fix/116-pr4 (updates PR #137) |
+
+## Files Changed (merge-review blockers)
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| src/sofer/scanner.py | Modified | `_is_link` (symlink + reparse-point) helper; `discover_files` skips links + linked ancestors; module docstring (B1) |
+| src/sofer/model.py | Modified | `resolve_doc_path` helper; `validate()` resolves doc paths against `_base_dir` (B2) |
+| src/sofer/prepare.py | Modified | readme/study_design/recipe resolve via `resolve_doc_path` against `_base_dir` (B2) |
+| src/sofer/mcp_server.py | Modified | `_validate_doc_files` + 4 call sites (B2); `sofer_init` TOML-before-raw/ (B3) |
+| src/sofer/execution_context.py | Modified | `_WINDOWS_INVALID_CHARS`, `_RESERVED_DEVICE_NAMES`, `_reserved_device_name`, validate_identity branches (B3) |
+| src/sofer/cli.py | Modified | `_cmd_init` TOML-before-raw/ at all 4 write sites + docstring (B3) |
+| src/sofer/publish.py | Modified | `_inspect_repo`/`_ensure_repo` fail-closed; `publish()` remote prologue abort + post-upload warning; module docstring (B4) |
+| tests/test_scanner.py | Modified | symlink/junction discovery tests + `_make_link` helper (B1) |
+| tests/test_prepare.py | Modified | relative doc-path resolution tests (B2) |
+| tests/test_mcp_server.py | Modified | doc-path containment + boundary tests (B2); Windows-invalid/reserved init refusals (B3); output-anchor tests (B6) |
+| tests/test_cli.py | Modified | prepare-from-TOML-dir readme test (B2); Windows-invalid/reserved init refusals (B3); profile/render output anchors (B6) |
+| tests/test_execution_context.py | Modified | Windows-invalid + reserved-name matrix cells (B3) |
+| tests/test_publish.py | Modified | remote fail-closed tests (B4) |
+| openspec/specs/scan/spec.md | Modified | SCN-01 symlink exclusion + scenarios (B1) |
+| openspec/specs/prepare/spec.md | Modified | PRP-03 TOML-dir resolution + containment scenarios (B2) |
+| openspec/specs/mcp-server/spec.md | Modified | INIT-05 Windows-invalid + reserved names; INIT-03 TOML-before-raw/ (B3) |
+| openspec/specs/publish/spec.md | Modified | PUB-05 fail-closed scenarios (B4) |
+| openspec/changes/archive/2026-09-04-fix-dataset-identity-context/verify-report.md | Modified | merge-review evidence reconciliation (B5) |
+| openspec/changes/archive/2026-09-04-fix-dataset-identity-context/apply-progress.md | Modified | this section (deliverable) |
+
+## Deviations / Notes
+
+1. **B2 also fixed `model.validate()` doc checks** (beyond the blocker's prepare.py scope): the MCP `_load_dataset` prologue runs `cfg.validate()`, so a TOML-declared relative readme that existed next to the TOML would have been flagged "not found" (cwd-relative check) and refused before prepare could read it. `validate()` now resolves doc paths against `_base_dir` — required for the "contained doc path passes" test.
+2. **B3 `:`-in-name nuance**: `ntpath.splitdrive` treats any `X:` at index 1 as a drive (caught by the component check); the char-level `:` ban is exercised with `a1:b` (colon outside drive position). The `_WINDOWS_INVALID_CHARS` constant keeps the full `<>:"/\|?*` set for one readable message.
+3. **B4 post-upload inspection** warns + skips the split report instead of failing the already-successful upload — fail-closed applies to the pre-upload inspection (overwrite-protection truth); a completed upload is never reported as failed because a follow-up read failed.
+4. **B6 CLI flag form**: profile/render accept `--output` (long form only; `-o` is codebook-only), so the CLI tests use `--output`.
+5. **Windows junction verification**: the B1 directory-link test runs for real on this host (`mklink /J` works without elevation; `_is_link` detects the junction via `st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT` because `is_symlink()` is False for junctions on 3.11). File-symlink tests skip on Windows without developer mode — 2 new skips (baseline 2 → 4).
+6. Intermediate commits leave the focused suite partially red until later units land (e.g. B3 unit tests need the B3 production change in the same commit — they land together; the final state is fully green).
+
+## Status
+
+6/6 merge-review blockers fixed, tested, spec-synced, and committed on `fix/116-pr4`. Full suite re-baselined at **1385 passed / 4 skipped**; all gates green; SOFER_TRACE.md untouched. Pushed to `origin/fix/116-pr4` (updates PR #137) — ready for re-verify/merge.
