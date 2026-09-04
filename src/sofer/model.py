@@ -380,8 +380,14 @@ class DatasetConfig:
         # invocation (TC-04/TC-05). Harmless if called repeatedly — resolution
         # is a pure function of (anchor, filesystem). The optional
         # ``discovery_root`` bounds the walk-up (TC-05): discovery never
-        # passes it, so overrides declared above the bound do not apply.
-        config.reload(base_dir, stop_at=discovery_root)
+        # passes it, so overrides declared above the bound do not apply. The
+        # ``stop_at`` keyword is only passed when a bound is given — the
+        # unbounded CLI path keeps the exact ``reload(base_dir)`` call shape
+        # (TC-04 spies on ``config.reload`` and accept no keywords).
+        if discovery_root is not None:
+            config.reload(base_dir, stop_at=discovery_root)
+        else:
+            config.reload(base_dir)
 
         with open(path, "rb") as fh:
             data = _tomli.load(fh)
