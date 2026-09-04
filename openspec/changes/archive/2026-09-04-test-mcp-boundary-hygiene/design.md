@@ -56,7 +56,7 @@ All conversions follow the established #119 pattern (`pytest.raises(ToolError, m
 ### D7 — Import cleanup: design CORRECTION to the proposal
 **Choice**: `tests/test_mcp_server.py` import block unchanged — `sofer_publish` does NOT become F401.
 **Evidence**: `test_every_tool_acquires_execution_lock` (L1907-1926) uses `sofer_publish` in a source-inspection `callables` list (L1913); `test_scan_apply_never_prompts_and_chains_scanner` (L1078-1088) keeps `sofer_scan_apply`. The proposal's "drop unused import" risk is a false alarm.
-**In `tests/test_mcp_schema.py`**: the `sofer_auth_status` import (L18) DOES become F401 — L251 is the only use of the imported function (L187 is tools-dict schema inspection via `_list_tools`). Change to `from sofer.mcp_server import build_server`.
+**In `tests/test_mcp_schema.py`**: the `sofer_auth_status` import (L18) DOES become F401 — `test_auth_status_no_leak` is the only use of the imported function (L187 is tools-dict schema inspection via `_list_tools`). Change to `from sofer.mcp_server import build_server`.
 
 ### D8 — PB-03 framing: no behavioral change, one comment-level alignment
 **Choice**: `tests/test_mcp_process.py` recovery tests (TestRecoveryPublishConfirm L121-156, TestRecoveryInit L159-206) already implement the hint-VALUE contract exactly (refusal reason in boundary-visible `output` + deterministic hint VALUES replayed → asserted to reach a DIFFERENT gate or `ok:True`). Edit only the module docstring L6: "executing the documented ``next`` hints" → "executing the documented hint VALUES", so spec wording == test wording.

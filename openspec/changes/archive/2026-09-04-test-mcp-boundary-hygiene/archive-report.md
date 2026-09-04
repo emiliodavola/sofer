@@ -6,7 +6,7 @@
 **Artifact store**: hybrid (OpenSpec files + Engram)
 **Status**: archived
 **Verify verdict**: PASS — 9/9 scenarios (7 PB-01 + 2 PB-03), 2/2 requirements, 0 blockers, 0 CRITICAL
-**Branch**: fix/130-boundary-hygiene @ 8d6eab2 (base e3fe857)
+**Branch**: fix/130-boundary-hygiene @ a5253ad (base e3fe857)
 
 ## Summary
 
@@ -15,16 +15,19 @@ Test-only change. Converted the 9 remaining direct registered-tool calls in `tes
 ## Files Changed (git diff e3fe857...HEAD)
 
 ```
- .../test-mcp-boundary-hygiene/apply-progress.md    | 100 +++++++++++++++++
- .../changes/test-mcp-boundary-hygiene/design.md    | 119 +++++++++++++++++++++
- .../test-mcp-boundary-hygiene/exploration.md       |  81 ++++++++++++++
- .../changes/test-mcp-boundary-hygiene/proposal.md  |  74 +++++++++++++
+ .../apply-progress.md                              | 100 +++++++++++++++++
+ .../archive-report.md                              |  85 +++++++++++++++
+ .../2026-09-04-test-mcp-boundary-hygiene/design.md | 119 +++++++++++++++++++++
+ .../exploration.md                                 |  81 ++++++++++++++
+ .../proposal.md                                    |  74 +++++++++++++
  .../specs/process-boundary/spec.md                 |  68 ++++++++++++
- .../changes/test-mcp-boundary-hygiene/tasks.md     |  58 ++++++++++
+ .../2026-09-04-test-mcp-boundary-hygiene/tasks.md  |  58 ++++++++++
+ .../verify-report.md                               |  96 +++++++++++++++++
+ openspec/specs/process-boundary/spec.md            |  49 ++++++---
  tests/test_mcp_process.py                          |   2 +-
  tests/test_mcp_schema.py                           |  12 ++-
  tests/test_mcp_server.py                           | 112 ++++++++++---------
- 9 files changed, 569 insertions(+), 57 deletions(-)
+ 12 files changed, 785 insertions(+), 71 deletions(-)
 ```
 
 - `tests/test_mcp_server.py` — 8 boundary conversions (L291/1064/1073/1179/1189/1222/2577/2591); L1210 test deleted; `test_publish_hf_without_confirm_raises` renamed `test_publish_hf_target_schema_rejected`; L291 rewritten with body-raise trigger + `io.StringIO()` fakes; `import io` added (apply deviation 1); import block otherwise unchanged (design D7).
@@ -43,7 +46,7 @@ Test-only change. Converted the 9 remaining direct registered-tool calls in `tes
 
 ## Task Completion
 
-All 15 tasks in `tasks.md` (Phases 1–4) are `[x]` — 0 unchecked implementation tasks. Note: `apply-progress.md` prose says "13 tasks"; the tasks file has 15 checkboxes. Cosmetic count drift only, no task unchecked (verify-report suggestion 1).
+All 15 tasks in `tasks.md` (Phases 1–4) are `[x]` — 0 unchecked implementation tasks, matching `apply-progress.md` (count corrected to 15 in the post-archive audit pass).
 
 ## Verification Evidence (final state, per verify-report obs #967)
 

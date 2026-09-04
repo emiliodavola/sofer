@@ -15,9 +15,9 @@ The suite SHALL exercise registered MCP tools through `fastmcp.Client(server)` (
 
 #### Scenario: Seven publish/scan_apply conversions through the client
 
-- GIVEN the seven conversion sites in `tests/test_mcp_server.py` (L1064, L1073, L1179, L1189, L1222, L2577, L2591)
+- GIVEN the seven conversion sites in `tests/test_mcp_server.py` (`test_publish_dry_run_default_no_network`, `test_publish_hf_target_schema_rejected`, `test_garbage_target_dry_run_false_refused_no_api`, `test_aws_target_dry_run_false_refused`, `test_local_target_dry_run_false_copies_package`, and `test_xlsx_registered_validate_passes_and_idempotent` covering the two `sofer_scan_apply` sites)
 - WHEN each runs via `_call(server, "sofer_publish"|"sofer_scan_apply", {...})` through `Client(server)`
-- THEN valid-input conversions (dry-run plan L1064, local copy L1222, scan registration L2577/L2591) SHALL return the documented envelope shape
+- THEN valid-input conversions (dry-run plan `test_publish_dry_run_default_no_network`, local copy `test_local_target_dry_run_false_copies_package`, scan registration `test_xlsx_registered_validate_passes_and_idempotent`) SHALL return the documented envelope shape
 
 #### Scenario: Stdio transport with clean framing
 
@@ -35,8 +35,8 @@ The suite SHALL exercise registered MCP tools through `fastmcp.Client(server)` (
 
 - GIVEN `sofer_publish` called via `Client(server)` with `target` outside the `"local"` Literal (`"hf"`, `"garbage"`, `"aws"`)
 - WHEN the call executes
-- THEN the request SHALL be rejected in-schema at input validation and SHALL surface as `ToolError` at the boundary — not an envelope `error_code` branch — and the tool body SHALL NOT run (L1179's `calls == []` is preserved; the guard moved from the in-tool TARGET_INVALID gate to in-schema rejection)
-- AND the deleted L1210 direct-call-only test (`garbage` + `dry_run` → `ok:True`) SHALL NOT be re-added — its boundary-visible replacement is this in-schema rejection, which holds regardless of `dry_run`
+- THEN the request SHALL be rejected in-schema at input validation and SHALL surface as `ToolError` at the boundary — not an envelope `error_code` branch — and the tool body SHALL NOT run (`test_garbage_target_dry_run_false_refused_no_api`'s `calls == []` is preserved; the guard moved from the in-tool TARGET_INVALID gate to in-schema rejection)
+- AND the deleted `test_garbage_target_dry_run_ok_no_network` direct-call-only test (`garbage` + `dry_run` → `ok:True`) SHALL NOT be re-added — its boundary-visible replacement is this in-schema rejection, which holds regardless of `dry_run`
 
 #### Scenario: Stream-restore conversion exercises the tool body
 
@@ -53,7 +53,7 @@ The suite SHALL exercise registered MCP tools through `fastmcp.Client(server)` (
 ### Requirement: Recovery replay executes returned calls (PB-03)
 
 Recovery tests SHALL key off the deterministic hint VALUES that the production gates pin for each refusal, plus the boundary-visible `output` message, and SHALL execute the hinted arguments as a second call. `next` itself is NOT client-visible for `sofer_publish_confirm`/`sofer_init` because the declared `output_schema`s project envelopes and do not list `next` (re-audited: `sofer_auth_status` is the only tool whose schema declares `next`, proving the projection is the cause); surfacing `next` would require a production schema change, outside this suite's scope — the hint-VALUE substitution IS the deliberate recovery contract. Replayed calls SHALL be asserted to reach a DIFFERENT gate than the refusal, or `ok:True` — not merely that the hint is present.
-(Previously: framed as "executes the documented next hint arguments" with the boundary projection as a parenthetical correction.)
+(Previously: framed as "executes the documented hint arguments" with the boundary projection as a parenthetical correction.)
 
 #### Scenario: publish_confirm replay
 

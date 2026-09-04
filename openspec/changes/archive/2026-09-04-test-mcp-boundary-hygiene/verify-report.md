@@ -19,7 +19,7 @@ build_output_hash: sha256:94e0905153fa10da2ccd027bdbee83bd76edc8e5f1b196900a71cf
 **Change**: test-mcp-boundary-hygiene
 **Version**: spec delta (process-boundary, MODIFIED PB-01 + PB-03)
 **Mode**: Standard (strict_tdd: false) · Hybrid artifact store
-**Branch**: fix/130-boundary-hygiene @ 8d6eab2 (base e3fe857)
+**Branch**: fix/130-boundary-hygiene @ a5253ad (base e3fe857)
 
 ### Completeness
 | Metric | Value |
@@ -28,7 +28,7 @@ build_output_hash: sha256:94e0905153fa10da2ccd027bdbee83bd76edc8e5f1b196900a71cf
 | Tasks complete | 15 |
 | Tasks incomplete | 0 |
 
-(apply-progress prose says "13 tasks"; the tasks.md file has 15 checkboxes across Phases 1-4, all `[x]`. Cosmetic count drift in prose only — no unchecked task.)
+(apply-progress prose count corrected to 15 in the post-archive audit pass; tasks.md has 15 checkboxes across Phases 1-4, all `[x]`. No unchecked task.)
 
 ### Build & Tests Execution
 **Build (type-check)**: ✅ Passed
@@ -89,7 +89,7 @@ uv run pytest tests/ -q
 **CRITICAL**: None
 **WARNING**: None
 **SUGGESTION**:
-1. apply-progress.md says "All 13 tasks complete" but tasks.md contains 15 checkboxes (Phases 1-4). Prose count drift only — no task is unchecked. Fix the number on the next edit.
+1. apply-progress.md task count corrected to 15 to match tasks.md's 15 checkboxes (Phases 1-4, all `[x]`). Resolved in the post-archive audit pass.
 2. `SOFER_TRACE.md` is untracked in the working tree. It is intentionally not staged (apply-progress 4.4), but consider adding it to `.gitignore` or deleting before PR.
 
 ### Verdict

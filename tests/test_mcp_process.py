@@ -146,7 +146,7 @@ class TestRecoveryPublishConfirm:
         # reason is the human-readable message naming the required hint.
         assert "acknowledge_risk=True" in first["output"]
 
-        # Replay with the documented next hint for the risk gate (mcp_server
+        # Replay with the documented hint VALUE for the risk gate refusal (mcp_server
         # risk gate: {"acknowledge_risk": True}); the token is STILL present.
         replayed = _call(server, "sofer_publish_confirm", {**args, "acknowledge_risk": True}).data
         assert replayed["ok"] is False
@@ -176,7 +176,7 @@ class TestRecoveryInit:
         assert refused["exit_code"] == 1
         assert any("File already exists" in e for e in refused["config_errors"])
 
-        # Documented next hint for the file-exists refusal (mcp_server.py:
+        # Documented hint VALUE for the file-exists refusal (mcp_server.py:
         # {"force": True}) merged into the replayed args.
         replayed = _call(server, "sofer_init", {**args, "force": True}).data
         assert replayed["ok"] is True
@@ -198,7 +198,7 @@ class TestRecoveryInit:
         assert any("non-empty" in e for e in refused["config_errors"])
         assert not list(tmp_path.glob("*.toml"))
 
-        # Documented next hint for the name-empty refusal is {} — the
+        # Documented hint VALUE for the name-empty refusal is {} — the
         # correction is a non-empty name in the replayed args.
         replayed = _call(server, "sofer_init", {"name": "my-ds"}).data
         assert replayed["ok"] is True

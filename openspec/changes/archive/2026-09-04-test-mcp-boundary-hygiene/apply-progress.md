@@ -7,7 +7,7 @@ Date: 2026-09-04
 
 ## Status
 
-All 13 tasks complete (Phases 1-4). Full gate green: **1269 passed, 2 skipped** (1271 collected) — exactly the design's predicted count after the L1210 deletion (baseline 1270 → 1269). Zero production changes (`src/` untouched).
+All 15 tasks complete (Phases 1-4). Full gate green: **1269 passed, 2 skipped** (1271 collected) — exactly the design's predicted count after the L1210 deletion (baseline 1270 → 1269). Zero production changes (`src/` untouched).
 
 ## Phase 1: Conversions batch A (valid envelopes) — DONE
 
