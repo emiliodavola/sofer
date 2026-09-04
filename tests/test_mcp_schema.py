@@ -206,6 +206,21 @@ class TestOutputSchema:
             assert "exit_code" in props, f"{name} output_schema missing exit_code"
             assert "output" in props, f"{name} output_schema missing output"
 
+    def test_sofer_init_identity_fields_in_schema(self, tmp_path: Path):
+        """MSP-R03 / PB-03: sofer_init output_schema declares the identity
+        fields as string properties, NOT in ``required``."""
+        tools = _tools_dict(tmp_path)
+        schema = tools["sofer_init"].outputSchema  # type: ignore[attr-defined]
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        assert "config_path" in props, "sofer_init output_schema missing config_path"
+        assert "dataset_root" in props, "sofer_init output_schema missing dataset_root"
+        assert props["config_path"]["type"] == "string"
+        assert props["dataset_root"]["type"] == "string"
+        required = schema.get("required", [])
+        assert "config_path" not in required
+        assert "dataset_root" not in required
+        assert required == ["ok", "exit_code", "output"]
+
 
 class TestEnvelope:
     def test_refusal_envelope(self, tmp_path: Path):

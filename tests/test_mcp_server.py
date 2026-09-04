@@ -2151,24 +2151,32 @@ class TestInitCreatesTomlAndRaw:
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
-        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="testuser")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
         assert (tmp_path / "raw").is_dir()
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
         assert cfg.name == "my-ds"
         assert envelope["config_errors"] == []
+        # INIT-03 / PB-03: the success envelope reports the canonical identity
+        # as absolute paths (config_path = dataset_root/name.toml).
+        assert envelope["config_path"] == str((tmp_path / "my-ds.toml").resolve())
+        assert envelope["dataset_root"] == str(tmp_path.resolve())
 
     def test_client_call_creates_toml(self, tmp_path, restore_tool_config):
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is True
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
-            name="my-ds", user="YOUR_USER"
+            name="my-ds", user="testuser"
         )
 
 
@@ -2177,7 +2185,9 @@ class TestInitUserFlag:
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds", "user": "alice"}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "alice", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is True
         expected = _INIT_TEMPLATE.format(name="my-ds", user="alice")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
@@ -2188,7 +2198,9 @@ class TestInitUserFlag:
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds", "user": "bob"}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "bob", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is True
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
             name="my-ds", user="bob"
@@ -2196,12 +2208,29 @@ class TestInitUserFlag:
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
         assert cfg.repo_id == "bob/my-ds"
 
-    def test_default_user_placeholder(self, tmp_path, restore_tool_config):
+    def test_missing_user_refused_before_write(self, tmp_path, restore_tool_config):
+        """INIT-05: no user -> envelope refusal naming user, NO TOML, NO raw/."""
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds"}).data
-        assert envelope["ok"] is True
-        cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
-        assert cfg.repo_id == "YOUR_USER/my-ds"
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("user must be non-empty" in e for e in envelope["config_errors"])
+        assert not (tmp_path / "my-ds.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_placeholder_user_refused_before_write(self, tmp_path, restore_tool_config):
+        """INIT-05: placeholder user banned pre-write (never lands in the TOML)."""
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "YOUR_USER", "cwd": str(tmp_path)}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("placeholder" in e for e in envelope["config_errors"])
+        assert not (tmp_path / "my-ds.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
 
 class TestInitDryRun:
@@ -2209,7 +2238,15 @@ class TestInitDryRun:
         (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
         envelope = _call(
-            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+            server,
+            "sofer_init",
+            {
+                "name": "my-ds",
+                "user": "testuser",
+                "cwd": str(tmp_path),
+                "move_existing": True,
+                "dry_run": True,
+            },
         ).data
         assert envelope["ok"] is True
         assert not (tmp_path / "raw").exists(), "dry_run must not create raw/"
@@ -2222,7 +2259,15 @@ class TestInitDryRun:
     def test_dry_run_empty_candidates(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
         envelope = _call(
-            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+            server,
+            "sofer_init",
+            {
+                "name": "my-ds",
+                "user": "testuser",
+                "cwd": str(tmp_path),
+                "move_existing": True,
+                "dry_run": True,
+            },
         ).data
         assert envelope["ok"] is True
         assert not (tmp_path / "raw").exists()
@@ -2234,7 +2279,11 @@ class TestInitCollision:
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds", "move_existing": True}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path), "move_existing": True},
+        ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert (tmp_path / "a.csv").exists(), "collision must not move file"
@@ -2244,27 +2293,105 @@ class TestInitCollision:
 class TestInitTraversal:
     def test_traversal_dotdot_mcp(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "../evil"})
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "../evil", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not (tmp_path / "evil.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
     def test_traversal_absolute_mcp(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "/abs/evil"})
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "/abs/evil", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not (tmp_path / "evil.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
     def test_traversal_client_raises(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "../evil"})
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "../evil", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
 
     def test_traversal_win_drive_rejected(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "C:/evil"})
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "C:/evil", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not (tmp_path / "evil.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_unsafe_name_nested_traversal_refused(self, tmp_path, restore_tool_config):
+        """INIT-05: a/../b is banned by the separator rule before any write."""
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "a/../b", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+        assert not (tmp_path / "raw").exists()
+
+    def test_unsafe_name_quotes_refused(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": 'a"b', "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+        assert not (tmp_path / "raw").exists()
+
+    def test_unsafe_name_newline_refused(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "a\nb", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+        assert not (tmp_path / "raw").exists()
+
+    def test_unsafe_name_control_char_refused(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "a\x01b", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("single path component" in e for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+        assert not (tmp_path / "raw").exists()
 
     def test_empty_name_returns_ok_false(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "   "}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "   ", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert any("non-empty" in e for e in envelope["config_errors"])
@@ -2272,7 +2399,9 @@ class TestInitTraversal:
 
     def test_empty_name_mcp(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": ""}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is False
         assert not list(tmp_path.glob("*.toml"))
 
@@ -2280,10 +2409,16 @@ class TestInitTraversal:
 class TestInitIdempotencyForce:
     def test_force_false_does_not_overwrite(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        first = _call(server, "sofer_init", {"name": "my-ds"}).data
+        first = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert first["ok"] is True
         (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
-        second = _call(server, "sofer_init", {"name": "my-ds", "force": False}).data
+        second = _call(
+            server,
+            "sofer_init",
+            {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path), "force": False},
+        ).data
         assert second["ok"] is False
         assert second["exit_code"] == 1
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == "custom"
@@ -2292,18 +2427,22 @@ class TestInitIdempotencyForce:
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        _call(server, "sofer_init", {"name": "my-ds"})
+        _call(server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)})
         (tmp_path / "my-ds.toml").write_text("custom", encoding="utf-8")
-        envelope = _call(server, "sofer_init", {"name": "my-ds", "force": True}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path), "force": True},
+        ).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == _INIT_TEMPLATE.format(
-            name="my-ds", user="YOUR_USER"
+            name="my-ds", user="testuser"
         )
 
     def test_minimal_toml_validation(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        _call(server, "sofer_init", {"name": "my-ds"})
+        _call(server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)})
         cfg = DatasetConfig.from_toml(tmp_path / "my-ds.toml")
         assert cfg.name == "my-ds"
 
@@ -2335,7 +2474,11 @@ class TestInitTreePreserve:
                 pass
 
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds", "move_existing": True}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path), "move_existing": True},
+        ).data
         assert envelope["ok"] is True
         assert (tmp_path / "raw" / "a.csv").is_file()
         assert not (tmp_path / "a.csv").exists()
@@ -2345,7 +2488,15 @@ class TestInitTreePreserve:
         (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
         envelope = _call(
-            server, "sofer_init", {"name": "my-ds", "move_existing": True, "dry_run": True}
+            server,
+            "sofer_init",
+            {
+                "name": "my-ds",
+                "user": "testuser",
+                "cwd": str(tmp_path),
+                "move_existing": True,
+                "dry_run": True,
+            },
         ).data
         assert "a.csv -> raw/a.csv" in envelope["output"]
 
@@ -2362,7 +2513,9 @@ class TestInitWindowsPlaceholder:
         import ntpath
 
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "test"}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "test", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert envelope["ok"] is True
         content = (tmp_path / "test.toml").read_text(encoding="utf-8")
         # No TODO: colon in file locals
@@ -2385,7 +2538,7 @@ class TestInitWindowsPlaceholder:
 
     def test_toml_no_todo_colon_in_locals(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
-        _call(server, "sofer_init", {"name": "test2"})
+        _call(server, "sofer_init", {"name": "test2", "user": "testuser", "cwd": str(tmp_path)})
         content = (tmp_path / "test2.toml").read_text(encoding="utf-8")
         # file locals must not contain TODO:
         for line in content.splitlines():
@@ -2394,18 +2547,23 @@ class TestInitWindowsPlaceholder:
 
 
 class TestInitCwdContainment:
-    """INIT-02: cwd None back-compat, contained succeeds, outside/traversal, no mutation."""
+    """INIT-02: cwd None fails closed, contained succeeds, outside/traversal, no mutation."""
 
-    def test_cwd_none_back_compat(self, tmp_path, restore_tool_config):
+    def test_cwd_none_fails_closed(self, tmp_path, restore_tool_config):
         parent = tmp_path / "Desktop"
         parent.mkdir()
         child = parent / "test"
         child.mkdir()
         server = build_server(root=parent)
-        # Simulate live CWD being child, but cwd=None should still use server root
-        envelope = _call(server, "sofer_init", {"name": "test", "cwd": None}).data
-        assert envelope["ok"] is True
-        assert (parent / "test.toml").exists()
+        # Live pytest CWD (repo root) is NOT a strict descendant of `parent`
+        # -> fail closed: refusal naming cwd, no write at the parent or child.
+        envelope = _call(
+            server, "sofer_init", {"name": "test", "user": "testuser", "cwd": None}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("cwd" in e for e in envelope["config_errors"])
+        assert not (parent / "test.toml").exists()
         assert not (child / "test.toml").exists()
 
     def test_cwd_contained_succeeds(self, tmp_path, restore_tool_config):
@@ -2414,7 +2572,11 @@ class TestInitCwdContainment:
         child = parent / "test"
         child.mkdir()
         server = build_server(root=parent)
-        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(child)}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(child)},
+        ).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2425,7 +2587,11 @@ class TestInitCwdContainment:
         server = build_server(root=parent)
         outside = "C:/Windows"
         with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "test", "cwd": outside})
+            _call(
+                server,
+                "sofer_init",
+                {"name": "test", "user": "testuser", "cwd": outside},
+            )
         assert not (parent / "test.toml").exists()
 
     def test_cwd_traversal_rejected(self, tmp_path, restore_tool_config):
@@ -2435,10 +2601,18 @@ class TestInitCwdContainment:
         server = build_server(root=parent)
         traversal = str(parent / ".." / "Windows")
         with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "test", "cwd": traversal})
+            _call(
+                server,
+                "sofer_init",
+                {"name": "test", "user": "testuser", "cwd": traversal},
+            )
         # Dotdot via string that escapes root
         with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "test", "cwd": str(parent / ".." / "evil")})
+            _call(
+                server,
+                "sofer_init",
+                {"name": "test", "user": "testuser", "cwd": str(parent / ".." / "evil")},
+            )
 
     def test_no_global_mutation(self, tmp_path, restore_tool_config):
         parent = tmp_path / "Desktop"
@@ -2447,7 +2621,11 @@ class TestInitCwdContainment:
         child.mkdir()
         server = build_server(root=parent)
         before = ms._get_root()
-        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(child)}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(child)},
+        ).data
         assert envelope["ok"] is True
         after = ms._get_root()
         assert before == after == parent.resolve()
@@ -2463,7 +2641,11 @@ class TestInitStaleRoot:
         child = parent / "test"
         child.mkdir()
         server = build_server(root=parent)
-        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(child)}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(child)},
+        ).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2476,13 +2658,19 @@ class TestInitStaleRoot:
         child = parent / "test"
         child.mkdir()
         server = build_server(root=parent)
-        _call(server, "sofer_init", {"name": "test", "cwd": str(child)})
+        _call(
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(child)},
+        )
         # create keep file inside effective raw
         keep = child / "raw" / "keep.csv"
         keep.write_text("a;b\n1;2\n", encoding="utf-8-sig")
         # re-run with force should preserve keep
         envelope = _call(
-            server, "sofer_init", {"name": "test", "cwd": str(child), "force": True}
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(child), "force": True},
         ).data
         assert envelope["ok"] is True
         assert keep.exists()
@@ -2494,13 +2682,17 @@ class TestInitStaleRoot:
         child = parent / "test"
         child.mkdir()
         server = build_server(root=parent)
-        _call(server, "sofer_init", {"name": "test", "cwd": str(child)})
+        _call(
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(child)},
+        )
         assert (child / "raw").is_dir()
         assert not (parent / "raw").exists()
 
 
 class TestInitAutoCwd:
-    """Approach 2: auto-detect live CWD when inside server root, fallback otherwise."""
+    """INIT-02: cwd=None uses the live CWD only when it is a strict descendant."""
 
     def test_auto_cwd_inside_root(self, tmp_path, monkeypatch, restore_tool_config):
         parent = tmp_path / "Desktop"
@@ -2509,7 +2701,9 @@ class TestInitAutoCwd:
         child.mkdir()
         server = build_server(root=parent)
         monkeypatch.chdir(child)
-        envelope = _call(server, "sofer_init", {"name": "test"}).data
+        envelope = _call(
+            server, "sofer_init", {"name": "test", "user": "testuser"}
+        ).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2518,7 +2712,7 @@ class TestInitAutoCwd:
         # global root never mutated
         assert ms._get_root() == parent.resolve()
 
-    def test_auto_cwd_outside_fallback(self, tmp_path, monkeypatch, restore_tool_config):
+    def test_auto_cwd_outside_fails_closed(self, tmp_path, monkeypatch, restore_tool_config):
         parent = tmp_path / "Desktop"
         parent.mkdir()
         child = parent / "test"
@@ -2527,9 +2721,13 @@ class TestInitAutoCwd:
         outside.mkdir()
         server = build_server(root=parent)
         monkeypatch.chdir(outside)
-        envelope = _call(server, "sofer_init", {"name": "test"}).data
-        assert envelope["ok"] is True
-        assert (parent / "test.toml").exists()
+        envelope = _call(
+            server, "sofer_init", {"name": "test", "user": "testuser"}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("cwd" in e for e in envelope["config_errors"])
+        assert not (parent / "test.toml").exists()
         assert not (outside / "test.toml").exists()
         assert not (child / "test.toml").exists()
 
@@ -2543,7 +2741,11 @@ class TestInitAutoCwd:
         # explicit cwd should still be honoured (even if live already inside)
         other = parent / "other"
         other.mkdir()
-        envelope = _call(server, "sofer_init", {"name": "test", "cwd": str(other)}).data
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "test", "user": "testuser", "cwd": str(other)},
+        ).data
         assert envelope["ok"] is True
         assert (other / "test.toml").exists()
         assert not (child / "test.toml").exists()
@@ -2643,7 +2845,33 @@ class TestInitCwdSchema:
         parent.mkdir()
         server = build_server(root=parent)
         with pytest.raises(ToolError, match="outside the server root"):
-            _call(server, "sofer_init", {"name": "test", "cwd": "C:/Windows"})
+            _call(
+                server,
+                "sofer_init",
+                {"name": "test", "user": "testuser", "cwd": "C:/Windows"},
+            )
+
+
+class TestOutputAnchoringMspR10:
+    """MSP-R10: relative output overrides anchor to the config's directory."""
+
+    def test_relative_output_dir_anchors_to_config_dir(self, tmp_path, restore_tool_config):
+        """sofer_prepare(config='proj/dataset.toml', output_dir='build') writes
+        under <root>/proj/build, NOT <root>/build (mcp-server/spec.md:171-175)."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_prepare",
+            {"config": str(proj / "dataset.toml"), "output_dir": "build"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (proj / "build" / "data.parquet").is_file()
+        assert (proj / "build" / "README.md").is_file()
+        assert not (tmp_path / "build").exists(), "must not anchor to the server root"
 
 
 # ---------------------------------------------------------------------------
