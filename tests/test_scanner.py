@@ -922,7 +922,9 @@ class TestE2EInitMoveScan:
         (tmp_path / "a.csv").write_text("x,y\n1,2\n", encoding="utf-8")
         (tmp_path / "b.parquet").write_text("fake", encoding="utf-8")
 
-        rc = _cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        rc = _cmd_init(
+            Namespace(name="my-ds", user="testuser", move_existing=True, dry_run=False, force=True)
+        )
         assert rc == 0
         assert (tmp_path / "raw" / "a.csv").exists()
         assert not (tmp_path / "a.csv").exists()
@@ -930,11 +932,7 @@ class TestE2EInitMoveScan:
         assert (tmp_path / "raw" / "b.parquet").exists()
 
         cfg = tmp_path / "my-ds.toml"
-        # Patch placeholder repo_id so validation passes (init template uses YOUR_USER).
-        cfg.write_text(
-            cfg.read_text(encoding="utf-8").replace("YOUR_USER/my-ds", "u/my-ds"),
-            encoding="utf-8",
-        )
+        # init embeds a validated repo_id (identity checked pre-write)
         # scan registers raw/ files into TOML and copies to cache/
         monkeypatch.setattr("builtins.input", lambda _p="": "y")
         rc2 = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
