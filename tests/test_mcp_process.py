@@ -118,6 +118,75 @@ class TestNestedCwd:
         assert not (parent / "raw").exists()
 
 
+class TestParentRootIdentity:
+    """PB-04: real-process parent-root identity contract (the #116 reproduction).
+
+    Launches the REAL ``sofer-mcp`` process via the module-scoped
+    ``mcp_stdio_parent_root`` fixture (server root = parent dir with an
+    existing ``child/`` dataset dir) — ``build_server(root=child)`` or
+    imported-function tests are insufficient for the parent/child identity
+    contract (PB-04 spec). One spawn per module (PB-09 lean-spawn bound): both
+    scenarios run sequentially over a single stdio session whose live CWD is
+    the parent root, so ``cwd=None`` MUST fail closed (no silent parent-root
+    selection) and ``cwd="child"`` MUST anchor identity under ``child/``.
+    """
+
+    def test_cwd_omitted_fails_closed_then_cwd_child_anchors(
+        self, mcp_stdio_parent_root: Any
+    ) -> None:
+        """(a) cwd omitted at the parent root -> input-required refusal naming
+        ``cwd``, NO parent ``test.toml`` and NO parent ``raw/``; then (b)
+        ``cwd="child"`` -> ``child/test.toml`` + ``child/raw/`` exist,
+        ``parent/test.toml`` absent, and the envelope reports the absolute
+        ``config_path`` / ``dataset_root``."""
+        params = mcp_stdio_parent_root.spawn()
+        parent = mcp_stdio_parent_root.cwd
+        child = parent / "child"
+
+        async def _go() -> None:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                ) as session:
+                    await session.initialize()
+
+                    # (a) cwd omitted: the live CWD equals the parent server
+                    # root, which is NOT a strict descendant of itself — the
+                    # call must be refused naming the required cwd argument,
+                    # with NO writes at the parent (fail-closed, INIT-02).
+                    omitted = await session.call_tool(
+                        "sofer_init", {"name": "test", "user": "testuser"}
+                    )
+                    assert not omitted.isError
+                    refusal = json.loads(omitted.content[0].text)
+                    assert refusal["ok"] is False
+                    assert refusal["exit_code"] == 1
+                    assert any("cwd" in e for e in refusal["config_errors"]), refusal
+                    assert not (parent / "test.toml").exists()
+                    assert not (parent / "raw").exists()
+
+                    # (b) cwd="child": identity anchors under child/, the
+                    # parent stays clean, and the envelope reports the
+                    # canonical absolute identity (INIT-03, PB-03).
+                    anchored = await session.call_tool(
+                        "sofer_init", {"name": "test", "user": "testuser", "cwd": "child"}
+                    )
+                    assert not anchored.isError
+                    envelope = json.loads(anchored.content[0].text)
+                    assert envelope["ok"] is True, envelope
+                    assert (child / "test.toml").is_file()
+                    assert (child / "raw").is_dir()
+                    assert not (parent / "test.toml").exists()
+                    assert not (parent / "raw").exists()
+                    assert envelope["config_path"] == str((child / "test.toml").resolve())
+                    assert envelope["dataset_root"] == str(child.resolve())
+
+        _run(_go())
+
+
 class TestRecoveryPublishConfirm:
     """PB-03: replay the documented risk-gate hint past the risk gate."""
 
