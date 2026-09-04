@@ -151,6 +151,16 @@ and `LICENSE` (via `build_license_file`) at the root of the output directory.
 When `cfg.readme` points to an existing file, its content SHALL be used instead
 of the generated card.
 
+The optional documentation paths — `readme`, `study_design`, `recipe` (all read
+and embedded into the card) — SHALL resolve against the config's directory
+(`cfg._base_dir`, the TOML's folder), never the process working directory: a
+relative declaration like `readme = "docs/readme.md"` SHALL be read from next
+to the TOML. Under the MCP server, every declared doc path SHALL additionally
+be containment-checked against the server root before any read — a path
+resolving outside the root (`../../secret.txt` or an absolute escape) SHALL
+refuse the call (`ok:False` / `config_errors`), never be silently read into the
+published card.
+
 #### Scenario: Card and license written to output root
 
 - GIVEN a config with `license = "cc0-1.0"` and CSV entries
@@ -164,6 +174,20 @@ of the generated card.
 - GIVEN `cfg.readme` pointing to an existing markdown file
 - WHEN `prepare` completes
 - THEN the output `README.md` SHALL equal the custom file's content
+
+#### Scenario: Relative README resolves against the TOML directory
+
+- GIVEN `cfg.readme = "custom.md"` and `custom.md` next to the TOML
+- AND the process cwd is elsewhere
+- WHEN `prepare` completes
+- THEN the output `README.md` SHALL equal `custom.md`'s content
+
+#### Scenario: Declared doc path outside the server root refused
+
+- GIVEN a TOML declaring `readme = "../../outside.md"` (resolving outside the MCP server root)
+- WHEN the tool boundary validates the config
+- THEN the call SHALL be refused with `ok:False` and a `config_errors` entry
+      naming the field, before any read
 
 #### Scenario: No license declared still succeeds
 

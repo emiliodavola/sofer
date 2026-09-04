@@ -1225,3 +1225,33 @@ class TestSubprocessBoundary:
         assert result.returncode == 0, result.stderr
         assert (tmp_path / "data" / "out.md").is_file(), "output must land next to the input"
         assert not (tmp_path / "out.md").exists(), "output must not land in cwd"
+
+    def test_prepare_reads_relative_readme_from_toml_dir(self, tmp_path) -> None:
+        """CLI prepare resolves a relative [meta] readme against the TOML's
+        directory (PRP-03), never the process cwd.
+
+        The TOML lives in ``proj/`` while the subprocess cwd is the parent —
+        an un-anchored read would miss ``proj/custom.md`` and fall back to the
+        generated card.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "custom.md").write_text("# PROJ CARD\n", encoding="utf-8")
+        (proj / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
+        (proj / "dataset.toml").write_text(
+            "[dataset]\n"
+            'name = "test-ds"\n'
+            'repo_id = "user/test-ds"\n'
+            "\n"
+            "[meta]\n"
+            "confidential = false\n"
+            'readme = "custom.md"\n'
+            "\n"
+            "[[file]]\n"
+            'local = "data.csv"\n'
+            'remote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(["prepare", "proj/dataset.toml"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"

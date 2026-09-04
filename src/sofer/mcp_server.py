@@ -88,7 +88,7 @@ from .execution_context import (
     validate_identity,
 )
 from .metadata import load as metadata_load
-from .model import DatasetConfig, QualityResult
+from .model import DatasetConfig, QualityResult, resolve_doc_path
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
 from .profile import profile as run_profile
@@ -449,6 +449,40 @@ def _validate_output_targets(
     return errors
 
 
+def _validate_doc_files(cfg: DatasetConfig) -> list[str]:
+    """Containment-check the optional documentation paths (PRP-03, fix 2).
+
+    ``[dataset] readme`` / ``study_design`` / ``recipe`` are optional paths
+    read by :func:`sofer.prepare.prepare` and embedded into the published
+    dataset card (prepare.py:809-830). They resolve against the config's
+    directory (``cfg._base_dir``), so a TOML can declare ``readme =
+    "../../secret.txt"`` (or an absolute path outside the root) and prepare
+    would otherwise read external content into the published card. Every
+    declared value is resolved and required to stay under the server root;
+    violations are collected (never a silent pass) so the caller refuses
+    with ``ok:False`` / ``config_errors`` before any read happens.
+
+    Args:
+        cfg: Dataset configuration carrying the declared doc paths.
+
+    Returns:
+        Human-readable violation messages (empty when every declared doc
+        path is contained).
+    """
+    root_resolved = _get_root().resolve()
+    base = cfg._base_dir if cfg._base_dir else Path.cwd()
+    errors: list[str] = []
+    for field_name in ("readme", "study_design", "recipe"):
+        raw = getattr(cfg, field_name)
+        resolved = resolve_doc_path(raw, base)
+        if resolved is None:
+            continue
+        resolved = resolved.resolve()
+        if not resolved.is_relative_to(root_resolved):
+            errors.append(f"[dataset] {field_name} resolves outside the server root: {resolved}")
+    return errors
+
+
 def _reload_tool_config(start: Path) -> None:
     """Re-anchor ``[tool.sofer]`` discovery bounded by the server root.
 
@@ -514,6 +548,7 @@ def _load_dataset(
     config_errors: list[str] = cfg.validate()
     config_errors.extend(_validate_file_entries(cfg))
     config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
+    config_errors.extend(_validate_doc_files(cfg))
 
     if config_errors or not run_checks:
         return cfg, None, config_errors
@@ -1242,6 +1277,7 @@ def sofer_profile_all(
         config_errors = cfg.validate()
         config_errors.extend(_validate_file_entries(cfg))
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
+        config_errors.extend(_validate_doc_files(cfg))
         if config_errors:
             return _refusal(config_errors)
         if not cfg.files:
@@ -1372,6 +1408,7 @@ def sofer_render_all(
         config_errors = cfg.validate()
         config_errors.extend(_validate_file_entries(cfg))
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
+        config_errors.extend(_validate_doc_files(cfg))
         if config_errors:
             return _refusal(config_errors)
         if not cfg.files:
@@ -1439,6 +1476,7 @@ def sofer_auth_status(
         # avoid false ok:true on malicious TOML (Risk W1).
         config_errors.extend(_validate_file_entries(cfg))
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
+        config_errors.extend(_validate_doc_files(cfg))
         token = _get_hf_token()
         token_status = "present" if token is not None else "missing"
         requires_ack_confidential = bool(cfg.confidential)

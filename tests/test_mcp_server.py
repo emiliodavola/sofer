@@ -2977,6 +2977,77 @@ class TestOutputAnchoringMspR10:
         assert not (tmp_path / "build").exists(), "must not anchor to the server root"
 
 
+class TestDocPathContainment:
+    """PRP-03 / B2: auxiliary doc paths resolve against the TOML's directory
+    and are containment-checked under the server root."""
+
+    @staticmethod
+    def _write_toml_with_doc(proj: Path, field: str, value: str) -> None:
+        """Overwrite *proj*/dataset.toml with an extra [meta] doc declaration."""
+        (proj / "dataset.toml").write_text(
+            "[dataset]\nname='x'\nrepo_id='u/x'\n\n"
+            f"[meta]\nconfidential = false\n{field} = {value!r}\n\n"
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+
+    def test_doc_path_outside_root_refused_before_read(self, tmp_path, restore_tool_config):
+        """A TOML declaring readme='../../outside.md' (relative to the TOML)
+        is refused at the MCP boundary — ok:False, no read into the card."""
+        root = tmp_path / "root"
+        root.mkdir()
+        proj = root / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        self._write_toml_with_doc(proj, "readme", "../../outside.md")
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_validate", {"config": str(proj / "dataset.toml")}).data
+        assert envelope["ok"] is False
+        assert any(
+            "readme resolves outside the server root" in e for e in envelope["config_errors"]
+        ), envelope
+
+    def test_study_design_and_recipe_outside_root_refused(self, tmp_path, restore_tool_config):
+        """study_design/recipe are containment-checked too — a declared path
+        escaping the root refuses the call."""
+        root = tmp_path / "root"
+        root.mkdir()
+        proj = root / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        self._write_toml_with_doc(proj, "study_design", "../../outside.md")
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_validate", {"config": str(proj / "dataset.toml")}).data
+        assert envelope["ok"] is False
+        assert any(
+            "study_design resolves outside the server root" in e for e in envelope["config_errors"]
+        ), envelope
+
+    def test_contained_doc_path_passes_and_reads_relative_to_toml_dir(
+        self, tmp_path, restore_tool_config
+    ):
+        """A contained RELATIVE readme passes validation and prepare reads it
+        relative to the TOML's directory — never the process cwd."""
+        root = tmp_path / "root"
+        root.mkdir()
+        proj = root / "proj"
+        proj.mkdir()
+        _make_dataset(proj)
+        custom = proj / "custom.md"
+        custom.write_text("# CONTAINED CARD\n", encoding="utf-8")
+        self._write_toml_with_doc(proj, "readme", "custom.md")
+        server = build_server(root=root)
+
+        validate = _call(server, "sofer_validate", {"config": str(proj / "dataset.toml")}).data
+        assert validate["ok"] is True, validate
+
+        prepare = _call(server, "sofer_prepare", {"config": str(proj / "dataset.toml")}).data
+        assert prepare["ok"] is True, prepare
+        assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# CONTAINED CARD\n"
+
+
 # ---------------------------------------------------------------------------
 #  feat-mcp-build-clarity — canonical chain, when-to-use, no sofer_build
 # ---------------------------------------------------------------------------

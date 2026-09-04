@@ -35,6 +35,30 @@ _PLACEHOLDERS: frozenset[str] = frozenset(
 )
 
 
+def resolve_doc_path(value: str | None, base: Path) -> Path | None:
+    """Resolve an optional documentation path against the config directory.
+
+    ``[dataset] readme`` / ``study_design`` / ``recipe`` (and ``codebook``)
+    are optional file paths read by :func:`sofer.prepare.prepare` and
+    embedded into the published dataset card. They resolve against *base*
+    (the TOML's directory, ``cfg._base_dir``) — never the process working
+    directory — so a TOML declaring ``readme = "docs/readme.md"`` is read
+    from next to the TOML regardless of where the CLI/MCP process runs.
+    Absolute values are returned as-is.
+
+    Args:
+        value: The raw declared path, or ``None``/empty when not declared.
+        base: Anchor directory for relative values (the config directory).
+
+    Returns:
+        The resolved path, or ``None`` when *value* is empty.
+    """
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else base / path
+
+
 class InferenceStatus(str, Enum):
     """Frozen vocabulary describing how a value was inferred.
 
@@ -566,14 +590,17 @@ class DatasetConfig:
         # any staging write.
         errors.extend(_validate_case_fold_collisions(self))
 
-        # optional docs
+        # optional docs — resolved against the config's directory (PRP-03),
+        # never the process cwd, so a relative declaration like
+        # ``readme = "docs/readme.md"`` is found next to the TOML.
         for field_name, doc_path in (
             ("readme", self.readme),
             ("codebook", self.codebook),
             ("study_design", self.study_design),
             ("recipe", self.recipe),
         ):
-            if doc_path and not Path(doc_path).exists():
-                errors.append(f"Declared {field_name} not found: {doc_path}")
+            doc_resolved = resolve_doc_path(doc_path, base)
+            if doc_resolved is not None and not doc_resolved.exists():
+                errors.append(f"Declared {field_name} not found: {doc_resolved}")
 
         return errors

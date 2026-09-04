@@ -262,6 +262,65 @@ class TestPrepareCardLicense:
         assert rc == 0
         assert (out / "README.md").read_text(encoding="utf-8") == "# CUSTOM CARD\n"
 
+    def test_relative_readme_resolves_against_config_dir(self, tmp_path: Path) -> None:
+        """A RELATIVE cfg.readme resolves against the config dir (PRP-03),
+        never the process cwd — the TOML's directory is the anchor."""
+        custom = tmp_path / "custom.md"
+        custom.write_text("# RELATIVE CARD\n", encoding="utf-8")
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="data.csv")],
+            readme="custom.md",
+        )
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        assert rc == 0
+        assert (out / "README.md").read_text(encoding="utf-8") == "# RELATIVE CARD\n"
+
+    def test_recipe_and_study_design_relative_to_config_dir(self, tmp_path: Path, capsys) -> None:
+        """Relative recipe/study_design resolve against the config dir and
+        their content is embedded into the card."""
+        (tmp_path / "recipe.R").write_text("# recipe\n", encoding="utf-8")
+        (tmp_path / "design.md").write_text("# design\n", encoding="utf-8")
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="data.csv")],
+            recipe="recipe.R",
+            study_design="design.md",
+        )
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "declared but not found" not in captured.out
+        card = (out / "README.md").read_text(encoding="utf-8")
+        assert "# recipe" in card
+        assert "# design" in card
+
+    def test_relative_readme_missing_warns_and_falls_back(self, tmp_path: Path, capsys) -> None:
+        """A relative readme that does not exist keeps the 'declared but not
+        found' warning and falls back to the generated card."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="data.csv")],
+            readme="missing.md",
+        )
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "readme declared but not found" in captured.out
+        assert (out / "README.md").is_file()
+
     def test_no_license_still_succeeds(self, tmp_path: Path) -> None:
         """license='' -> LICENSE holds the fallback message; exit 0."""
         csv = tmp_path / "data.csv"
