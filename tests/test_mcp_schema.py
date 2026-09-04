@@ -15,7 +15,7 @@ import pytest
 from conftest import call_tool
 from fastmcp import Client
 
-from sofer.mcp_server import build_server, sofer_auth_status
+from sofer.mcp_server import build_server
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "mcp-happy-path"
 
@@ -247,12 +247,18 @@ class TestEnvelope:
             encoding="utf-8",
         )
         monkeypatch.setenv("HF_TOKEN", "secret123")
-        build_server(root=tmp_path, approval_phrase="phrase123")
-        envelope = sofer_auth_status(str(tmp_path / "dataset.toml"))
+        server = build_server(root=tmp_path, approval_phrase="phrase123")
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
         assert envelope["token"] in ("present", "missing")
         assert "secret123" not in str(envelope)
         assert "phrase123" not in str(envelope)
         assert envelope["requires_approval_phrase"] is True
+        # sofer_auth_status is the ONLY tool whose output_schema declares next —
+        # this is the sole boundary-level next assertion (spec delta s7).
+        assert envelope["next"]["acknowledge_risk"] is True
+        assert envelope["next"]["approval_phrase"] == "<from human>"
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
 
 
