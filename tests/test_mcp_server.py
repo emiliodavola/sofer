@@ -2230,6 +2230,25 @@ class TestInitUserFlag:
         assert not (tmp_path / "my-ds.toml").exists()
         assert not (tmp_path / "raw").exists()
 
+    def test_newline_user_refused_before_write(self, tmp_path, restore_tool_config):
+        """INIT-05: user with a trailing newline is refused at the boundary.
+
+        Python's ``$`` anchor matches before a trailing ``\n``, so without the
+        ``\\Z`` anchor + control-character check ``user="alice\n"`` would pass
+        validation and the MCP strip would silently diverge from the CLI
+        (``alice\n`` vs ``alice`` in the TOML). The refusal must happen before
+        any write.
+        """
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "alice\n", "cwd": str(tmp_path)}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert any("control" in e or "match" in e for e in envelope["config_errors"])
+        assert not (tmp_path / "my-ds.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
 
 class TestInitDryRun:
     def test_dry_run_no_mutation(self, tmp_path, restore_tool_config):

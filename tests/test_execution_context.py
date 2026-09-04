@@ -93,6 +93,18 @@ class TestValidateIdentity:
         """user not matching ^[\\w\\-]+$ is refused."""
         assert validate_identity("test", user)
 
+    @pytest.mark.parametrize("user", ["alice\n", "alice\t", "alice\x00", "alice\x7f"])
+    def test_user_control_char_refused(self, user):
+        """Newline/tab/NUL/DEL users are refused.
+
+        Python's ``$`` anchor matches before a trailing ``\n``, so the regex
+        alone would let ``"alice\n"`` through; the ``\\Z`` anchor plus the
+        explicit control-character check reject it (INIT-05 parity with the
+        ``name`` component check).
+        """
+        errors = validate_identity("ds", user)
+        assert any("control" in e.lower() or "match" in e.lower() for e in errors)
+
     def test_name_placeholder_not_banned(self):
         """The placeholder ban applies to user only — a placeholder-like
         name is still a valid single component."""

@@ -32,8 +32,11 @@ from typing import TypeGuard
 from .model import _PLACEHOLDERS
 
 #: ``user`` SHALL match ``^[\w\-]+$`` (INIT-05): letters, digits, and
-#: underscore (``\w``) plus explicit hyphens.
-_USER_RE = re.compile(r"^[\w\-]+$")
+#: underscore (``\w``) plus explicit hyphens. The end anchor is ``\Z`` (end
+#: of string), NOT ``$`` — in Python ``$`` matches before a trailing ``\n``,
+#: so a ``user="alice\n"`` would otherwise pass; the ``\Z`` anchor plus the
+#: control-character check below reject it.
+_USER_RE = re.compile(r"^[\w\-]+\Z")
 
 #: Control characters banned from ``name`` / ``user`` (INIT-05) — covers
 #: ``\n``, ``\t``, ``\r`` and the rest of ``[\x00-\x1f]`` plus DEL (``\x7f``).
@@ -144,9 +147,11 @@ def validate_identity(name: str | None, user: str | None) -> list[str]:
           (``None`` / ``""`` / whitespace-only are rejected);
         - ``name`` must be a single component (see
           :func:`_is_single_component`);
-        - ``user`` must match ``^[\\w\\-]+$`` and must not be a normalized
-          ``model._PLACEHOLDERS`` value (``YOUR_USER``, ``your-username``,
-          ...). The placeholder ban applies to ``user`` only.
+        - ``user`` must match ``^[\\w\\-]+$`` (end-anchored, so a trailing
+          newline fails), must not contain control characters, and must not
+          be a normalized ``model._PLACEHOLDERS`` value (``YOUR_USER``,
+          ``your-username``, ...). The placeholder ban applies to ``user``
+          only.
 
     Args:
         name: Dataset name, or ``None``.
@@ -168,7 +173,9 @@ def validate_identity(name: str | None, user: str | None) -> list[str]:
     if not _is_non_empty(user):
         errors.append("user must be non-empty")
     else:
-        if not _USER_RE.match(user):
+        if _CONTROL_CHARS_RE.search(user):
+            errors.append(f"user must not contain control characters, got '{user}'")
+        elif not _USER_RE.match(user):
             errors.append(f"user must match ^[\\w\\-]+$, got '{user}'")
         elif user.strip().lower() in _PLACEHOLDERS:
             errors.append(
