@@ -215,9 +215,18 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # time (post-reload), never from a frozen argparse default.
     max_sample = args.max_sample if args.max_sample is not None else config.CODEBOOK_MAX_SAMPLE
 
+    # Anchor a relative --output to the input file's parent (MSP-R10): the
+    # codebook lands next to the analysed file, never in an unrelated cwd.
+    output_path = args.output
+    if output_path:
+        out = Path(output_path)
+        if not out.is_absolute():
+            out = Path(args.csv).parent / out
+        output_path = str(out)
+
     codebook = generate_codebook(
         args.csv,
-        output_path=args.output,
+        output_path=output_path,
         max_sample=max_sample,
     )
     if not args.output:
@@ -287,10 +296,15 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     if not getattr(args, "dataset", None):
         print("Error: Must specify a dataset file or use --all-files.", file=sys.stderr)
         return 1
+    # Anchor a relative --output to the dataset's parent (MSP-R10): the
+    # metadata.yaml lands next to the profiled file, never in an unrelated cwd.
+    output_dir = Path(args.output) if args.output else None
+    if output_dir is not None and not output_dir.is_absolute():
+        output_dir = Path(args.dataset).parent / output_dir
     try:
         return run_profile(
             Path(args.dataset),
-            output_dir=Path(args.output) if args.output else None,
+            output_dir=output_dir,
             force=bool(getattr(args, "force", False)),
         )
     except FileExistsError as exc:
@@ -356,10 +370,16 @@ def _cmd_render(args: argparse.Namespace) -> int:
     if not getattr(args, "package", None):
         print("Error: Must specify a package path or use --all-files.", file=sys.stderr)
         return 1
+    # Anchor a relative --output to the package dir-or-file (MSP-R10): the
+    # README.md lands next to metadata.yaml, never in an unrelated cwd.
+    output_dir = Path(args.output) if args.output else None
+    if output_dir is not None and not output_dir.is_absolute():
+        pkg = Path(args.package)
+        output_dir = (pkg if pkg.is_dir() else pkg.parent) / output_dir
     try:
         return run_render(
             Path(args.package),
-            output_dir=Path(args.output) if args.output else None,
+            output_dir=output_dir,
             force=bool(getattr(args, "force", False)),
         )
     except FileExistsError as exc:
