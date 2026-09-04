@@ -857,15 +857,16 @@ def _cmd_init(args: argparse.Namespace) -> int:
            ``<root>/<name>.toml`` and ``<root>/RAW_DIR`` from it; refuse to
            overwrite an existing TOML.
         3. ``mkdir -p RAW_DIR`` idempotently (``exist_ok=True``) before the
-           TOML write — skipped only when ``--move-existing --dry-run`` is
-           active (preview, no mutation).
+           TOML write — skipped under ``--dry-run`` in BOTH branches
+           (preview only, no mutation), matching the MCP ``sofer_init``
+           no-mutation semantics.
         4. When ``--move-existing`` is set: collect depth-1 supported files
            (``SUPPORTED_FORMATS``, direct children of the dataset root), run
            :func:`check_flatten_collisions` against existing ``raw/`` content
-           before any move, honour ``--dry-run`` (preview, no ``raw/`` mkdir
-           when absent, no moves), ``--force`` / ``not isatty`` guard (skip
-           prompt), else prompt ``[y/N]`` and abort on ``N``, then
-           :func:`shutil.move` each file into ``RAW_DIR``.
+           before any move, honour ``--dry-run`` (preview: no TOML, no
+           ``raw/`` mkdir when absent, no moves), ``--force`` / ``not
+           isatty`` guard (skip prompt), else prompt ``[y/N]`` and abort on
+           ``N``, then :func:`shutil.move` each file into ``RAW_DIR``.
     """
     errors = validate_identity(args.name, getattr(args, "user", None))
     if errors:
@@ -888,7 +889,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     toml_text = _INIT_TEMPLATE.format(name=args.name, user=user_val)
 
     if not move_existing:
-        # Always scaffold raw/ idempotently before TOML write (CLI-R07).
+        if dry_run:
+            # No-mutation preview (CLI-R07 / MCP parity): neither the TOML
+            # nor raw/ is created.
+            print(f"  DRY RUN  Would create {output.name}")
+            print(f"  DRY RUN  Would scaffold {raw_dir_name}")
+            return 0
+        # Scaffold raw/ idempotently before TOML write (CLI-R07).
         raw_dir_path.mkdir(parents=True, exist_ok=True)
         output.write_text(toml_text, encoding="utf-8")
         print(f"  OK  Created {output}")
@@ -933,12 +940,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 print(f"     {src.name} -> {raw_dir_name}/{src.name}")
         else:
             print("  DRY RUN  No supported files to move.")
-        # Preview only: no raw/ mkdir when absent, no moves.
-        output.write_text(toml_text, encoding="utf-8")
-        print(f"  OK  Created {output}")
-        print("     Edit the file and run:")
-        print(f"       sofer prepare {output.name}")
-        print(f"       sofer publish {output.name}")
+        # Preview only — dry_run performs NO filesystem writes (CLI-R07
+        # no-mutation contract): neither the TOML nor raw/ is created, no
+        # moves, matching the MCP sofer_init no-mutation semantics.
+        print(f"  DRY RUN  Would create {output.name}")
+        print(f"  DRY RUN  Would scaffold {raw_dir_name}")
         return 0
 
     # Non-dry-run move_existing: honour --force / isatty guard.
@@ -1324,8 +1330,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "into raw/; files inside cache/, build/, raw/, or EXCLUSIONS are "
             "never moved, subdirectories are ignored, and collisions with "
             "existing raw/ content are checked via check_flatten_collisions "
-            "before any move. --dry-run previews moves without mutation "
-            "(raw/ not created when absent); --force or non-interactive "
+            "before any move. --dry-run performs no writes in either branch "
+            "(no <name>.toml, no raw/, no moves); --force or non-interactive "
             "(not isatty) skips the [y/N] prompt, else prompt aborts on N.\n"
             "\n"
             "Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) "
@@ -1357,7 +1363,10 @@ def _build_parser() -> argparse.ArgumentParser:
     i.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview moves (a.csv -> raw/a.csv) without creating raw/ or moving files.",
+        help=(
+            "Preview without writing any files: no <name>.toml, no raw/, no "
+            "moves — for plain init and --move-existing alike."
+        ),
     )
     i.add_argument(
         "--force",

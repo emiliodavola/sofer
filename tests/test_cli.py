@@ -523,7 +523,7 @@ class TestInitRawFolder:
         assert (tmp_path / "raw" / "a.csv").exists()
 
     def test_move_existing_dry_run_no_mutation(self, tmp_path, monkeypatch, capsys):
-        """--dry-run previews moves, creates TOML, but not raw/ when absent nor moves."""
+        """--dry-run previews moves, writes NO TOML, no raw/ when absent, no moves."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
         (tmp_path / "b.xlsx").write_text("x", encoding="utf-8")
@@ -534,11 +534,26 @@ class TestInitRawFolder:
         out = capsys.readouterr().out
         assert "dry run" in out.lower()
         assert "a.csv" in out
-        assert (tmp_path / "my-ds.toml").exists()
+        assert "Would create my-ds.toml" in out
+        assert not (tmp_path / "my-ds.toml").exists()
         # raw/ not created when absent under dry-run
         assert not (tmp_path / "raw").exists()
         assert (tmp_path / "a.csv").exists()
         assert (tmp_path / "b.xlsx").exists()
+
+    def test_init_plain_dry_run_no_mutation(self, tmp_path, monkeypatch, capsys):
+        """`init --dry-run` (no --move-existing) previews, writes no TOML/raw/ (CLI-R07)."""
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=False, dry_run=True, force=False)
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN" in out
+        assert "Would create my-ds.toml" in out
+        assert "Would scaffold raw" in out
+        assert not (tmp_path / "my-ds.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
     def test_move_existing_non_interactive_guard(self, tmp_path, monkeypatch, capsys):
         """not isatty without --force skips move, creates raw/, hints --force."""
@@ -1164,6 +1179,21 @@ class TestSubprocessBoundary:
         assert result.returncode == 0
         assert str(tmp_path.resolve() / "myds.toml") in result.stdout
         assert (tmp_path / "myds.toml").exists()
+
+    def test_init_dry_run_no_mutation(self, tmp_path) -> None:
+        """`init --dry-run` exits 0, previews, and writes nothing (CLI-R07).
+
+        Parity with MCP ``sofer_init(dry_run=True)`` (no-mutation in both
+        branches): the plain init branch must not write the TOML nor create
+        raw/ under ``--dry-run``.
+        """
+        result = run_cli(["init", "myds", "--user", "alice", "--dry-run"], cwd=tmp_path)
+        assert result.returncode == 0
+        assert "DRY RUN" in result.stdout
+        assert "Would create myds.toml" in result.stdout
+        assert "Would scaffold raw" in result.stdout
+        assert not (tmp_path / "myds.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
     def test_init_placeholder_user_rejected(self, tmp_path) -> None:
         """`--user YOUR_USER` exits 1 naming the placeholder, no file written."""
