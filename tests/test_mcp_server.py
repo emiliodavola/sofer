@@ -2211,9 +2211,7 @@ class TestInitUserFlag:
     def test_missing_user_refused_before_write(self, tmp_path, restore_tool_config):
         """INIT-05: no user -> envelope refusal naming user, NO TOML, NO raw/."""
         server = build_server(root=tmp_path)
-        envelope = _call(
-            server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)}
-        ).data
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)}).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert any("user must be non-empty" in e for e in envelope["config_errors"])
@@ -2701,9 +2699,7 @@ class TestInitAutoCwd:
         child.mkdir()
         server = build_server(root=parent)
         monkeypatch.chdir(child)
-        envelope = _call(
-            server, "sofer_init", {"name": "test", "user": "testuser"}
-        ).data
+        envelope = _call(server, "sofer_init", {"name": "test", "user": "testuser"}).data
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         assert (child / "raw").is_dir()
@@ -2721,9 +2717,7 @@ class TestInitAutoCwd:
         outside.mkdir()
         server = build_server(root=parent)
         monkeypatch.chdir(outside)
-        envelope = _call(
-            server, "sofer_init", {"name": "test", "user": "testuser"}
-        ).data
+        envelope = _call(server, "sofer_init", {"name": "test", "user": "testuser"}).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert any("cwd" in e for e in envelope["config_errors"])
