@@ -461,23 +461,6 @@ def _reload_tool_config(start: Path) -> None:
     sofer_config.reload(start, stop_at=_get_root())
 
 
-def _bound_discovery(base: Path) -> None:
-    """Re-bind ``[tool.sofer]`` when ``from_toml``'s reload escaped the root.
-
-    ``DatasetConfig.from_toml`` reloads config from the dataset directory
-    (model.py:355) using the CLI's unbounded walk-up; when that discovered a
-    ``pyproject.toml`` ABOVE the server root, re-run the reload bounded at
-    the root so the module constants fall back to defaults (or an in-root
-    pyproject). No-op when the discovered source is already inside the root
-    or no source was found (built-in defaults).
-    """
-    source = sofer_config.SOURCE_PATH
-    if source is None:
-        return
-    if not Path(source).resolve().is_relative_to(_get_root().resolve()):
-        sofer_config.reload(base, stop_at=_get_root())
-
-
 def _read_toml_text(path: Path) -> dict[str, Any]:
     """Parse a TOML file into a plain dict.
 
@@ -524,11 +507,9 @@ def _load_dataset(
         config_path, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
     )
     try:
-        cfg = DatasetConfig.from_toml(toml_path)
+        cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
     except Exception as exc:
         return None, None, [f"Failed to read TOML: {exc}"]
-
-    _bound_discovery(cfg._base_dir)
 
     config_errors: list[str] = cfg.validate()
     config_errors.extend(_validate_file_entries(cfg))
@@ -1249,14 +1230,13 @@ def sofer_profile_all(
             config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
         )
         try:
-            cfg = DatasetConfig.from_toml(toml_path)
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
         except Exception as exc:
             return _error_envelope(
                 "CONFIG_ERROR",
                 f"Failed to read TOML: {exc}",
                 config_errors=[f"Failed to read TOML: {exc}"],
             )
-        _bound_discovery(cfg._base_dir)
         config_errors = cfg.validate()
         config_errors.extend(_validate_file_entries(cfg))
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
@@ -1371,14 +1351,13 @@ def sofer_render_all(
             config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
         )
         try:
-            cfg = DatasetConfig.from_toml(toml_path)
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
         except Exception as exc:
             return _error_envelope(
                 "CONFIG_ERROR",
                 f"Failed to read TOML: {exc}",
                 config_errors=[f"Failed to read TOML: {exc}"],
             )
-        _bound_discovery(cfg._base_dir)
         config_errors = cfg.validate()
         config_errors.extend(_validate_file_entries(cfg))
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
@@ -1437,14 +1416,13 @@ def sofer_auth_status(
             config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
         )
         try:
-            cfg = DatasetConfig.from_toml(toml_path)
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
         except Exception as exc:
             return _error_envelope(
                 "CONFIG_ERROR",
                 f"Failed to read TOML: {exc}",
                 config_errors=[f"Failed to read TOML: {exc}"],
             )
-        _bound_discovery(cfg._base_dir)
         config_errors = cfg.validate()
         # Also surface containment errors for file entries and output targets to
         # avoid false ok:true on malicious TOML (Risk W1).
