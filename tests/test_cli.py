@@ -1211,6 +1211,23 @@ class TestSubprocessBoundary:
         assert not (tmp_path / "b.toml").exists()
         assert not (tmp_path / "raw").exists()
 
+    def test_init_windows_invalid_name_rejected(self, tmp_path) -> None:
+        """Windows-invalid char name `a*b` exits 1 pre-write, no TOML/raw."""
+        result = run_cli(["init", "a*b", "--user", "alice"], cwd=tmp_path)
+        assert result.returncode == 1
+        assert "Windows-invalid" in result.stderr
+        assert not (tmp_path / "a*b.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_init_reserved_device_name_rejected(self, tmp_path) -> None:
+        """Reserved device name `CON` exits 1 pre-write — no TOML, no raw/
+        (no partial state; on Windows CON.toml would be unmaterializable)."""
+        result = run_cli(["init", "CON", "--user", "alice"], cwd=tmp_path)
+        assert result.returncode == 1
+        assert "reserved" in result.stderr.lower()
+        assert not (tmp_path / "CON.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
     def test_codebook_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
         """A relative single-file ``-o`` anchors to the INPUT's parent, not cwd.
 

@@ -2494,6 +2494,33 @@ class TestInitTraversal:
         assert not list(tmp_path.glob("*.toml"))
         assert not (tmp_path / "raw").exists()
 
+    def test_unsafe_name_windows_invalid_char_refused(self, tmp_path, restore_tool_config):
+        """INIT-05: a Windows-invalid char name (a*b) is refused pre-write."""
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "a*b", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("Windows-invalid" in e for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+        assert not (tmp_path / "raw").exists()
+
+    def test_reserved_device_name_refused(self, tmp_path, restore_tool_config):
+        """INIT-05: a reserved device name (CON) is refused pre-write — no
+        TOML, no raw/ (raw/ cannot even be created as an orphan)."""
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "CON", "user": "testuser", "cwd": str(tmp_path)},
+        ).data
+        assert envelope["ok"] is False
+        assert any("reserved" in e.lower() for e in envelope["config_errors"])
+        assert not list(tmp_path.glob("*.toml"))
+        assert not (tmp_path / "raw").exists()
+
     def test_empty_name_returns_ok_false(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)
         envelope = _call(

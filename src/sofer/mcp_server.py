@@ -1840,10 +1840,12 @@ def sofer_init(
                 "config_errors": [],
                 **report_identity(identity),
             }
-        raw_dir.mkdir(parents=True, exist_ok=True)
+        # TOML write BEFORE the raw/ scaffold: a write failure never leaves
+        # an orphan raw/ (no partial state, INIT-05 robustness).
         Path(toml_path).write_text(
             _INIT_TEMPLATE.format(name=name, user=user_val), encoding="utf-8"
         )
+        raw_dir.mkdir(parents=True, exist_ok=True)
         print(f"  OK  Created {toml_path.name}")
         if move_existing and candidates:
             moved = move_to_raw(candidates, base_dir, raw_dir)

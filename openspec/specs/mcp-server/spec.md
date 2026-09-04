@@ -544,7 +544,7 @@ System MUST emit `_INIT_TEMPLATE` with Windows-safe `[[file]] local`. Placeholde
 
 > Added by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31). Modified by `fix-dataset-identity-context` (archived 2026-09-04).
 
-`sofer_init` MUST create `<name>.toml` and `raw/` only inside `effective_root` (INIT-02). No parent writes. The success envelope SHALL report the canonical identity: `config_path` (absolute `effective_root/<name>.toml`) and `dataset_root` (absolute resolved `effective_root`) — both SHALL appear in the envelope AND in the tool's `output_schema` (INIT-03, MSP-R03).
+`sofer_init` MUST create `<name>.toml` and `raw/` only inside `effective_root` (INIT-02). No parent writes. The TOML SHALL be written BEFORE `raw/` is scaffolded (and the CLI `init` SHALL do the same) so a TOML write failure never leaves an orphan `raw/` — no partial state. The success envelope SHALL report the canonical identity: `config_path` (absolute `effective_root/<name>.toml`) and `dataset_root` (absolute resolved `effective_root`) — both SHALL appear in the envelope AND in the tool's `output_schema` (INIT-03, MSP-R03).
 
 (Previously: anchored writes only; the envelope reported no identity fields.)
 
@@ -601,7 +601,7 @@ After `sofer_init` → `sofer_scan_apply`, scanner MUST discover `DATA_GOT_ALL.x
 
 > Added by `fix-dataset-identity-context` (archived 2026-09-04).
 
-`sofer_init` SHALL validate identity BEFORE any write: `name` and `user` SHALL both be mandatory, non-empty, and safe single components — no `/`, no `\`, no drive/UNC path (`ntpath.splitdrive`), no `.`/`..` components, no quotes, no newlines/control characters, no leading/trailing whitespace. `user` SHALL match `^[\w\-]+\Z` — the `\Z` end-of-string anchor, NOT `$` (Python `$` also matches before a trailing `\n`, so `\Z` is the exact no-trailing-newline contract; it is a strict superset of the earlier `^[\w\-]+$` prose form) — and SHALL NOT be a placeholder (`YOUR_USER` or any normalized `model._PLACEHOLDERS` value). Any violation SHALL refuse the call with an actionable error BEFORE creating `<name>.toml` or `raw/`; the generated TOML SHALL NEVER contain `YOUR_USER`. CLI parity is specified in CLI-R07.
+`sofer_init` SHALL validate identity BEFORE any write: `name` and `user` SHALL both be mandatory, non-empty, and safe single components — no `/`, no `\`, no drive/UNC path (`ntpath.splitdrive`), no `.`/`..` components, no quotes, no newlines/control characters, no leading/trailing whitespace. `name` SHALL additionally contain no Windows-invalid filename character (`<>:"/\|?*`) and SHALL NOT be a Windows reserved device name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, case-insensitive, stem-matched so `CON.txt` is rejected too (dots are legal in names; `<name>.toml` with a reserved stem is unmaterializable on Windows, and the validation is platform-independent pre-write). `user` SHALL match `^[\w\-]+\Z` — the `\Z` end-of-string anchor, NOT `$` (Python `$` also matches before a trailing `\n`, so `\Z` is the exact no-trailing-newline contract; it is a strict superset of the earlier `^[\w\-]+$` prose form) — and SHALL NOT be a placeholder (`YOUR_USER` or any normalized `model._PLACEHOLDERS` value). Any violation SHALL refuse the call with an actionable error BEFORE creating `<name>.toml` or `raw/`; the generated TOML SHALL NEVER contain `YOUR_USER`. CLI parity is specified in CLI-R07.
 
 (Previously: only empty `name` was refused; a missing/blank `user` silently emitted the `YOUR_USER` placeholder.)
 
@@ -628,6 +628,12 @@ After `sofer_init` → `sofer_scan_apply`, scanner MUST discover `DATA_GOT_ALL.x
 - GIVEN `name` containing a separator (`a/b`, `a\b`), drive (`C:/evil`), traversal (`a/../b`), quotes, newline, or control character
 - WHEN `sofer_init` executes
 - THEN the call SHALL be refused before any write
+
+#### Scenario: Windows-invalid or reserved name rejected
+
+- GIVEN `name` containing a Windows-invalid character (`a*b`, `a?b`, `a<b`, `a>b`, `a|b`, `a:b`) or a reserved device name (`CON`, `con.toml`, `COM1`, `LPT9`)
+- WHEN `sofer_init` executes
+- THEN the call SHALL be refused before any write, with NO TOML and NO `raw/`
 
 #### Scenario: Non-conforming user rejected
 

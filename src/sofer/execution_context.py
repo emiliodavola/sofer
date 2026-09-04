@@ -42,6 +42,24 @@ _USER_RE = re.compile(r"^[\w\-]+\Z")
 #: ``\n``, ``\t``, ``\r`` and the rest of ``[\x00-\x1f]`` plus DEL (``\x7f``).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
+#: Windows-invalid filename characters banned from ``name`` (INIT-05).
+#: The full ``<>:"/\|?*`` set; ``/``, ``\`` and ``"`` already have dedicated
+#: checks in :func:`_is_single_component` (separators / quotes), so this
+#: constant covers the remaining ``<>:|?*`` plus the already-banned members
+#: for a single readable message when a name passes the component check.
+_WINDOWS_INVALID_CHARS = '<>:"/\\|?*'
+
+#: Windows reserved device names (INIT-05): a dataset named ``CON`` (or
+#: ``CON.toml`` — the stem is what matters) cannot be materialized on
+#: Windows (``write_text`` fails with ``OSError``), so it is rejected
+#: pre-write on every platform. Covers ``CON``/``PRN``/``AUX``/``NUL`` and
+#: ``COM1``-``COM9`` / ``LPT1``-``LPT9``, case-insensitively.
+_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
 
 class IdentityResolutionError(Exception):
     """Raised when the dataset root cannot be resolved safely (D4).
@@ -134,6 +152,23 @@ def _is_single_component(name: str) -> bool:
     return True
 
 
+def _reserved_device_name(name: str) -> bool:
+    """True when *name*'s stem is a Windows reserved device name (INIT-05).
+
+    Windows reserves ``CON``, ``PRN``, ``AUX``, ``NUL``, ``COM1``-``COM9``
+    and ``LPT1``-``LPT9`` regardless of extension — ``CON`` and ``CON.toml``
+    are both unmaterializable. Dots are allowed in dataset names, so the
+    stem (text before the first ``.``) is what is compared, case-insensitively.
+
+    Args:
+        name: The dataset name to inspect.
+
+    Returns:
+        ``True`` when the name's stem is a reserved device name.
+    """
+    return name.split(".", 1)[0].lower() in _RESERVED_DEVICE_NAMES
+
+
 def validate_identity(name: str | None, user: str | None) -> list[str]:
     """Validate a ``(name, user)`` identity pair, returning error strings.
 
@@ -146,7 +181,12 @@ def validate_identity(name: str | None, user: str | None) -> list[str]:
         - both ``name`` and ``user`` are mandatory and non-empty
           (``None`` / ``""`` / whitespace-only are rejected);
         - ``name`` must be a single component (see
-          :func:`_is_single_component`);
+          :func:`_is_single_component`), must not contain Windows-invalid
+          filename characters (``<>:"/\\|?*``), and must not be a Windows
+          reserved device name (``CON``/``PRN``/``AUX``/``NUL``/
+          ``COM1``-``COM9``/``LPT1``-``LPT9``, stem-matched — ``CON.txt``
+          is rejected too, since ``write_text`` would fail on Windows and
+          the TOML path ``<name>.toml`` would be unmaterializable);
         - ``user`` must match ``^[\\w\\-]+$`` (end-anchored, so a trailing
           newline fails), must not contain control characters, and must not
           be a normalized ``model._PLACEHOLDERS`` value (``YOUR_USER``,
@@ -169,6 +209,13 @@ def validate_identity(name: str | None, user: str | None) -> list[str]:
             "name must be a single path component without separators, "
             f"drives, quotes, or control characters, got '{name}'"
         )
+    elif any(c in name for c in _WINDOWS_INVALID_CHARS):
+        errors.append(
+            "name must not contain Windows-invalid filename characters "
+            f"(< > : \" / \\ | ? *), got '{name}'"
+        )
+    elif _reserved_device_name(name):
+        errors.append(f"name is a reserved Windows device name, got '{name}'")
 
     if not _is_non_empty(user):
         errors.append("user must be non-empty")

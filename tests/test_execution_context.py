@@ -110,6 +110,50 @@ class TestValidateIdentity:
         name is still a valid single component."""
         assert validate_identity("YOUR_USER", "alice") == []
 
+    @pytest.mark.parametrize("name", ["a*b", "a?b", "a<b", "a>b", "a|b", "a1:b"])
+    def test_windows_invalid_chars_refused(self, name):
+        """Windows-invalid filename characters (<>:|?*) are refused (INIT-05).
+
+        These pass the single-component check (no separator/drive/quote) but
+        cannot be materialized as ``<name>.toml`` on Windows. ``a:b`` /
+        ``1:b`` are already caught by the drive check (ntpath.splitdrive
+        treats any ``X:`` at index 1 as a drive), so the char-level ``:``
+        check is pinned with a colon outside drive position (``a1:b``).
+        """
+        errors = validate_identity(name, "alice")
+        assert any("Windows-invalid" in e for e in errors)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "CON",
+            "con",
+            "Prn",
+            "AUX",
+            "NUL",
+            "COM1",
+            "com9",
+            "LPT1",
+            "lpt9",
+            "CON.txt",
+            "con.toml",
+        ],
+    )
+    def test_reserved_device_name_refused(self, name):
+        """Windows reserved device names are refused pre-write (INIT-05).
+
+        Dots are allowed in names, so the reserved check is stem-matched:
+        ``CON`` and ``CON.txt`` are both rejected (``<name>.toml`` would be
+        unmaterializable on Windows).
+        """
+        errors = validate_identity(name, "alice")
+        assert any("reserved" in e.lower() for e in errors)
+
+    def test_normal_names_still_accepted(self):
+        """Names with dots/hyphens/underscores remain valid."""
+        for name in ("my.ds", "my-dataset", "data_2024"):
+            assert validate_identity(name, "alice") == []
+
 
 class TestResolveDatasetRoot:
     """resolve_dataset_root three modes per D5."""

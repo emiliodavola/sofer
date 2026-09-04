@@ -856,10 +856,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
            directory (:func:`resolve_dataset_root` mode (a)) — and derive
            ``<root>/<name>.toml`` and ``<root>/RAW_DIR`` from it; refuse to
            overwrite an existing TOML.
-        3. ``mkdir -p RAW_DIR`` idempotently (``exist_ok=True``) before the
-           TOML write — skipped under ``--dry-run`` in BOTH branches
-           (preview only, no mutation), matching the MCP ``sofer_init``
-           no-mutation semantics.
+        3. Write the TOML FIRST, then ``mkdir -p RAW_DIR`` idempotently
+           (``exist_ok=True``) — a TOML write failure never leaves an orphan
+           ``raw/`` (no partial state). Both steps are skipped under
+           ``--dry-run`` in BOTH branches (preview only, no mutation),
+           matching the MCP ``sofer_init`` no-mutation semantics.
         4. When ``--move-existing`` is set: collect depth-1 supported files
            (``SUPPORTED_FORMATS``, direct children of the dataset root), run
            :func:`check_flatten_collisions` against existing ``raw/`` content
@@ -895,9 +896,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
             print(f"  DRY RUN  Would create {output.name}")
             print(f"  DRY RUN  Would scaffold {raw_dir_name}")
             return 0
-        # Scaffold raw/ idempotently before TOML write (CLI-R07).
-        raw_dir_path.mkdir(parents=True, exist_ok=True)
+        # TOML write BEFORE the raw/ scaffold: a write failure never leaves
+        # an orphan raw/ (no partial state, INIT-05 robustness).
         output.write_text(toml_text, encoding="utf-8")
+        raw_dir_path.mkdir(parents=True, exist_ok=True)
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
@@ -954,8 +956,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
             "  !  Skipping move of existing files (non-interactive). Use --force to move.",
             file=sys.stderr,
         )
-        raw_dir_path.mkdir(parents=True, exist_ok=True)
         output.write_text(toml_text, encoding="utf-8")
+        raw_dir_path.mkdir(parents=True, exist_ok=True)
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
@@ -972,17 +974,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
             answer = "n"
         if answer not in ("y", "yes"):
             print("  OK  Aborted move.")
-            raw_dir_path.mkdir(parents=True, exist_ok=True)
             output.write_text(toml_text, encoding="utf-8")
+            raw_dir_path.mkdir(parents=True, exist_ok=True)
             print(f"  OK  Created {output}")
             print("     Edit the file and run:")
             print(f"       sofer prepare {output.name}")
             print(f"       sofer publish {output.name}")
             return 0
 
-    # Proceed: scaffold raw/ then move.
-    raw_dir_path.mkdir(parents=True, exist_ok=True)
+    # Proceed: write the TOML, then scaffold raw/ and move.
     output.write_text(toml_text, encoding="utf-8")
+    raw_dir_path.mkdir(parents=True, exist_ok=True)
     print(f"  OK  Created {output}")
     for src in candidates:
         dest = raw_dir_path / src.name
