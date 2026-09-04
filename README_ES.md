@@ -327,7 +327,7 @@ canalización.
 
 | Comando | Descripción |
 |---|---|
-| `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Flag: `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`; por defecto: marcador `YOUR_USER`). |
+| `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Requiere `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`); un `--user` faltante sale con 2, y los valores placeholder (`YOUR_USER`) o inseguros salen con 1 antes de cualquier escritura — la línea de éxito imprime el `config_path` absoluto. |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto contenido), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
@@ -357,7 +357,7 @@ canalización.
 | `--all-files` | `codebook`, `prepare`, `profile`, `render` | Modo batch: genera un artefacto por cada entrada `[[file]]` (`cache/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requiere entradas `[[file]]`; las colisiones lanzan `ValueError`. |
 | `--config` | `codebook`, `profile`, `render` | Ruta al TOML para `--all-files` (por defecto: `default_config_name` de `[tool.sofer]`). |
 | `--ext <ext>` | `scan` | Filtra `scan` a extensiones específicas (repetible, p. ej. `--ext csv --ext jsonl`); si se omite, todos los formatos soportados. |
-| `--user USUARIO` | `init` | Usuario/org HF para `repo_id` (p. ej. `--user myuser` → `repo_id "myuser/<name>"`); por defecto: marcador `YOUR_USER`. |
+| `--user USUARIO` | `init` | Usuario/org HF para `repo_id` (p. ej. `--user myuser` → `repo_id "myuser/<name>"`); obligatorio — un `--user` faltante sale con 2, los valores placeholder (`YOUR_USER`) o inseguros salen con 1, sin escribir archivos. |
 | `--output DIR` | `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`). `publish --clean` respeta `--output` solo para `build`; `cache/` siempre en `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
 | `--cwd PATH` | `mcp add` | `cwd` absoluto contenido para el servidor; falla con la ruta cuando está fuera de la raíz del scope. |
