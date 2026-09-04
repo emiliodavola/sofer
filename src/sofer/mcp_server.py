@@ -1306,7 +1306,14 @@ def sofer_render(
         _reload_tool_config(package_path)
         output_path = (
             _contained_path(
-                output_dir, root=package_path.parent, what="output_dir", must_exist=False
+                output_dir,
+                # CLI parity (cli.py `_cmd_render`): a package DIRECTORY anchors
+                # the relative output INSIDE it; a metadata.yaml FILE anchors to
+                # its parent. Previously the MCP side always anchored to
+                # package_path.parent, so a dir package wrote to the parent.
+                root=package_path if package_path.is_dir() else package_path.parent,
+                what="output_dir",
+                must_exist=False,
             )
             if output_dir is not None
             else None

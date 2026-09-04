@@ -1687,6 +1687,40 @@ class TestRenderBehavior:
         assert "Wrote" in envelope["output"]
         assert "# " in readme.read_text(encoding="utf-8")
 
+    def test_render_output_dir_anchors_inside_package_dir(self, tmp_path, restore_tool_config):
+        """Blocker 3: for a package DIRECTORY, a relative output_dir lands
+        INSIDE it (`<dir>/out/README.md`), matching the CLI anchor — never in
+        the parent (`<parent>/out/`)."""
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        profiled = _call(server, "sofer_profile", {"dataset": str(pkg / "data.csv")}).data
+        assert profiled["ok"] is True, profiled
+
+        envelope = _call(server, "sofer_render", {"package": str(pkg), "output_dir": "out"}).data
+        assert envelope["ok"] is True, envelope
+        assert (pkg / "out" / "README.md").is_file(), "README must land inside the package dir"
+        assert not (tmp_path / "out" / "README.md").exists(), "must not write to the parent"
+
+    def test_render_output_dir_file_package_anchors_to_parent(
+        self, tmp_path, restore_tool_config
+    ):
+        """Blocker 3: for a metadata.yaml FILE package, output anchors to the
+        file's parent (unchanged behavior)."""
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+        profiled = _call(server, "sofer_profile", {"dataset": "data.csv"}).data
+        assert profiled["ok"] is True, profiled
+
+        envelope = _call(
+            server,
+            "sofer_render",
+            {"package": str(tmp_path / "metadata.yaml"), "output_dir": "out"},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (tmp_path / "out" / "README.md").is_file()
+
 
 class TestCodebookAllBehavior:
     def test_codebook_all_writes_files_and_index(self, tmp_path, restore_tool_config):
