@@ -1180,3 +1180,18 @@ class TestSubprocessBoundary:
         assert "a/../b" in result.stderr
         assert not (tmp_path / "b.toml").exists()
         assert not (tmp_path / "raw").exists()
+
+    def test_codebook_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file ``-o`` anchors to the INPUT's parent, not cwd.
+
+        MSP-R10 parity with the MCP side (D9): the codebook must land next to
+        the analysed file. The input lives in ``data/`` while the subprocess
+        cwd is the parent, so an un-anchored output would land at
+        ``<cwd>/out.md`` — this pins the anchored ``<data>/out.md`` instead.
+        """
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        result = run_cli(["codebook", "data/sample.csv", "-o", "out.md"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "data" / "out.md").is_file(), "output must land next to the input"
+        assert not (tmp_path / "out.md").exists(), "output must not land in cwd"
