@@ -2303,9 +2303,28 @@ class TestInitDryRun:
         assert not (tmp_path / "raw").exists(), "dry_run must not create raw/"
         assert (tmp_path / "a.csv").exists(), "dry_run must not move candidate"
         assert "a.csv -> raw/a.csv" in envelope["output"]
-        # TOML still written
-        assert (tmp_path / "my-ds.toml").is_file()
+        # dry_run performs NO filesystem writes: the TOML must NOT be created
+        # either (INIT-03 no-mutation contract), only preview lines reported.
+        assert not (tmp_path / "my-ds.toml").exists(), "dry_run must not write the TOML"
+        assert "Would create my-ds.toml" in envelope["output"]
+        assert "Would scaffold raw" in envelope["output"]
         assert not (tmp_path / "raw" / "a.csv").exists()
+
+    def test_dry_run_plain_no_toml(self, tmp_path, restore_tool_config):
+        """dry_run WITHOUT move_existing also performs no writes (INIT-03)."""
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path), "dry_run": True},
+        ).data
+        assert envelope["ok"] is True
+        assert not (tmp_path / "my-ds.toml").exists(), "dry_run must not write the TOML"
+        assert not (tmp_path / "raw").exists(), "dry_run must not create raw/"
+        assert "Would create my-ds.toml" in envelope["output"]
+        assert "Would scaffold raw" in envelope["output"]
+        # Identity reporting stays — a computed path, no write (INIT-03).
+        assert envelope["config_path"] == str((tmp_path / "my-ds.toml").resolve())
 
     def test_dry_run_empty_candidates(self, tmp_path, restore_tool_config):
         server = build_server(root=tmp_path)

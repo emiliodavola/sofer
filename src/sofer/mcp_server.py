@@ -1649,7 +1649,10 @@ def sofer_init(
         Field(description="When true, move depth-1 supported files into raw/ preserving tree."),
     ] = False,
     dry_run: Annotated[
-        bool, Field(description="When true, preview creation without writing raw/ or moving files.")
+        bool,
+        Field(
+            description="When true, preview creation without writing any files (no TOML, no raw/, no moves)."
+        ),
     ] = False,
     force: Annotated[bool, Field(description="Overwrite existing <name>.toml when true.")] = False,
     user: Annotated[
@@ -1677,7 +1680,8 @@ def sofer_init(
     Args:
         name: Dataset name used for ``<name>.toml`` — a safe single path component.
         move_existing: When ``True``, move depth-1 supported files into ``raw/``.
-        dry_run: When ``True``, preview without writing ``raw/`` or moving files.
+        dry_run: When ``True``, preview without writing any files (no TOML,
+            no ``raw/``, no moves).
         force: Overwrite existing ``<name>.toml`` when ``True``.
         user: Hugging Face username for ``repo_id`` — required, never a placeholder.
         cwd: Working directory for init; must stay under server root. ``None``
@@ -1778,13 +1782,10 @@ def sofer_init(
                         print(f"     {src.name} -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
                 else:
                     print("  DRY RUN  No supported files to move.")
-                Path(toml_path).write_text(
-                    _INIT_TEMPLATE.format(name=name, user=user_val), encoding="utf-8"
-                )
-                print(f"  OK  Created {toml_path.name}")
-                print("     Edit the file and run:")
-                print(f"       sofer prepare {toml_path.name}")
-                print(f"       sofer publish {toml_path.name}")
+                # Preview only — dry_run performs NO filesystem writes (INIT-03
+                # no-mutation contract): neither the TOML nor raw/ is created.
+                print(f"  DRY RUN  Would create {toml_path.name}")
+                print(f"  DRY RUN  Would scaffold {sofer_config.RAW_DIR}")
                 return {
                     "ok": True,
                     "exit_code": 0,
@@ -1793,13 +1794,8 @@ def sofer_init(
                     **report_identity(identity),
                 }
         if dry_run and not move_existing:
-            Path(toml_path).write_text(
-                _INIT_TEMPLATE.format(name=name, user=user_val), encoding="utf-8"
-            )
-            print(f"  OK  Created {toml_path.name}")
-            print("     Edit the file and run:")
-            print(f"       sofer prepare {toml_path.name}")
-            print(f"       sofer publish {toml_path.name}")
+            print(f"  DRY RUN  Would create {toml_path.name}")
+            print(f"  DRY RUN  Would scaffold {sofer_config.RAW_DIR}")
             return {
                 "ok": True,
                 "exit_code": 0,
