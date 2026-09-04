@@ -1693,6 +1693,12 @@ def sofer_init(
                 return _refusal([str(exc)])
         else:
             effective_root = _contained_path(cwd, root=_get_root(), what="cwd", must_exist=False)
+        # Re-anchor [tool.sofer] discovery on the effective root (per-call):
+        # a previous call (another dataset, or a from_toml with discovery_root)
+        # can leave sofer_config.RAW_DIR reflecting another project's raw_dir —
+        # reloading here makes raw_dir below resolve for THIS root, falling back
+        # to defaults when no pyproject exists under it.
+        _reload_tool_config(effective_root)
         assert user is not None  # validate_identity passed — user is mandatory
         user_val = user.strip()
         identity = DatasetIdentity.from_parts(name, user_val, effective_root)

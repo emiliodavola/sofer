@@ -2290,6 +2290,46 @@ class TestInitDryRun:
         assert not (tmp_path / "raw").exists()
 
 
+class TestInitToolConfigReload:
+    """Blocker 2: sofer_init re-anchors [tool.sofer] discovery per effective root.
+
+    A previous call (another dataset's reload, or from_toml with a
+    discovery_root) can leave the GLOBAL sofer_config.RAW_DIR reflecting a
+    different project's raw_dir; the next init must reload for its own root so
+    ``raw/`` is scaffolded under the config that governs THAT directory.
+    """
+
+    def test_init_reloads_raw_dir_per_root(self, tmp_path, restore_tool_config):
+        """pyproject with raw_dir='sources' under root A; root B has none.
+
+        init in A scaffolds ``A/sources/`` (NOT ``A/raw/``); the following init
+        in B falls back to ``B/raw/`` — no cross-call leakage of A's config.
+        """
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "pyproject.toml").write_text(
+            '[tool.sofer]\nraw_dir = "sources"\n', encoding="utf-8"
+        )
+        server = build_server(root=tmp_path)
+        env_a = _call(
+            server,
+            "sofer_init",
+            {"name": "ds-a", "user": "testuser", "cwd": str(tmp_path / "a")},
+        ).data
+        assert env_a["ok"] is True, env_a
+        assert (tmp_path / "a" / "sources").is_dir(), "raw_dir from A's pyproject must win"
+        assert not (tmp_path / "a" / "raw").exists()
+
+        env_b = _call(
+            server,
+            "sofer_init",
+            {"name": "ds-b", "user": "testuser", "cwd": str(tmp_path / "b")},
+        ).data
+        assert env_b["ok"] is True, env_b
+        assert (tmp_path / "b" / "raw").is_dir(), "no pyproject -> default raw/ must apply"
+        assert not (tmp_path / "b" / "sources").exists()
+
+
 class TestInitCollision:
     def test_collision_returns_ok_false_no_move(self, tmp_path, restore_tool_config):
         (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
