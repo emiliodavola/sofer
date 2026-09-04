@@ -6,11 +6,11 @@
 **Artifact store**: hybrid (OpenSpec files + Engram)
 **Status**: archived
 **Verify verdict**: PASS — 9/9 scenarios (7 PB-01 + 2 PB-03), 2/2 requirements, 0 blockers, 0 CRITICAL
-**Branch**: fix/130-boundary-hygiene @ a5253ad (base e3fe857)
+**Branch**: fix/130-boundary-hygiene @ cab251d (base e3fe857)
 
 ## Summary
 
-Test-only change. Converted the 9 remaining direct registered-tool calls in `tests/test_mcp_server.py` (7× `sofer_publish` at L291/L1064/L1073/L1179/L1189/L1210/L1222 + 2× `sofer_scan_apply` at L2577/L2591) plus the 10th (`sofer_auth_status` at `tests/test_mcp_schema.py:251`) to the public `fastmcp.Client(server)` boundary via the shared `call_tool`/`_call` helper. L291's stream-restore test switched to a body-raising trigger (missing TOML → `MCPToolError` → `ToolError` at the boundary) so `_capture_output`'s finally-restore is genuinely exercised. L1210 (`test_garbage_target_dry_run_ok_no_network`) was deleted — its asserted behavior is direct-call-only and unreproducible at the boundary; the `calls == []` value survives via L1179, now provably "tool body never runs" (in-schema Literal rejection). The `process-boundary` spec delta MODIFIED PB-01 (extended conversion list + boundary-honest ToolError semantics) and PB-03 (hint-VALUE replay contract, `next` projection re-audit). Zero production changes (`src/` untouched).
+Test-only change. Converted the 8 remaining direct registered-tool call sites in `tests/test_mcp_server.py` (6× `sofer_publish` — stream-restore trigger, dry-run default, hf-schema-rejected, garbage refused, aws refused, local copy — + 2× `sofer_scan_apply` in `test_xlsx_registered_validate_passes_and_idempotent`) plus `sofer_auth_status` at `tests/test_mcp_schema.py` (`test_auth_status_no_leak`) to the public `fastmcp.Client(server)` boundary via the shared `call_tool`/`_call` helper. The stream-restore test switched to a body-raising trigger (missing TOML → `MCPToolError` → `ToolError` at the boundary) so `_capture_output`'s finally-restore is genuinely exercised. `test_garbage_target_dry_run_ok_no_network` was deleted — its asserted behavior is direct-call-only and unreproducible at the boundary; the `calls == []` value survives via `test_garbage_target_dry_run_false_refused_no_api`, now provably "tool body never runs" (in-schema Literal rejection). `test_publish_hf_without_confirm_raises` renamed `test_publish_hf_target_schema_rejected`. The `process-boundary` spec delta MODIFIED PB-01 (extended conversion list + boundary-honest ToolError semantics) and PB-03 (hint-VALUE replay contract, `next` projection re-audit). Zero production changes (`src/` untouched).
 
 ## Files Changed (git diff e3fe857...HEAD)
 
@@ -27,7 +27,7 @@ Test-only change. Converted the 9 remaining direct registered-tool calls in `tes
  tests/test_mcp_process.py                          |   2 +-
  tests/test_mcp_schema.py                           |  12 ++-
  tests/test_mcp_server.py                           | 112 ++++++++++---------
- 12 files changed, 785 insertions(+), 71 deletions(-)
+ 12 files changed, 791 insertions(+), 74 deletions(-)
 ```
 
 - `tests/test_mcp_server.py` — 8 boundary conversions (L291/1064/1073/1179/1189/1222/2577/2591); L1210 test deleted; `test_publish_hf_without_confirm_raises` renamed `test_publish_hf_target_schema_rejected`; L291 rewritten with body-raise trigger + `io.StringIO()` fakes; `import io` added (apply deviation 1); import block otherwise unchanged (design D7).
