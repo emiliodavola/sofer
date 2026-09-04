@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import call_tool, mcp_payload
+from conftest import PROCESS_TIMEOUT_SECONDS, _make_dataset, call_tool, mcp_payload
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -51,27 +51,6 @@ from sofer.prepare import prepare as domain_prepare
 def _run(coro):
     """Run one async client interaction per test."""
     return asyncio.run(coro)
-
-
-def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-ds") -> Path:
-    """Write a minimal, quality-passing dataset (TOML + CSV) under *root*."""
-    (root / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
-    lines = [
-        "[dataset]",
-        f'name = "{name}"',
-        'repo_id = "user/test-ds"',
-        "",
-        "[meta]",
-        f"confidential = {str(confidential).lower()}",
-        "",
-        "[[file]]",
-        'local = "data.csv"',
-        'remote = "data.csv"',
-        "",
-    ]
-    toml = root / "dataset.toml"
-    toml.write_text("\n".join(lines), encoding="utf-8")
-    return toml
 
 
 def _prepare_package(root: Path) -> None:
@@ -277,7 +256,7 @@ class TestStdioSmoke:
                 # server that never responds fail this test loudly via a
                 # timeout instead of hanging CI indefinitely (R4 hardening).
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=30)
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
                 ) as session:
                     init = await session.initialize()
                     assert init is not None

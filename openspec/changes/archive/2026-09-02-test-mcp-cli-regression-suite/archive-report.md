@@ -17,7 +17,7 @@ Test-only regression suite (PB-01…PB-09, 26 scenarios) pinning sofer's MCP ser
 - Shared boundary helpers in `tests/conftest.py`: `mcp_payload` (Root-unwrap), `run_cli` (cp1252 env), module-scoped `mcp_stdio_server` — one spawn per module; reused across modules, not duplicated.
 - Converted direct-call tests (`sofer_publish_confirm` ×22, `sofer_init` ×25, `sofer_validate`, `test_offline_happy_path`) through `Client(server)`; `test_mcp_server._unwrap` delegates to `mcp_payload`.
 - `tests/test_cli.py` `TestSubprocessBoundary`: `--help` rc 0 + all subcommands, strict cp1252 with re-encode assertion (ubuntu CI via `PYTHONIOENCODING`), unknown-command rc 2.
-- `.github/workflows/ci.yml`: `uv run pytest -v` annotated as the deliberate complete-suite gate (comment-only change; `push` trigger on all branches so chained slice branches run it).
+- `.github/workflows/ci.yml`: `uv run pytest -v` annotated as the deliberate complete-suite gate (annotation is comment-only); `push` trigger on `branches-ignore: [main, dev]` so chained slice branches still run the gate on push without double-running main/dev (trigger narrowed post-merge audit fix).
 - New fixtures `tests/fixtures/mcp-config-states/{empty,malformed}.toml`, kept out of `mcp-happy-path/`.
 
 Boundary correction documented during apply (design.md Open Questions): FastMCP projects tool results through each `output_schema`, so refusal envelopes at the client boundary drop `error_code`/`message`/`next` and non-`hf` targets surface as schema `ToolError`. PB-03 recovery replay therefore keys off boundary-visible `output` messages plus the deterministic, documented `next` hint VALUES, asserting the replayed call reaches a DIFFERENT gate or `ok:True`.
@@ -61,13 +61,13 @@ All task checkboxes `[x]` in archived `tasks.md` (verified `rg -c "^- \[ \]"` �
 
 ## Verification Evidence
 
-- **Test command**: `uv run pytest tests/ -q` → `1270 passed, 2 skipped (pre-existing), 13 warnings in 25.80s` — exit 0 (hash `sha256:1981c0a0b634a2103d1d00b89122b729c69c4d0d48996280c42111183ca52204`); 1272 collected (1269 baseline + 3 new), count not regressed.
+- **Test command**: `uv run pytest tests/ -q` → `1270 passed, 2 skipped (pre-existing), 13 warnings in 25.80s` — exit 0 (hash `sha256:1981c0a0b634a2103d1d00b89122b729c69c4d0d48996280c42111183ca52204`); 1272 collected (baseline dev collected 1258 + 14 new test functions — 11 process + 3 CLI), count not regressed.
 - **Build**: `uv run ruff check src/ tests/` → all passed; `uv run mypy src/ scripts/` → `Success: no issues found in 30 source files`; `git diff --check dev...HEAD` → clean — exit 0 (hash `sha256:f60b2867b79b4087fa0b79626b505f5c54fa6cb39c43fb18fc81ea025d4be167`).
 - **Credential-free (PB-06)**: full suite green with `HF_TOKEN`, `HF_HUB_TOKEN`, `HUGGING_FACE_HUB_TOKEN` all absent — zero credential-dependent skips/failures.
 - **Spec compliance**: 26/26 scenarios COMPLIANT (runtime-executed for all behavioral scenarios; static diff/CI evidence for PB-01-s4, PB-05, PB-08).
 - **Correctness**: PB-01 conversions 22+25+1 through `_call(server, ...)`; zero new `+` lines call registered tools directly; PB-02 cp1252 test re-encodes stdout as cp1252 (not decode-only); PB-03 replays assert branch progression (different gate or `ok:True`); PB-04 via real fixture TOMLs + filesystem-path assertions; PB-06 `publish._api` monkeypatched; PB-09 helpers typed and single-homed, one `build_server()` per test, module-scoped stdio spawn, `asyncio.run`, no pytest-asyncio, no new deps.
 - **Coherence**: D1–D7 all followed; D3 documented boundary correction (client-boundary envelope projection) reflected in design.md Open Questions.
-- **Critical issues**: 0; **Warnings**: 2 non-blocking (orchestrator brief task-count discrepancy 20 vs authoritative 27; pre-existing `_make_dataset`/`_write_minimal_dataset` near-duplicate fixtures, predates change); **Suggestions**: 2 non-blocking (future boundary-hygiene pass for remaining `sofer_publish` ×7 / `sofer_scan_apply` ×2 direct calls; consider `.gitignore` for `SOFER_TRACE.md`).
+- **Critical issues**: 0; **Warnings**: 2 non-blocking (orchestrator brief task-count discrepancy 20 vs authoritative 27; `_make_dataset`/`_write_minimal_dataset` near-duplicate fixtures introduced by this change — commit `74b4ca1` — and consolidated post-merge); **Suggestions**: 2 non-blocking (future boundary-hygiene pass for remaining `sofer_publish` ×7 / `sofer_scan_apply` ×2 direct calls; consider `.gitignore` for `SOFER_TRACE.md`).
 - **Verdict**: **PASS** — Archive-ready.
 
 ## Rollback Plan

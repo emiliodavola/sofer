@@ -9,8 +9,10 @@ so global state never leaks between tests.
 
 Also hosts the shared process-boundary helpers (PB-01..PB-09): ``mcp_payload``
 (the Root-model unwrap), ``call_tool`` (shared client-boundary call wrapper),
-``run_cli`` (executable CLI subprocess), and the module-scoped
-``mcp_stdio_server`` fixture (one stdio spawn config per module).
+``run_cli`` (executable CLI subprocess), the module-scoped
+``mcp_stdio_server`` fixture (one stdio spawn config per module), and
+``_make_dataset`` (canonical minimal-dataset helper — the single home for the
+fixture logic, AGENTS.md rule 4).
 Sibling test modules reuse these helpers instead of re-implementing them.
 """
 
@@ -84,6 +86,12 @@ def restore_tool_config():
 # ---------------------------------------------------------------------------
 #  Process-boundary helpers (PB-01..PB-09)
 # ---------------------------------------------------------------------------
+
+#: Shared wall-clock budget (seconds) for subprocess/stdio boundaries: the
+#: ``run_cli`` subprocess timeout and the stdio ``read_timeout_seconds``
+#: values. Test-harness config — a conftest constant is the right home
+#: (AGENTS.md rule 1), not ``sofer.config``.
+PROCESS_TIMEOUT_SECONDS = 30.0
 
 
 def mcp_payload(result: Any) -> Any:
@@ -166,7 +174,7 @@ def run_cli(
     cwd: Path,
     env: dict[str, str] | None = None,
     encoding: str = "utf-8",
-    timeout: float | None = 30.0,
+    timeout: float | None = PROCESS_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     """Run the sofer CLI as an executable subprocess (PB-02).
 
@@ -232,27 +240,39 @@ class McpStdioServer:
         )
 
 
-def _write_minimal_dataset(root: Path) -> None:
-    """Write a minimal quality-passing dataset (TOML + CSV) under *root*."""
+def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-ds") -> Path:
+    """Write a minimal, quality-passing dataset (TOML + CSV) under *root*.
+
+    Single canonical home for the minimal-dataset helper (AGENTS.md rule 4):
+    ``tests/test_mcp_server.py`` imports it from here, and the module-scoped
+    ``mcp_stdio_server`` fixture uses it for its server root. The CSV uses the
+    default ``;`` delimiter and the TOML declares one registered ``[[file]]``.
+
+    Args:
+        root: Directory the dataset files are written into.
+        confidential: Value for the ``[meta] confidential`` flag.
+        name: Dataset name for the ``[dataset] name`` field.
+
+    Returns:
+        The written ``dataset.toml`` path.
+    """
     (root / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
-    (root / "dataset.toml").write_text(
-        "\n".join(
-            [
-                "[dataset]",
-                'name = "test-ds"',
-                'repo_id = "user/test-ds"',
-                "",
-                "[meta]",
-                "confidential = false",
-                "",
-                "[[file]]",
-                'local = "data.csv"',
-                'remote = "data.csv"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    lines = [
+        "[dataset]",
+        f'name = "{name}"',
+        'repo_id = "user/test-ds"',
+        "",
+        "[meta]",
+        f"confidential = {str(confidential).lower()}",
+        "",
+        "[[file]]",
+        'local = "data.csv"',
+        'remote = "data.csv"',
+        "",
+    ]
+    toml = root / "dataset.toml"
+    toml.write_text("\n".join(lines), encoding="utf-8")
+    return toml
 
 
 @pytest.fixture(scope="module")
@@ -267,5 +287,5 @@ def mcp_stdio_server(tmp_path_factory: pytest.TempPathFactory) -> McpStdioServer
     bound (never one subprocess per test).
     """
     root = tmp_path_factory.mktemp("mcp-stdio")
-    _write_minimal_dataset(root)
+    _make_dataset(root)
     return McpStdioServer(cwd=root)

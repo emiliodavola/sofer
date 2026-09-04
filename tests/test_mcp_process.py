@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import _write_minimal_dataset, call_tool
+from conftest import PROCESS_TIMEOUT_SECONDS, _make_dataset, call_tool
 
 from sofer.mcp_server import build_server
 
@@ -79,7 +79,7 @@ class TestStdioFraming:
                 # server that never responds fail this test loudly via a
                 # timeout instead of hanging CI indefinitely (R4 hardening).
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=30)
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
                 ) as session:
                     init = await session.initialize()
                     assert init is not None
@@ -134,7 +134,7 @@ class TestRecoveryPublishConfirm:
         BEFORE the risk gate, so it would only show a different gate by
         ordering, never that ``acknowledge_risk=True`` was accepted.)
         """
-        _write_minimal_dataset(tmp_path)
+        _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
         server = build_server(root=tmp_path, approval_phrase="s3cret")
         args: dict[str, Any] = {"config": str(tmp_path / "dataset.toml")}
@@ -282,7 +282,7 @@ class TestConfigStates:
     ) -> None:
         """Triage preview: ``sofer_scan_dry_run`` lists the candidates it
         would register/copy WITHOUT copying files or writing the TOML."""
-        _write_minimal_dataset(tmp_path)
+        _make_dataset(tmp_path)
         (tmp_path / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
         server = build_server(root=tmp_path)
