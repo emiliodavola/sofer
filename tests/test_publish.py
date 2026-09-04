@@ -18,6 +18,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from sofer import publish as publish_mod
 from sofer.model import DatasetConfig, FileEntry
@@ -25,6 +26,8 @@ from sofer.prepare import prepare
 from sofer.publish import (
     _check_overwrite_protection,
     _copy_package,
+    _ensure_repo,
+    _inspect_repo,
     _needs_prepare,
     _repo_diff_summary,
     publish,
@@ -537,6 +540,84 @@ class TestHfPublish:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Repo diff summary (moved from test_uploader, PR 4)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRemoteFailClosed:
+    """PUB-05: remote inspection is fail-closed — only a repo-not-found
+    reads as empty; any other failure aborts before upload."""
+
+    def test_inspect_repo_returns_empty_on_repo_not_found(self, tmp_path, monkeypatch):
+        """RepositoryNotFoundError (repo missing/empty) -> [] — the only
+        'empty' case, exactly what _check_overwrite_protection must see."""
+        import httpx
+        from huggingface_hub.utils import RepositoryNotFoundError
+
+        def _raise_not_found(*_a, **_kw):
+            request = httpx.Request("GET", "https://huggingface.co/api/datasets/u/x")
+            response = httpx.Response(404, request=request)
+            raise RepositoryNotFoundError("not found", response=response)
+
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", _raise_not_found)
+        cfg = _cfg(tmp_path, [])
+        assert _inspect_repo(cfg) == []
+
+    def test_inspect_repo_raises_on_other_failure(self, tmp_path, monkeypatch):
+        """A non-not-found failure (network/auth) RAISES — never a silent []."""
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down")),
+        )
+        cfg = _cfg(tmp_path, [])
+        with pytest.raises(RuntimeError, match="network down"):
+            _inspect_repo(cfg)
+
+    def test_ensure_repo_raises_on_non_exists_error(self, tmp_path, monkeypatch):
+        """create_repo failing for a reason other than 'already exists'
+        RAISES instead of printing and continuing."""
+        monkeypatch.setattr(
+            publish_mod._api,
+            "create_repo",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("unauthorized")),
+        )
+        cfg = _cfg(tmp_path, [])
+        with pytest.raises(RuntimeError, match="unauthorized"):
+            _ensure_repo(cfg)
+
+    def test_publish_refuses_before_upload_when_inspection_fails(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Inspection failure fails the whole publish BEFORE any upload:
+        rc 1, upload_folder never called, message names the failure."""
+        from sofer.checks import ValidationReport
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down")),
+        )
+        monkeypatch.setattr(
+            publish_mod._api,
+            "upload_folder",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("upload attempted despite failed inspection")
+            ),
+        )
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        report = ValidationReport("test")  # clean report — gate passes
+        rc = publish(cfg, target="hf", quality_report=report)
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "Remote inspection failed" in captured.out
+        assert "network down" in captured.out
 
 
 class TestRepoDiffSummary:
