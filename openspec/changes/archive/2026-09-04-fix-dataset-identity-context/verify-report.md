@@ -337,3 +337,31 @@ Still green over the real `sofer-mcp` stdio process after all 5 fixes.
 ### Verdict (post-audit re-verification)
 
 **VERIFIED** — all 5 audit blockers confirmed fixed and spec-compliant on the live `openspec/specs/`, all gates green with ACTUAL counts matching the expected 1342 passed / 2 skipped, mypy/ruff/format/diff-check clean, the #116 ground-truth reproduction still passes over the real MCP process, the +10 count reconciles with zero unexplained test deletions, and SOFER_TRACE.md remains untouched. No CRITICAL or WARNING findings; 3 cosmetic SUGGESTIONs.
+---
+
+## Merge-review evidence reconciliation (2026-09-04)
+
+During merge review of the chained PRs (#134/#136/#135/#137) the archived
+re-verification section (1342 passed / 2 skipped) was found to be inconsistent
+with the final branch state. Reconciliation:
+
+- **FINAL baseline: 1344 passed, 2 skipped, 0 failed** — verified by the
+  pre-merge alignment gates on `fix/116-dataset-identity-context` (see
+  apply-progress "Gates (post-alignment, ACTUAL output)").
+- **1342 → 1344 delta (+2)**: the two CLI `--dry-run` no-mutation tests
+  (`test_init_dry_run_no_mutation`, `test_init_plain_dry_run_no_mutation`)
+  landed in the pre-merge alignment commit `a1cb36f` ("fix(cli): honor
+  --dry-run as no-mutation in init") AFTER the post-audit re-verification ran,
+  so the re-verification section legitimately recorded 1342. The final state
+  is 1344 passed / 2 skipped.
+- **Per-slice gate counts are historical, not the final state**: the 1318 /
+  1325 / 1330 / 1332 counts recorded in apply-progress and the earlier
+  verify-report sections are per-slice snapshots (each slice's gate on its
+  own branch head). Arithmetic: 1269 (dev baseline) + 49 + 7 + 5 + 2 = 1332
+  at slice 4; + 10 post-audit fixes = 1342; + 2 pre-merge CLI dry-run tests
+  = 1344. The PR bodies' per-slice counts plus the "1344 at final state"
+  checklist line are consistent with this reconciliation.
+
+The authoritative count for the merged change is **1344 passed / 2 skipped**
+(mypy, ruff check, ruff format, git diff --check all clean; SOFER_TRACE.md
+untouched — PB-08).
