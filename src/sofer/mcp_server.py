@@ -80,6 +80,13 @@ from .checks import DatasetValidator, ValidationReport
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
+from .execution_context import (
+    DatasetIdentity,
+    IdentityResolutionError,
+    report_identity,
+    resolve_dataset_root,
+    validate_identity,
+)
 from .metadata import load as metadata_load
 from .model import DatasetConfig, QualityResult
 from .prepare import prepare as run_prepare
@@ -1659,19 +1666,19 @@ def sofer_init(
     user: Annotated[
         str | None,
         Field(
-            description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'); default: YOUR_USER placeholder."
+            description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'). Required — placeholders such as YOUR_USER are rejected."
         ),
     ] = None,
     cwd: Annotated[
         str | None,
         Field(
-            description="Working directory for init; must stay under server root. When None, auto-detects live Path.cwd() when inside the server root, otherwise falls back to the server root."
+            description="Working directory for init; must stay under the server root. When None, the live process CWD is used only when it is a strict descendant of the server root; otherwise the call is refused — pass cwd='<dataset dir>' explicitly."
         ),
     ] = None,
 ) -> dict[str, Any]:
     """Create <name>.toml from _INIT_TEMPLATE and scaffold raw/.
 
-    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/. When cwd is given, writes are anchored under that directory contained under the server root; when None, auto-detects the live Path.cwd() when it is inside the server root, otherwise falls back to the server root. Never mutates the global server root.
+    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/. The identity is validated BEFORE any write (INIT-05): a missing/blank/unsafe name or user refuses with a CONFIG_ERROR envelope and nothing is written. When cwd is given, writes are anchored under that directory contained under the server root; when None, the live process CWD is used only when it is a strict descendant of the server root (INIT-02) — otherwise the call is refused naming the required cwd argument. Never mutates the global server root.
     Network usage: none.
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
@@ -1679,42 +1686,34 @@ def sofer_init(
     Requires: server root writable. Next: sofer_scan_apply to register files.
 
     Args:
-        name: Dataset name used for ``<name>.toml``.
+        name: Dataset name used for ``<name>.toml`` — a safe single path component.
         move_existing: When ``True``, move depth-1 supported files into ``raw/``.
         dry_run: When ``True``, preview without writing ``raw/`` or moving files.
         force: Overwrite existing ``<name>.toml`` when ``True``.
-        user: Hugging Face username for ``repo_id``.
-        cwd: Working directory for init; must stay under server root. ``None`` auto-detects live CWD when inside the server root, otherwise uses the server root.
+        user: Hugging Face username for ``repo_id`` — required, never a placeholder.
+        cwd: Working directory for init; must stay under server root. ``None``
+            uses the live process CWD only when it is a strict descendant of
+            the server root, otherwise refuses naming the required argument.
     """
     with _tool_execution(), _capture_output() as (out, err):
-        if not name.strip():
-            return {
-                "ok": False,
-                "exit_code": 1,
-                "output": _captured_text(out, err),
-                "config_errors": ["name must be non-empty"],
-                "error_code": "CONFIG_ERROR",
-                "message": "name must be non-empty",
-                "next": {},
-            }
-        # Per-call effective root: None -> auto-detect live CWD when inside server root (Approach 2), str -> contained under _SERVER_ROOT.
+        errors = validate_identity(name, user)
+        if errors:
+            return _refusal(errors)
+        # Per-call effective root (INIT-02): cwd=None -> fail-closed strict
+        # descendant of the server root; cwd=str -> contained under it
+        # (escapes raise PathOutsideRootError, the pinned str-branch contract).
         if cwd is None:
-            live = Path.cwd().resolve()
             try:
-                root_resolved = (
-                    _SERVER_ROOT.resolve() if _SERVER_ROOT is not None else _get_root().resolve()
+                effective_root = resolve_dataset_root(
+                    None, live_cwd=Path.cwd().resolve(), server_root=_get_root()
                 )
-                if live.is_relative_to(root_resolved):
-                    effective_root = live
-                else:
-                    effective_root = _get_root()
-            except Exception:
-                effective_root = _get_root()
+            except IdentityResolutionError as exc:
+                return _refusal([str(exc)])
         else:
-            outer_root = (
-                _SERVER_ROOT.resolve() if _SERVER_ROOT is not None else Path.cwd().resolve()
-            )
-            effective_root = _contained_path(cwd, root=outer_root, what="cwd", must_exist=False)
+            effective_root = _contained_path(cwd, root=_get_root(), what="cwd", must_exist=False)
+        assert user is not None  # validate_identity passed — user is mandatory
+        user_val = user.strip()
+        identity = DatasetIdentity.from_parts(name, user_val, effective_root)
         toml_path = _contained_path(
             f"{name}.toml",
             root=effective_root,
@@ -1724,7 +1723,6 @@ def sofer_init(
         )
         raw_dir = effective_root / sofer_config.RAW_DIR
         base_dir = effective_root.resolve()
-        user_val = user.strip() if user and user.strip() else "YOUR_USER"
         if not raw_dir.resolve().is_relative_to(base_dir):
             return {
                 "ok": False,
@@ -1797,6 +1795,7 @@ def sofer_init(
                     "exit_code": 0,
                     "output": _captured_text(out, err),
                     "config_errors": [],
+                    **report_identity(identity),
                 }
         if dry_run and not move_existing:
             Path(toml_path).write_text(
@@ -1811,6 +1810,7 @@ def sofer_init(
                 "exit_code": 0,
                 "output": _captured_text(out, err),
                 "config_errors": [],
+                **report_identity(identity),
             }
         raw_dir.mkdir(parents=True, exist_ok=True)
         Path(toml_path).write_text(
@@ -1830,6 +1830,7 @@ def sofer_init(
             "exit_code": 0,
             "output": _captured_text(out, err),
             "config_errors": [],
+            **report_identity(identity),
         }
 
 
@@ -2101,6 +2102,8 @@ def _register_tools(server: _FastMCP) -> None:
                 "ok": {"type": "boolean"},
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string"},
+                "config_path": {"type": "string"},
+                "dataset_root": {"type": "string"},
                 "config_errors": {"type": "array"},
             },
             "required": ["ok", "exit_code", "output"],
