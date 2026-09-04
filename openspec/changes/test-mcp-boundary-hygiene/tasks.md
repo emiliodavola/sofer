@@ -52,7 +52,7 @@ Evidence 3.1/3.3: targeted pytest passes; docstring diff only.
 
 ## Phase 4: Final gates
 
-- [ ] 4.1 Full suite: `uv run pytest tests/ -q` → 1269 passed, 2 skipped.
-- [ ] 4.2 Quality gates: `uv run ruff check src/ tests/` + `uv run ruff format --check src/ tests/` (format touched files if flagged) + `uv run mypy src/` + `git diff --check` all clean.
-- [ ] 4.3 Boundary proofs: grep `tests/` — zero direct calls of imported registered tools; zero envelope `error_code` branches for invalid Literal inputs (PB-01 "No remaining direct-call proofs").
-- [ ] 4.4 Commit: single test-only conventional commit on `dev`; `git diff --stat` shows only `tests/` + `openspec/changes/` (no `src/`); pre-commit hooks pass.
+- [x] 4.1 Full suite: `uv run pytest tests/ -q` → 1269 passed, 2 skipped.
+- [x] 4.2 Quality gates: `uv run ruff check src/ tests/` + `uv run ruff format --check src/ tests/` (format touched files if flagged) + `uv run mypy src/` + `git diff --check` all clean.
+- [x] 4.3 Boundary proofs: grep `tests/` — zero direct calls of imported registered tools; zero envelope `error_code` branches for invalid Literal inputs (PB-01 "No remaining direct-call proofs").
+- [x] 4.4 Commit: single test-only conventional commit on the feature branch; `git diff --stat` shows only `tests/` + `openspec/changes/` (no `src/`); pre-commit hooks pass.
