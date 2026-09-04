@@ -61,7 +61,7 @@ la etiqueta de la versión (p. ej. `v0.3.0` se instala como `sofer v0.3.0`).
 
 ```bash
 # 1. Generate a configuration template
-sofer init my-dataset
+sofer init my-dataset --user myuser
 
 # 2. Scan for data files
 sofer scan my-dataset.toml

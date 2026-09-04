@@ -1644,6 +1644,12 @@ def sofer_init(
     name: Annotated[
         str, Field(description="Dataset name used for <name>.toml (e.g. 'my-dataset')")
     ],
+    user: Annotated[
+        str,
+        Field(
+            description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'). Required — placeholders such as YOUR_USER are rejected."
+        ),
+    ],
     move_existing: Annotated[
         bool,
         Field(description="When true, move depth-1 supported files into raw/ preserving tree."),
@@ -1655,12 +1661,6 @@ def sofer_init(
         ),
     ] = False,
     force: Annotated[bool, Field(description="Overwrite existing <name>.toml when true.")] = False,
-    user: Annotated[
-        str | None,
-        Field(
-            description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'). Required — placeholders such as YOUR_USER are rejected."
-        ),
-    ] = None,
     cwd: Annotated[
         str | None,
         Field(
@@ -1710,7 +1710,6 @@ def sofer_init(
         # reloading here makes raw_dir below resolve for THIS root, falling back
         # to defaults when no pyproject exists under it.
         _reload_tool_config(effective_root)
-        assert user is not None  # validate_identity passed — user is mandatory
         user_val = user.strip()
         identity = DatasetIdentity.from_parts(name, user_val, effective_root)
         toml_path = _contained_path(

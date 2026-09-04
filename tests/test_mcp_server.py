@@ -1703,9 +1703,7 @@ class TestRenderBehavior:
         assert (pkg / "out" / "README.md").is_file(), "README must land inside the package dir"
         assert not (tmp_path / "out" / "README.md").exists(), "must not write to the parent"
 
-    def test_render_output_dir_file_package_anchors_to_parent(
-        self, tmp_path, restore_tool_config
-    ):
+    def test_render_output_dir_file_package_anchors_to_parent(self, tmp_path, restore_tool_config):
         """Blocker 3: for a metadata.yaml FILE package, output anchors to the
         file's parent (unchanged behavior)."""
         (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
@@ -2243,12 +2241,11 @@ class TestInitUserFlag:
         assert cfg.repo_id == "bob/my-ds"
 
     def test_missing_user_refused_before_write(self, tmp_path, restore_tool_config):
-        """INIT-05: no user -> envelope refusal naming user, NO TOML, NO raw/."""
+        """INIT-05: user is REQUIRED — an absent user is rejected at input
+        validation (ToolError), before any write. No TOML, NO raw/."""
         server = build_server(root=tmp_path)
-        envelope = _call(server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)}).data
-        assert envelope["ok"] is False
-        assert envelope["exit_code"] == 1
-        assert any("user must be non-empty" in e for e in envelope["config_errors"])
+        with pytest.raises(ToolError):
+            _call(server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)})
         assert not (tmp_path / "my-ds.toml").exists()
         assert not (tmp_path / "raw").exists()
 

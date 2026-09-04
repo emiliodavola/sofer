@@ -59,7 +59,7 @@ Then run `sofer --help`. `sofer --version` always matches the release tag
 
 ```bash
 # 1. Generate a configuration template
-sofer init my-dataset
+sofer init my-dataset --user myuser
 
 # 2. Scan for data files
 sofer scan my-dataset.toml

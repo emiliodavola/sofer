@@ -221,6 +221,17 @@ class TestOutputSchema:
         assert "dataset_root" not in required
         assert required == ["ok", "exit_code", "output"]
 
+    def test_sofer_init_user_required(self, tmp_path: Path):
+        """INIT-05: sofer_init input schema requires ``user`` as a
+        non-nullable string (mandatory, never optional)."""
+        tools = _tools_dict(tmp_path)
+        schema = tools["sofer_init"].inputSchema or {}
+        props = schema.get("properties", {})
+        user_schema = props.get("user", {})
+        assert "user" in schema.get("required", []), "user must be a required parameter"
+        assert user_schema.get("type") == "string", user_schema
+        assert "null" not in str(user_schema), "user must not be nullable"
+
 
 class TestEnvelope:
     def test_refusal_envelope(self, tmp_path: Path):
