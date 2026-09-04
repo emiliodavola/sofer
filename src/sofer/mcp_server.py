@@ -760,7 +760,7 @@ def sofer_prepare(
         if cfg is None or config_errors:
             return _refusal(config_errors)
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
@@ -836,7 +836,7 @@ def sofer_publish(
                 config_errors=config_errors,
             )
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
@@ -991,7 +991,7 @@ def sofer_publish_confirm(
                 )
 
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
@@ -1055,7 +1055,9 @@ def sofer_codebook(
         )
         _reload_tool_config(data_path.parent)
         output_path = (
-            _contained_path(output_file, root=_get_root(), what="output_file", must_exist=False)
+            _contained_path(
+                output_file, root=data_path.parent, what="output_file", must_exist=False
+            )
             if output_file is not None
             else None
         )
@@ -1099,7 +1101,7 @@ def sofer_codebook_all(
         if cfg is None or config_errors:
             return _refusal(config_errors)
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
@@ -1162,7 +1164,7 @@ def sofer_profile(
         )
         _reload_tool_config(data_path.parent)
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=data_path.parent, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
@@ -1249,7 +1251,7 @@ def sofer_profile_all(
                 config_errors=["No [[file]] entries found in configuration."],
             )
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
@@ -1303,7 +1305,9 @@ def sofer_render(
         package_path = _contained_path(package, root=_get_root(), what="package", must_exist=True)
         _reload_tool_config(package_path)
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(
+                output_dir, root=package_path.parent, what="output_dir", must_exist=False
+            )
             if output_dir is not None
             else None
         )
@@ -1370,7 +1374,7 @@ def sofer_render_all(
                 config_errors=["No [[file]] entries found in configuration."],
             )
         output_path = (
-            _contained_path(output_dir, root=_get_root(), what="output_dir", must_exist=False)
+            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
             else None
         )
