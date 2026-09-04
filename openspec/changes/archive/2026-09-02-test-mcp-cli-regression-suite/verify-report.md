@@ -50,9 +50,9 @@ $ uv run pytest tests/ -q
 $ uv run pytest tests/ --collect-only -q
 1272 tests collected in 1.08s
 Skips (both pre-existing, environment-only, present on dev):
-  tests/test_mcp_server.py:597  — symlink/junction creation requires elevated
+  tests/test_mcp_server.py:594/614 — symlink/junction creation requires elevated
                                   privileges on this win32 host
-  tests/test_mcp_server.py:1121 — hatchling build backend is not installed in
+  tests/test_mcp_server.py:1118 — hatchling build backend is not installed in
                                   the dev environment (CI builds the wheel)
 Focused (change modules):
   tests/test_mcp_process.py -q        → 11 passed
@@ -87,7 +87,7 @@ Focused (change modules):
 | PB-05 | No focused-only gate | CI `uv run pytest -v` and dev `uv run pytest tests/ -q` both cover the complete suite (1272 collected) | ✅ COMPLIANT |
 | PB-06 | Offline happy path | `tests/test_mcp_schema.py > TestHappyPath::test_offline_happy_path` (via `Client(server)`, `publish._api` monkeypatched) + `TestDeliveryHandoff` (mocked `_api`, no network) | ✅ COMPLIANT |
 | PB-06 | No credentials required | Full suite run with HF_TOKEN/HF_HUB_TOKEN/HUGGING_FACE_HUB_TOKEN unset → 1270 passed, 2 skipped, no credential-dependent skips | ✅ COMPLIANT |
-| PB-07 | Full suite passes | `uv run pytest tests/ -q` → 1270 passed, 2 skipped (1269 baseline + 3 = 1272 collected; count not regressed) | ✅ COMPLIANT |
+| PB-07 | Full suite passes | `uv run pytest tests/ -q` → 1270 passed, 2 skipped (baseline dev collected 1258; change added 14 test functions — 11 process + 3 CLI; final 1272 collected, 1270 passed, 2 skipped) | ✅ COMPLIANT |
 | PB-07 | Lint, types, whitespace | ruff ✅, mypy src/ scripts/ ✅, `git diff --check` ✅ (all exit 0) | ✅ COMPLIANT |
 | PB-08 | Untracked trace file untouched | `git status --short` → `?? SOFER_TRACE.md` (untracked, unstaged, unmodified); absent from `git diff dev...HEAD --name-only` | ✅ COMPLIANT |
 | PB-09 | One server per test | Every new test calls `build_server(...)` per test (per-process `_SERVER_ROOT`/`_APPROVAL_PHRASE` globals); `server` fixture is function-scoped | ✅ COMPLIANT |
@@ -120,7 +120,7 @@ Focused (change modules):
 | D4 CLI subprocess (cp1252 cross-platform) | ✅ Yes | `PYTHONIOENCODING=cp1252` + strict decode + re-encode; no Windows CI job |
 | D5 Isolation (one server per test; module-scoped stdio; `asyncio.run`) | ✅ Yes | No pytest-asyncio added |
 | D6 win32 safety (`_make_link` skip pattern) | ✅ Yes (not exercised) | No link-creating test in the change; pattern retained in test_mcp_server.py for future slices |
-| D7 CI comment-only annotation | ✅ Yes | `git diff` confirms comment-only; YAML still parses |
+| D7 CI complete-gate annotation + push trigger | ✅ Yes | Annotation is comment-only and YAML still parses; the `push` trigger runs the gate on slice branches — narrowed post-merge to `branches-ignore: [main, dev]` (audit fix) |
 
 ### Issues Found
 
@@ -128,7 +128,7 @@ Focused (change modules):
 
 **WARNING**:
 1. Orchestrator brief cites "20 tasks"; authoritative `tasks.md` + `gentle-ai sdd-status` report **27 tasks** (5+5+6+6+5), all complete. Metadata discrepancy only — no impact on the change's completeness (27/27).
-2. Pre-existing near-duplicate fixtures `tests/test_mcp_server.py::_make_dataset` vs `conftest._write_minimal_dataset` remain (already flagged in apply-progress; deferred out of scope — violates AGENTS.md rule 4 but predates this change).
+2. Near-duplicate fixtures `tests/test_mcp_server.py::_make_dataset` vs `conftest._write_minimal_dataset` were introduced BY this change (commit `74b4ca1` — violates AGENTS.md rule 4). Consolidated post-merge: `_make_dataset` (parameterized) is now the single canonical helper in conftest and `_write_minimal_dataset` was removed (audit fix).
 
 **SUGGESTION**:
 1. Pre-existing direct calls of `sofer_publish` (7 sites) and `sofer_scan_apply` (2 sites) in `tests/test_mcp_server.py` remain as the only registered-tool direct calls — outside PB-01's named conversion list, but a future boundary-hygiene pass (with a spec amendment) could route them through `Client(server)` too.

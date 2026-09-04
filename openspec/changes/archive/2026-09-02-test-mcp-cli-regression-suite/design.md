@@ -76,7 +76,7 @@ No migration. Rollback: delete `tests/test_mcp_process.py`, revert conftest/test
 
 ## Effort / Risk Forecast
 
-- **Changed lines: ~1,100–1,400** (module 450–550; conftest 120–150; conversions 250–350; test_cli 120–160; fixtures ~30; ci.yml comment-only) — within the session review budget of 3000 lines (user-configured). The standard 400-line review guard still applies: slice 1 (conftest + conversions) may brush against it at the top of its range (~270–500 lines) — flag this for the tasks-phase review-workload forecast. Chaining: slice 1 = conftest + conversions, slice 2 = `test_mcp_process.py`, slice 3 = test_cli + fixtures (each slice independently verifiable).
+- **Changed lines: ~1,100–1,400** (module 450–550; conftest 120–150; conversions 250–350; test_cli 120–160; fixtures ~30; ci.yml annotation + push trigger) — within the session review budget of 3000 lines (user-configured). The standard 400-line review guard still applies: slice 1 (conftest + conversions) may brush against it at the top of its range (~270–500 lines) — flag this for the tasks-phase review-workload forecast. Chaining: slice 1 = conftest + conversions, slice 2 = `test_mcp_process.py`, slice 3 = test_cli + fixtures (each slice independently verifiable).
 - **Risks**: +30–60 s suite wall-clock (mitigated: one shared stdio spawn); win32 junction privilege (skip pattern); keep help text free of non-cp1252 glyphs so strict-decode holds on ubuntu; `_capture_output` global stdout swap is serialized under `_EXEC_LOCK` in-process and bypassed by subprocess tests.
 
 ## Open Questions

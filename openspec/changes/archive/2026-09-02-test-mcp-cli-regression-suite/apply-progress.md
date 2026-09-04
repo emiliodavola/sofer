@@ -138,10 +138,14 @@ of the change are complete.
   (`mcp_server.py:987`) — with the refusal message switching from the risk
   message to "approval phrase required". Deterministic and offline (no
   network, no real credentials; approval gate is a `build_server` param).
-- **PR 3 uses conftest's `_write_minimal_dataset`** for the publish recovery
-  fixture instead of a third `_make_dataset` copy (AGENTS.md rule 4 — no
-  duplicated logic; the helper already lived in conftest and now has a second
-  consumer).
+- **PR 1 introduced a near-duplicate fixture (post-merge audit finding)**:
+  `conftest._write_minimal_dataset` (commit `74b4ca1`) was written as a
+  near-copy of the pre-existing `tests/test_mcp_server.py::_make_dataset`,
+  violating AGENTS.md rule 4 (the helper did NOT already live in conftest).
+  PR 3 reused `_write_minimal_dataset` for the publish recovery fixture, which
+  is why the duplication went unnoticed until the post-merge audit. It has
+  since been consolidated: `_make_dataset` (parameterized) is now the single
+  canonical helper in conftest and `_write_minimal_dataset` was removed.
 - **PR 4 triage test reuses `_write_minimal_dataset` + `new.csv`** instead of
   re-implementing a scan fixture: `discovered:2` (registered `data.csv` +
   new `new.csv`) and `registered:1` mirror the existing
@@ -189,12 +193,15 @@ of the change are complete.
   when scanning a freshly-`sofer_init`ed TOML because `merge_entries` strips
   the template placeholder entries before counting — the greenfield test
   asserts `copied` instead (see Deviations above).
-- Pre-existing note (from PR 1): `tests/test_mcp_server.py::_make_dataset`
-  and conftest's `_write_minimal_dataset` remain near-duplicates;
-  refactoring is deferred out of scope (flagged in tasks).
+- Post-merge audit finding: `tests/test_mcp_server.py::_make_dataset` and
+  conftest's `_write_minimal_dataset` were near-duplicates introduced by this
+  change (commit `74b4ca1`), not pre-existing — flagged by the post-merge
+  audit (tasks.md never mentioned the duplication) and consolidated post-merge
+  into the single canonical `_make_dataset` in conftest.
 - PR 5 (no findings): the cp1252 live probe confirmed the help text is fully
   cp1252-encodable, so no non-cp1252 glyph issue exists to report; full-suite
-  count landed exactly at the forecast (1269 baseline + 3 = 1272 collected;
+  count landed exactly at the forecast (baseline dev collected 1258; change
+  added 14 test functions — 11 process + 3 CLI; final 1272 collected,
   1270 passed + 2 skipped).
 
 ## Remaining Tasks (later PRs in the chain)
@@ -318,7 +325,8 @@ all diagnosed and addressed surgically in this pass:
 ## Status
 
 27/27 tasks complete (Phases 1–5, PRs 1–5). Full suite **1270 passed,
-2 skipped** (1269 baseline + 3), ruff/mypy/`git diff --check` all clean,
+2 skipped** (baseline dev collected 1258 + 14 new = 1272 collected),
+ruff/mypy/`git diff --check` all clean,
 `SOFER_TRACE.md` untouched. Ready for sdd-verify of the whole change.
 Post-verify: 4R hardening pass complete (commits `c5125f2`, `1da70aa`,
 `2679158`) — full suite still **1270 passed, 2 skipped**, all gates green,
