@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -273,6 +275,33 @@ def _make_tree(tmp_path: Path, entries: list[str]) -> None:
         _touch(tmp_path / p)
 
 
+def _make_link(link: Path, target: Path) -> bool:
+    """Create a symlink (or NTFS junction on win32) ``link -> target``.
+
+    Returns ``True`` on success. On win32, ``os.symlink`` requires
+    developer-mode privileges — falls back to ``mklink /J`` (junction). When
+    the OS refuses both, returns ``False`` so the caller skips with a
+    documented reason instead of stalling. Mirrors the helper in
+    ``test_mcp_server.py`` (link creation is a platform capability, not
+    sofer logic).
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return True
+    except OSError:
+        if os.name != "nt":
+            return False
+        try:
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0 and link.exists()
+        except OSError:
+            return False
+
+
 # ------------------------------------------------------------------
 # TestDiscoverFiles
 # ------------------------------------------------------------------
@@ -339,6 +368,58 @@ class TestDiscoverFiles:
         names = {p.name for p in result}
         # build.csv is a file, so kept; build/nested.csv is in excluded dir, so skipped
         assert names == {"build.csv"}
+
+    def test_symlinked_file_outside_not_discovered(self, tmp_path, tmp_path_factory) -> None:
+        """A file symlink pointing OUTSIDE tmp_path is never discovered (SCN-01).
+
+        On Python 3.10-3.12 ``rglob`` yields the link and ``is_file()``
+        follows it — without the ``_is_link`` guard the external file would
+        be discovered, copied into cache/, registered, and publishable.
+        """
+        outside = tmp_path_factory.mktemp("outside-leak")
+        secret = outside / "secret.csv"
+        secret.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        if not _make_link(link, secret):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        _make_tree(tmp_path, ["real.csv"])
+        result = discover_files(tmp_path)
+        assert link not in result, "external file reached via symlink must not be discovered"
+        assert {p.name for p in result} == {"real.csv"}
+
+    def test_symlinked_dir_outside_not_discovered(self, tmp_path, tmp_path_factory) -> None:
+        """A directory symlink pointing OUTSIDE tmp_path is not traversed.
+
+        The link's target contents must not be discovered even though on
+        3.10-3.12 ``rglob`` follows directory links and would yield the
+        children as regular (non-link) entries — the ancestor guard rejects
+        them.
+        """
+        outside = tmp_path_factory.mktemp("outside-leak")
+        (outside / "secret.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leakdir"
+        if not _make_link(link, outside):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        _make_tree(tmp_path, ["real.csv"])
+        result = discover_files(tmp_path)
+        assert all("secret" not in p.name for p in result), (
+            f"external dir contents leaked into discovery: {result}"
+        )
+        assert {p.name for p in result} == {"real.csv"}
+
+    def test_regular_file_still_discovered_alongside_links(
+        self, tmp_path, tmp_path_factory
+    ) -> None:
+        """A regular file next to a symlink is still discovered (only links are excluded)."""
+        outside = tmp_path_factory.mktemp("outside-leak")
+        (outside / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        if not _make_link(link, outside / "x.csv"):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        _touch(tmp_path / "keep.csv")
+        result = discover_files(tmp_path)
+        names = {p.name for p in result}
+        assert names == {"keep.csv"}
 
 
 # ------------------------------------------------------------------

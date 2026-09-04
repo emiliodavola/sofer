@@ -20,11 +20,20 @@ parent), checks raw-dest collisions atomically via
 
 All functions are pure logic — they raise on errors; the CLI handler
 catches and translates to exit codes.
+
+Symlinks are EXCLUDED from discovery (SCN-01): :func:`discover_files`
+skips symlinked entries AND entries reached through a symlinked (or, on
+Windows, junctioned) directory. On Python 3.10-3.12 ``Path.rglob`` follows
+directory links, so a link inside the scan root pointing OUTSIDE it would
+otherwise have its contents discovered, copied into ``cache/`` by
+:func:`copy_files`, registered, and published — an exfiltration vector.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -39,6 +48,34 @@ from .model import FileEntry
 EXCLUSIONS: frozenset[str] = frozenset(
     {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
 )
+
+
+def _is_link(path: Path) -> bool:
+    """Return ``True`` when *path* is a symlink or a Windows reparse point.
+
+    ``Path.is_symlink()`` alone misses NTFS junctions (``mklink /J``): on
+    every supported Python version junctions report ``is_symlink() == False``
+    (``Path.is_junction()`` exists only on 3.12+). Junctions are detected via
+    the ``FILE_ATTRIBUTE_REPARSE_POINT`` stat flag on Windows. POSIX never
+    has reparse points, so the ``os.name != "nt"`` short-circuit keeps the
+    check free of platform-specific stat fields.
+
+    Args:
+        path: The path to inspect.
+
+    Returns:
+        ``True`` when *path* is a symlink or (Windows) a reparse point such
+        as a junction.
+    """
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        attrs = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def flatten_first_level(relative: Path) -> Path:
@@ -142,6 +179,13 @@ def discover_files(
     When *extensions* is supplied (e.g. via ``--ext .csv``), only those suffixes
     are considered — the global registry is ignored.
 
+    Symlinks (and Windows junctions) are excluded from discovery (SCN-01): a
+    symlinked entry itself is skipped, and so is any entry whose path passes
+    through a linked directory. This matters on Python 3.10-3.12, where
+    ``Path.rglob`` follows directory links — without the ancestor guard a
+    link inside the scan root pointing OUTSIDE it would have its contents
+    discovered, copied into ``cache/``, registered, and publishable.
+
     Returns an empty list when no supported files are found.
     """
     if extensions is not None:
@@ -153,6 +197,21 @@ def discover_files(
     for entry in root.rglob("*"):
         # Skip entries whose path contains an excluded directory name anywhere.
         if any(part in exclude_dirs for part in entry.parts):
+            continue
+        if _is_link(entry):
+            continue
+        # On 3.10-3.12 rglob follows directory links: a file reached THROUGH
+        # a linked directory is itself not a link, so also reject entries whose
+        # path contains a link ancestor (checked up to, but not including, the
+        # scan root itself).
+        linked_ancestor = False
+        for parent in entry.parents:
+            if parent == root:
+                break
+            if _is_link(parent):
+                linked_ancestor = True
+                break
+        if linked_ancestor:
             continue
         if entry.is_file() and entry.suffix.lower() in ext_set:
             results.append(entry)
