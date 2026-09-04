@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -280,16 +281,25 @@ class TestStdioSmoke:
 
 class TestStreamRestore:
     def test_stdout_stderr_restored_after_raise(self, tmp_path, monkeypatch):
-        _make_dataset(tmp_path)
-        build_server(root=tmp_path)
+        """A tool-body raise must restore the swapped stdout/stderr streams.
 
-        fake_out = object()
-        fake_err = object()
+        Trigger: sofer_publish with a missing TOML raises MCPToolError inside
+        the tool body (sofer_publish does NOT convert it to a refusal envelope,
+        unlike sofer_validate), so _capture_output's finally-restore is
+        genuinely exercised and FastMCP surfaces the error as ToolError at the
+        client boundary. The fakes are file-like (io.StringIO) because FastMCP
+        logs tool-call errors to stderr after the body raises; a bare object()
+        would crash the logging write and mask the real error message.
+        """
+        server = build_server(root=tmp_path)
+
+        fake_out = io.StringIO()
+        fake_err = io.StringIO()
         monkeypatch.setattr(sys, "stdout", fake_out)
         monkeypatch.setattr(sys, "stderr", fake_err)
 
-        envelope = sofer_publish(str(tmp_path / "dataset.toml"), target="hf", dry_run=False)  # type: ignore[arg-type]
-        assert envelope["ok"] is False
+        with pytest.raises(ToolError, match="config not found"):
+            _call(server, "sofer_publish", {"config": str(tmp_path / "missing.toml")})
 
         assert sys.stdout is fake_out
         assert sys.stderr is fake_err
@@ -1059,20 +1069,23 @@ class TestPublishDryRun:
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish(str(tmp_path / "dataset.toml"))
+        envelope = _call(server, "sofer_publish", {"config": str(tmp_path / "dataset.toml")}).data
         assert envelope["ok"] is True
         assert envelope["dry_run"] is True
         assert "Dry-run" in envelope["output"] or "no files uploaded" in envelope["output"]
 
-    def test_publish_hf_without_confirm_raises(self, tmp_path, restore_tool_config):
+    def test_publish_hf_target_schema_rejected(self, tmp_path, restore_tool_config):
         _make_dataset(tmp_path)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish(str(tmp_path / "dataset.toml"), target="hf", dry_run=False)  # type: ignore[arg-type]
-        assert envelope["ok"] is False
-        assert envelope["error_code"] == "TARGET_INVALID"
+        with pytest.raises(ToolError, match="Input should be 'local'"):
+            _call(
+                server,
+                "sofer_publish",
+                {"config": str(tmp_path / "dataset.toml"), "target": "hf", "dry_run": False},
+            )
 
 
 def test_scan_apply_never_prompts_and_chains_scanner():
@@ -1174,57 +1187,48 @@ class TestPublishTargetLadder:
             publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
         )
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish(str(tmp_path / "dataset.toml"), target="garbage", dry_run=False)  # type: ignore[arg-type]
-        assert envelope["ok"] is False
-        assert envelope["error_code"] == "TARGET_INVALID"
+        with pytest.raises(ToolError, match="Input should be 'local'"):
+            _call(
+                server,
+                "sofer_publish",
+                {
+                    "config": str(tmp_path / "dataset.toml"),
+                    "target": "garbage",
+                    "dry_run": False,
+                },
+            )
         assert calls == [], "publish._api must never be reached for a refused target"
 
     def test_aws_target_dry_run_false_refused(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
-        envelope = sofer_publish(str(tmp_path / "dataset.toml"), target="aws", dry_run=False)  # type: ignore[arg-type]
-        assert envelope["ok"] is False
-        assert envelope["error_code"] == "TARGET_INVALID"
-
-    def test_garbage_target_dry_run_ok_no_network(self, tmp_path, monkeypatch, restore_tool_config):
-        _make_dataset(tmp_path)
-        _prepare_package(tmp_path)
-        calls: list[str] = []
-        monkeypatch.setattr(
-            publish_mod._api, "create_repo", lambda *a, **kw: calls.append("create_repo")
-        )
-        monkeypatch.setattr(
-            publish_mod._api,
-            "list_repo_files",
-            lambda *a, **kw: calls.append("list_repo_files"),
-        )
-        monkeypatch.setattr(
-            publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
-        )
-        build_server(root=tmp_path)
-
-        envelope = sofer_publish(str(tmp_path / "dataset.toml"), target="garbage", dry_run=True)
-        assert envelope["ok"] is True
-        assert envelope["dry_run"] is True
-        assert "Dry-run" in envelope["output"] or "no files uploaded" in envelope["output"]
-        assert calls == [], "a dry-run plan must never touch publish._api"
+        with pytest.raises(ToolError, match="Input should be 'local'"):
+            _call(
+                server,
+                "sofer_publish",
+                {"config": str(tmp_path / "dataset.toml"), "target": "aws", "dry_run": False},
+            )
 
     def test_local_target_dry_run_false_copies_package(self, tmp_path, restore_tool_config):
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)
-        build_server(root=tmp_path)
+        server = build_server(root=tmp_path)
 
         deliver = tmp_path / "deliver"
-        envelope = sofer_publish(
-            str(tmp_path / "dataset.toml"),
-            target="local",
-            dry_run=False,
-            output_dir=str(deliver),
-        )
+        envelope = _call(
+            server,
+            "sofer_publish",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "target": "local",
+                "dry_run": False,
+                "output_dir": str(deliver),
+            },
+        ).data
         assert envelope["ok"] is True, envelope
         assert envelope["exit_code"] == 0
         assert (deliver / "data.parquet").is_file(), "local copy must deliver the package"
@@ -2574,7 +2578,7 @@ class TestInitXlsxIntegration:
         assert envelope["ok"] is True
         assert (child / "test.toml").exists()
         # scan (placeholder raw/example.* stripped by merge_entries)
-        scan_env = sofer_scan_apply(str(child / "test.toml"))
+        scan_env = _call(server, "sofer_scan_apply", {"config": str(child / "test.toml")}).data
         assert scan_env["ok"] is True, scan_env
         # cache files exist
         assert (child / "cache" / "DATA_GOT_ALL.xlsx").is_file()
@@ -2588,7 +2592,9 @@ class TestInitXlsxIntegration:
         assert val["ok"] is True, val
         assert val["passed"] is True
         # rerun scan idempotent - count stays 2 cache xlsx entries (force to overwrite)
-        scan2 = sofer_scan_apply(str(child / "test.toml"), force=True)
+        scan2 = _call(
+            server, "sofer_scan_apply", {"config": str(child / "test.toml"), "force": True}
+        ).data
         assert scan2["ok"] is True
         content2 = (child / "test.toml").read_text(encoding="utf-8")
         # count cache xlsx occurrences should remain 2

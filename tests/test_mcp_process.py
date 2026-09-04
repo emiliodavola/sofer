@@ -3,7 +3,7 @@
 Phases 3-4 (PRs 3-4) of the ``test-mcp-cli-regression-suite`` change (#119).
 Proves the registered MCP server through the real stdio transport (PB-01),
 the nested-dataset CWD containment of ``sofer_init`` (PB-04), the recovery
-contract of PB-03 (executing the documented ``next`` hints and asserting the
+contract of PB-03 (executing the documented hint VALUES and asserting the
 replayed call reaches a different gate or the intended branch), the
 config-state scenarios of PB-04 (empty / existing / greenfield / triage /
 malformed configs plus the delivery handoff), and the offline guarantee of
