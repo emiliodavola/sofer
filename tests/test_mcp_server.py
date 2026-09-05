@@ -151,6 +151,38 @@ def server(tmp_path: Path):
     return build_server(root=tmp_path)
 
 
+class TestOutputBound:
+    """MSP-R12: the captured output envelope is byte-bounded (never unbounded)."""
+
+    def test_output_max_bytes_constant_exposed(self) -> None:
+        """config exposes OUTPUT_MAX_BYTES, a positive int default."""
+        assert hasattr(config, "OUTPUT_MAX_BYTES")
+        assert isinstance(config.OUTPUT_MAX_BYTES, int)
+        assert config.OUTPUT_MAX_BYTES > 0
+
+    def test_captured_text_passthrough_under_limit(self) -> None:
+        """Short output is returned verbatim (no marker)."""
+        assert ms._captured_text(io.StringIO("hello"), io.StringIO("")) == "hello"
+
+    def test_captured_text_truncates_with_marker(self) -> None:
+        """Output over the bound is truncated and carries the marker."""
+        big = "x" * (config.OUTPUT_MAX_BYTES + 1000)
+        text = ms._captured_text(io.StringIO(big), io.StringIO(""))
+        assert "... [truncated: " in text
+        assert text.endswith("bytes]")
+        assert len(text.encode("utf-8")) < len(big.encode("utf-8"))
+
+    def test_truncate_output_reports_dropped_bytes(self) -> None:
+        """The marker reports exactly how many bytes were dropped."""
+        result = ms._truncate_output("x" * 300, limit=100)
+        assert result == ("x" * 100) + "... [truncated: 200 bytes]"
+
+    def test_captured_text_combines_stderr(self) -> None:
+        """stderr is appended to stdout before truncation."""
+        text = ms._captured_text(io.StringIO("out"), io.StringIO("err"))
+        assert text == "outerr"
+
+
 class TestToolRoster:
     _EXPECTED: frozenset[str] = frozenset(
         {
