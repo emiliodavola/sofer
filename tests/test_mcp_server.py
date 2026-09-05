@@ -1388,6 +1388,58 @@ def test_scan_apply_never_prompts_and_chains_scanner():
     assert "write_toml" in src
 
 
+class TestScanApplyTruthfulReport:
+    """SCN-08: a partial failure never reports a successful registration.
+
+    ``registered`` must be truthful — only reported after the copy AND the
+    TOML write have both succeeded. A copy collision or a TOML write failure
+    reports ``registered: 0``.
+    """
+
+    def test_copy_collision_reports_registered_zero(self, tmp_path, restore_tool_config) -> None:
+        """A loose file that collides with a differing cache/ destination
+        refuses the copy and reports registered 0 — nothing was registered."""
+        _make_dataset(tmp_path)
+        # A loose new file whose cache/ destination already differs.
+        (tmp_path / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "cache").mkdir(exist_ok=True)
+        (tmp_path / "cache" / "new.csv").write_text(
+            "different;content\n9;9\n", encoding="utf-8-sig"
+        )
+        before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert envelope["registered"] == 0, envelope
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
+
+    def test_write_toml_failure_reports_registered_zero(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """A TOML write failure reports registered 0 — the cache copy happened
+        but no entry was actually registered in the config."""
+        _make_dataset(tmp_path)
+        (tmp_path / "new.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+
+        def _boom(_raw_toml, _config_path):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(ms, "write_toml", _boom)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert envelope["registered"] == 0, envelope
+        assert "Failed to write TOML" in envelope["message"]
+
+
 # ---------------------------------------------------------------------------
 #  MSP-R12 — wheel packaging: entry point + mcp extra (CI-marked integration)
 # ---------------------------------------------------------------------------

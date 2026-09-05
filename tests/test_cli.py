@@ -824,6 +824,40 @@ class TestScanMoveCLI:
         assert not (tmp_path / "raw" / "f.txt").exists()
 
 
+class TestScanTruthfulReport:
+    """SCN-08: ``Registered N`` is only printed AFTER copy + TOML write succeed."""
+
+    def test_write_toml_failure_does_not_report_registered(self, tmp_path, monkeypatch, capsys):
+        """A TOML write failure exits 1 and never prints a ``Registered``
+        success line — the cache copy happened but registration did not."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def _boom(_raw_toml, _config_path):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli, "write_toml", _boom)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Registered" not in captured.out
+        assert "Failed to write TOML" in captured.err
+
+    def test_success_reports_registered_after_write(self, tmp_path, monkeypatch, capsys):
+        """A successful scan prints the registration line after the copy and
+        TOML write complete."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Registered 1 new [[file]] entry(s)." in out
+
+
 # ── Fix 1: ran_checks propagation ─────────────────────────────────────────
 
 

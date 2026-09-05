@@ -534,10 +534,6 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     new_count = after_count - before_count
 
     print(f"  OK  Discovered {len(discovered)} supported file(s).")
-    if new_count:
-        print(f"  OK  Registered {new_count} new [[file]] entry(s).")
-    else:
-        print("  OK  All discovered files already registered (idempotent).")
 
     # 4. Confirm with the user before copying when Phase 1 had no candidates
     #    and thus no prompt yet; when Phase 1 moved files, the gate already
@@ -566,6 +562,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print("  DRY RUN  Would copy the following files:")
         for _src, dest in copied:
             print(f"     → {dest.relative_to(base_dir).as_posix()}")
+        if new_count:
+            print(f"  DRY RUN  Would register {new_count} new [[file]] entry(s).")
+        else:
+            print("  DRY RUN  All discovered files already registered (idempotent).")
     else:
         for _src, dest in copied:
             print(f"     OK  {dest.relative_to(base_dir).as_posix()}")
@@ -582,6 +582,12 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        # Registration is only truthful AFTER the copy and the TOML write have
+        # both succeeded — a partial failure must never report a registration.
+        if new_count:
+            print(f"  OK  Registered {new_count} new [[file]] entry(s).")
+        else:
+            print("  OK  All discovered files already registered (idempotent).")
 
     return 0
 
