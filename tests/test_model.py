@@ -286,6 +286,14 @@ class TestValidate:
         errors = cfg.validate()
         assert any("repo_id" in e for e in errors)
 
+    def test_invalid_repo_id_trailing_newline_rejected(self):
+        """A trailing newline is rejected by the ``\\Z`` anchor — Python ``$``
+        also matches before a trailing ``\\n``, which would smuggle an invalid
+        repo through validation (INIT-05 parity)."""
+        cfg = DatasetConfig(name="test", repo_id="user/repo\n")
+        errors = cfg.validate()
+        assert any("repo_id" in e for e in errors)
+
     def test_empty_files_list(self):
         """Zero file entries should fail."""
         cfg = DatasetConfig(name="test", repo_id="user/repo", files=[])

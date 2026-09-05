@@ -576,8 +576,10 @@ class DatasetConfig:
                 )
                 break
 
-        # repo_id format
-        if not re.match(r"^[\w\-]+/[\w\-]+$", self.repo_id):
+        # repo_id format — `\Z` (not `$`) so a trailing newline is rejected,
+        # matching the exact no-trailing-newline contract used for `user` in
+        # validate_identity (INIT-05).
+        if not re.match(r"^[\w\-]+/[\w\-]+\Z", self.repo_id):
             errors.append(f"Invalid repo_id: '{self.repo_id}'. Must be 'user/repo'.")
 
         # file entries
