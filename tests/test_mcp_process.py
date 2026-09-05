@@ -38,7 +38,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import PROCESS_TIMEOUT_SECONDS, _make_dataset, call_tool
+from conftest import (
+    PROCESS_TIMEOUT_SECONDS,
+    McpStdioServer,
+    _make_dataset,
+    call_tool,
+)
 
 from sofer.mcp_server import build_server
 
@@ -187,7 +192,61 @@ class TestParentRootIdentity:
         _run(_go())
 
 
-class TestRecoveryPublishConfirm:
+class TestInstalledBinary:
+    """E2E: the REAL installed ``sofer-mcp`` console script over stdio.
+
+    The module-scoped fixtures spawn ``sys.executable -c 'from sofer.mcp_server
+    import main; main()'`` — the checkout module. This class proves the
+    INSTALLED ``sofer-mcp`` console-script entry point (``pyproject.toml
+    [project.scripts]``, the boundary real users hit) drives the same server:
+    a parent/child layout where ``sofer_init`` with ``cwd="child"`` anchors
+    identity under the child and reports the canonical envelope. Skips when
+    ``sofer-mcp`` is not on PATH (e.g. an uninstalled dev checkout) — CI's
+    ``uv run`` places the project venv's scripts dir on PATH, so it runs there.
+    """
+
+    @pytest.mark.skipif(
+        shutil.which("sofer-mcp") is None,
+        reason="sofer-mcp not installed",
+    )
+    def test_installed_binary_init_anchors_under_child(
+        self, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """``sofer_init(name="probe", user="testuser", cwd="child")`` via the
+        installed binary: ``child/probe.toml`` + ``child/raw/`` exist,
+        ``parent/probe.toml`` absent, and the envelope reports the absolute
+        ``config_path`` / ``dataset_root`` (INIT-03, PB-03)."""
+        parent = tmp_path_factory.mktemp("installed-binary")
+        (parent / "child").mkdir()
+        server = McpStdioServer(cwd=parent, command=shutil.which("sofer-mcp"), args=())
+        params = server.spawn()
+        child = parent / "child"
+
+        async def _go() -> None:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                ) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        "sofer_init",
+                        {"name": "probe", "user": "testuser", "cwd": "child"},
+                    )
+                    assert not result.isError
+                    envelope = json.loads(result.content[0].text)
+                    assert envelope["ok"] is True, envelope
+                    assert (child / "probe.toml").is_file()
+                    assert (child / "raw").is_dir()
+                    assert not (parent / "probe.toml").exists()
+                    assert not (parent / "raw").exists()
+                    assert envelope["config_path"] == str((child / "probe.toml").resolve())
+                    assert envelope["dataset_root"] == str(child.resolve())
+
+        _run(_go())
+
     """PB-03: replay the documented risk-gate hint past the risk gate."""
 
     def test_replay_acknowledge_risk_progresses_to_approval_gate(

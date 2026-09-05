@@ -233,10 +233,15 @@ class McpStdioServer:
     args: tuple[str, ...] = ("-c", "from sofer.mcp_server import main; main()")
     """Python args invoking the MCP server entry point over stdio."""
 
+    command: str | None = None
+    """Executable to spawn; ``None`` (default) uses ``sys.executable`` with
+    *args*. Set to a console-script path (e.g. ``shutil.which("sofer-mcp")``)
+    to prove the installed entry point instead of the checkout module."""
+
     def spawn(self) -> StdioServerParameters:
         """Return stdio parameters for one client session (one spawn each)."""
         return StdioServerParameters(
-            command=sys.executable,
+            command=self.command or sys.executable,
             args=list(self.args),
             cwd=str(self.cwd),
         )
