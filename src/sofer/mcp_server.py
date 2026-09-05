@@ -1118,13 +1118,13 @@ def sofer_codebook_all(
     output_dir: Annotated[
         str | None,
         Field(
-            description="Override directory for per-file codebooks (default: cache/codebooks). Must stay under server root."
+            description="Override directory for per-file codebooks (default: the package build_dir, where publish collects codebooks). Must stay under server root."
         ),
     ] = None,
 ) -> dict[str, Any]:
     """Generate one codebook per [[file]] entry in a dataset config.
 
-    Side effects: writes per-file codebooks plus a root codebook.md index into output_dir or cache/codebooks/.
+    Side effects: writes per-file codebooks plus a root codebook.md index into output_dir or the package build_dir/ (where publish collects them).
     Network usage: none.
 
     When to use: Phase 1 step 3 after sofer_prepare; batch alternative to sofer_codebook.
@@ -1135,11 +1135,16 @@ def sofer_codebook_all(
         cfg, _report, config_errors = _load_dataset(config, run_checks=False)
         if cfg is None or config_errors:
             return _refusal(config_errors)
-        output_path = (
-            _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
-            if output_dir is not None
-            else None
-        )
+        if output_dir is not None:
+            output_path = _contained_path(
+                output_dir, root=cfg._base_dir, what="output_dir", must_exist=False
+            )
+        else:
+            # Align with publish's codebook collection (RC-C01): publish
+            # collects codebooks from the package build_dir, so a standalone
+            # codebook_all must write there too — never the shared
+            # cache/codebooks/ directory.
+            output_path = resolve_output_dir(cfg, None)
         try:
             generated = generate_all_codebooks(
                 cfg,
@@ -2290,7 +2295,7 @@ def _prompt_prepare_dataset(config: str, output: str | None = None) -> str:
         f"3. sofer_codebook_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir; writes per-file codebooks + codebook.md.\n"
         f"4. sofer_profile_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir; batch writes profiles/<rel>.metadata.yaml.\n"
         f"5. sofer_render_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir; batch writes renders/<rel>.README.md.\n"
-        f"6. sofer_publish(config={config!r}, dry_run=True) — then STOP for human approval before sofer_publish_confirm(acknowledge_risk=True, ...).\n"
+        f"6. sofer_publish(config={config!r}, output_dir={output_repr}, dry_run=True) — then STOP for human approval before sofer_publish_confirm(acknowledge_risk=True, ...).\n"
         "\n"
         "When-to-use: use prepare_dataset for the full build (you want Parquet+Card+codebooks+profiles+renders); use assess_dataset for quick single-file profile/render triage without prepare. Full chain args: config (TOML path, must stay under server root), output_dir (override dir or None), force (overwrite guard).\n"
         "\n"
@@ -2300,7 +2305,7 @@ def _prompt_prepare_dataset(config: str, output: str | None = None) -> str:
         f"sofer_codebook_all(config={config!r}, output_dir={output_repr})\n"
         f"sofer_profile_all(config={config!r}, output_dir={output_repr})\n"
         f"sofer_render_all(config={config!r}, output_dir={output_repr})\n"
-        f"sofer_publish(config={config!r}, dry_run=True)  # STOP — get approval before sofer_publish_confirm\n"
+        f"sofer_publish(config={config!r}, output_dir={output_repr}, dry_run=True)  # STOP — get approval before sofer_publish_confirm\n"
     )
 
 
@@ -2346,7 +2351,7 @@ def _prompt_finalize_and_publish(config: str, output: str | None = None) -> str:
         f"3. sofer_codebook_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir.\n"
         f"4. sofer_profile_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir, force.\n"
         f"5. sofer_render_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir, force.\n"
-        f'6. sofer_publish(config={config!r}, target="local", dry_run=True) — args: config, target, output_dir, force, keep_csv, dry_run; dry_run=True only prints a plan, no upload.\n'
+        f'6. sofer_publish(config={config!r}, target="local", output_dir={output_repr}, dry_run=True) — args: config, target, output_dir, force, keep_csv, dry_run; dry_run=True only prints a plan, no upload.\n'
         "7. STOP: present the dry-run plan to the human and get explicit "
         "approval BEFORE calling sofer_publish_confirm. Never publish without "
         "that approval.\n"
@@ -2357,7 +2362,7 @@ def _prompt_finalize_and_publish(config: str, output: str | None = None) -> str:
         "\n"
         "When-to-use: use finalize_and_publish for the end-to-end release (validate->prepare->codebook_all->profile->render->publish dry-run->STOP->confirm); for pre-publish checks use prepare_dataset.\n"
         "\n"
-        f"Copy-paste chain (to dry-run): sofer_validate(config={config!r}); sofer_prepare(config={config!r}, output_dir={output_repr}); sofer_codebook_all(config={config!r}, output_dir={output_repr}); sofer_profile_all(config={config!r}, output_dir={output_repr}); sofer_render_all(config={config!r}, output_dir={output_repr}); sofer_publish(config={config!r}, dry_run=True)\n"
+        f"Copy-paste chain (to dry-run): sofer_validate(config={config!r}); sofer_prepare(config={config!r}, output_dir={output_repr}); sofer_codebook_all(config={config!r}, output_dir={output_repr}); sofer_profile_all(config={config!r}, output_dir={output_repr}); sofer_render_all(config={config!r}, output_dir={output_repr}); sofer_publish(config={config!r}, output_dir={output_repr}, dry_run=True)\n"
     )
 
 

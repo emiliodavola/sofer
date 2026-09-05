@@ -497,6 +497,7 @@ def _copy_package(
     *,
     keep_csv: bool,
     protected: set[str] | None = None,
+    force: bool = True,
 ) -> None:
     """Copy the planned package from *source* to *dest*.
 
@@ -513,6 +514,10 @@ def _copy_package(
                    entries at their remote paths.
         protected: Lowercased remote names skipped by overwrite protection
                    (``None`` = nothing skipped).
+        force:     When ``False``, refuse to overwrite an existing
+                   destination FILE (raises :class:`FileExistsError`) — the
+                   local target's overwrite guard (PUB-13). The hf staging
+                   root is always fresh, so it keeps the default ``True``.
     """
     skip = protected or set()
     # Shared expanded set (PUB-10) so copy set == diff set (PUB-09)
@@ -529,7 +534,7 @@ def _copy_package(
             continue
         src = source / _PP(remote)
         if src.exists():
-            copy_to_mirror(src, dest, remote)
+            copy_to_mirror(src, dest, remote, force=force)
             staged.add(remote.lower())
         else:
             # Fallback for keep_csv CSV original not in mirror (copied from local)
@@ -539,25 +544,25 @@ def _copy_package(
                 if entry.remote == remote:
                     local = entry.resolve(base)
                     if local.exists():
-                        copy_to_mirror(local, dest, remote)
+                        copy_to_mirror(local, dest, remote, force=force)
                         staged.add(remote.lower())
                     break
 
     if "readme.md" not in skip:
         src = source / "README.md"
         if src.exists():
-            copy_to_mirror(src, dest, "README.md")
+            copy_to_mirror(src, dest, "README.md", force=force)
     if "license" not in skip:
         src = source / "LICENSE"
         if src.exists():
-            copy_to_mirror(src, dest, "LICENSE")
+            copy_to_mirror(src, dest, "LICENSE", force=force)
 
     codebooks_dir = source / config.CODEBOOKS_DIR
     if codebooks_dir.is_dir():
         for cb in sorted(codebooks_dir.rglob("*.md")):
-            copy_to_mirror(cb, dest, cb.relative_to(source).as_posix())
+            copy_to_mirror(cb, dest, cb.relative_to(source).as_posix(), force=force)
     if (source / "codebook.md").is_file():
-        copy_to_mirror(source / "codebook.md", dest, "codebook.md")
+        copy_to_mirror(source / "codebook.md", dest, "codebook.md", force=force)
 
 
 def _print_local_package_summary(cfg: DatasetConfig, source: Path) -> None:
@@ -606,7 +611,11 @@ def publish(
                        or ``"local"`` (copy to ``--output``).
         output_dir:    ``hf``: override the prepare output directory
                        (default ``[dataset] build_dir``).  ``local``:
-                       destination directory for the package copy.
+                       destination directory for the package copy.  Under
+                       ``--dry-run`` (any target) it names the package
+                       source, so the plan reflects where the earlier
+                       prepare/codebook_all/profile_all/render_all steps
+                       wrote.
         force:         When ``True``, skip overwrite protection on the hf
                        target.
         verify:        Accepted for signature compatibility; verification
@@ -647,9 +656,12 @@ def publish(
         Exit code (``0`` success, ``1`` quality-gate failure, prepare
         failure, or hf upload failure).
     """
-    # For the hf target this is the prepare-output / staging source; for the
-    # local target it is the *destination* of the package copy.
-    source = resolve_output_dir(cfg, output_dir if target == "hf" else None)
+    # output_dir is the package-source override for the hf target and for any
+    # dry-run plan (so the plan reflects where prepare/codebook_all/etc.
+    # wrote). For the local target's ACTUAL copy, output_dir is the
+    # DESTINATION (resolved later at the local branch), so the source stays
+    # the build dir.
+    source = resolve_output_dir(cfg, output_dir if (target == "hf" or dry_run) else None)
 
     print(f"\n{'=' * 60}")
     print(f"  Dataset:   {cfg.name}")
@@ -699,7 +711,14 @@ def publish(
         dest = resolve_output_dir(cfg, output_dir)
         print(f"  [i] Copying package from {source} to {dest} ...")
         # --keep-csv has no effect on the local target (PUB-07).
-        _copy_package(cfg, source, dest, keep_csv=False)
+        try:
+            # PUB-13: without --force, refuse to overwrite an existing
+            # destination file (fail-closed, no silent copy2 overwrite).
+            _copy_package(cfg, source, dest, keep_csv=False, force=force)
+        except FileExistsError as exc:
+            print(f"\n  X  {exc}")
+            print("     Use --force to overwrite the existing files.")
+            return 1
         print(f"\n{'=' * 60}")
         print(f"  Result: package copied to {dest}")
         print(f"{'=' * 60}\n")

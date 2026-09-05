@@ -1787,8 +1787,11 @@ class TestCodebookAllBehavior:
         assert envelope["exit_code"] == 0
         assert len(envelope["files"]) >= 2, envelope["files"]
         assert all(Path(f).is_file() for f in envelope["files"])
-        assert (tmp_path / "cache" / "codebook.md").is_file(), "root index must be generated"
+        # Codebooks land in the package build_dir (where publish collects),
+        # not the shared cache/ dir (PUB-13 / RC-C01).
+        assert (tmp_path / "build" / "codebook.md").is_file(), "root index must be generated"
         assert not (tmp_path / "codebook.md").exists()
+        assert not (tmp_path / "cache" / "codebook.md").exists()
 
     def test_codebook_all_collision_ok_false(self, tmp_path, restore_tool_config):
         root = tmp_path / "root"
@@ -1822,11 +1825,33 @@ class TestCodebookAllBehavior:
             server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
-        codebook = tmp_path / "cache" / "codebooks" / "data.md"
+        codebook = tmp_path / "build" / "codebooks" / "data.md"
         assert codebook.is_file(), f"missing {codebook}"
         text = codebook.read_text(encoding="utf-8")
         assert "| 1 | `name`" in text, text
         assert "| 2 | `age`" in text, text
+
+    def test_codebook_all_build_dir_collected_by_publish(self, tmp_path, restore_tool_config):
+        """PUB-13 / RC-C01: codebook_all writes into the package build_dir, so a
+        publish dry-run collects the codebooks (no codebook-less package)."""
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        prep = _call(server, "sofer_prepare", {"config": str(tmp_path / "dataset.toml")}).data
+        assert prep["ok"] is True, prep
+
+        cb = _call(server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}).data
+        assert cb["ok"] is True, cb
+        assert (tmp_path / "build" / "codebooks" / "data.md").is_file()
+        assert (tmp_path / "build" / "codebook.md").is_file()
+
+        pub = _call(
+            server, "sofer_publish", {"config": str(tmp_path / "dataset.toml"), "dry_run": True}
+        ).data
+        assert pub["ok"] is True, pub
+        assert "codebook.md" in pub["output"], (
+            "publish must collect codebooks from the build_dir package"
+        )
 
 
 class TestScanDryRunBehavior:

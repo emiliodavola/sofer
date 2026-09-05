@@ -268,7 +268,7 @@ def expanded_planned_remotes(
     return expanded
 
 
-def copy_to_mirror(src: Path, dest_root: Path, remote: str) -> None:
+def copy_to_mirror(src: Path, dest_root: Path, remote: str, *, force: bool = True) -> None:
     """Copy a file or directory tree into the mirror layout under *dest_root*.
 
     Directories are copied recursively with :func:`shutil.copytree`
@@ -281,10 +281,21 @@ def copy_to_mirror(src: Path, dest_root: Path, remote: str) -> None:
         dest_root: Root of the mirror layout (e.g. the staging directory).
         remote:    Remote-relative destination path (POSIX separators;
                    a trailing slash on a directory is harmless).
+        force:     When ``False`` and the destination FILE already exists,
+                   raise :class:`FileExistsError` instead of silently
+                   overwriting it (publish local-target overwrite
+                   protection, PUB-13). Directories always merge; only the
+                   file branch is protected. Defaults to ``True`` so
+                   ``prepare`` staging keeps its unconditional-overwrite
+                   behavior.
     """
     if src.is_dir():
         shutil.copytree(src, dest_root / remote, dirs_exist_ok=True)
     else:
         dest = dest_root / remote
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() and not force:
+            raise FileExistsError(
+                f"Destination already exists: {dest} (use --force to overwrite)"
+            )
         shutil.copy2(src, dest)

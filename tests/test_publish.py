@@ -211,6 +211,42 @@ class TestLocalTarget:
         assert after == before, "in-place summary must not mutate the package"
         assert "Local target" in captured.out
 
+    def test_local_refuses_overwrite_without_force(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """PUB-13: local --output refuses (rc 1) instead of silently
+        overwriting an existing destination file when force=False."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        prepare(cfg, tmp_path / "build")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        (dest / "data.parquet").write_text("existing", encoding="utf-8")
+
+        rc = publish(cfg, target="local", output_dir="./out")
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert (dest / "data.parquet").read_text(encoding="utf-8") == "existing"
+        assert "Use --force" in captured.out
+
+    def test_local_overwrites_with_force(self, tmp_path: Path, monkeypatch) -> None:
+        """PUB-13: local --output --force overwrites an existing destination file."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        prepare(cfg, tmp_path / "build")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        (dest / "data.parquet").write_text("existing", encoding="utf-8")
+
+        rc = publish(cfg, target="local", output_dir="./out", force=True)
+        assert rc == 0
+        assert (dest / "data.parquet").read_bytes() != b"existing"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PUB-01 — quality gate blocks hf delivery
@@ -316,6 +352,25 @@ class TestDryRun:
         assert not (out / "data.parquet").exists(), "dry-run must not run prepare"
         assert "Dry-run complete" in captured.out
         assert "ADDED" in captured.out  # diff summary from planned remotes
+
+    def test_dry_run_honors_output_dir_source(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """PUB-13: a dry-run with --output names the package source, so the
+        plan reflects the codebooks prepare --all-files wrote into it."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        custom = tmp_path / "custom"
+        prepare(cfg, custom, all_files=True)  # codebooks land in custom/
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True, output_dir="./custom")
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "codebook.md" in captured.out, (
+            "dry-run must collect codebooks from the --output package dir"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
