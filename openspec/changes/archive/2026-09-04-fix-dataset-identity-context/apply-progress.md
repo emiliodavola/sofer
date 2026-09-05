@@ -496,3 +496,57 @@ The audit's conditional ("update the live spec IF INIT-01/INIT-02 or the tool de
 ## Status
 
 6/6 merge-review blockers fixed, tested, spec-synced, and committed on `fix/116-pr4`. Full suite re-baselined at **1385 passed / 4 skipped**; all gates green; SOFER_TRACE.md untouched. Pushed to `origin/fix/116-pr4` (updates PR #137) — ready for re-verify/merge.
+
+---
+
+# Third-review fixes (2026-09-04) — applied on fix/116-pr4 (PR #137)
+
+**Context**: The maintainer's THIRD review round of the chained PRs (#134/#136/#135/#137) for issue #116 found 4 evidence-verified defects. All 4 fixed on `fix/116-pr4` (head of PR #137 — commits update that PR automatically; no new PRs, no merge). Strict TDD disabled (Standard mode). Each defect fixed + tested in its own work-unit commit; all gates re-run after.
+
+## Work Units
+
+| Unit | Defect | Commit | Notes |
+|------|--------|--------|-------|
+| A | auth_status returns ok:True even with config_errors | `ea1b047 fix(mcp): auth_status ok reflects config validity` | `sofer_auth_status` collected `cfg.validate() + _validate_file_entries + _validate_output_targets + _validate_doc_files` but ALWAYS returned `ok:True/exit_code 0` — a malicious/invalid TOML got a false "ok" from the preflight (contradicts the error-envelope contract). Now `ok = not config_errors`; `exit_code = 0 if ok else 1`; same fields returned (token/confidential/requires_*/next/config_errors); docstring notes ok reflects config validity. +3 tests (placeholder user → ok:False/rc 1/non-empty config_errors; `[[file]] local="../../escape.csv"` containment violation → ok:False naming "outside the server root"; valid TOML → ok:True/rc 0) |
+| B | readOnlyHint True on tools that write files | `5214c1d fix(mcp): mark writing tools non-read-only in annotations` | `readOnlyHint: True` was set on sofer_codebook/codebook_all/profile/profile_all/render/render_all — all WRITE files. Flipped to False for the 6; genuinely read-only tools stay True (sofer_validate, sofer_scan_dry_run, sofer_auth_status). destructiveHint/idempotentHint untouched (idempotentHint already True on the idempotent writers). +1 schema test `test_readonly_hint_matches_side_effects` partitioning all 14 tools: 11 writing tools → False, 3 read-only → True |
+| C | `_needs_prepare` hardcodes `dataset.toml`, ignoring custom TOML names | `bb1355d fix(publish): use the real config path in stale-package check` | `publish._needs_prepare` checked only `base / config.DEFAULT_CONFIG_NAME` — a custom-named TOML (issue #116 canonical init produces e.g. `test.toml`) was never compared, so a modified custom TOML did NOT trigger regeneration → stale package. `DatasetConfig.from_toml` now stores the resolved TOML path as private `_config_path: Path = Path()` (model.py); `_needs_prepare` uses `cfg._config_path` when set, falling back to `base / DEFAULT_CONFIG_NAME` for hand-built configs. +2 tests (custom `test.toml` newer than parquet → True; unchanged → False) |
+| D | Real installed-binary evidence + Windows CI | `5817d3c test(process): prove installed sofer-mcp binary over stdio` + `9e73b21 ci: run test matrix on windows-latest` | The ground-truth fixture spawns `sys.executable` (checkout module), and CI ran only ubuntu-latest. New `TestInstalledBinary` spawns the REAL installed `sofer-mcp` console script via `shutil.which("sofer-mcp")` over stdio (McpStdioServer gains an optional `command` field; `None` → `sys.executable`), calls `sofer_init(name="probe", user="testuser", cwd="child")` on a parent/child layout, asserts child-anchored TOML + raw/ + identity envelope; `@skipif(sofer-mcp not installed)`. ci.yml test matrix gains `os: [ubuntu-latest, windows-latest]` (lint stays ubuntu). Test RAN and PASSED locally — `sofer-mcp` IS installed in this venv |
+
+## Verification (final gates, ACTUAL output)
+
+| Command | Result |
+|---------|--------|
+| uv run pytest tests/ -q (FULL suite) | **1392 passed, 4 skipped, 0 failed** — 1385 baseline + 7 new passed (A +3, B +1, C +2, D +1), 0 new skips (installed-binary test RAN) |
+| uv run pytest tests/test_mcp_server.py tests/test_mcp_schema.py tests/test_publish.py tests/test_mcp_process.py -q | 263 passed, 2 skipped |
+| uv run mypy src/ | Success: no issues found in 30 source files |
+| uv run ruff check src/ tests/ | All checks passed |
+| uv run ruff format --check src/ tests/ | 60 files already formatted |
+| git diff --check | clean (CRLF warnings only) |
+| ci.yml YAML | `yaml.safe_load` OK; test matrix os `[ubuntu-latest, windows-latest]`, runs-on `${{ matrix.os }}`, lint ubuntu-latest |
+| git status | SOFER_TRACE.md untracked, UNTOUCHED (PB-08); verify-report.md still modified (pre-existing uncommitted prior-batch artifact — not staged, not committed); 6 commits pushed to origin/fix/116-pr4 |
+
+## Files Changed (third-review fixes)
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| src/sofer/mcp_server.py | Modified | sofer_auth_status ok/exit_code from config_errors + docstring (A); readOnlyHint False × 6 (B) |
+| src/sofer/model.py | Modified | `_config_path: Path = Path()` private field, set from `path.resolve()` in from_toml (C) |
+| src/sofer/publish.py | Modified | `_needs_prepare` uses `cfg._config_path` when set; `Path()` sentinel compare; docstring (C) |
+| tests/test_mcp_server.py | Modified | TestAuthStatusValidity +3 (A) |
+| tests/test_mcp_schema.py | Modified | TestAnnotations::test_readonly_hint_matches_side_effects (B) |
+| tests/test_publish.py | Modified | TestNeedsPrepare custom-toml +2 (C) |
+| tests/conftest.py | Modified | McpStdioServer gains optional `command` field (D) |
+| tests/test_mcp_process.py | Modified | TestInstalledBinary E2E class (D) |
+| .github/workflows/ci.yml | Modified | test matrix gains windows-latest (D) |
+
+## Deviations / Notes
+
+1. **FIX C `Path()` truthiness trap**: `bool(Path())` is `True` (empty `Path()` == `Path('.')`), so the naive `cfg._config_path if cfg._config_path else ...` pattern would treat the hand-built-config default as a real path and silently skip the TOML check. Guarded explicitly with `cfg._config_path != Path()`.
+2. **FIX D McpStdioServer extended, not forked**: the frozen dataclass gained an optional `command: str | None = None` field; `spawn()` uses `self.command or sys.executable` — existing fixtures byte-identical, the installed-binary test passes `command=shutil.which("sofer-mcp"), args=()`.
+3. **FIX D ran locally**: `sofer-mcp` is installed in this venv, so TestInstalledBinary executed (not skipped) and passed — real console-script entry-point evidence on this host. It would skip on a bare checkout without installation; CI's `uv run` places the venv scripts dir on PATH, so it runs there.
+4. **verify-report.md left uncommitted**: the working tree carried a pre-existing, uncommitted prior-batch edit (post-merge-review re-verification, 1385/4) that was NOT part of this batch — left exactly as found, never staged.
+5. **Commit splitting**: mcp_server.py spans units A and B — the 6 readOnlyHint lines were temporarily reverted (regex-anchored to the 6 tool names) for commit A, then restored from a temp backup for commit B; final file state verified identical to the post-fix version.
+
+## Status
+
+4/4 third-review defects fixed, tested, and committed on `fix/116-pr4`. Full suite re-baselined at **1392 passed / 4 skipped**; all gates green; SOFER_TRACE.md untouched. Pushed to `origin/fix/116-pr4` (updates PR #137) — ready for re-verify/merge.
