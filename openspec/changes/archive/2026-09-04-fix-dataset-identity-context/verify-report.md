@@ -657,3 +657,17 @@ green, and SOFER_TRACE.md remains untouched — **BUT** the F2 line introduced b
 `ruff format --check` both exit 1, breaking PB-07 and the CI lint job.
 **CRITICAL finding 1; blockers 1.** One mechanical formatting fix is required
 before merge (`apply-fix`).
+
+### Third-review CRITICAL resolution (2026-09-04)
+
+The post-third-review re-verification recorded a CRITICAL: the F2 field line in src/sofer/model.py (114 chars) failed ruff E501 (line-length 100), which would fail the CI lint job. Fixed in 2d1136d (`style(model): wrap _config_path field to satisfy line-length`) — `field(...)` wrapped across lines, comment kept.
+
+Final gates on head 2d1136d (verified by the orchestrator):
+- `uv run pytest tests/ -q` -> **1392 passed, 4 skipped** (38.94s, exit 0)
+- `uv run mypy src/` -> Success: no issues found in 30 source files
+- `uv run ruff check src/ tests/` -> All checks passed!
+- `uv run ruff format --check src/ tests/` -> 60 files already formatted
+- `git diff --check` -> clean
+- SOFER_TRACE.md untouched (untracked, 17210 bytes, mtime 2026-08-31 17:40)
+
+**FINAL VERDICT: verified — merge-ready** (chain order #134 -> #136 -> #135 -> #137).
