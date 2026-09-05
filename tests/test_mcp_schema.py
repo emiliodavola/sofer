@@ -316,12 +316,34 @@ class TestEnvelope:
         assert envelope["token"] in ("present", "missing")
         assert "secret123" not in str(envelope)
         assert "phrase123" not in str(envelope)
+        assert envelope["approval_configured"] is True
         assert envelope["requires_approval_phrase"] is True
         # sofer_auth_status is the ONLY tool whose output_schema declares next —
         # this is the sole boundary-level next assertion (spec delta s7).
         assert envelope["next"]["acknowledge_risk"] is True
         assert envelope["next"]["approval_phrase"] == "<from human>"
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+
+    def test_auth_status_approval_not_configured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a server phrase, the preflight reports approval_configured
+        False, still requires an approval phrase (fail-closed), and points the
+        next hint at configuring it instead of supplying a phrase."""
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "dataset.toml").write_text(
+            '[dataset]\nname="x"\nrepo_id="u/x"\n\n[[file]]\nlocal="data.csv"\nremote="data.csv"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HF_TOKEN", "secret123")
+        server = build_server(root=tmp_path)  # no approval phrase
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["approval_configured"] is False
+        assert envelope["requires_approval_phrase"] is True
+        assert envelope["next"]["action"] == "configure_approval_phrase"
+        assert "approval_phrase" not in envelope["next"]
 
 
 class TestHappyPath:

@@ -497,7 +497,7 @@ class TestDeliveryHandoff:
 
         monkeypatch.setattr(pub_mod, "HfApi", _fake_hf_api)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
         config_arg = str(tmp_path / "dataset.toml")
 
         validated = _call(server, "sofer_validate", {"config": config_arg}).data
@@ -520,12 +520,16 @@ class TestDeliveryHandoff:
         assert plan["dry_run"] is True
 
         # confidential=false in the fixture, so acknowledge_risk alone
-        # satisfies the acknowledgments (no confidential ack, no approval
-        # phrase on this server).
+        # satisfies the acknowledgment booleans; the fail-closed approval gate
+        # additionally requires the server-configured phrase on every publish.
         confirmed = _call(
             server,
             "sofer_publish_confirm",
-            {"config": config_arg, "acknowledge_risk": True},
+            {
+                "config": config_arg,
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert confirmed["ok"] is True, confirmed
         assert confirmed["acknowledge_risk"] is True

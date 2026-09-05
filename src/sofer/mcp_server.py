@@ -30,9 +30,11 @@ Security model (REVISION-2 design, findings CF-1/CF-2):
 - **Fail-closed publish ladder**: ``sofer_publish_confirm`` requires
   ``acknowledge_risk=True`` (default ``False`` -> envelope ``PUBLISH_RISK_NOT_ACKD``),
   requires ``acknowledge_confidential=True`` when ``[meta] confidential`` is
-  set, and — when the host configured an approval phrase via
-  ``build_server(approval_phrase=...)`` / ``SOFER_MCP_APPROVAL_PHRASE`` —
-  requires that phrase compared with ``hmac.compare_digest``. The quality
+  set, and ALWAYS requires a human approval phrase. The phrase is configured
+  via ``build_server(approval_phrase=...)`` / ``SOFER_MCP_APPROVAL_PHRASE``
+  and compared with ``hmac.compare_digest`` (mismatch ->
+  ``PUBLISH_APPROVAL_REQUIRED``); fail-closed, an unconfigured phrase refuses
+  the publish outright (``PUBLISH_APPROVAL_NOT_CONFIGURED``). The quality
   gate runs before the token check (offline, deterministic fail).
 - **Single-writer config state**: fastmcp v3 dispatches synchronous tools to
   a threadpool, so every tool body runs under a server-wide
@@ -144,6 +146,7 @@ _ERROR_CODES: tuple[str, ...] = (
     "PUBLISH_RISK_NOT_ACKD",
     "PUBLISH_CONFIDENTIAL_NOT_ACKD",
     "PUBLISH_APPROVAL_REQUIRED",
+    "PUBLISH_APPROVAL_NOT_CONFIGURED",
     "PATH_OUTSIDE_ROOT",
     "TARGET_INVALID",
 )
@@ -158,8 +161,9 @@ _PHASED_INSTRUCTIONS: str = (
     "Each tool lists Requires: and Next: so tools/list is self-sufficient.\n"
     "Publishing to Hugging Face Hub happens ONLY through sofer_publish_confirm, "
     "which requires explicit human authorization (acknowledge_risk=True; "
-    "the config's confidential flag must be acknowledged; a host-configured "
-    "approval phrase may be required). All path arguments and resources are "
+    "the config's confidential flag must be acknowledged; an approval phrase "
+    "configured via SOFER_MCP_APPROVAL_PHRASE is ALWAYS required — without it "
+    "publish is disabled). All path arguments and resources are "
     "contained under the server root. Preflight: sofer_auth_status checks token/confidential/approval without network. "
     f"{_UNTRUSTED_NOTE}\n"
     "Next hint: start with sofer_validate for existing datasets, or sofer_init + sofer_scan_apply for greenfield. sofer_auth_status is the preflight tool."
@@ -974,7 +978,7 @@ def sofer_publish_confirm(
     approval_phrase: Annotated[
         str | None,
         Field(
-            description="Host-configured approval phrase when the server requires it (env SOFER_MCP_APPROVAL_PHRASE)."
+            description="Human approval phrase (env SOFER_MCP_APPROVAL_PHRASE). ALWAYS required for publish — the server refuses with PUBLISH_APPROVAL_NOT_CONFIGURED when no phrase is configured, and PUBLISH_APPROVAL_REQUIRED on a missing/mismatched phrase."
         ),
     ] = None,
 ) -> dict[str, Any]:
@@ -1054,23 +1058,38 @@ def sofer_publish_confirm(
                     "partial": False,
                 },
             )
-        if _APPROVAL_PHRASE is not None:
-            if approval_phrase is None or not hmac.compare_digest(
-                approval_phrase, _APPROVAL_PHRASE
-            ):
-                return _error_envelope(
-                    "PUBLISH_APPROVAL_REQUIRED",
-                    "approval phrase required — ask the human to confirm this publish",
-                    next_hint={"approval_phrase": "<from human>"},
-                    config_errors=config_errors,
-                    extra={
-                        "confidential": cfg.confidential,
-                        "acknowledge_risk": acknowledge_risk,
-                        "acknowledge_confidential": acknowledge_confidential,
-                        "skipped_protected": [],
-                        "partial": False,
-                    },
-                )
+        if _APPROVAL_PHRASE is None:
+            # Fail-closed: without a server-configured approval phrase there is
+            # no human-in-the-loop gate, so the irreversible HF publish is
+            # disabled entirely. The acknowledgment booleans are ADDITIONAL
+            # gates, never sufficient on their own.
+            return _error_envelope(
+                "PUBLISH_APPROVAL_NOT_CONFIGURED",
+                "publish is disabled: no approval phrase is configured on this server (set SOFER_MCP_APPROVAL_PHRASE and restart) — a human approval phrase is required for any Hugging Face publish",
+                next_hint={"action": "configure_approval_phrase"},
+                config_errors=config_errors,
+                extra={
+                    "confidential": cfg.confidential,
+                    "acknowledge_risk": acknowledge_risk,
+                    "acknowledge_confidential": acknowledge_confidential,
+                    "skipped_protected": [],
+                    "partial": False,
+                },
+            )
+        if approval_phrase is None or not hmac.compare_digest(approval_phrase, _APPROVAL_PHRASE):
+            return _error_envelope(
+                "PUBLISH_APPROVAL_REQUIRED",
+                "approval phrase required — ask the human to confirm this publish",
+                next_hint={"approval_phrase": "<from human>"},
+                config_errors=config_errors,
+                extra={
+                    "confidential": cfg.confidential,
+                    "acknowledge_risk": acknowledge_risk,
+                    "acknowledge_confidential": acknowledge_confidential,
+                    "skipped_protected": [],
+                    "partial": False,
+                },
+            )
 
         output_path = (
             _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
@@ -1511,6 +1530,15 @@ def sofer_auth_status(
     fails validation or containment checks reports ``ok:False`` with
     ``exit_code 1`` even when the token/auth state itself is healthy.
 
+    The envelope carries two approval-posture fields:
+    ``approval_configured`` — whether the server has an approval phrase set
+    (``SOFER_MCP_APPROVAL_PHRASE`` / ``build_server(approval_phrase=...)``);
+    and ``requires_approval_phrase`` — always ``True``, because the publish
+    ladder now treats a human approval phrase as mandatory (fail-closed). When
+    ``approval_configured`` is ``False`` the ``next`` hint carries
+    ``{"action": "configure_approval_phrase"}``; when ``True`` it carries
+    ``{"approval_phrase": "<from human>"}`` instead.
+
     When to use: preflight before sofer_publish_confirm to learn required acknowledgments without triggering a publish.
     Example: sofer_auth_status(config="dataset.toml")
     Requires: dataset TOML exists. Next: sofer_publish_confirm with required flags from next hint, or set HF_TOKEN.
@@ -1536,14 +1564,20 @@ def sofer_auth_status(
         token = _get_hf_token()
         token_status = "present" if token is not None else "missing"
         requires_ack_confidential = bool(cfg.confidential)
-        requires_approval_phrase = _APPROVAL_PHRASE is not None
+        # Fail-closed posture: a human approval phrase is ALWAYS required for
+        # publish, so `requires_approval_phrase` is unconditionally True.
+        # `approval_configured` reports whether the server actually has one set.
+        approval_configured = _APPROVAL_PHRASE is not None
+        requires_approval_phrase = True
         next_hint: dict[str, Any] = {}
         if token is None:
             next_hint["token"] = "set HF_TOKEN"
         if cfg.confidential:
             next_hint["acknowledge_confidential"] = True
-        if requires_approval_phrase:
+        if approval_configured:
             next_hint["approval_phrase"] = "<from human>"
+        else:
+            next_hint["action"] = "configure_approval_phrase"
         next_hint["acknowledge_risk"] = True
         # ok reflects config validity: validation/containment errors make the
         # preflight a failure (exit_code 1) even when token/auth state is
@@ -1556,6 +1590,7 @@ def sofer_auth_status(
             "token": token_status,
             "confidential": cfg.confidential,
             "requires_ack_confidential": requires_ack_confidential,
+            "approval_configured": approval_configured,
             "requires_approval_phrase": requires_approval_phrase,
             "next": next_hint,
             "config_errors": config_errors,
@@ -2239,6 +2274,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "token": {"type": "string"},
                 "confidential": {"type": "boolean"},
                 "requires_ack_confidential": {"type": "boolean"},
+                "approval_configured": {"type": "boolean"},
                 "requires_approval_phrase": {"type": "boolean"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
@@ -2421,8 +2457,10 @@ def _prompt_finalize_and_publish(config: str, output: str | None = None) -> str:
         "that approval.\n"
         "8. Only after approval: call sofer_publish_confirm(config=..., "
         'target="hf", output_dir=..., force=..., acknowledge_risk=True; if the config is marked confidential, also '
-        "acknowledge_confidential=True; if the host requires an approval "
-        "phrase, obtain it from the human and pass it as approval_phrase; requires HF_TOKEN).\n"
+        "acknowledge_confidential=True; an approval phrase is ALWAYS required "
+        "— obtain it from the human and pass it as approval_phrase (the server "
+        "is configured via SOFER_MCP_APPROVAL_PHRASE and refuses the publish "
+        "when none is set); requires HF_TOKEN).\n"
         "\n"
         "When-to-use: use finalize_and_publish for the end-to-end release (validate->prepare->codebook_all->profile->render->publish dry-run->STOP->confirm); for pre-publish checks use prepare_dataset.\n"
         "\n"
@@ -2462,9 +2500,11 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
         approval_phrase: Host-supplied phrase required by
             ``sofer_publish_confirm`` (compared with ``hmac.compare_digest``).
             Defaults to the ``SOFER_MCP_APPROVAL_PHRASE`` environment
-            variable at build time. When unset, only the acknowledgment
-            booleans gate the HF publish (weaker posture — hosts handling
-            sensitive data SHOULD configure a phrase).
+            variable at build time. REQUIRED for any HF publish (fail-closed):
+            when unset the publish is DISABLED and
+            ``sofer_publish_confirm`` refuses with
+            ``PUBLISH_APPROVAL_NOT_CONFIGURED`` — the acknowledgment booleans
+            alone are never sufficient.
 
     Returns:
         A configured :class:`FastMCP` server with all tools, resources, and

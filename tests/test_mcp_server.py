@@ -442,12 +442,16 @@ class TestNetworkOffline:
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
@@ -473,12 +477,16 @@ class TestNetworkOffline:
         # returned ok:True/exit_code:0 on a total upload failure.
         monkeypatch.setattr(publish_mod._api, "upload_folder", _boom)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
@@ -512,12 +520,16 @@ class TestNetworkOffline:
         _mock_hf_api(monkeypatch)
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.setenv("HF_HUB_TOKEN", "alias_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert envelope["ok"] is True
 
@@ -563,7 +575,7 @@ class TestPublishAuthorizationLadder:
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         envelope = _call(
             server,
@@ -572,6 +584,7 @@ class TestPublishAuthorizationLadder:
                 "config": str(tmp_path / "dataset.toml"),
                 "acknowledge_risk": True,
                 "acknowledge_confidential": True,
+                "approval_phrase": "test-phrase",
             },
         ).data
         assert envelope["ok"] is True
@@ -637,6 +650,44 @@ class TestPublishAuthorizationLadder:
             },
         ).data
         assert envelope["ok"] is True
+
+    def test_no_phrase_configured_refuses_fail_closed(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """Without a server approval phrase, confirm refuses fail-closed.
+
+        Even with ``acknowledge_risk=True``, a valid token, and a supplied
+        ``approval_phrase`` argument, a server with NO configured phrase must
+        refuse with ``PUBLISH_APPROVAL_NOT_CONFIGURED`` and never reach the
+        upload — the acknowledgment booleans are no longer sufficient alone.
+        """
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        upload_calls: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api,
+            "upload_folder",
+            lambda *a, **kw: upload_calls.append("upload_folder"),
+        )
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path)  # no approval phrase configured
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "anything",
+            },
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["exit_code"] == 1
+        assert envelope["error_code"] == "PUBLISH_APPROVAL_NOT_CONFIGURED"
+        assert envelope["next"] == {"action": "configure_approval_phrase"}
+        assert "publish is disabled" in envelope["output"]
+        assert upload_calls == []
 
 
 class TestContainment:
@@ -1172,12 +1223,16 @@ class TestVerifyAndProtected:
         _prepare_package(tmp_path)
         _mock_hf_api(monkeypatch, existing=["data.parquet"])
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert envelope["ok"] is True
         assert envelope["partial"] is True
@@ -1638,12 +1693,16 @@ class TestHfTokenFallback:
         _mock_hf_api(monkeypatch)
         secret = "hf_super_secret_12345"
         monkeypatch.setenv("HF_TOKEN", secret)
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
         # success case must not contain token in output
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert secret not in envelope["output"]
         assert secret not in str(envelope)
@@ -1685,11 +1744,15 @@ class TestHfTokenFallback:
 
         monkeypatch.setattr(publish_mod, "HfApi", _fake_hf_api)
         monkeypatch.setenv("HF_TOKEN", "tok-123")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert captured["token"] == "tok-123"
         assert envelope["ok"] is True
@@ -1709,11 +1772,15 @@ class TestHfTokenIntegration:
         monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
         monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
         _mock_hf_api(monkeypatch)
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
         envelope = _call(
             server,
             "sofer_publish_confirm",
-            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": True},
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert envelope["ok"] is True
         assert envelope["exit_code"] == 0
