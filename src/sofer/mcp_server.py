@@ -1616,6 +1616,12 @@ def sofer_scan_apply(
     Side effects: copies discovered files into cache/ and updates the dataset TOML with new [[file]] entries.
     Network usage: none.
 
+    Ordering (SCN-08): files are copied first and the TOML is written LAST
+    via an atomic :func:`write_toml` (temp + ``os.replace``), so a TOML write
+    failure cannot leave an inconsistent cache/TOML state. The documented
+    recovery is a re-run with ``force=True``: the cache copy is overwritten
+    and the TOML re-registered.
+
     When to use: Phase 0 after sofer_init for greenfield datasets; preview with sofer_scan_dry_run first.
     Example: sofer_scan_apply(config="dataset.toml")
     Requires: dataset TOML exists. Next: sofer_validate once files are registered.
@@ -1673,7 +1679,7 @@ def sofer_scan_apply(
                 "config_errors": [f"Failed to write TOML: {exc}"],
                 "error_code": "CONFIG_ERROR",
                 "message": f"Failed to write TOML: {exc}",
-                "next": {},
+                "next": {"force": True},
             }
         return {
             "ok": True,

@@ -18,6 +18,12 @@ parent), checks raw-dest collisions atomically via
 ``raw/`` excluded only during the MOVE discovery phase via
 ``EXCLUSIONS|{RAW_DIR, OUTPUT_DIR}``.
 
+``copy_files`` is idempotent on re-scan (an already-identical destination is
+skipped, SCN-08) and ``write_toml`` commits atomically (temp file +
+``os.replace``) so a TOML write failure can never leave a partial config.
+The TOML is written LAST (after all copies) so a failure cannot leave an
+inconsistent cache/TOML state — recovery is a plain re-run with ``--force``.
+
 All functions are pure logic — they raise on errors; the CLI handler
 catches and translates to exit codes.
 
@@ -31,6 +37,7 @@ otherwise have its contents discovered, copied into ``cache/`` by
 
 from __future__ import annotations
 
+import filecmp
 import os
 import shutil
 import stat
@@ -351,6 +358,29 @@ def move_to_raw(
     return moved
 
 
+def _files_identical(a: Path, b: Path) -> bool:
+    """Return ``True`` when *a* and *b* have identical byte content.
+
+    Powers the idempotent re-scan contract (SCN-08): :func:`copy_files`
+    treats a destination that already mirrors the source byte-for-byte as
+    already copied, while a destination that *differs* still raises
+    :class:`FileExistsError` unless ``--force``.
+
+    Args:
+        a: First path to compare.
+        b: Second path to compare.
+
+    Returns:
+        ``True`` when both paths are regular files with identical content;
+        ``False`` on any difference or comparison failure (missing file,
+        unreadable, differing bytes).
+    """
+    try:
+        return filecmp.cmp(a, b, shallow=False)
+    except OSError:
+        return False
+
+
 def copy_files(
     discovered: list[Path],
     base_dir: Path,
@@ -365,19 +395,28 @@ def copy_files(
     ``data_dir / <flatten_first_level(relative)>``.  Parent directories are
     created lazily on first use.
 
+    Idempotent re-scan (SCN-08): when a destination already exists with
+    content identical to the source, it is skipped (not re-copied, no error),
+    so ``scan`` run twice against unchanged sources is safe. A destination
+    whose content *differs* from the source is still protected — it raises
+    :class:`FileExistsError` unless *force* is ``True``.
+
     Parameters:
         dry_run: When ``True``, only compute what *would* be copied — do not
             touch the filesystem.
         force: When ``True``, overwrite existing destination files silently.
-            When ``False`` (the default), :class:`FileExistsError` is raised
-            on collision.
+            When ``False`` (the default), an already-identical destination is
+            skipped and a differing destination raises
+            :class:`FileExistsError`.
 
     Returns:
         A list of ``(source, destination)`` tuples for every file that was
-        copied (or would have been copied under ``dry_run=True``).
+        copied (or would have been copied under ``dry_run=True``). Files
+        skipped as already-identical are not included.
 
     Raises:
-        FileExistsError: If a destination already exists and *force* is ``False``.
+        FileExistsError: If a destination already exists with *different*
+            content and *force* is ``False``.
     """
     copied: list[tuple[Path, Path]] = []
 
@@ -389,8 +428,13 @@ def copy_files(
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists() and not force:
+                if _files_identical(src, dest):
+                    # Already copied with identical content — re-scan is
+                    # idempotent, skip without error (SCN-08).
+                    continue
                 raise FileExistsError(
-                    f"Destination already exists: {dest} (use --force to overwrite)"
+                    f"Destination already exists and differs: {dest} "
+                    f"(use --force to overwrite)"
                 )
             shutil.copy2(src, dest)
 
@@ -400,5 +444,12 @@ def copy_files(
 
 
 def write_toml(raw_toml: dict[str, Any], config_path: Path) -> None:
-    """Serialize *raw_toml* and overwrite *config_path*."""
-    config_path.write_text(tomli_w.dumps(raw_toml), encoding=config.OUTPUT_ENCODING)
+    """Serialize *raw_toml* and atomically replace *config_path* (SCN-08).
+
+    The TOML is written to a temporary file in the same directory, then moved
+    into place with :func:`os.replace` — so a crash or failure mid-write can
+    never leave a truncated or partial TOML at *config_path*.
+    """
+    tmp = config_path.with_name(config_path.name + ".tmp")
+    tmp.write_text(tomli_w.dumps(raw_toml), encoding=config.OUTPUT_ENCODING)
+    os.replace(tmp, config_path)

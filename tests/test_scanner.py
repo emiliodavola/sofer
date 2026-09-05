@@ -609,13 +609,25 @@ class TestCopyFiles:
         assert not (data_dir / "a.csv").exists()
 
     def test_file_exists_error_without_force(self, tmp_path: Path) -> None:
-        """FileExistsError is raised when dest exists and force=False."""
-        _touch(tmp_path / "a.csv")
+        """FileExistsError is raised when dest exists with DIFFERENT content and force=False."""
+        _touch(tmp_path / "a.csv", content="source")
         data_dir = tmp_path / "data"
-        _touch(data_dir / "a.csv")
+        _touch(data_dir / "a.csv", content="different-dest")
 
         with pytest.raises(FileExistsError, match="--force"):
             copy_files([tmp_path / "a.csv"], tmp_path, data_dir)
+
+    def test_identical_dest_skipped_without_force(self, tmp_path: Path) -> None:
+        """An already-identical destination is skipped, not an error (SCN-08
+        idempotent re-scan) — ``scan twice is safe`` without ``--force``."""
+        _touch(tmp_path / "a.csv", content="same")
+        data_dir = tmp_path / "data"
+        _touch(data_dir / "a.csv", content="same")
+
+        copied = copy_files([tmp_path / "a.csv"], tmp_path, data_dir)
+
+        assert copied == []
+        assert (data_dir / "a.csv").read_text(encoding="utf-8") == "same"
 
     def test_force_overwrites(self, tmp_path: Path) -> None:
         """force=True overwrites existing dest without error."""
@@ -667,6 +679,14 @@ class TestWriteToml:
         config.write_text("old", encoding="utf-8")
         write_toml({"dataset": {"name": "new", "repo_id": "u/r"}}, config)
         assert "new" in config.read_text(encoding="utf-8")
+
+    def test_atomic_write_no_tmp_leftover(self, tmp_path: Path) -> None:
+        """write_toml commits via temp + os.replace — no .tmp file remains."""
+        config = tmp_path / "out.toml"
+        write_toml({"dataset": {"name": "x", "repo_id": "u/r"}}, config)
+
+        assert config.exists()
+        assert not config.with_name(config.name + ".tmp").exists()
 
 
 # ------------------------------------------------------------------
@@ -762,6 +782,38 @@ class TestIntegration:
 
         second_cfg = DatasetConfig.from_toml(config)
         assert len(second_cfg.files) == first_count
+
+    def test_partial_failure_recovery_via_force(self, tmp_path: Path, monkeypatch) -> None:
+        """A TOML write failure after the cache copy leaves the TOML untouched;
+        a re-run with --force recovers (SCN-08)."""
+        import sofer.cli as cli_mod
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv", content="x,y\n1,2\n")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        original = config.read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        # Simulate a TOML write failure AFTER the copy phase succeeds.
+        monkeypatch.setattr(
+            cli_mod, "write_toml", lambda _raw, _path: (_ for _ in ()).throw(OSError("disk full"))
+        )
+        rc = _cmd_scan(Namespace(config=str(config), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        # TOML unchanged — no partial registration.
+        assert config.read_text(encoding="utf-8") == original
+        # Cache copy happened before the failed TOML write.
+        assert (tmp_path / "cache" / "a.csv").exists()
+
+        # Recovery: restore the real writer and re-run with --force.
+        monkeypatch.undo()
+        rc2 = _cmd_scan(Namespace(config=str(config), dry_run=False, force=True, ext=None))
+        assert rc2 == 0
+        cfg = DatasetConfig.from_toml(config)
+        assert len(cfg.files) == 1
 
     def test_missing_config_returns_error(self, tmp_path: Path, monkeypatch) -> None:
         """Calling scan with a nonexistent config returns exit code 1."""

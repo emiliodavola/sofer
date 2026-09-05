@@ -413,7 +413,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                :func:`flatten_first_level` + ``shutil.copy2``), ``write_toml``.
 
     Atomicity: collision or ``N``/``--dry-run`` leaves TOML and moved files
-    untouched — no partial moves.
+    untouched — no partial moves. Phase 2 copies files first and writes the
+    TOML last via an atomic :func:`write_toml` (temp + ``os.replace``), so a
+    TOML write failure cannot corrupt the config; the documented recovery is
+    a plain re-run with ``--force`` (the cache copy is overwritten and the
+    TOML re-registered, SCN-08).
     """
     config_path = Path(args.config).resolve()
 
@@ -570,6 +574,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             print(f"  OK  Updated {config_path.name}")
         except Exception as exc:
             print(f"  X  Failed to write TOML: {exc}", file=sys.stderr)
+            print(
+                "  i  Re-run with --force to recover (cache/ copies are already in place).",
+                file=sys.stderr,
+            )
             return 1
 
     return 0
