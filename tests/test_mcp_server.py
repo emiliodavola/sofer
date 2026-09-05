@@ -183,6 +183,45 @@ class TestOutputBound:
         assert text == "outerr"
 
 
+class TestNextHintContract:
+    """MSP-R13: the ``next`` recovery field is a flat dict of actionable hints,
+    present on error envelopes and the auth_status success preflight."""
+
+    @staticmethod
+    def _is_flat_hint_dict(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        return all(not isinstance(v, (dict, list)) for v in value.values())
+
+    def test_error_envelope_next_is_flat_dict(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """An error envelope carries ``next`` as a flat dict of scalar hints."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {"config": str(tmp_path / "dataset.toml"), "acknowledge_risk": False},
+        ).data
+        assert envelope["ok"] is False
+        assert "next" in envelope, "error envelope must carry the next field"
+        assert self._is_flat_hint_dict(envelope["next"])
+        assert envelope["next"] == {"acknowledge_risk": True}
+
+    def test_success_preflight_next_is_flat_dict(self, tmp_path, restore_tool_config) -> None:
+        """sofer_auth_status success envelope carries ``next`` as a flat dict."""
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True
+        assert "next" in envelope, "auth_status envelope must carry the next field"
+        assert self._is_flat_hint_dict(envelope["next"])
+
+
 class TestToolRoster:
     _EXPECTED: frozenset[str] = frozenset(
         {

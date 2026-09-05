@@ -126,6 +126,16 @@ _OUTPUT_FIELD_DESCRIPTION: str = (
     "'... [truncated: N bytes]' marker when larger."
 )
 
+# Error-envelope fields merged into every tool's output_schema so the
+# machine-readable recovery metadata (error_code, message, next) survives
+# FastMCP's output_schema validation on BOTH success and error returns —
+# without these the schema would silently drop the fields at the boundary.
+_ERROR_ENVELOPE_SCHEMA_FIELDS: dict[str, dict[str, str]] = {
+    "error_code": {"type": "string"},
+    "message": {"type": "string"},
+    "next": {"type": "object"},
+}
+
 # Error codes for the single error envelope (10.3).
 _ERROR_CODES: tuple[str, ...] = (
     "CONFIG_ERROR",
@@ -695,6 +705,13 @@ def _error_envelope(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the single error envelope for expected failures.
+
+    The ``next`` field is the machine-readable recovery hint: a FLAT dict of
+    actionable hints (string keys, scalar values) — e.g. ``{"force": True}``,
+    ``{"target": "hf"}``, ``{"action": "set_HF_TOKEN"}`` — never a nested
+    structure. ``next`` is present on EVERY error envelope and on the
+    :func:`sofer_auth_status` success preflight; empty (``{}``) means "no
+    specific hint".
 
     Args:
         error_code: One of :data:`_ERROR_CODES`.
@@ -1941,6 +1958,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "ran_checks": {"type": "array"},
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -1961,6 +1979,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -1983,6 +2002,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "target": {"type": "string"},
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2007,6 +2027,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "skipped_protected": {"type": "array"},
                 "partial": {"type": "boolean"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2026,6 +2047,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "output_path": {"type": ["string", "null"]},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2047,6 +2069,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "files": {"type": "array"},
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2066,6 +2089,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "pii_findings": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2086,6 +2110,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "files": {"type": "array"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2104,6 +2129,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "ok": {"type": "boolean"},
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2124,6 +2150,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "files": {"type": "array"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2145,6 +2172,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "discovered": {"type": "integer"},
                 "registered": {"type": "integer"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2167,6 +2195,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "registered": {"type": "integer"},
                 "copied": {"type": "integer"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2188,6 +2217,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "config_path": {"type": "string"},
                 "dataset_root": {"type": "string"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2210,8 +2240,8 @@ def _register_tools(server: _FastMCP) -> None:
                 "confidential": {"type": "boolean"},
                 "requires_ack_confidential": {"type": "boolean"},
                 "requires_approval_phrase": {"type": "boolean"},
-                "next": {"type": "object"},
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
