@@ -281,21 +281,21 @@ def copy_to_mirror(src: Path, dest_root: Path, remote: str, *, force: bool = Tru
         dest_root: Root of the mirror layout (e.g. the staging directory).
         remote:    Remote-relative destination path (POSIX separators;
                    a trailing slash on a directory is harmless).
-        force:     When ``False`` and the destination FILE already exists,
-                   raise :class:`FileExistsError` instead of silently
-                   overwriting it (publish local-target overwrite
-                   protection, PUB-13). Directories always merge; only the
-                   file branch is protected. Defaults to ``True`` so
+        force:     When ``False`` and the destination (file OR directory)
+                   already exists, raise :class:`FileExistsError` instead of
+                   silently overwriting/merging it (publish local-target
+                   overwrite protection, PUB-13). Defaults to ``True`` so
                    ``prepare`` staging keeps its unconditional-overwrite
                    behavior.
     """
     if src.is_dir():
-        shutil.copytree(src, dest_root / remote, dirs_exist_ok=True)
+        dest = dest_root / remote
+        if dest.exists() and not force:
+            raise FileExistsError(f"Destination already exists: {dest} (use --force to overwrite)")
+        shutil.copytree(src, dest, dirs_exist_ok=True)
     else:
         dest = dest_root / remote
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and not force:
-            raise FileExistsError(
-                f"Destination already exists: {dest} (use --force to overwrite)"
-            )
+            raise FileExistsError(f"Destination already exists: {dest} (use --force to overwrite)")
         shutil.copy2(src, dest)
