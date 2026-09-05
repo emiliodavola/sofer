@@ -190,6 +190,42 @@ class TestAnnotations:
         val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
         assert val is True
 
+    _READ_ONLY_TOOLS = frozenset({"sofer_validate", "sofer_scan_dry_run", "sofer_auth_status"})
+    _WRITING_TOOLS = frozenset(
+        {
+            "sofer_prepare",
+            "sofer_publish",
+            "sofer_publish_confirm",
+            "sofer_codebook",
+            "sofer_codebook_all",
+            "sofer_profile",
+            "sofer_profile_all",
+            "sofer_render",
+            "sofer_render_all",
+            "sofer_scan_apply",
+            "sofer_init",
+        }
+    )
+
+    def test_readonly_hint_matches_side_effects(self, tmp_path: Path):
+        """readOnlyHint is True ONLY for genuinely read-only tools.
+
+        Every tool that writes files (codebooks, metadata profiles, README
+        renders, scan_apply registration, init scaffolding, prepare, publish)
+        must report readOnlyHint False so agents treat it as side-effecting.
+        The roster partition covers all 14 tools.
+        """
+        tools = _tools_dict(tmp_path)
+        assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS
+        for name in self._READ_ONLY_TOOLS:
+            ann = tools[name].annotations
+            val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
+            assert val is True, f"{name} must stay readOnly"
+        for name in self._WRITING_TOOLS:
+            ann = tools[name].annotations
+            val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
+            assert val is False, f"{name} writes files — readOnlyHint must be False"
+
 
 class TestOutputSchema:
     def test_output_schema_typed(self, tmp_path: Path):

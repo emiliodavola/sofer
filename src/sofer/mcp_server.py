@@ -1969,7 +1969,7 @@ def _register_tools(server: _FastMCP) -> None:
     server.tool(
         sofer_codebook,
         annotations={
-            "readOnlyHint": True,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": False,
@@ -1988,7 +1988,7 @@ def _register_tools(server: _FastMCP) -> None:
     server.tool(
         sofer_codebook_all,
         annotations={
-            "readOnlyHint": True,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": False,
@@ -2009,7 +2009,7 @@ def _register_tools(server: _FastMCP) -> None:
     server.tool(
         sofer_profile,
         annotations={
-            "readOnlyHint": True,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": False,
@@ -2028,7 +2028,7 @@ def _register_tools(server: _FastMCP) -> None:
     server.tool(
         sofer_profile_all,
         annotations={
-            "readOnlyHint": True,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": False,
@@ -2048,7 +2048,7 @@ def _register_tools(server: _FastMCP) -> None:
     server.tool(
         sofer_render,
         annotations={
-            "readOnlyHint": True,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": False,
@@ -2066,7 +2066,7 @@ def _register_tools(server: _FastMCP) -> None:
     server.tool(
         sofer_render_all,
         annotations={
-            "readOnlyHint": True,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": False,
