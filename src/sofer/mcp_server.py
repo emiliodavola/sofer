@@ -1526,9 +1526,11 @@ def sofer_auth_status(
     Side effects: none — read-only probe, no network.
     Network usage: none.
 
-    ``ok`` reflects config validity as well as auth state: a config that
-    fails validation or containment checks reports ``ok:False`` with
-    ``exit_code 1`` even when the token/auth state itself is healthy.
+    ``ok`` reflects publish readiness — config validity AND auth state. A
+    config that fails validation or containment checks reports ``ok:False``
+    with ``exit_code 1``; so does a missing HF token, or an unconfigured
+    approval phrase while ``requires_approval_phrase`` is ``True``. A dataset
+    that cannot publish never reads as ``ok:True``.
 
     The envelope carries two approval-posture fields:
     ``approval_configured`` — whether the server has an approval phrase set
@@ -1579,10 +1581,16 @@ def sofer_auth_status(
         else:
             next_hint["action"] = "configure_approval_phrase"
         next_hint["acknowledge_risk"] = True
-        # ok reflects config validity: validation/containment errors make the
-        # preflight a failure (exit_code 1) even when token/auth state is
-        # healthy — a malicious or invalid TOML must never read as "ok".
-        ok = not config_errors
+        # ok reflects publish readiness, not merely config validity: a valid
+        # config still cannot publish without a token or (when required) a
+        # configured approval phrase, so the preflight must read ok:False in
+        # those cases too — never a false ok:True for a dataset that cannot
+        # publish.
+        ok = (
+            not config_errors
+            and token is not None
+            and (not requires_approval_phrase or approval_configured)
+        )
         return {
             "ok": ok,
             "exit_code": 0 if ok else 1,

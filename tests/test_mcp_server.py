@@ -232,10 +232,13 @@ class TestNextHintContract:
         assert self._is_flat_hint_dict(envelope["next"])
         assert envelope["next"] == {"acknowledge_risk": True}
 
-    def test_success_preflight_next_is_flat_dict(self, tmp_path, restore_tool_config) -> None:
+    def test_success_preflight_next_is_flat_dict(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
         """sofer_auth_status success envelope carries ``next`` as a flat dict."""
         _make_dataset(tmp_path)
-        server = build_server(root=tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
         envelope = _call(
             server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
         ).data
@@ -309,11 +312,13 @@ class TestToolRoster:
 
 
 class TestAuthStatusValidity:
-    """sofer_auth_status ok reflects config validity: config_errors -> ok:False.
+    """sofer_auth_status ok reflects publish readiness: config_errors, a missing
+    token, or an unconfigured approval phrase all flip the envelope to ok:False.
 
-    The preflight must never report a false ``ok:True`` for an invalid or
-    malicious TOML — validation/containment errors flip the envelope to
-    ``ok:False`` / ``exit_code 1`` even when token/auth state is healthy.
+    The preflight must never report a false ``ok:True`` for a dataset that
+    cannot publish — an invalid/malicious TOML, a missing HF token, or a
+    missing approval phrase (while one is required) each read as ``ok:False`` /
+    ``exit_code 1``.
     """
 
     def test_placeholder_user_ok_false(self, tmp_path: Path, restore_tool_config: Any) -> None:
@@ -350,10 +355,14 @@ class TestAuthStatusValidity:
         assert envelope["exit_code"] == 1, envelope
         assert any("outside the server root" in e for e in envelope["config_errors"]), envelope
 
-    def test_valid_toml_ok_true(self, tmp_path: Path, restore_tool_config: Any) -> None:
-        """A valid config reports ok:True, exit_code 0, no config errors."""
+    def test_valid_toml_ok_true(
+        self, tmp_path: Path, monkeypatch, restore_tool_config: Any
+    ) -> None:
+        """A valid config with a token and a configured approval phrase
+        reports ok:True, exit_code 0, no config errors."""
         _make_dataset(tmp_path)
-        server = build_server(root=tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         envelope = _call(
             server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
@@ -361,6 +370,46 @@ class TestAuthStatusValidity:
         assert envelope["ok"] is True, envelope
         assert envelope["exit_code"] == 0, envelope
         assert envelope["config_errors"] == [], envelope
+
+    def test_missing_token_ok_false(
+        self, tmp_path: Path, monkeypatch, restore_tool_config: Any
+    ) -> None:
+        """A valid config with NO token reports ok:False — the preflight must
+        reflect auth state, not just config validity (it cannot publish)."""
+        _make_dataset(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        monkeypatch.delenv("HF_OIDC_RESOURCE", raising=False)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1, envelope
+        assert envelope["token"] == "missing"
+
+    def test_approval_not_configured_ok_false(
+        self, tmp_path: Path, monkeypatch, restore_tool_config: Any
+    ) -> None:
+        """A valid config with a token but no server approval phrase reports
+        ok:False — publish readiness requires the phrase (fail-closed)."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path)  # no approval phrase configured
+
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1, envelope
+        assert envelope["approval_configured"] is False
+        assert envelope["requires_approval_phrase"] is True
 
 
 # ---------------------------------------------------------------------------

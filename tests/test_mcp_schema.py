@@ -367,7 +367,7 @@ class TestHappyPath:
         import sofer.config as cfg
 
         cfg.reload(tmp_path)
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         # Mock publish._api so the HF path stays offline and deterministic
         import sofer.publish as pub_mod
