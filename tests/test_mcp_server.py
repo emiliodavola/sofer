@@ -689,6 +689,42 @@ class TestPublishAuthorizationLadder:
         assert "publish is disabled" in envelope["output"]
         assert upload_calls == []
 
+    def test_blank_phrase_treated_as_unconfigured(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """An empty/whitespace approval phrase must fail closed, not open.
+
+        A host misconfigured with ``SOFER_MCP_APPROVAL_PHRASE=""`` would
+        otherwise leave ``_APPROVAL_PHRASE == ""`` (falsy but not None),
+        skipping the fail-closed gate and letting ``hmac.compare_digest("",
+        "")`` pass. The blank phrase must be normalized to unconfigured so
+        the publish still refuses with ``PUBLISH_APPROVAL_NOT_CONFIGURED``.
+        """
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        upload_calls: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api,
+            "upload_folder",
+            lambda *a, **kw: upload_calls.append("upload_folder"),
+        )
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "",
+            },
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "PUBLISH_APPROVAL_NOT_CONFIGURED"
+        assert upload_calls == []
 
 class TestContainment:
     def test_config_outside_root_refused(self, tmp_path):

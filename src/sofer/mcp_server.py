@@ -2513,11 +2513,16 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     """
     global _SERVER_ROOT, _APPROVAL_PHRASE
     _SERVER_ROOT = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
-    _APPROVAL_PHRASE = (
+    raw_phrase = (
         approval_phrase
         if approval_phrase is not None
         else os.environ.get("SOFER_MCP_APPROVAL_PHRASE")
     )
+    # Fail-closed: an empty or whitespace-only phrase is treated as
+    # unconfigured (None), so it can never become a trivially-guessable
+    # ""-matching gate. A blank env var (e.g. ``SOFER_MCP_APPROVAL_PHRASE=``)
+    # must not silently enable the acknowledgment-only posture.
+    _APPROVAL_PHRASE = raw_phrase if raw_phrase and raw_phrase.strip() else None
     server = _FastMCP(
         "sofer",
         instructions=_PHASED_INSTRUCTIONS,
