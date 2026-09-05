@@ -1,18 +1,25 @@
 ```yaml
 schema: gentle-ai.verify-result/v1
-evidence_revision: sha256:dffd9862f70631202e87f8118df647c0b82d0388cd1094cf069ed95f53114303
-verdict: pass
-blockers: 0
-critical_findings: 0
+evidence_revision: sha256:f155c5e9254bb0ecf946478e0a083121bb669be539ed5d9f5cac87ac6125bda6
+verdict: fail
+blockers: 1
+critical_findings: 1
 requirements: 9/9
 scenarios: 52/52
 test_command: uv run pytest tests/ -q
 test_exit_code: 0
-test_output_hash: sha256:a6f2687758c59116eac9a653bc5a27a057fd98c8f11cddb6a0516a7b8397da50
+test_output_hash: sha256:aad5ecc8024b7322e23a2fccb04e4824ef730d3d45a4743acab29a8c765ffe88
 build_command: uv run mypy src/ && uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/ && git diff --check
-build_exit_code: 0
-build_output_hash: sha256:9574935ed411d5a6430d6fffe93763022edca4a8171867320f9663c9b55ffcaa
+build_exit_code: 1
+build_output_hash: sha256:05fd83220e4f4fad20ed5fdb22bdf2c275e70ae23777b4ef3d31ebfde50860fa
 ```
+
+> NOTE (2026-09-04, post-third-review): the YAML frontmatter above now reflects
+> the LATEST re-verification envelope (this round's ACTUAL gate outputs). The
+> earlier note "frontmatter hashes reflect the PRE-audit state" applies to the
+> historical sections below; this round supersedes the machine-readable
+> envelope. `evidence_revision` is the sha256 of the verified branch head
+> commit `8026b2c` (`fix/116-pr4`).
 
 ## Verification Report
 
@@ -496,3 +503,157 @@ real MCP stdio process, previously-fixed behaviors (user `\Z`/control chars,
 dry-run no-write both adapters, render dir-package parity, per-root RAW_DIR
 reload, cwd fail-closed) all re-run green, and SOFER_TRACE.md remains
 untouched. No CRITICAL or WARNING findings; 2 cosmetic SUGGESTIONs.
+
+---
+
+## Post-third-review re-verification (2026-09-04)
+
+Re-verification after the maintainer's **third** review round. Four defects
+were fixed on `fix/116-pr4` (head of PR #137; commits `ea1b047`, `5214c1d`,
+`bb1355d`, `5817d3c`, `9e73b21`, `8026b2c`) and passed an independent gate
+review (PASS-WITH-CONCERNS, one WARNING F1 — class identity — fixed in
+`8026b2c` together with F2). Verification-only — no source/test files
+modified; the verify-report deliverable updated and committed as required.
+
+### Gates (ACTUAL output, re-run on fix/116-pr4 @ 8026b2c)
+
+```text
+uv run pytest tests/ -q                                -> 1392 passed, 4 skipped, 13 warnings (exit 0)
+                                                          (measured 3x: 41.30s, 40.27s, 39.63s — all 1392/4)
+uv run mypy src/                                       -> Success: no issues found in 30 source files (exit 0)
+uv run ruff check src/ tests/                          -> FAIL — E501 Line too long (114 > 100) at src/sofer/model.py:341 (exit 1)
+uv run ruff format --check src/ tests/                 -> FAIL — 1 file would be reformatted: src/sofer/model.py (exit 1)
+git diff --check                                       -> clean (exit 0)
+```
+
+- `test_output_hash`: `sha256:aad5ecc8024b7322e23a2fccb04e4824ef730d3d45a4743acab29a8c765ffe88`
+- `build_output_hash`: `sha256:05fd83220e4f4fad20ed5fdb22bdf2c275e70ae23777b4ef3d31ebfde50860fa`
+- Expected suite **1392 passed / 4 skipped — MATCHES ACTUAL exactly** (3 measurements).
+- **The ruff gates are RED**: the F2 `_config_path` line introduced in `8026b2c`
+  is 114 chars against the repo's configured `line-length = 100`
+  (`pyproject.toml [tool.ruff]`, E-selection active, no per-file ignore), and
+  ruff format wants the `field(...)` call wrapped. This breaks PB-07
+  ("`uv run ruff check src/ tests/` SHALL pass") and the CI `lint` job
+  (`uv run ruff check src/ tests/ scripts/` on every PR) — PR #137 would fail
+  CI as-is.
+
+### The 4 skips explained (unchanged from the previous round, sites renumbered)
+
+| Skip site | Test | Reason | Status |
+|-----------|------|--------|--------|
+| `test_mcp_server.py:638` | `test_symlink_inside_root_to_outside` | file-symlink creation requires elevated privileges on this win32 host | pre-existing |
+| `test_mcp_server.py:1165` | hatchling build-backend skipif | hatchling not installed in dev env (CI builds the wheel) | pre-existing |
+| `test_scanner.py:384` | `test_symlinked_file_outside_not_discovered` | file-symlink creation unavailable on this host | pre-existing (env) |
+| `test_scanner.py:418` | `test_regular_file_still_discovered_alongside_links` | file-symlink creation unavailable on this host | pre-existing (env) |
+
+The **junction** variants run for real on this host (NTFS junctions need no
+elevation): `test_scanner.py:402` and `test_mcp_server.py:603` PASSED — the
+`_is_link` reparse-point detection is exercised by real execution, not only
+skips.
+
+### Fix conformance after fixes (source + spec + test evidence)
+
+| Defect | Fix (commit) | Source evidence | Test evidence | Spec conformance |
+|--------|--------------|-----------------|---------------|------------------|
+| A | auth_status ok reflects config validity (ea1b047) | `sofer_auth_status` (mcp_server.py:1448-1510): `config_errors` = `cfg.validate()` + `_validate_file_entries` + `_validate_output_targets` + `_validate_doc_files`; `ok = not config_errors`, `exit_code = 0 if ok else 1`; docstring documents the contract; TOML read failure → `_error_envelope("CONFIG_ERROR", ..., config_errors=[...])` | `TestAuthStatusValidity` (3): placeholder repo user → ok:False/exit 1/config_errors names placeholder; `[[file]]` escaping root → ok:False names "outside the server root"; valid TOML → ok:True/exit 0 — all PASSED | error-envelope contract — expected failures return `{"ok":false,...,"config_errors":[...]}` and a malicious/invalid TOML never reads as ok |
+| B | writing tools non-read-only (5214c1d) | `_register_tools`: `readOnlyHint: False` on the 6 writing tools `sofer_codebook`, `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`, `sofer_render_all` (prepare/publish/publish_confirm/scan_apply/init already False); `sofer_auth_status` stays in `_READ_ONLY_TOOLS` (readOnlyHint:true per spec) | `TestAnnotations::test_readonly_hint_matches_side_effects` — roster partition covers all 14 tools; PASSED | tool-annotations contract — readOnlyHint True ONLY for the 3 genuinely read-only tools (validate/scan_dry_run/auth_status) |
+| C | `_needs_prepare` real config path (bb1355d) | `model.py` `_config_path` field set by `from_toml` (`_config_path=path.resolve()`); `publish._needs_prepare`: `toml_path = cfg._config_path if cfg._config_path != Path() else base / config.DEFAULT_CONFIG_NAME` — explicit `!= Path()` guard (sentinel is truthy); docstring documents custom-named TOMLs (issue #116 canonical `test.toml`) | `TestNeedsPrepare::test_custom_toml_name_newer_than_parquet_returns_true` + `test_custom_toml_name_unchanged_returns_false` — PASSED | PUB-03 compliant — the TOML mtime comparison keys on the REAL config path, whatever its name |
+| D | installed-binary E2E + windows CI (5817d3c, 9e73b21) | `tests/conftest.py` `_go()` installed-binary resolver + `TestInstalledBinary`; `ci.yml` test matrix `os: [ubuntu-latest, windows-latest]` × 5 Python versions, complete-suite gate `uv run pytest -v` kept (PB-05) | `TestInstalledBinary::test_installed_binary_init_anchors_under_child` — PASSED over the real installed `sofer-mcp` binary over stdio | PB-05/PB-02 — windows-latest now in the matrix; complete-suite gate preserved |
+| F1 | TestRecoveryPublishConfirm restored (8026b2c) | class un-absorbed from `TestInstalledBinary` (tests/test_mcp_process.py:250) | `uv run pytest "tests/test_mcp_process.py::TestRecoveryPublishConfirm" -q` → **1 passed** — the archived verify-report selector `TestRecoveryPublishConfirm::test_replay_acknowledge_risk_progresses_to_approval_gate` collects again | PB-03 recovery replay green |
+| F2 | `_config_path` non-comparing/non-repr (8026b2c) | `_config_path: Path = field(default=Path(), compare=False, repr=False)` — DatasetConfig equality is not path-spelling sensitive; `!= Path()` guard still valid (direct Path comparison, unaffected by compare=False) | `test_custom_toml_name_*` (both) PASSED — guard works with `_config_path` set by `from_toml` | PUB-03 — **but the 114-char line breaks the ruff gates (CRITICAL below)** |
+
+### Ground truth — issue #116 (real stdio process)
+
+```text
+uv run pytest "tests/test_mcp_process.py::TestInstalledBinary" "tests/test_mcp_process.py::TestParentRootIdentity" -v
+tests/test_mcp_process.py::TestInstalledBinary::test_installed_binary_init_anchors_under_child PASSED [ 50%]
+tests/test_mcp_process.py::TestParentRootIdentity::test_cwd_omitted_fails_closed_then_cwd_child_anchors PASSED [100%]
+============================== 2 passed in 4.15s ==============================
+```
+
+Both the installed-binary E2E and the #116 parent-root reproduction stay green
+over the real `sofer-mcp` stdio process.
+
+### No regressions (previously-fixed behaviors re-run)
+
+```text
+uv run pytest tests/test_execution_context.py -q -k "control or windows_invalid or reserved or newline" -> 25 passed   (user \Z + control chars + Windows-invalid/reserved)
+uv run pytest tests/test_cli.py tests/test_mcp_server.py -q -k "dry_run or dry_run_no_mutation or dry_run_plain" -> 15 passed  (dry-run no-write BOTH adapters)
+uv run pytest tests/test_mcp_server.py -q -k "render_output_dir_anchors or render_output_dir_file_package" -> 2 passed   (dir-package inside / file-package parent)
+uv run pytest tests/test_mcp_server.py -q -k "init_reloads_raw_dir or raw_dir_per_root or RawDir" -> 1 passed    (per-root RAW_DIR reload)
+uv run pytest tests/test_mcp_server.py tests/test_prepare.py tests/test_cli.py -q -k "DocPathContainment or doc_path or relative_readme or recipe_and_study" -> 7 passed  (doc containment)
+uv run pytest tests/test_publish.py -q -k "fail or inspect or ensure_repo or RemoteFailClosed" -> 9 passed       (publish fail-closed)
+uv run pytest tests/test_scanner.py -q -> 72 passed, 2 skipped                      (symlink/junction exclusion)
+uv run pytest tests/test_mcp_process.py -q -> 13 passed                              (process module, incl. F1 + installed binary)
+uv run pytest tests/test_mcp_server.py -q -k "AuthStatusValidity" -> 3 passed        (fix A)
+uv run pytest tests/test_mcp_schema.py -q -k "readonly_hint or read_only or ReadOnly" -> 2 passed  (fix B)
+uv run pytest tests/test_publish.py -q -k "custom_toml" -> 2 passed                  (fix C)
+```
+
+TOML-before-raw/ (INIT-03): source-verified — `sofer_init` writes the TOML
+(`write_text`, mcp_server.py:1853) BEFORE scaffolding `raw/`
+(`raw_dir.mkdir`, L1856); the no-write refusal tests (NO TOML, NO `raw/`) pass.
+
+### Count reconciliation (1385 → 1392 = +7 passed, skips unchanged at 4)
+
+`git diff ea1b047~1..HEAD -- tests/` shows **7 new test functions, 0 deleted**
+(`^-def test_` count = 0):
+
+| New test | Fix |
+|----------|-----|
+| `TestAuthStatusValidity` (3: placeholder / containment / valid) | A |
+| `TestAnnotations::test_readonly_hint_matches_side_effects` (1) | B |
+| `TestNeedsPrepare::test_custom_toml_name_newer_than_parquet_returns_true` (1) | C |
+| `TestNeedsPrepare::test_custom_toml_name_unchanged_returns_false` (1) | C |
+| `TestInstalledBinary::test_installed_binary_init_anchors_under_child` (1) | D |
+
+3+1+1+1+1 = **+7 exactly**; 1385 + 7 = **1392 passed**. F1 restored an
+existing test's class (no count delta). Skips: 4, unchanged (both scanner
+file-symlink env skips pre-date this round — they existed at the
+post-merge-review gate). **Zero test deletions.**
+
+### SOFER_TRACE.md (PB-08)
+
+`git status --short` → `?? SOFER_TRACE.md` (untracked, never staged);
+length 17210, mtime 2026-08-31 17:40:07 — unchanged, untouched by this
+re-verification.
+
+### Issues
+
+**CRITICAL**:
+1. **F2 fix (8026b2c) breaks the ruff gates.** `src/sofer/model.py:341`
+   `_config_path: Path = field(default=Path(), compare=False, repr=False)  # resolved TOML path (set by from_toml)`
+   is 114 chars > the configured `line-length = 100` → `uv run ruff check src/ tests/`
+   exits 1 (E501) and `uv run ruff format --check src/ tests/` exits 1 (field
+   call must be wrapped). This violates PB-07 ("`uv run ruff check src/ tests/`
+   SHALL pass") and the CI `lint` job (`uv run ruff check src/ tests/ scripts/`,
+   runs on every PR to main/dev) — PR #137 would fail CI. The F2 semantics
+   (`compare=False, repr=False`, `!= Path()` guard) are correct and tested;
+   only the line formatting is wrong. Fix: wrap the `field(...)` call across
+   three lines exactly as `ruff format` proposes (or drop the trailing comment).
+
+**WARNING**: None.
+
+**SUGGESTION**:
+1. Carry the previous rounds' suggestions forward (INIT-05 prose `^[\w\-]+$` vs
+   `\Z` literal; `openspec/project.md` baseline bump 1385 → 1392 after this
+   round's merge).
+2. The gate reviewer's PASS-WITH-CONCERNS measured only pytest (1392/4); the
+   F1/F2 commit was authored after that measurement. Re-running all five gates
+   (pytest + mypy + ruff check + ruff format + diff-check) on the final branch
+   head is what surfaced the E501 — recommend the gate checklist include the
+   static gates on the FINAL head, not just pytest.
+
+### Verdict (post-third-review re-verification)
+
+**NOT VERIFIED** — all 4 third-review defects (A–D) are confirmed fixed and
+spec-compliant with passing tests, F1/F2 semantics confirmed (class restored,
+`_config_path` compare=False + `!= Path()` guard works), the suite matches the
+expected **1392 passed / 4 skipped** exactly (3 measurements), the +7 count
+reconciles with zero test deletions, the #116 ground-truth and installed-binary
+E2E pass over the real stdio process, all previously-fixed behaviors re-run
+green, and SOFER_TRACE.md remains untouched — **BUT** the F2 line introduced by
+`8026b2c` violates E501/line-length-100, so `ruff check` and
+`ruff format --check` both exit 1, breaking PB-07 and the CI lint job.
+**CRITICAL finding 1; blockers 1.** One mechanical formatting fix is required
+before merge (`apply-fix`).
