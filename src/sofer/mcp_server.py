@@ -1455,6 +1455,10 @@ def sofer_auth_status(
     Side effects: none — read-only probe, no network.
     Network usage: none.
 
+    ``ok`` reflects config validity as well as auth state: a config that
+    fails validation or containment checks reports ``ok:False`` with
+    ``exit_code 1`` even when the token/auth state itself is healthy.
+
     When to use: preflight before sofer_publish_confirm to learn required acknowledgments without triggering a publish.
     Example: sofer_auth_status(config="dataset.toml")
     Requires: dataset TOML exists. Next: sofer_publish_confirm with required flags from next hint, or set HF_TOKEN.
@@ -1489,9 +1493,13 @@ def sofer_auth_status(
         if requires_approval_phrase:
             next_hint["approval_phrase"] = "<from human>"
         next_hint["acknowledge_risk"] = True
+        # ok reflects config validity: validation/containment errors make the
+        # preflight a failure (exit_code 1) even when token/auth state is
+        # healthy — a malicious or invalid TOML must never read as "ok".
+        ok = not config_errors
         return {
-            "ok": True,
-            "exit_code": 0,
+            "ok": ok,
+            "exit_code": 0 if ok else 1,
             "output": "",
             "token": token_status,
             "confidential": cfg.confidential,

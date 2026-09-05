@@ -215,6 +215,61 @@ class TestToolRoster:
         assert before == after
 
 
+class TestAuthStatusValidity:
+    """sofer_auth_status ok reflects config validity: config_errors -> ok:False.
+
+    The preflight must never report a false ``ok:True`` for an invalid or
+    malicious TOML — validation/containment errors flip the envelope to
+    ``ok:False`` / ``exit_code 1`` even when token/auth state is healthy.
+    """
+
+    def test_placeholder_user_ok_false(self, tmp_path: Path, restore_tool_config: Any) -> None:
+        """A config failing validation (placeholder repo user) reports
+        ok:False, exit_code 1, and non-empty config_errors."""
+        _make_dataset(tmp_path)
+        toml = tmp_path / "dataset.toml"
+        text = toml.read_text(encoding="utf-8")
+        toml.write_text(
+            text.replace('repo_id = "user/test-ds"', 'repo_id = "YOUR_USER/test-ds"'),
+            encoding="utf-8",
+        )
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_auth_status", {"config": str(toml)}).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1, envelope
+        assert envelope["config_errors"], envelope
+        assert any("placeholder" in e for e in envelope["config_errors"]), envelope
+
+    def test_containment_violation_ok_false(self, tmp_path: Path, restore_tool_config: Any) -> None:
+        """A ``[[file]]`` local escaping the server root is refused ok:False."""
+        _make_dataset(tmp_path)
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname="x"\nrepo_id="u/x"\n\n[[file]]\n'
+            'local="../../escape.csv"\nremote="escape.csv"\n',
+            encoding="utf-8",
+        )
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_auth_status", {"config": str(toml)}).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1, envelope
+        assert any("outside the server root" in e for e in envelope["config_errors"]), envelope
+
+    def test_valid_toml_ok_true(self, tmp_path: Path, restore_tool_config: Any) -> None:
+        """A valid config reports ok:True, exit_code 0, no config errors."""
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0, envelope
+        assert envelope["config_errors"] == [], envelope
+
+
 # ---------------------------------------------------------------------------
 #  7.3 — No silent default config name (MSP-R10)
 # ---------------------------------------------------------------------------
