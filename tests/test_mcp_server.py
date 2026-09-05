@@ -182,6 +182,28 @@ class TestOutputBound:
         text = ms._captured_text(io.StringIO("out"), io.StringIO("err"))
         assert text == "outerr"
 
+    def test_codebook_output_truncated_with_marker(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """``sofer_codebook`` runs its markdown through the byte cap: a
+        codebook larger than ``output_max_bytes`` carries the truncation
+        marker instead of the full markdown (MSP-R12 envelope bound).
+
+        The cap is set via ``[tool.sofer] output_max_bytes`` so the tool's
+        per-call ``config.reload`` (self-anchoring, MSP-R10) picks it up —
+        a monkeypatched module constant would be overwritten by that reload.
+        """
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.sofer]\noutput_max_bytes = 64\n", encoding="utf-8"
+        )
+        (tmp_path / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_codebook", {"path": "data.csv"}).data
+        assert envelope["ok"] is True
+        assert "... [truncated: " in envelope["output"], envelope["output"]
+        assert envelope["output"].endswith("bytes]")
+
 
 class TestNextHintContract:
     """MSP-R13: the ``next`` recovery field is a flat dict of actionable hints,
@@ -689,9 +711,7 @@ class TestPublishAuthorizationLadder:
         assert "publish is disabled" in envelope["output"]
         assert upload_calls == []
 
-    def test_blank_phrase_treated_as_unconfigured(
-        self, tmp_path, monkeypatch, restore_tool_config
-    ):
+    def test_blank_phrase_treated_as_unconfigured(self, tmp_path, monkeypatch, restore_tool_config):
         """An empty/whitespace approval phrase must fail closed, not open.
 
         A host misconfigured with ``SOFER_MCP_APPROVAL_PHRASE=""`` would
@@ -725,6 +745,7 @@ class TestPublishAuthorizationLadder:
         assert envelope["ok"] is False
         assert envelope["error_code"] == "PUBLISH_APPROVAL_NOT_CONFIGURED"
         assert upload_calls == []
+
 
 class TestContainment:
     def test_config_outside_root_refused(self, tmp_path):

@@ -1172,7 +1172,7 @@ def sofer_codebook(
         return {
             "ok": True,
             "exit_code": 0,
-            "output": markdown,
+            "output": _truncate_output(markdown),
             "output_path": str(output_path) if output_path is not None else None,
         }
 
@@ -1280,7 +1280,7 @@ def sofer_profile(
             return {
                 "ok": False,
                 "exit_code": 1,
-                "output": str(exc),
+                "output": _truncate_output(str(exc)),
                 "config_errors": [],
                 "error_code": "CONFIG_ERROR",
                 "message": str(exc),
@@ -1431,7 +1431,7 @@ def sofer_render(
             return {
                 "ok": False,
                 "exit_code": 1,
-                "output": str(exc),
+                "output": _truncate_output(str(exc)),
                 "config_errors": [],
                 "error_code": "CONFIG_ERROR",
                 "message": str(exc),
@@ -1680,7 +1680,7 @@ def sofer_scan_dry_run(
         return {
             "ok": True,
             "exit_code": 0,
-            "output": "\n".join(lines),
+            "output": _truncate_output("\n".join(lines)),
             "discovered": len(discovered),
             "registered": registered,
             "config_errors": [],
