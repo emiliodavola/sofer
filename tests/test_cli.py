@@ -446,9 +446,35 @@ class TestCodebookPlaceholderValidation:
             Namespace(all_files=True, config=str(toml_path), csv=None, output=None)
         )
         assert rc == 0
-        root = tmp_path / "cache" / "codebook.md"
+        # CLI parity with MCP sofer_codebook_all: codebooks land in the package
+        # build_dir (where publish collects them), never the shared cache/.
+        root = tmp_path / "build" / "codebook.md"
         assert root.exists()
+        assert not (tmp_path / "cache" / "codebook.md").exists()
         assert not (tmp_path / "codebook.md").exists()
+
+    def test_all_files_output_override_writes_to_output_dir(self, tmp_path, monkeypatch):
+        """`codebook --all-files --output out` honours the override, writing
+        under out/ instead of the default build_dir."""
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "f.csv").write_text("col\n1\n", encoding="utf-8")
+
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "alice/my-dataset"\n\n'
+            '[[file]]\nlocal = "data/f.csv"\nremote = "data/f.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml_path), csv=None, output="out")
+        )
+        assert rc == 0
+        assert (tmp_path / "out" / "codebook.md").exists()
+        assert (tmp_path / "out" / "codebooks" / "data" / "f.md").exists()
+        assert not (tmp_path / "build" / "codebook.md").exists()
 
 
 # ── raw-folder organization: init + --move-existing (CLI-R07 / CLI-R08) ────────

@@ -179,7 +179,9 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     Without ``--all-files``: analyse *FILE* and print the codebook to
     stdout (or write to ``--output``).  With ``--all-files``: read every
     ``[[file]]`` entry from the TOML and write one codebook per file
-    under ``cache/codebooks/``, plus a root index.
+    under the package ``build_dir`` (``--output`` overrides it), plus a
+    root index — mirroring where ``sofer_codebook_all`` and ``publish``
+    collect codebooks.
     """
     if args.all_files:
         if args.csv:
@@ -199,7 +201,7 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
                 print(f"Error: {err}", file=sys.stderr)
             return 1
         try:
-            generate_all_codebooks(cfg)
+            generate_all_codebooks(cfg, output_dir=resolve_output_dir(cfg, args.output))
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -1185,7 +1187,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "and a sample value.\n"
             "\n"
             "Use --all-files to generate one codebook per [[file]] entry "
-            "in the TOML configuration, written under cache/codebooks/."
+            "in the TOML configuration, written under the package build_dir/."
         ),
     )
     c.add_argument(

@@ -110,16 +110,16 @@ When `--all-files` is specified, the system MUST generate one codebook for every
 
 ### Requirement: Root Index (CB-R04)
 
-When `--all-files` is used, the system MUST generate the root `codebook.md` at `write_root / "codebook.md"`: `cache/codebook.md` when `output_dir is None` (standalone `codebook --all-files`), `output_dir/codebook.md` when `output_dir` is set (prepare). The index SHALL contain a TOC with relative links under `codebooks/` prefix (matching uploader's HF staging), not `data/codebooks/`, colocated with per-file `codebooks/<rel-stem>.md` (or per-sheet `codebooks/<rel>/<stem>__<sanitized>.md`). System MUST NOT write `base_dir/codebook.md` in standalone mode. `**Tables:**` SHALL count sheets (one per codebook file), and `**Total columns:**` SHALL sum columns across all emitted codebooks.
+When `--all-files` is used, the system MUST generate the root `codebook.md` at `write_root / "codebook.md"`: the CLI `codebook --all-files` SHALL resolve `write_root` to the package `build_dir` (or `--output` override), matching `sofer_codebook_all` and where `publish` collects codebooks; the `generate_all` domain function with `output_dir is None` SHALL still write `cache/codebook.md` (Option B only when `output_dir` is set). The index SHALL contain a TOC with relative links under `codebooks/` prefix (matching uploader's HF staging), not `data/codebooks/`, colocated with per-file `codebooks/<rel-stem>.md` (or per-sheet `codebooks/<rel>/<stem>__<sanitized>.md`). System MUST NOT write `base_dir/codebook.md` in standalone mode. `**Tables:**` SHALL count sheets (one per codebook file), and `**Total columns:**` SHALL sum columns across all emitted codebooks.
 
-(Previously: Tables counted TOML entries, not sheets; only `stem.md` links.)
+(Previously: Tables counted TOML entries, not sheets; only `stem.md` links. `codebook --all-files` wrote to `cache/codebook.md` instead of the package `build_dir`.)
 
-#### Scenario: Standalone batch writes to cache
+#### Scenario: Standalone batch writes to build_dir
 
 - GIVEN `dataset.toml` in `/proj/` with `raw/a.csv` and `raw/b.parquet`
 - WHEN `sofer codebook --config dataset.toml --all-files` completes
-- THEN `/proj/cache/codebook.md` SHALL exist, `/proj/cache/codebooks/a.md` and `b.md` SHALL exist
-- AND `/proj/codebook.md` SHALL NOT exist, links SHALL be `codebooks/a.md` and `codebooks/b.md`
+- THEN `/proj/build/codebook.md` SHALL exist, `/proj/build/codebooks/a.md` and `b.md` SHALL exist
+- AND `/proj/cache/codebook.md` SHALL NOT exist, links SHALL be `codebooks/a.md` and `codebooks/b.md`
 
 #### Scenario: Prepare mode writes to build
 
@@ -131,7 +131,7 @@ When `--all-files` is used, the system MUST generate the root `codebook.md` at `
 
 - GIVEN `[[file]]` for `raw/Labels/etiquetas_a.csv`
 - WHEN standalone batch generates index
-- THEN link SHALL be `codebooks/Labels/etiquetas_a.md` (and file at `cache/codebooks/Labels/etiquetas_a.md`)
+- THEN link SHALL be `codebooks/Labels/etiquetas_a.md` (and file at `build/codebooks/Labels/etiquetas_a.md`)
 
 #### Scenario: Index links are relative paths
 
