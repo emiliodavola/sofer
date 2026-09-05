@@ -85,8 +85,12 @@ class TestBuildEntry:
         cwd.mkdir()
         env = {"HF_TOKEN": "hf123", "SOFER_MCP_APPROVAL_PHRASE": "secret"}
         entry = mcp_registration.build_entry("gemini", cwd, env)
-        # Secret VALUES are never persisted — only the env NAMES (CF-3).
-        assert entry["env"] == ["HF_TOKEN", "SOFER_MCP_APPROVAL_PHRASE"]
+        # Secret VALUES are never persisted — only the $VAR references (CF-3).
+        # Gemini CLI expands host env vars at runtime from this object form.
+        assert entry["env"] == {
+            "HF_TOKEN": "$HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
+        }
         assert "hf123" not in str(entry)
         assert "secret" not in str(entry)
         assert entry["command"] == "sofer-mcp"
@@ -96,7 +100,7 @@ class TestBuildEntry:
         cwd = tmp_path / "proj"
         cwd.mkdir()
         entry = mcp_registration.build_entry("gemini", cwd, {"HF_TOKEN": "hf123"})
-        assert entry["env"] == ["HF_TOKEN"]
+        assert entry["env"] == {"HF_TOKEN": "$HF_TOKEN"}
         assert "SOFER_MCP_APPROVAL_PHRASE" not in entry["env"]
 
     def test_codex_env_vars_allow_list(self, tmp_path):
@@ -441,11 +445,12 @@ class TestEnvForwarding:
         path = proj / ".gemini" / "settings.json"
         raw_text = path.read_text(encoding="utf-8")
         data = json.loads(raw_text)
-        # Only env NAMES are persisted — never the secret values (CF-3).
-        assert data["mcpServers"]["sofer"]["env"] == [
-            "HF_TOKEN",
-            "SOFER_MCP_APPROVAL_PHRASE",
-        ]
+        # Only env $VAR references are persisted — never the secret values
+        # (CF-3). Gemini CLI expands these from the host environment.
+        assert data["mcpServers"]["sofer"]["env"] == {
+            "HF_TOKEN": "$HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
+        }
         assert "hf123" not in raw_text
         assert "phrase" not in raw_text
 

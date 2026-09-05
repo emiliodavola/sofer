@@ -140,8 +140,9 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
 
     Env forwarding rules:
     - codex: ``env_vars`` is the allow-list of known keys present in *env*
-    - gemini: ``env`` is the list of known keys present in *env* (NAMES only —
-      the secret values are never persisted to settings.json)
+    - gemini: ``env`` is a mapping of known key -> ``$KEY`` reference (Gemini
+      CLI expands host environment variables at runtime, so the secret values
+      are never persisted to settings.json)
     - opencode: no env forwarding (returns minimal entry)
 
     Args:
@@ -160,8 +161,8 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
         env_vars = [k for k in _ENV_KEYS if env.get(k)]
         return {"command": "sofer-mcp", "cwd": cwd_str, "env_vars": env_vars}
     if agent == "gemini":
-        env_names = [k for k in _ENV_KEYS if env.get(k)]
-        return {"command": "sofer-mcp", "cwd": cwd_str, "env": env_names}
+        env_refs = {k: f"${k}" for k in _ENV_KEYS if env.get(k)}
+        return {"command": "sofer-mcp", "cwd": cwd_str, "env": env_refs}
     raise ValueError(f"unknown agent: {agent}")
 
 
@@ -191,7 +192,7 @@ def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bo
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
-        if sorted(a.get("env", [])) != sorted(b.get("env", [])):
+        if a.get("env") != b.get("env"):
             return False
         return True
     # opencode
