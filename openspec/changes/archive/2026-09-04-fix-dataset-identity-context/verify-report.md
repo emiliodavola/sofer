@@ -365,3 +365,134 @@ with the final branch state. Reconciliation:
 The authoritative count for the merged change is **1344 passed / 2 skipped**
 (mypy, ruff check, ruff format, git diff --check all clean; SOFER_TRACE.md
 untouched — PB-08).
+
+---
+
+## Post-merge-review re-verification (2026-09-04)
+
+Re-verification after the maintainer's merge review found 6 blockers, all
+fixed on `fix/116-pr4` (head of PR #137; 7 commits `4ff3d91..d6ac85f`) and
+passed by an independent gate review (PASS, no CRITICAL). The 6 fixes updated
+the live specs (`openspec/specs/scan/spec.md` SCN-01 symlink exclusion,
+`openspec/specs/prepare/spec.md` PRP-03 doc containment,
+`openspec/specs/mcp-server/spec.md` INIT-05 Windows-invalid/reserved names +
+INIT-03 TOML-before-raw/, `openspec/specs/publish/spec.md` PUB-05 fail-closed
+inspection). Verification-only — no source/test files modified.
+
+### Gates (ACTUAL output, re-run on fix/116-pr4 @ d6ac85f)
+
+```text
+uv run pytest tests/ -q                                -> 1385 passed, 4 skipped, 13 warnings in 35.07s (exit 0)
+                                                          (measured 3x: 34.81s, 36.33s, 35.07s — all 1385/4)
+uv run mypy src/                                       -> Success: no issues found in 30 source files (exit 0)
+uv run ruff check src/ tests/                          -> All checks passed! (exit 0)
+uv run ruff format --check src/ tests/                 -> 60 files already formatted (exit 0)
+git diff --check                                       -> clean (exit 0)
+```
+
+- `test_output_hash`: `sha256:e1e767b0befd714e338a2a83a76fdefac8eebaa0ef35b6ffda8e0a2e7f6ab581`
+- `build_output_hash`: `sha256:3266b03d0ae65295cbe214aab624a4a998c8103ba8125e4be1291cc8077d123e`
+- Expected suite **1385 passed / 4 skipped — MATCHES ACTUAL exactly.**
+
+### The 4 skips explained
+
+| Skip site | Test | Reason | Status |
+|-----------|------|--------|--------|
+| `test_mcp_server.py:583` | `test_symlink_inside_root_to_outside` | file-symlink creation requires elevated privileges on this win32 host | pre-existing (present at 4ff3d91) |
+| `test_mcp_server.py:1110` | hatchling build-backend skipif | hatchling not installed in dev env (CI builds the wheel) | pre-existing |
+| `test_scanner.py:384` | `test_symlinked_file_outside_not_discovered` | file-symlink creation unavailable on this host | NEW (+1 of the +2) |
+| `test_scanner.py:418` | `test_regular_file_still_discovered_alongside_links` | file-symlink creation unavailable on this host | NEW (+1 of the +2) |
+
+Note: the **junction** paths run for real on this host (NTFS junctions work
+without elevation): `test_scanner.py:402 test_symlinked_dir_outside_not_discovered`
+PASSED and `test_mcp_server.py:603 test_junction_dir_inside_root_to_outside`
+PASSED — the `_is_link` reparse-point detection is exercised by real
+execution, not just skipped.
+
+### Fix conformance after fixes (source + spec + test evidence)
+
+| Blocker | Fix (commit) | Source evidence | Test evidence | Spec conformance |
+|---------|--------------|-----------------|---------------|------------------|
+| B1 | Symlink exclusion (99750e5) | `scanner.py` `_is_link` (is_symlink OR Windows `FILE_ATTRIBUTE_REPARSE_POINT` on 3.10-3.12 where junction `is_symlink()` is False); `discover_files` skips linked entries AND entries with a linked ancestor (parents loop up to root); module docstring states the exfiltration rationale | `test_symlinked_file_outside_not_discovered` (skipped — env), `test_symlinked_dir_outside_not_discovered` (PASSED — junction), `test_regular_file_still_discovered_alongside_links` (skipped — env); scanner suite 72 passed/2 skipped | SCN-01 compliant — live spec now bans symlinks + junctions and both new scenarios are covered (junction vector executed green) |
+| B2 | Doc-path containment (548a227) | `model.resolve_doc_path(value, base)` resolves against `cfg._base_dir` (never process cwd); used by `model.validate()` (4 doc fields) and `prepare.py` L809-830; MCP `_validate_doc_files(cfg)` containment-check wired into `_load_dataset` + `sofer_profile_all`/`render_all`/`auth_status` (collected errors, refusal `ok:False`) | `TestDocPathContainment` (3: outside-root readme refused, study_design+recipe refused, contained passes & reads relative to TOML dir); `test_relative_readme_resolves_against_config_dir` + `test_recipe_and_study_design_relative_to_config_dir` + `test_relative_readme_missing_warns_and_falls_back` (prepare.py domain); `test_prepare_reads_relative_readme_from_toml_dir` (CLI subprocess) — all PASSED | PRP-03 compliant — "relative README resolves against the TOML directory" and "declared doc path outside the server root refused" scenarios green |
+| B3 | Windows-invalid/reserved names + TOML-before-raw (1fde058) | `execution_context.py` `_WINDOWS_INVALID_CHARS = '<>:"/\\|?*'`, `_RESERVED_DEVICE_NAMES` (CON/PRN/AUX/NUL/COM1-9/LPT1-9), `_reserved_device_name` stem-matched case-insensitive (CON.txt rejected); `validate_identity` `elif` branches; init write-order hardened TOML-before-raw/ in `_cmd_init` (4 sites) + `sofer_init` | `test_windows_invalid_chars_refused` (6 cells: a*b a?b a<b a>b a|b a1:b), `test_reserved_device_name_refused` (11 cells incl. CON.txt/con.toml), `test_normal_names_still_accepted`; MCP `test_unsafe_name_windows_invalid_char_refused` + `test_reserved_device_name_refused`; CLI `test_init_windows_invalid_name_rejected` + `test_init_reserved_device_name_rejected` — all PASSED | INIT-05 compliant — new "Windows-invalid or reserved name rejected" scenario green (NO TOML, NO raw/ pre-write); INIT-03 TOML-before-raw/ prose matches code |
+| B4 | Publish fail-closed (a5f2365) | `publish.py` `_inspect_repo`: `RepositoryNotFoundError` → `[]`, ANY other exception → raise; `_ensure_repo`: raise on non-"already exists" `create_repo` errors; `publish()` wraps the remote prologue → rc 1 BEFORE any staging/upload; post-upload inspection failure warns + skips split report only | `TestRemoteFailClosed` (4: not-found → [], RuntimeError → raises, publish refuses before upload with `upload_folder` NOT called, ensure_repo raises) — all PASSED | PUB-05 compliant — all 3 new scenarios ("repo-not-found reads as empty", "inspection failure fails closed", "create_repo failure fails closed") green |
+| B5 | Anchor tests present (49f0fd8) | CLI `profile`/`render` single-file `--output` anchored to input parent; MCP `sofer_codebook` output_file → input parent, `sofer_profile` output_dir → input parent, `sofer_codebook_all`/`profile_all`/`render_all` relative output_dir → `cfg._base_dir` (NOT server root) | `test_profile_relative_output_anchors_to_input_parent`, `test_render_relative_output_anchors_to_input_parent`, `test_codebook_single_file_output_anchors_to_input_parent`, `test_profile_single_file_output_anchors_to_input_parent`, `test_codebook_all_output_dir_anchors_to_config_dir`, `test_profile_all_output_dir_anchors_to_config_dir`, `test_render_all_output_dir_anchors_to_config_dir` — all PASSED | MSP-R10 / D9 parity — the previously code-verified anchoring contracts now have direct runtime coverage |
+| B6 | Baseline recorded (625c98c + d6ac85f) | verify-report.md "Merge-review evidence reconciliation" (1344) + apply-progress "Merge-review blockers" section; this append records the post-fix 1385/4 | — | — |
+
+### No regressions (previously-fixed behaviors re-run)
+
+```text
+uv run pytest tests/test_execution_context.py -q -k "control or windows_invalid or reserved or newline"   -> 25 passed   (user \Z + control chars + new checks)
+uv run pytest tests/test_cli.py tests/test_mcp_server.py -q -k "dry_run or dry_run_no_mutation or dry_run_plain"  -> 15 passed  (dry-run no-write BOTH adapters)
+uv run pytest tests/test_mcp_server.py -q -k "render_output_dir_anchors or render_output_dir_file_package"        -> 2 passed   (dir-package inside / file-package parent)
+uv run pytest tests/test_mcp_server.py -q -k "init_reloads_raw_dir or raw_dir_per_root or RawDir"                 -> 1 passed   (per-root RAW_DIR reload)
+uv run pytest tests/test_prepare.py -q                                                                           -> 50 passed
+uv run pytest tests/test_publish.py -q -k "fail or inspect or ensure_repo"                                       -> 9 passed
+uv run pytest tests/test_scanner.py -q                                                                           -> 72 passed, 2 skipped
+```
+
+### Ground truth — issue #116 (real stdio process)
+
+```text
+uv run pytest "tests/test_mcp_process.py::TestParentRootIdentity" -v
+tests/test_mcp_process.py::TestParentRootIdentity::test_cwd_omitted_fails_closed_then_cwd_child_anchors PASSED [100%]
+============================== 1 passed in 2.79s ==============================
+```
+
+Still green over the real `sofer-mcp` stdio process after all 6 fixes.
+
+### Count reconciliation (1344 → 1385 passed, 2 → 4 skipped)
+
+`git diff 4ff3d91..d6ac85f` shows **28 new test functions, 0 deleted**
+(43 collected items after parametrize expansion):
+
+| File | New functions | Items (cells) | Fix |
+|------|---------------|---------------|-----|
+| tests/test_scanner.py | 3 | 3 (1 passes + 2 Windows file-symlink skips) | B1 |
+| tests/test_prepare.py | 3 | 3 | B2 |
+| tests/test_mcp_server.py | 10 | 10 (3 doc-containment + 2 windows/reserved + 5 anchors) | B2/B3/B5 |
+| tests/test_execution_context.py | 3 | 18 (6 + 11 + 1 parametrize cells) | B3 |
+| tests/test_cli.py | 5 | 5 (2 windows/reserved + 2 anchors + 1 prepare-TOML-dir) | B3/B5/B2 |
+| tests/test_publish.py | 4 | 4 | B4 |
+
+Total items: 3+3+10+18+5+4 = **+43**; passed +41, skipped +2.
+Arithmetic: 1344 + 41 passed = **1385 passed**; 2 + 2 skipped = **4 skipped**.
+Zero test deletions (`^-def test_` count = 0). Matches the apply-progress
+"+43 cells" table exactly.
+
+### SOFER_TRACE.md (PB-08)
+
+`git status --short` → `?? SOFER_TRACE.md` (untracked, never staged);
+length 17210, mtime 2026-08-31 17:40:07 — unchanged, untouched by this
+re-verification.
+
+### Issues
+
+**CRITICAL**: None.
+
+**WARNING**: None.
+
+**SUGGESTION**:
+1. The two scanner file-symlink tests (`test_symlinked_file_outside_not_discovered`,
+   `test_regular_file_still_discovered_alongside_links`) skip on this win32
+   host (file-symlink creation needs developer mode/elevation). They run on
+   POSIX CI. The junction variant of the same code path is exercised green on
+   this host, so the exclusion logic is proven; no action required.
+2. `test_mcp_server.py:603 test_junction_dir_inside_root_to_outside` is the
+   pre-existing containment test that now passes for real on this host — the
+   skip at 603 was already unreachable here (junction creation succeeds), so
+   its skip-branch is dead code on Windows; harmless.
+
+### Verdict (post-merge-review re-verification)
+
+**VERIFIED** — all 6 merge-review blockers confirmed fixed and spec-compliant
+against the updated live specs (SCN-01, PRP-03, PUB-05, INIT-05/INIT-03),
+all gates green with ACTUAL counts matching the expected **1385 passed / 4
+skipped** (measured 3x), mypy/ruff/format/diff-check clean, the +43 item
+reconciliation (41 passed + 2 skipped) verified against the added test files
+with zero deletions, the #116 ground-truth reproduction still passes over the
+real MCP stdio process, previously-fixed behaviors (user `\Z`/control chars,
+dry-run no-write both adapters, render dir-package parity, per-root RAW_DIR
+reload, cwd fail-closed) all re-run green, and SOFER_TRACE.md remains
+untouched. No CRITICAL or WARNING findings; 2 cosmetic SUGGESTIONs.

@@ -247,6 +247,8 @@ class TestInstalledBinary:
 
         _run(_go())
 
+
+class TestRecoveryPublishConfirm:
     """PB-03: replay the documented risk-gate hint past the risk gate."""
 
     def test_replay_acknowledge_risk_progresses_to_approval_gate(
