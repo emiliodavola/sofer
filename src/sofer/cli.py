@@ -31,6 +31,7 @@ from .quality import QualityValidator
 from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
+    _is_link,
     check_flatten_collisions,
     check_raw_collisions,
     copy_files,
@@ -608,7 +609,8 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
     from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
-    receives an explicit ``env`` dict, opencode receives no env.
+    receives an ``env`` name list (NAMES only — values are never persisted),
+    opencode receives no env.
     """
     from . import mcp_registration
 
@@ -918,6 +920,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
     candidates: list[Path] = []
     for entry in dataset_root.iterdir():
         if not entry.is_file():
+            continue
+        if _is_link(entry):
+            # Symlinks/junctions are never moved into raw/ (SCN-01 exfiltration
+            # guard, mirrored from discover_files).
             continue
         if entry.suffix.lower() not in SUPPORTED_FORMATS:
             continue

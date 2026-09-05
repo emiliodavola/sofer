@@ -2730,6 +2730,28 @@ class TestInitTreePreserve:
         assert not (tmp_path / "a.csv").exists()
         assert (tmp_path / "my-ds.toml").is_file()
 
+    def test_move_existing_skips_symlink(self, tmp_path, tmp_path_factory, restore_tool_config):
+        """CF-3: a symlinked supported file at the dataset root is never moved
+        into raw/ by sofer_init(move_existing=True)."""
+        outside = tmp_path_factory.mktemp("outside")
+        secret = outside / "secret.csv"
+        secret.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        if not _make_link(link, secret):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server,
+            "sofer_init",
+            {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path), "move_existing": True},
+        ).data
+        assert envelope["ok"] is True
+        assert (tmp_path / "raw" / "a.csv").is_file()
+        assert not (tmp_path / "raw" / "leak.csv").exists(), "symlink must not be moved"
+        assert link.exists()
+
     def test_move_existing_dry_run_tree_preview(self, tmp_path, restore_tool_config):
         (tmp_path / "a.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)

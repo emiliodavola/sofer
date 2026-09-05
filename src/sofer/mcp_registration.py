@@ -13,8 +13,10 @@ Each agent has a distinct on-disk shape:
 
 All writes are idempotent, preserve unrelated keys, create a single
 ``.bak`` backup before the first mutation, and use an atomic
-``tmp+os.replace`` commit. Gemini ``env`` is explicit (no shell
-inheritance), Codex ``env_vars`` is an allow-list, and ``command``
+``tmp+os.replace`` commit. Both Gemini ``env`` and Codex ``env_vars``
+persist env NAMES only (an allow-list of keys present in the environment) —
+secret values (``HF_TOKEN``, ``SOFER_MCP_APPROVAL_PHRASE``) are never
+written to disk. ``command``
 string/array variations are normalized before comparison. Native
 delegation (``codex``/``gemini``) is probed via ``shutil.which`` +
 ``--help`` with a timeout and falls back to file-edit; opencode
@@ -138,7 +140,8 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
 
     Env forwarding rules:
     - codex: ``env_vars`` is the allow-list of known keys present in *env*
-    - gemini: ``env`` is the explicit dict of key→value for known keys
+    - gemini: ``env`` is the list of known keys present in *env* (NAMES only —
+      the secret values are never persisted to settings.json)
     - opencode: no env forwarding (returns minimal entry)
 
     Args:
@@ -157,8 +160,8 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
         env_vars = [k for k in _ENV_KEYS if env.get(k)]
         return {"command": "sofer-mcp", "cwd": cwd_str, "env_vars": env_vars}
     if agent == "gemini":
-        env_dict = {k: v for k, v in env.items() if k in _ENV_KEYS and v}
-        return {"command": "sofer-mcp", "cwd": cwd_str, "env": env_dict}
+        env_names = [k for k in _ENV_KEYS if env.get(k)]
+        return {"command": "sofer-mcp", "cwd": cwd_str, "env": env_names}
     raise ValueError(f"unknown agent: {agent}")
 
 
@@ -188,7 +191,7 @@ def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bo
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
-        if a.get("env", {}) != b.get("env", {}):
+        if sorted(a.get("env", [])) != sorted(b.get("env", [])):
             return False
         return True
     # opencode

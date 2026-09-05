@@ -97,6 +97,7 @@ from .quality import QualityValidator
 from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
+    _is_link,
     check_flatten_collisions,
     copy_files,
     discover_files,
@@ -1835,6 +1836,10 @@ def sofer_init(
         if move_existing:
             for entry in effective_root.iterdir():
                 if not entry.is_file():
+                    continue
+                if _is_link(entry):
+                    # Symlinks/junctions are never moved into raw/ (SCN-01
+                    # exfiltration guard, mirrored from discover_files).
                     continue
                 if entry.suffix.lower() not in SUPPORTED_FORMATS:
                     continue

@@ -505,6 +505,30 @@ class TestInitRawFolder:
         assert (tmp_path / "notes.txt").exists()
         assert (tmp_path / "cache" / "c.csv").exists()
 
+    def test_move_existing_skips_symlink(self, tmp_path, tmp_path_factory, monkeypatch):
+        """A symlinked CSV at the dataset root is never moved into raw/
+        (SCN-01 exfiltration guard, CF-3)."""
+        import pytest
+
+        monkeypatch.chdir(tmp_path)
+        outside = tmp_path_factory.mktemp("outside")
+        secret = outside / "secret.csv"
+        secret.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        try:
+            link.symlink_to(secret)
+        except OSError:
+            pytest.skip("symlink creation unavailable on this host")
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=True)
+        )
+        assert rc == 0
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert not (tmp_path / "raw" / "leak.csv").exists(), "symlink must not be moved"
+        assert link.exists(), "the link itself must remain in place"
+
     def test_move_existing_collision_guard(self, tmp_path, monkeypatch, capsys):
         """Collision with existing raw/ content fails naming both sources."""
         monkeypatch.chdir(tmp_path)
