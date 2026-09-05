@@ -338,7 +338,9 @@ class DatasetConfig:
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
-    _config_path: Path = field(default=Path(), compare=False, repr=False)  # resolved TOML path (set by from_toml)
+    _config_path: Path = field(
+        default=Path(), compare=False, repr=False
+    )  # resolved TOML path (set by from_toml)
 
     # ------------------------------------------------------------------
     #  Factory / loading
