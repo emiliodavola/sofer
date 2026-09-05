@@ -137,7 +137,9 @@ _ERROR_ENVELOPE_SCHEMA_FIELDS: dict[str, dict[str, str]] = {
     "next": {"type": "object"},
 }
 
-# Error codes for the single error envelope (10.3).
+# Error codes for the single error envelope (10.3). Path escapes are raised
+# as PathOutsideRootError (transport-mapped to isError), never emitted as an
+# error envelope, so they are deliberately absent here.
 _ERROR_CODES: tuple[str, ...] = (
     "CONFIG_ERROR",
     "VALIDATION_FAILED",
@@ -146,7 +148,6 @@ _ERROR_CODES: tuple[str, ...] = (
     "PUBLISH_CONFIDENTIAL_NOT_ACKD",
     "PUBLISH_APPROVAL_REQUIRED",
     "PUBLISH_APPROVAL_NOT_CONFIGURED",
-    "PATH_OUTSIDE_ROOT",
     "TARGET_INVALID",
 )
 
