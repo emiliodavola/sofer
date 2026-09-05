@@ -131,6 +131,40 @@ class TestNeedsPrepare:
         cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
         assert _needs_prepare(cfg, out) is False
 
+    def test_custom_toml_name_newer_than_parquet_returns_true(self, tmp_path: Path) -> None:
+        """A custom-named TOML (issue #116 canonical init: ``test.toml``)
+        modified after the newest parquet -> True.
+
+        The stale check keys on the REAL config path stored by
+        ``DatasetConfig.from_toml`` (``_config_path``), not a hardcoded
+        ``dataset.toml`` — with the old code the custom TOML was never
+        compared and the package stayed stale.
+        """
+        out = tmp_path / "build"
+        out.mkdir()
+        pq.write_table(pa.table({"a": [1]}), out / "data.parquet")
+        toml = tmp_path / "test.toml"
+        toml.write_text('[dataset]\nname = "test"\nrepo_id = "user/test"\n', encoding="utf-8")
+        os.utime(out / "data.parquet", (_MID, _MID))
+        os.utime(toml, (_NEW, _NEW))
+
+        cfg = DatasetConfig.from_toml(toml)
+        assert _needs_prepare(cfg, out) is True
+
+    def test_custom_toml_name_unchanged_returns_false(self, tmp_path: Path) -> None:
+        """A custom-named TOML older than the newest parquet -> False (no
+        false regeneration trigger from the real config path)."""
+        out = tmp_path / "build"
+        out.mkdir()
+        pq.write_table(pa.table({"a": [1]}), out / "data.parquet")
+        toml = tmp_path / "test.toml"
+        toml.write_text('[dataset]\nname = "test"\nrepo_id = "user/test"\n', encoding="utf-8")
+        os.utime(out / "data.parquet", (_NEW, _NEW))
+        os.utime(toml, (_OLD, _OLD))
+
+        cfg = DatasetConfig.from_toml(toml)
+        assert _needs_prepare(cfg, out) is False
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PUB-02 — local target

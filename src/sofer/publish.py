@@ -432,7 +432,9 @@ def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
     the package needs regenerating when
 
     - the output directory has no ``.parquet`` files (existence fallback), or
-    - ``dataset.toml`` was modified after the newest Parquet, or
+    - the config TOML (``cfg._config_path`` — whatever its name, e.g.
+      ``dataset.toml`` or a custom ``test.toml``) was modified after the
+      newest Parquet, or
     - any declared source file (all supported formats: CSV, TSV, Parquet,
       Excel, JSONL) was modified after the newest Parquet.
 
@@ -449,7 +451,12 @@ def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
     newest = max(p.stat().st_mtime for p in parquets)
 
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
-    toml_path = base / config.DEFAULT_CONFIG_NAME
+    # The config's real path wins (custom-named TOMLs — issue #116 canonical
+    # init produces e.g. ``test.toml``); ``Path()`` is the hand-built-config
+    # sentinel (truthy in bool()), so compare explicitly before falling back.
+    toml_path = (
+        cfg._config_path if cfg._config_path != Path() else base / config.DEFAULT_CONFIG_NAME
+    )
     if toml_path.is_file() and toml_path.stat().st_mtime > newest:
         return True
 

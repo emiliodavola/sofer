@@ -338,6 +338,7 @@ class DatasetConfig:
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
+    _config_path: Path = Path()  # resolved TOML path (set by from_toml)
 
     # ------------------------------------------------------------------
     #  Factory / loading
@@ -542,6 +543,7 @@ class DatasetConfig:
             demo_url=meta.get("demo_url", ""),
             dataset_card_authors=meta.get("dataset_card_authors", ""),
             _base_dir=base_dir,
+            _config_path=path.resolve(),
         )
 
     # ------------------------------------------------------------------
