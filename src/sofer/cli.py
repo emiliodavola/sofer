@@ -31,9 +31,9 @@ from .quality import QualityValidator
 from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
-    _is_link,
     check_flatten_collisions,
     check_raw_collisions,
+    collect_init_moves,
     copy_files,
     discover_files,
     flatten_first_level,
@@ -924,32 +924,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f"       sofer publish {output.name}")
         return 0
 
-    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in the dataset root.
-    candidates: list[Path] = []
-    for entry in dataset_root.iterdir():
-        if not entry.is_file():
-            continue
-        if _is_link(entry):
-            # Symlinks/junctions are never moved into raw/ (SCN-01 exfiltration
-            # guard, mirrored from discover_files).
-            continue
-        if entry.suffix.lower() not in SUPPORTED_FORMATS:
-            continue
-        if entry.name == output.name:
-            continue
-        # Exclude the template's own TOML name and already-tracked raw reuse;
-        # top-level files inside cache/build/raw are not iterdir children, but
-        # guard against a file literally named like those dirs (e.g. "cache").
-        candidates.append(entry.resolve())
-    candidates.sort()
+    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in the dataset
+    # root (shared helper, AGENTS.md rule 4).
+    candidates, existing = collect_init_moves(dataset_root, output.name, raw_dir_path)
 
     # Pre-move collision check against existing raw/ content.
     if candidates:
-        existing: list[Path] = []
-        if raw_dir_path.exists():
-            for q in raw_dir_path.rglob("*"):
-                if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
-                    existing.append(q.resolve())
         base_dir = dataset_root
         try:
             check_flatten_collisions(candidates + existing, base_dir)

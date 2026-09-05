@@ -77,7 +77,6 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
     ) from _exc
 
 from . import config as sofer_config
-from ._formats import SUPPORTED_FORMATS
 from .checks import DatasetValidator, ValidationReport
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
@@ -99,8 +98,8 @@ from .quality import QualityValidator
 from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
-    _is_link,
     check_flatten_collisions,
+    collect_init_moves,
     copy_files,
     discover_files,
     merge_entries,
@@ -1894,23 +1893,7 @@ def sofer_init(
         candidates: list[Path] = []
         existing: list[Path] = []
         if move_existing:
-            for entry in effective_root.iterdir():
-                if not entry.is_file():
-                    continue
-                if _is_link(entry):
-                    # Symlinks/junctions are never moved into raw/ (SCN-01
-                    # exfiltration guard, mirrored from discover_files).
-                    continue
-                if entry.suffix.lower() not in SUPPORTED_FORMATS:
-                    continue
-                if entry.name == toml_path.name:
-                    continue
-                candidates.append(entry.resolve())
-            candidates.sort()
-            if raw_dir.exists():
-                for q in raw_dir.rglob("*"):
-                    if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
-                        existing.append(q.resolve())
+            candidates, existing = collect_init_moves(effective_root, toml_path.name, raw_dir)
             try:
                 check_flatten_collisions(candidates + existing, base_dir)
             except ValueError as exc:

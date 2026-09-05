@@ -164,6 +164,55 @@ def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
         raise ValueError("\n".join(errors))
 
 
+def collect_init_moves(
+    root: Path,
+    toml_name: str,
+    raw_dir: Path,
+) -> tuple[list[Path], list[Path]]:
+    """Collect the ``--move-existing`` move set for ``sofer init``.
+
+    Single shared home (AGENTS.md rule 4) for the collection logic that the
+    CLI ``_cmd_init`` and MCP ``sofer_init`` adapters both need: depth-1
+    ``SUPPORTED_FORMATS`` files directly under *root* — excluding the TOML
+    itself (``entry.name == toml_name``) and any symlink/junction
+    (:func:`_is_link`, SCN-01 exfiltration guard) — become the sorted
+    *candidates*; supported files already present under *raw_dir* become
+    *existing*. The flatten-collision check against the two lists is the
+    caller's concern (the CLI gates it on non-empty candidates, the MCP runs
+    it whenever ``move_existing`` is set).
+
+    Args:
+        root:      Dataset root whose depth-1 files are inspected.
+        toml_name: The TOML filename to exclude from the move set.
+        raw_dir:   The ``raw/`` directory whose existing files are collected.
+
+    Returns:
+        ``(candidates, existing)`` — sorted absolute move candidates and the
+        existing supported files under *raw_dir* (possibly empty).
+    """
+    candidates: list[Path] = []
+    for entry in root.iterdir():
+        if not entry.is_file():
+            continue
+        if _is_link(entry):
+            # Symlinks/junctions are never moved into raw/ (SCN-01
+            # exfiltration guard, mirrored from discover_files).
+            continue
+        if entry.suffix.lower() not in SUPPORTED_FORMATS:
+            continue
+        if entry.name == toml_name:
+            continue
+        candidates.append(entry.resolve())
+    candidates.sort()
+
+    existing: list[Path] = []
+    if raw_dir.exists():
+        for q in raw_dir.rglob("*"):
+            if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
+                existing.append(q.resolve())
+    return candidates, existing
+
+
 def _file_entry_from_raw(entry: dict[str, Any]) -> FileEntry:
     """Build a :class:`FileEntry` from a raw TOML ``[[file]]`` dict."""
     return FileEntry(
@@ -433,8 +482,7 @@ def copy_files(
                     # idempotent, skip without error (SCN-08).
                     continue
                 raise FileExistsError(
-                    f"Destination already exists and differs: {dest} "
-                    f"(use --force to overwrite)"
+                    f"Destination already exists and differs: {dest} (use --force to overwrite)"
                 )
             shutil.copy2(src, dest)
 
