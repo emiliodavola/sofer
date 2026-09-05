@@ -145,6 +145,13 @@ The suite SHALL cover empty config, existing config, greenfield, triage, nested 
 - THEN `child/test.toml` and `child/raw/` SHALL exist, `parent/test.toml` SHALL NOT
 - AND the envelope SHALL report absolute `config_path` `child/test.toml` and `dataset_root` `child`
 
+#### Scenario: Real-process greenfield chain reaches publish dry-run
+
+- GIVEN a module-scoped stdio fixture spawning the real `sofer-mcp` process with server root = parent dir and an intended child dataset dir holding a loose source file
+- WHEN `sofer_init(cwd="child")` then `sofer_scan_apply` then `sofer_validate` then `sofer_prepare` then `sofer_codebook_all` then `sofer_publish(dry_run=True)` run over one stdio session with NO manual file moves
+- THEN every step SHALL return `ok:true` and the chain SHALL reach the dry-run plan (issue #115 criterion #1) with the config/root anchored under `child/`
+- AND the chain SHALL stay fully offline (`sofer_publish(dry_run=True)` returns before any network branch)
+
 ### Requirement: Complete-run gate (PB-05)
 
 CI SHALL keep the complete suite (`uv run pytest -v`) as the test gate; no focused-only command SHALL replace it.

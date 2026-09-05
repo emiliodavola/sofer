@@ -63,6 +63,22 @@ def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
     return call_tool(server, name, args)
 
 
+@pytest.fixture(scope="module")
+def mcp_stdio_chain_root(tmp_path_factory: pytest.TempPathFactory) -> McpStdioServer:
+    """Module-scoped stdio spawn config for the greenfield ground-truth chain.
+
+    Server root = parent dir with an intended ``child/`` dataset dir holding a
+    single loose source file. One spawn per module (PB-09 lean-spawn bound);
+    the chain test runs init → scan_apply → validate → prepare → codebook_all
+    → publish(dry_run) over ONE stdio session with no manual file moves.
+    """
+    parent = tmp_path_factory.mktemp("mcp-stdio-chain")
+    child = parent / "child"
+    child.mkdir()
+    (child / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
+    return McpStdioServer(cwd=parent)
+
+
 class TestStdioFraming:
     """PB-01: real stdio transport with clean JSON-RPC framing (one spawn)."""
 
@@ -244,6 +260,88 @@ class TestInstalledBinary:
                     assert not (parent / "raw").exists()
                     assert envelope["config_path"] == str((child / "probe.toml").resolve())
                     assert envelope["dataset_root"] == str(child.resolve())
+
+        _run(_go())
+
+
+class TestStdioGroundTruthChain:
+    """PB-04/PB-06: the canonical greenfield chain over a REAL stdio session.
+
+    issue #115 criterion #1: reproduce ``init → … → publish dry-run`` over the
+    real stdio transport with no manual file moves. The chain is fully offline
+    — ``sofer_publish(dry_run=True)`` returns before any network branch
+    (publish.py:693-704), so the server subprocess needs no ``publish._api``
+    monkeypatch to stay deterministic. The in-process layers are covered by
+    ``TestDeliveryHandoff`` (upload branch) and
+    ``TestConfigStates.test_greenfield_bootstrap_init_scan_apply_validate``;
+    this test pins the init → prepare → publish(dry_run) prefix over stdio.
+    """
+
+    def test_init_scan_validate_prepare_codebook_publish_dry_run(
+        self, mcp_stdio_chain_root: Any
+    ) -> None:
+        """One stdio session walks the chain with config/root anchored under
+        ``child/`` and reaches the dry-run plan without any manual file move."""
+        params = mcp_stdio_chain_root.spawn()
+        parent = mcp_stdio_chain_root.cwd
+        child = parent / "child"
+
+        async def _go() -> None:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                ) as session:
+                    await session.initialize()
+
+                    init = await session.call_tool(
+                        "sofer_init", {"name": "chain-ds", "user": "chainuser", "cwd": "child"}
+                    )
+                    assert not init.isError
+                    init_env = json.loads(init.content[0].text)
+                    assert init_env["ok"] is True, init_env
+                    assert (child / "chain-ds.toml").is_file()
+                    assert (child / "raw").is_dir()
+                    assert not (parent / "chain-ds.toml").exists()
+
+                    applied = await session.call_tool(
+                        "sofer_scan_apply", {"config": "child/chain-ds.toml"}
+                    )
+                    assert not applied.isError
+                    applied_env = json.loads(applied.content[0].text)
+                    assert applied_env["ok"] is True, applied_env
+                    assert applied_env["copied"] == 1, applied_env
+                    assert (child / "cache" / "data.csv").is_file()
+
+                    validated = await session.call_tool(
+                        "sofer_validate", {"config": "child/chain-ds.toml"}
+                    )
+                    validated_env = json.loads(validated.content[0].text)
+                    assert validated_env["ok"] is True, validated_env
+
+                    prepared = await session.call_tool(
+                        "sofer_prepare", {"config": "child/chain-ds.toml"}
+                    )
+                    prepared_env = json.loads(prepared.content[0].text)
+                    assert prepared_env["ok"] is True, prepared_env
+                    assert (child / "build" / "data.parquet").is_file()
+
+                    codebooks = await session.call_tool(
+                        "sofer_codebook_all", {"config": "child/chain-ds.toml"}
+                    )
+                    codebooks_env = json.loads(codebooks.content[0].text)
+                    assert codebooks_env["ok"] is True, codebooks_env
+                    assert (child / "build" / "codebook.md").is_file()
+
+                    plan = await session.call_tool(
+                        "sofer_publish", {"config": "child/chain-ds.toml", "dry_run": True}
+                    )
+                    assert not plan.isError
+                    plan_env = json.loads(plan.content[0].text)
+                    assert plan_env["ok"] is True, plan_env
+                    assert plan_env["dry_run"] is True
 
         _run(_go())
 
