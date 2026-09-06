@@ -401,6 +401,7 @@ class TestAuthStatusValidity:
         ok:False — publish readiness requires the phrase (fail-closed)."""
         _make_dataset(tmp_path)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
         server = build_server(root=tmp_path)  # no approval phrase configured
 
         envelope = _call(
