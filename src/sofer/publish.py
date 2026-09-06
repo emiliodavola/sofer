@@ -515,8 +515,8 @@ def _copy_package(
         protected: Lowercased remote names skipped by overwrite protection
                    (``None`` = nothing skipped).
         force:     When ``False``, refuse to overwrite an existing
-                   destination FILE (raises :class:`FileExistsError`) — the
-                   local target's overwrite guard (PUB-13). The hf staging
+                   destination FILE or directory (raises :class:`FileExistsError`) —
+                   the local target's overwrite guard (PUB-13). The hf staging
                    root is always fresh, so it keeps the default ``True``.
     """
     skip = protected or set()
