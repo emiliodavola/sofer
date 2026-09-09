@@ -12,6 +12,11 @@ PHASE_BUILD = "build"
 PHASE_PUBLISH = "publish"
 PHASE_TRIAGE = "triage"
 
+# Argument placeholder used by registry templates that need the canonical
+# dataset TOML path to become executable (MSP-R13 binding contract).
+_CONFIG_PATH_ARG = "config"
+_CONFIG_PATH_MARKER = "<config_path>"
+
 
 @dataclass(frozen=True)
 class WorkflowCall:
@@ -246,6 +251,37 @@ def _thaw_argument(value: Any) -> Any:
     if isinstance(value, (tuple, frozenset)):
         return [_thaw_argument(item) for item in value]
     return value
+
+
+def bind_continuation(template: WorkflowTemplate, config_path: str | None = None) -> WorkflowCall:
+    """Bind a registry template to a concrete request, degrading to input-required.
+
+    A template argument of ``<config_path>`` needs the canonical dataset TOML
+    path to become executable. When the request carries no config, the
+    continuation SHALL still be emitted — as the same tool with
+    ``input_required`` naming ``config`` — so the caller can say exactly what
+    input is missing (MSP-R13) instead of dropping the continuation.
+
+    Args:
+        template: The registry continuation to bind.
+        config_path: Canonical dataset TOML path, or ``None``.
+
+    Returns:
+        An executable :class:`WorkflowCall`. When *config_path* is missing and
+        the template depends on it, the call carries ``input_required=("config",)``
+        with no arguments.
+    """
+    call = _template_to_call(template, config_path)
+    if call is not None:
+        return call
+    if _CONFIG_PATH_MARKER in template.arguments.values():
+        return WorkflowCall(
+            template.tool,
+            {},
+            reason=template.reason,
+            input_required=(_CONFIG_PATH_ARG,),
+        )
+    return WorkflowCall(template.tool, {}, reason=template.reason)
 
 
 def _template_to_call(template: WorkflowTemplate, config_path: str | None) -> WorkflowCall | None:

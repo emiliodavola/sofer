@@ -17,6 +17,7 @@ from sofer.workflow import (
     WorkflowMetadata,
     WorkflowTemplate,
     _template_to_call,
+    bind_continuation,
     failure_result,
     metadata_for,
     select_workflow_branch,
@@ -128,6 +129,24 @@ def test_template_binding_degrades_to_input_required():
     assert isinstance(call, WorkflowCall)
     assert call.tool == "sofer_scan_dry_run"
     assert call.arguments == {"config": "/abs/dataset.toml"}
+
+
+def test_bind_continuation_degrades_to_input_required():
+    template = WorkflowTemplate("sofer_scan_dry_run", {"config": "<config_path>"})
+    bound = bind_continuation(template)
+    assert bound.tool == "sofer_scan_dry_run"
+    assert bound.arguments == {}
+    assert bound.input_required == ("config",)
+    bound2 = bind_continuation(template, "/abs/x.toml")
+    assert bound2.arguments == {"config": "/abs/x.toml"}
+    assert bound2.input_required == ()
+
+
+def test_bind_continuation_without_marker_keeps_arguments():
+    template = WorkflowTemplate("sofer_codebook", {"file": "x.csv"})
+    bound = bind_continuation(template)
+    assert bound.arguments == {"file": "x.csv"}
+    assert bound.input_required == ()
 
 
 def test_result_envelopes_are_stable_json():

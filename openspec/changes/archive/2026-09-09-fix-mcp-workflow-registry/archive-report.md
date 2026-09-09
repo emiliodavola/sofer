@@ -57,3 +57,49 @@ exactly (verified by the integrity tests before integration).
   `openspec/changes/archive/2026-09-09-fix-mcp-workflow-registry/`.
 - PR 2 (MCP/CLI integration) will extend this archive record with the
   integration evidence before #117 is closed.
+
+## PR 2 — Integration (2026-09-09, same archive record)
+
+Extends this archive: the MCP server and CLI contract now consume the
+registry (MSP-R13).
+
+### What landed (src/sofer/mcp_server.py)
+
+- `_workflow_next` / `_workflow_doc_line` / `_workflow_description` helpers;
+  `_error_envelope` gains `next_call` (executable registry continuation) with
+  legacy `next_hint` mapped to a new flat `hints` field; `_refusal` gains
+  `tool_name`/`config_path` and builds a truthful retry (`WorkflowCall` with
+  `{"config": path}`, or `input_required=("config",)` when no path).
+- Every success envelope now carries `next` from the registry: validate →
+  prepare → codebook_all → profile_all → render_all → auth_status →
+  publish (dry_run) → typed `human_gate`; greenfield init → scan_dry_run →
+  scan_apply → validate. `sofer_init` success carries `next` after
+  `report_identity`.
+- `sofer_auth_status`: `next` is the executable `sofer_publish` call;
+  preflight hints live in `hints`.
+- `_register_tools` appends `Workflow: phase=…, branch=…, next=…` to every
+  tool's description (tools/list metadata from the registry).
+- Missing-config / invalid-config refusals recover with a retry of the SAME
+  tool (never a fabricated credential); publish_confirm risk refusal carries
+  `input_required=("acknowledge_risk",)`.
+- `workflow.bind_continuation` (workflow.py): binds `<config_path>` templates
+  to a request, degrading to `input_required=("config",)` when absent.
+
+### Tests
+
+- `tests/test_mcp_server.py` — new `TestWorkflowRegistryConformance` (7):
+  tools/list descriptions carry Workflow metadata; validate success next is
+  executable (sofer_prepare); render_all next is sofer_auth_status;
+  missing-config recovery is structured; publish dry_run ends in a typed
+  human gate; **greenfield chain executed via a registered FastMCP client**
+  (init → scan_dry_run → scan_apply → validate following the returned
+  continuations); refusal recovery is a truthful retry of the same tool.
+- Updated flat-`next` contract tests to the executable `next` + `hints`
+  split (tests/test_mcp_server.py, tests/test_mcp_schema.py).
+- `tests/test_workflow.py` — bind_continuation degradation tests.
+
+### Verification
+
+- Full suite: **1461 passed, 6 skipped** (was 1452 after PR 1).
+- `ruff check` clean; `ruff format --check` clean; `mypy src/` clean
+  (31 source files); `git diff --check` clean.

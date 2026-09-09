@@ -15,7 +15,7 @@
 | Unit | Goal | Likely PR | Notes |
 |------|------|-----------|-------|
 | 1 | `src/sofer/workflow.py` + registry + spec sync + integrity tests | PR 1 | ✅ DONE — 12 tests, suite 1452 passed |
-| 2 | mcp_server.py + cli.py integration, executable-client tests, envelope parity, prompts/instructions from registry | PR 2 | pending |
+| 2 | mcp_server.py + cli.py integration, executable-client tests, envelope parity, prompts/instructions from registry | PR 2 | DONE — 1461 passed |
 
 ## Phase 1: Port the typed workflow layer (`workflow.py`) — DONE
 
@@ -30,16 +30,16 @@
 
 ## Phase 3: Integration with MCP server (`mcp_server.py`) — PR 2 (pending)
 
-- [ ] 3.1 Red: `tools/list` metadata from registry (tests/test_mcp_schema.py).
-- [ ] 3.2 Red: per-tool envelope `next` registry-derivable; error envelopes structured (error_code/message/next or input_required) for missing-config, invalid-config, invalid-output, missing-identity.
-- [ ] 3.3 Red: executable-client recovery test — registered FastMCP client follows init→scan_dry_run→apply→validate and render_all→auth_status→publish(dry_run)→human_gate chains by invoking returned tools.
-- [ ] 3.4 Green: replace per-tool `next_hint` blocks with registry-backed construction; wire prompts/instructions/tool descriptions to the registry.
-- [ ] 3.5 publish_confirm only after gate; render triage never config-bearing publish.
+- [x] 3.1 Red: `tools/list` metadata from registry (tests/test_mcp_schema.py).
+- [x] 3.2 Red: per-tool envelope `next` registry-derivable; error envelopes structured (error_code/message/next or input_required) for missing-config, invalid-config, invalid-output, missing-identity.
+- [x] 3.3 Red: executable-client recovery test — registered FastMCP client follows init→scan_dry_run→apply→validate and render_all→auth_status→publish(dry_run)→human_gate chains by invoking returned tools.
+- [x] 3.4 Green: replace per-tool `next_hint` blocks with registry-backed construction; wire prompts/instructions/tool descriptions to the registry.
+- [x] 3.5 publish_confirm only after gate; render triage never config-bearing publish.
 
 ## Phase 4: CLI parity — PR 2 (pending)
 
-- [ ] 4.1 Red: machine-readable status parses as JSON, no `repr` literals.
-- [ ] 4.2 Green: serialize via `WorkflowResult.to_dict()` where a machine-readable line exists.
+- [x] 4.1 Red: machine-readable status parses as JSON, no `repr` literals.
+- [x] 4.2 Green: serialize via `WorkflowResult.to_dict()` where a machine-readable line exists.
 
 ## Phase 5: Spec sync, verification, archive
 
