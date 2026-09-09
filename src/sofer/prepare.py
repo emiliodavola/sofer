@@ -920,6 +920,14 @@ def prepare(
             verification = verify_load_dataset(output_dir, cfg)
             _print_verification_report(verification)
 
+        # -- 10b. Package artifact manifest (PRP-11, #122) --------
+        # Single source of truth consumed by publish dry-run/confirm.
+        from .manifest import MANIFEST_NAME, build_package_manifest
+
+        (output_dir / MANIFEST_NAME).write_bytes(
+            build_package_manifest(cfg, output_dir).json_bytes()
+        )
+
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

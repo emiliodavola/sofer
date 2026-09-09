@@ -580,7 +580,10 @@ class TestHfPublish:
         cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
         out = tmp_path / "build"
         prepare(cfg, out)  # build first so auto-prepare stays quiet
-        expected_staged = sum(1 for p in out.rglob("*") if p.is_file())
+        from sofer.manifest import MANIFEST_NAME
+
+        # manifest.json is build metadata, never part of the upload plan.
+        expected_staged = sum(1 for p in out.rglob("*") if p.is_file() and p.name != MANIFEST_NAME)
         assert expected_staged > 0, "fixture must stage at least one file"
 
         td = tmp_path / "_staging"
