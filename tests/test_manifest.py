@@ -134,3 +134,19 @@ def test_manifest_json_roundtrip_stable(tmp_path):
     assert [e.path for e in restored.entries] == [e.path for e in manifest.entries]
     # stable roundtrip: bytes identicos
     assert PackageManifest.from_json(manifest.json_bytes()).json_bytes() == manifest.json_bytes()
+
+
+def test_codebooks_required_when_flow_promises_them(tmp_path):
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    out.mkdir()
+    (out / "data.parquet").write_bytes(b"PAR1")
+
+    optional = build_package_manifest(cfg, out)
+    cb = next(e for e in optional.entries if e.artifact_type == "codebook_page")
+    assert cb.status == ArtifactStatus.OPTIONAL
+
+    promised = build_package_manifest(cfg, out, codebooks_required=True)
+    cb2 = next(e for e in promised.entries if e.artifact_type == "codebook_page")
+    assert cb2.status == ArtifactStatus.MISSING
+    assert "codebooks/" in [e.path for e in promised.required_missing()]

@@ -132,6 +132,7 @@ def build_package_manifest(
     output_dir: Path,
     *,
     keep_csv: bool = False,
+    codebooks_required: bool = False,
 ) -> PackageManifest:
     """Classify every artifact of the selected build profile under *output_dir*.
 
@@ -167,11 +168,20 @@ def build_package_manifest(
         )
         _add(artifact_type, name, status)
 
-    # Data remotes (ground truth expansion, PUB-10)
+    # Data remotes (ground truth expansion, PUB-10). Recursive entries are
+    # directories: present when the directory tree exists in the output dir,
+    # never a per-file MISSING (their files are enumerated at copy time).
+    recursive_remotes = {
+        entry.remote.rstrip("/\\").lower() for entry in cfg.files if entry.recursive
+    }
     for remote in expanded_planned_remotes(cfg, keep_csv, output_dir):
         rel = PurePosixPath(remote)
-        present = (output_dir / rel).is_file()
         lower = remote.lower()
+        is_recursive = remote.rstrip("/\\").lower() in recursive_remotes
+        if is_recursive:
+            present = (output_dir / rel).is_dir()
+        else:
+            present = (output_dir / rel).is_file()
         if lower.endswith(".parquet"):
             artifact_type = "parquet"
         elif lower.endswith(".csv"):
@@ -184,7 +194,9 @@ def build_package_manifest(
             ArtifactStatus.STAGED if present else ArtifactStatus.MISSING,
         )
 
-    # Per-file codebooks (RC-C01): uploaded when present; optional when absent
+    # Per-file codebooks (RC-C01): uploaded when present; optional when absent.
+    # When the surrounding flow promised them (codebooks_required, e.g. the MCP
+    # canonical chain after codebook_all), their absence is MISSING and blocks.
     codebooks_dir = output_dir / config.CODEBOOKS_DIR
     if codebooks_dir.is_dir():
         for cb_path in sorted(codebooks_dir.rglob("*.md")):
@@ -193,6 +205,12 @@ def build_package_manifest(
                 cb_path.relative_to(output_dir).as_posix(),
                 ArtifactStatus.STAGED,
             )
+    elif codebooks_required:
+        _add(
+            "codebook_page",
+            f"{config.CODEBOOKS_DIR}/",
+            ArtifactStatus.MISSING,
+        )
     else:
         _add(
             "codebook_page",
