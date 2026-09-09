@@ -2080,26 +2080,9 @@ def sofer_init(
 
 def _register_tools(server: _FastMCP) -> None:
     """Register the 14 tool callables on *server*."""
-    for _tool in (
-        sofer_validate,
-        sofer_prepare,
-        sofer_publish,
-        sofer_publish_confirm,
-        sofer_codebook,
-        sofer_codebook_all,
-        sofer_profile,
-        sofer_profile_all,
-        sofer_render,
-        sofer_render_all,
-        sofer_auth_status,
-        sofer_scan_dry_run,
-        sofer_scan_apply,
-        sofer_init,
-    ):
-        if "Workflow:" not in (_tool.__doc__ or ""):
-            _tool.__doc__ = _workflow_description(_tool)
     server.tool(
         sofer_validate,
+        description=_workflow_description(sofer_validate),
         annotations={
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -2127,6 +2110,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_prepare,
+        description=_workflow_description(sofer_prepare),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2148,6 +2132,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_publish,
+        description=_workflow_description(sofer_publish),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2171,6 +2156,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_publish_confirm,
+        description=_workflow_description(sofer_publish_confirm),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2196,6 +2182,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_codebook,
+        description=_workflow_description(sofer_codebook),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2216,6 +2203,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_codebook_all,
+        description=_workflow_description(sofer_codebook_all),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2238,6 +2226,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_profile,
+        description=_workflow_description(sofer_profile),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2258,6 +2247,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_profile_all,
+        description=_workflow_description(sofer_profile_all),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2279,6 +2269,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_render,
+        description=_workflow_description(sofer_render),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2298,6 +2289,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_render_all,
+        description=_workflow_description(sofer_render_all),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2319,6 +2311,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_scan_dry_run,
+        description=_workflow_description(sofer_scan_dry_run),
         annotations={
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -2341,6 +2334,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_scan_apply,
+        description=_workflow_description(sofer_scan_apply),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2364,6 +2358,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_init,
+        description=_workflow_description(sofer_init),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2386,6 +2381,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_auth_status,
+        description=_workflow_description(sofer_auth_status),
         annotations={
             "readOnlyHint": True,
             "destructiveHint": False,
