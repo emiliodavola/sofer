@@ -53,6 +53,20 @@ class TestProfileWritesMetadataYaml:
         assert "structure" in data
         assert data["file"]["format"] == "csv"
 
+    def test_deterministic_metadata_with_source_date_epoch(self, tmp_path, monkeypatch):
+        """With SOURCE_DATE_EPOCH fixed, two identical runs produce byte-identical
+        metadata.yaml (TC-13 determinism, #118)."""
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+        csv_path = tmp_path / "contacts.csv"
+        _write_email_csv(csv_path)
+
+        assert profile(csv_path) == 0
+        first = (tmp_path / "metadata.yaml").read_bytes()
+        (tmp_path / "metadata.yaml").unlink()
+        assert profile(csv_path) == 0
+        second = (tmp_path / "metadata.yaml").read_bytes()
+        assert first == second
+
     def test_output_dir_override(self, tmp_path):
         csv_path = tmp_path / "contacts.csv"
         _write_email_csv(csv_path)

@@ -566,6 +566,13 @@ class DatasetConfig:
         """
         errors: list[str] = []
 
+        # TC-13: configuration type validation -- a malformed TOML value
+        # (int delimiter, list encoding, str min_files, ...) must surface a
+        # stable diagnostic here, before any reader or comparison executes
+        # (GitHub #118). Runs first so invalid values never reach the
+        # file/path resolution below as an arbitrary Python type.
+        errors.extend(_validate_config_types(self))
+
         # placeholder detection
         repo_user = self.repo_id.split("/")[0] if "/" in self.repo_id else ""
         for placeholder in _PLACEHOLDERS:
@@ -610,3 +617,69 @@ class DatasetConfig:
                 errors.append(f"Declared {field_name} not found: {doc_resolved}")
 
         return errors
+
+
+def _validate_config_types(cfg: DatasetConfig) -> list[str]:
+    """Validate the *types* of configuration values, independent of files.
+
+    TOML is untyped, so a dataset TOML may declare ``csv_delimiter = 5`` or
+    ``min_files = "two"``; those values would otherwise reach comparisons and
+    readers as arbitrary Python types (a list compared with ``== ","``, a str
+    in ``len(files) < min_files``). Diagnostics are stable strings naming the
+    offending key, the expected type, and the received value (TC-13, #118).
+
+    Args:
+        cfg: The parsed configuration to inspect.
+
+    Returns:
+        A list of stable error messages (empty = all types valid).
+    """
+    errors: list[str] = []
+
+    def _add(key: str, expected: str, value: object) -> None:
+        errors.append(f"{key} must be {expected}, got {type(value).__name__}: {value!r}")
+
+    def _is_number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    # -- scalar meta fields ------------------------------------------------
+    if not isinstance(cfg.csv_delimiter, str) or len(cfg.csv_delimiter) != 1:
+        _add("csv_delimiter", "a single-character string", cfg.csv_delimiter)
+    if not isinstance(cfg.csv_encoding, str) or not cfg.csv_encoding:
+        _add("csv_encoding", "a non-empty string", cfg.csv_encoding)
+    if not isinstance(cfg.repo_type, str) or not cfg.repo_type:
+        _add("repo_type", "a non-empty string", cfg.repo_type)
+
+    for field_name in ("confidential", "private", "skip_cross_file_schema"):
+        value = getattr(cfg, field_name)
+        if not isinstance(value, bool):
+            _add(field_name, "a boolean", value)
+
+    # -- thresholds --------------------------------------------------------
+    if not isinstance(cfg.min_files, int) or isinstance(cfg.min_files, bool):
+        _add("min_files", "a non-negative integer (bool is not an int here)", cfg.min_files)
+    elif cfg.min_files < 0:
+        _add("min_files", "a non-negative integer", cfg.min_files)
+
+    if not _is_number(cfg.min_total_size_mb) or cfg.min_total_size_mb < 0:
+        _add("min_total_size_mb", "a non-negative number", cfg.min_total_size_mb)
+
+    # -- quality checks: numeric fields must be numbers when present -------
+    for check in cfg.quality.checks:
+        for field_name in ("max_null_pct", "min", "max", "min_unique"):
+            value = getattr(check, field_name)
+            if value is not None and not _is_number(value):
+                _add(f"quality check '{check.check}' {field_name}", "a number", value)
+
+    # -- column checks: expected must be a list of strings -----------------
+    for col_check in cfg.column_checks:
+        if not isinstance(col_check.expected, list) or not all(
+            isinstance(item, str) for item in col_check.expected
+        ):
+            _add(
+                f"column check '{col_check.filename}' expected",
+                "a list of strings",
+                col_check.expected,
+            )
+
+    return errors
