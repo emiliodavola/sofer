@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .checks import ValidationReport
+    from .manifest import PackageManifest
     from .model import DatasetConfig
 
 from huggingface_hub import HfApi
@@ -244,6 +245,7 @@ def _repo_diff_summary(
     keep_csv: bool,
     codebook_remotes: list[str] | None = None,
     staging_dir: Path | None = None,
+    manifest: PackageManifest | None = None,
 ) -> str:
     """Build a human-readable diff of what will be added vs modified.
 
@@ -306,6 +308,13 @@ def _repo_diff_summary(
             lines.append(f"      ~ {f}")
         if len(modified) > config.REPORT_MAX_MODIFIED:
             lines.append(f"      … and {len(modified) - config.REPORT_MAX_MODIFIED} more")
+
+        if manifest is not None:
+            for miss_entry in manifest.required_missing():
+                lines.append(
+                    f"    ! MISSING {miss_entry.artifact_type}: {miss_entry.path} "
+                    "(rebuild with `prepare --force --all-files`)"
+                )
 
     return "\n".join(lines)
 
@@ -521,6 +530,7 @@ def _copy_package(
     """
     skip = protected or set()
     # Shared expanded set (PUB-10) so copy set == diff set (PUB-09)
+
     if source.is_dir():
         planned = expanded_planned_remotes(cfg, keep_csv, source)
     else:
@@ -600,6 +610,7 @@ def publish(
     clean: bool = False,
     clean_cache: bool = False,
     token: str | None = None,
+    codebooks_required: bool = False,
 ) -> int:
     """Deliver the prepared dataset package for *cfg* to *target*.
 
@@ -683,7 +694,16 @@ def publish(
         if rc != 0:
             return rc
 
-    # Shared expanded set (PUB-10) — ground truth when mirror exists else placeholder
+    # Package artifact manifest (PUB-12/#122): el MISMO objeto maneja el
+    # diff del dry-run y el enforcement del confirm -> nunca divergen.
+    from .manifest import build_package_manifest
+
+    manifest = (
+        build_package_manifest(cfg, source, keep_csv=False, codebooks_required=codebooks_required)
+        if source.is_dir()
+        else None
+    )
+
     if source.is_dir():
         planned = expanded_planned_remotes(cfg, keep_csv, source)
     else:
@@ -692,7 +712,14 @@ def publish(
     # ── 2. Dry-run: diff + split report, no network, no mutation ─────────
     if dry_run:
         codebook_remotes = _collect_codebook_remotes(source) if source.is_dir() else []
-        diff = _repo_diff_summary(cfg, [], keep_csv, codebook_remotes, staging_dir=source)
+        diff = _repo_diff_summary(
+            cfg,
+            [],
+            keep_csv,
+            codebook_remotes,
+            staging_dir=source,
+            manifest=manifest,
+        )
         print(diff)
         print()
         _print_split_mapping_validation(planned)
@@ -755,10 +782,25 @@ def publish(
 
     codebook_remotes = _collect_codebook_remotes(source)
 
-    # ── PUB-08: warn (never block) when the package carries no codebooks ─
-    # A fresh bare-`prepare` build is up-to-date, so auto-prepare skipped and
-    # nothing regenerated the codebooks; advise, then deliver anyway.
-    if not codebook_remotes:
+    # ── PUB-12: manifest enforcement gates the delivery ─────
+    # Missing REQUIRED artifacts (parquet, README, LICENSE; codebooks when
+    # the flow promised them) block publication with a concrete recovery.
+    if manifest is not None and manifest.required_missing():
+        print("\n  X  Package manifest reports missing required artifacts (PUB-12):")
+        for miss_entry in manifest.required_missing():
+            print(f"     - {miss_entry.artifact_type}: {miss_entry.path}")
+        print(
+            "     Recovery: run `sofer prepare --force --all-files` to rebuild\n"
+            "     the package, then retry."
+        )
+        return 1
+
+    # ── PUB-08: never a false warning (PUB-12). Codebooks that the profile
+    # did not promise are optional: a bare prepare build is up-to-date and
+    # valid; only a manifest-required codebook absence warns (handled
+    # above as a block). Legacy builds without a manifest keep the old
+    # advisory so the information is not lost.
+    if manifest is None and not codebook_remotes:
         print(
             "  [!] No codebooks found in this package - it will be delivered without them.\n"
             "     Run `sofer prepare --all-files` to generate per-file codebooks first."

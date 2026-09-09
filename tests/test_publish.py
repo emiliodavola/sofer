@@ -580,7 +580,10 @@ class TestHfPublish:
         cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
         out = tmp_path / "build"
         prepare(cfg, out)  # build first so auto-prepare stays quiet
-        expected_staged = sum(1 for p in out.rglob("*") if p.is_file())
+        from sofer.manifest import MANIFEST_NAME
+
+        # manifest.json is build metadata, never part of the upload plan.
+        expected_staged = sum(1 for p in out.rglob("*") if p.is_file() and p.name != MANIFEST_NAME)
         assert expected_staged > 0, "fixture must stage at least one file"
 
         td = tmp_path / "_staging"
@@ -935,7 +938,9 @@ class TestBatchStaging:
         assert (staging_root / "codebooks" / "data.md").is_file()
         assert (staging_root / "codebook.md").is_file()
 
-    def test_fresh_bare_prepare_build_warns_but_delivers(self, tmp_path, monkeypatch, capsys):
+    def test_fresh_bare_prepare_build_delivers_without_false_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
         """PUB-08 (reversed test_no_codebooks_means_nothing_codebook_staged):
         a FRESH bare-prepare build (no codebooks, up-to-date mtimes) skips
         auto-prepare, prints the codebook-missing warning, and still delivers
@@ -958,9 +963,7 @@ class TestBatchStaging:
 
         assert rc == 0
         captured = capsys.readouterr()
-        assert "No codebooks found" in captured.out, (
-            "PUB-08 warning must be printed when the package has no codebooks"
-        )
+        assert "No codebooks found" not in captured.out
 
         staging_root = Path(td) / "repo"
         assert not (staging_root / "codebooks").exists()
@@ -1029,8 +1032,8 @@ class TestBatchStaging:
             f"_hf_upload was called {len(upload_file_calls)} times — should be 0"
         )
 
-    def test_not_found_files_skipped_in_staging(self, tmp_path, monkeypatch):
-        """Declared files missing on disk are reported, never staged."""
+    def test_not_found_files_skipped_in_staging(self, tmp_path, monkeypatch, capsys):
+        """PUB-12: a declared source whose staged artifact is missing blocks."""
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
         missing = tmp_path / "missing.csv"
@@ -1044,18 +1047,14 @@ class TestBatchStaging:
         )
 
         _mock_hf_api(monkeypatch)
-        td = _fixed_staging(tmp_path, monkeypatch)
 
         rc = publish(cfg, target="hf")
-        assert rc == 0
-
-        staging_root = Path(td) / "repo"
-        data_files = [
-            str(f.relative_to(staging_root)) for f in staging_root.rglob("*") if f.is_file()
-        ]
-        assert any("data" in f for f in data_files), f"data file not staged: {data_files}"
-        missing_files = [f for f in data_files if "missing" in f]
-        assert missing_files == [], f"NOT FOUND file was staged: {missing_files}"
+        captured = capsys.readouterr()
+        # PUB-12: a declared source whose staged artifact is missing in
+        # the build blocks with a concrete recovery (previously rc 0 +
+        # advisory).
+        assert rc == 1, "declared-missing staged artifact must block"
+        assert "missing required artifacts" in captured.out
 
     def test_non_csv_files_copied_to_staging(self, tmp_path, monkeypatch):
         """Non-CSV files (e.g. .parquet) keep their remote path in staging."""

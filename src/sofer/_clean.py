@@ -68,6 +68,9 @@ def allowed_output_remotes(
       for multi-sheet XLSX, dual ``__``/``_`` guard via the mirror glob),
     - auto-generated compliance files (``README.md``, ``LICENSE``,
       ``codebook.md`` and the ``codebooks/**`` prefix family),
+    - the package artifact manifest (``manifest.json``, PRP-11/#122),
+      which prepare re-creates at the end of every run and must never be
+      pruned as an orphan,
     - the ``keep_csv`` CSV remotes already included by the first item when
       *keep_csv* is ``True`` (CSV-only, never for XLSX).
 
