@@ -93,12 +93,14 @@ def test_build_manifest_multi_sheet_expansion(tmp_path):
     cfg = DatasetConfig.from_toml(toml)
     out = root / "build"
     out.mkdir()
-    (out / "book__Sheet1.parquet").write_bytes(b"P1")
-    (out / "book__Sheet2.parquet").write_bytes(b"P2")
+    # Real on-disk layout produced by prepare is single-underscore per
+    # sheet (expanded_planned_remotes falls back to the stem_ glob; R2).
+    (out / "book_Sheet1.parquet").write_bytes(b"P1")
+    (out / "book_Sheet2.parquet").write_bytes(b"P2")
 
     manifest = build_package_manifest(cfg, out)
     parquets = sorted(e.path for e in manifest.entries if e.artifact_type == "parquet")
-    assert parquets == ["book__Sheet1.parquet", "book__Sheet2.parquet"]
+    assert parquets == ["book_Sheet1.parquet", "book_Sheet2.parquet"]
 
 
 def test_prepare_writes_manifest_file(tmp_path):
