@@ -13,6 +13,7 @@ the source dataset (PRF-03).
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -576,5 +577,14 @@ def _build_column(name: str, values: list[str]) -> ColumnMetadata:
 
 
 def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string (``generated`` provenance)."""
+    """Return the current UTC time as an ISO-8601 string (``generated`` provenance).
+
+    Honors ``SOURCE_DATE_EPOCH`` (reproducible-builds convention): when the
+    environment variable holds a POSIX epoch, the timestamp is derived from it,
+    so identical inputs produce byte-identical metadata (TC-13 determinism,
+    #118). Absent the variable, the current UTC time is used.
+    """
+    epoch = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if epoch:
+        return datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
     return datetime.now(timezone.utc).isoformat()

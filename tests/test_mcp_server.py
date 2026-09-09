@@ -321,6 +321,24 @@ class TestAuthStatusValidity:
     ``exit_code 1``.
     """
 
+    def test_invalid_csv_delimiter_type_ok_false(
+        self, tmp_path: Path, restore_tool_config: Any
+    ) -> None:
+        """A dataset TOML with [meta] csv_delimiter = 5 reports ok:False,
+        exit_code 1, and the stable diagnostic in config_errors (TC-13, #118)."""
+        _make_dataset(tmp_path)
+        toml = tmp_path / "dataset.toml"
+        lines = toml.read_text(encoding="utf-8").splitlines()
+        lines.insert(lines.index("[meta]") + 1, "csv_delimiter = 5")
+        toml.write_text("\n".join(lines), encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_auth_status", {"config": str(toml)}).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1, envelope
+        assert envelope["config_errors"], envelope
+        assert any("csv_delimiter" in e for e in envelope["config_errors"]), envelope
+
     def test_placeholder_user_ok_false(self, tmp_path: Path, restore_tool_config: Any) -> None:
         """A config failing validation (placeholder repo user) reports
         ok:False, exit_code 1, and non-empty config_errors."""
@@ -2359,7 +2377,7 @@ class TestAdvisoryHardening:
 
 
 # ---------------------------------------------------------------------------
-#  feat-profile-render-all-files — MCP batch + containment (PRF-05/RND-04/TC-11)
+#  feat-profile-render-all-files — MCP batch + containment (PRF-05/RND-04/TC-13)
 # ---------------------------------------------------------------------------
 
 

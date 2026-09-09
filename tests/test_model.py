@@ -280,6 +280,65 @@ class TestValidate:
         errors = cfg.validate()
         assert any("repo_id" in e for e in errors)
 
+    # -- TC-13: configuration type validation (fix-dataset-config-type-validation)
+
+    def test_invalid_csv_delimiter_type_rejected(self):
+        """A non-string csv_delimiter (e.g. int 5) must produce a stable diagnostic
+        naming the key -- never reach a reader as an arbitrary type."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", csv_delimiter=5, files=[])
+        errors = cfg.validate()
+        assert any("csv_delimiter" in e and "string" in e for e in errors), errors
+
+    def test_multi_char_csv_delimiter_rejected(self):
+        """A multi-character delimiter is a config error (readers compare single chars)."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", csv_delimiter=";;", files=[])
+        errors = cfg.validate()
+        assert any("csv_delimiter" in e for e in errors), errors
+
+    def test_invalid_csv_encoding_type_rejected(self):
+        """A non-string csv_encoding (e.g. a list) must be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", csv_encoding=["utf-8"], files=[])
+        errors = cfg.validate()
+        assert any("csv_encoding" in e for e in errors), errors
+
+    def test_non_bool_confidential_rejected(self):
+        """confidential="yes" must not be silently truthy-coerced."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", confidential="yes", files=[])
+        errors = cfg.validate()
+        assert any("confidential" in e and "bool" in e for e in errors), errors
+
+    def test_invalid_min_files_type_rejected(self):
+        """min_files="two" and min_files=True (bool) must both be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", min_files="two", files=[])
+        errors = cfg.validate()
+        assert any("min_files" in e and "integer" in e for e in errors), errors
+
+        cfg_bool = DatasetConfig(name="test", repo_id="user/x", min_files=True, files=[])
+        errors_bool = cfg_bool.validate()
+        assert any("min_files" in e for e in errors_bool), errors_bool
+
+    def test_negative_min_files_rejected(self):
+        cfg = DatasetConfig(name="test", repo_id="user/x", min_files=-1, files=[])
+        errors = cfg.validate()
+        assert any("min_files" in e and "non-negative" in e for e in errors), errors
+
+    def test_invalid_min_total_size_mb_rejected(self):
+        cfg = DatasetConfig(name="test", repo_id="user/x", min_total_size_mb=[1.0], files=[])
+        errors = cfg.validate()
+        assert any("min_total_size_mb" in e for e in errors), errors
+
+    def test_from_toml_invalid_delimiter_surfaces_in_validate(self, tmp_path):
+        """A real TOML with [meta] csv_delimiter = 5 parses (from_toml keeps its
+        contract) and validate() reports the stable type diagnostic."""
+        p = tmp_path / "dataset.toml"
+        p.write_text(
+            '[dataset]\nname = "x"\nrepo_id = "user/x"\n\n[meta]\ncsv_delimiter = 5\n',
+            encoding="utf-8",
+        )
+        cfg = DatasetConfig.from_toml(p)
+        errors = cfg.validate()
+        assert any("csv_delimiter" in e and "string" in e for e in errors), errors
+
     def test_invalid_repo_id_trailing_slash(self):
         """Trailing slash should fail."""
         cfg = DatasetConfig(name="test", repo_id="user/")

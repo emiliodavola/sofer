@@ -306,3 +306,69 @@ The system MUST add `card_collapse_threshold: int` to `[tool.sofer]` with built-
 
 - GIVEN a reader consults `docs/configuration.md` or `pyproject.toml` example
 - THEN they SHALL find `card_collapse_threshold` listed under `[tool.sofer]` with default `15` and description "columns per table above which Data Fields collapses; multi-table datasets always per-sheet"
+
+
+### Requirement: Configuration type validation with stable diagnostics (TC-13)
+
+Invalid configuration SHALL fail before reader execution with stable, actionable diagnostics -- never reach comparisons or readers as an arbitrary Python type, and never silently fall back to a default. Dataset `[meta]` and `[[check]]`/`[[quality]]` values are validated by `DatasetConfig` at parse/validate time; `[tool.sofer]` values are validated by the tool-config merge.
+
+`csv_delimiter` MUST be a single-character string; `csv_encoding` MUST be a non-empty string; `confidential`, `private`, `skip_cross_file_schema` MUST be booleans; `repo_type` MUST be a non-empty string; `min_files` MUST be a non-bool integer >= 0; `min_total_size_mb` MUST be a non-bool number >= 0; quality numeric fields (`max_null_pct`, `min`, `max`, `min_unique`) MUST be numbers when present; column-check `expected` MUST be a list of strings. Diagnostics SHALL name the offending key, the expected type, and the received value. The CLI SHALL exit non-zero with the same semantic error; the MCP SHALL return `ok:false, exit_code:1`, stable `error_code`, diagnostics, and a truthful recovery description. Profile generation SHALL honor `SOURCE_DATE_EPOCH` so identical inputs produce byte-identical metadata.
+
+(Previously: `DatasetConfig.from_toml` assigned raw TOML values without type checks, the `[tool.sofer]` merge loop's fallback branch accepted any type, and the profile `generated.timestamp` was always the current time.)
+
+#### Scenario: Invalid csv_delimiter type rejected at load
+
+- GIVEN `[meta] csv_delimiter = 5` in the dataset TOML
+- WHEN `DatasetConfig.from_toml` runs and `validate()` is called
+- THEN the diagnostic SHALL name `csv_delimiter`, expect a string, and show the received `5`
+- AND no reader SHALL execute
+
+#### Scenario: Invalid csv_encoding type rejected at load
+
+- GIVEN `[meta] csv_encoding = ["utf-8"]`
+- WHEN `DatasetConfig.from_toml` runs
+- THEN the diagnostic SHALL name `csv_encoding` and expect a non-empty string
+
+#### Scenario: Non-bool confidential rejected
+
+- GIVEN `[meta] confidential = "yes"`
+- WHEN `DatasetConfig.from_toml` runs
+- THEN the diagnostic SHALL name `confidential` and expect a boolean
+
+#### Scenario: Invalid min_files type rejected
+
+- GIVEN `[[check]] min_files = "two"`
+- WHEN `DatasetConfig.from_toml` runs
+- THEN the diagnostic SHALL name `min_files` and expect a non-negative integer
+- AND `min_files = true` SHALL also be rejected (bool is not an int here)
+
+#### Scenario: Negative min_files rejected
+
+- GIVEN `[[check]] min_files = -1`
+- WHEN `DatasetConfig.from_toml` runs
+- THEN the diagnostic SHALL name `min_files` and expect a non-negative integer
+
+#### Scenario: Tool-config typed keys reject wrong types
+
+- GIVEN `[tool.sofer] output_max_bytes = "huge"` (or any typed default given a wrong type)
+- WHEN the tool-config merge runs
+- THEN it SHALL raise a stable diagnostic naming the key and expected type
+- AND `[tool.sofer] csv_delimiter = 5` SHALL be rejected while `card_modality_tags = "tabular"` keeps the documented single-string-to-list coercion
+
+#### Scenario: CLI surfaces the diagnostic non-zero
+
+- GIVEN a dataset TOML with `[meta] csv_delimiter = 5`
+- WHEN a CLI command loads the config
+- THEN the process SHALL exit non-zero and print the stable diagnostic
+
+#### Scenario: MCP surfaces config_errors with ok:false
+
+- GIVEN a dataset TOML with `[meta] csv_delimiter = 5` under the server root
+- WHEN an MCP tool loads the config
+- THEN the envelope SHALL be `ok:false, exit_code:1` with the diagnostic in `config_errors`
+
+#### Scenario: Profile generation is deterministic under SOURCE_DATE_EPOCH
+
+- GIVEN `SOURCE_DATE_EPOCH` set to a fixed epoch
+- WHEN profile runs twice on the same input
+- THEN the two `metadata.yaml` documents SHALL be byte-identical

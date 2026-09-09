@@ -252,6 +252,20 @@ class TestLoadAndValidate:
         )
         return str(toml_path)
 
+    def test_invalid_csv_delimiter_type_validate_returns_1(self, tmp_path, capsys):
+        """A dataset TOML with [meta] csv_delimiter = 5 fails validation with a
+        stable diagnostic and rc 1 (TC-13, #118)."""
+        toml_path = tmp_path / "invalid.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "x"\nrepo_id = "user/x"\n\n'
+            '[[file]]\nlocal = "missing.csv"\nremote = "missing.csv"\n\n'
+            "[meta]\ncsv_delimiter = 5\n",
+            encoding="utf-8",
+        )
+        rc = cli._cmd_validate(Namespace(config=str(toml_path)))
+        assert rc == 1
+        assert "csv_delimiter" in capsys.readouterr().out
+
     def test_validate_config_errors_return_1(self, tmp_path, capsys):
         rc = cli._cmd_validate(Namespace(config=self._placeholder_toml(tmp_path)))
         assert rc == 1
