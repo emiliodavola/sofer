@@ -58,7 +58,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -77,6 +77,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
     ) from _exc
 
 from . import config as sofer_config
+from . import workflow
 from .checks import DatasetValidator, ValidationReport
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
@@ -135,6 +136,7 @@ _ERROR_ENVELOPE_SCHEMA_FIELDS: dict[str, dict[str, str]] = {
     "error_code": {"type": "string"},
     "message": {"type": "string"},
     "next": {"type": "object"},
+    "hints": {"type": "object"},
 }
 
 # Error codes for the single error envelope (10.3). Path escapes are raised
@@ -700,11 +702,60 @@ def _quality_result_to_dict(result: QualityResult) -> dict[str, Any]:
     }
 
 
+def _workflow_next(tool_name: str, config_path: str | None = None) -> dict[str, Any]:
+    """Return the registry continuation for *tool_name*, bound to a config path.
+
+    The authoritative workflow registry (workflow.WORKFLOW_METADATA, MSP-R13)
+    is the single source for envelope ``next``: a bound :class:`WorkflowCall`
+    (``{tool, arguments, reason, input_required}``), a typed ``human_gate``,
+    or ``{}`` when the tool has no continuation. Binding degrades
+    ``<config_path>`` templates to ``input_required=("config",)`` when no
+    config is present.
+    """
+    try:
+        entry = workflow.metadata_for(tool_name)
+    except KeyError:
+        return {}
+    nxt = entry.next
+    if nxt is None:
+        return {}
+    if isinstance(nxt, workflow.HumanGate):
+        return nxt.to_dict()
+    return workflow.bind_continuation(nxt, config_path).to_dict()
+
+
+def _workflow_doc_line(tool_name: str) -> str:
+    """One workflow line appended to tool descriptions (MSP-R13)."""
+    try:
+        entry = workflow.metadata_for(tool_name)
+    except KeyError:
+        return ""
+    nxt = entry.next
+    if isinstance(nxt, workflow.HumanGate):
+        cont = f"next=human_gate:{nxt.name}"
+    elif isinstance(nxt, workflow.WorkflowTemplate):
+        cont = f"next={nxt.tool}"
+    else:
+        cont = "next=none"
+    return (
+        f"Workflow: phase={entry.phase}, branch={entry.branch}, "
+        f"requires={', '.join(entry.requires) or 'none'}, {cont}"
+    )
+
+
+def _workflow_description(fn: Callable[..., Any]) -> str:
+    """Tool description = docstring plus the registry workflow line (MSP-R13)."""
+    doc = (fn.__doc__ or fn.__name__).rstrip()
+    line = _workflow_doc_line(fn.__name__)
+    return f"{doc}\n\n{line}" if line else doc
+
+
 def _error_envelope(
     error_code: str,
     message: str,
     *,
     next_hint: dict[str, Any] | None = None,
+    next_call: dict[str, Any] | None = None,
     config_errors: list[str] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -733,7 +784,8 @@ def _error_envelope(
         "output": message,
         "error_code": error_code,
         "message": message,
-        "next": next_hint or {},
+        "next": next_call or {},
+        "hints": next_hint or {},
         "config_errors": config_errors or [],
     }
     if extra:
@@ -746,10 +798,37 @@ def _refusal(
     *,
     error_code: str = "CONFIG_ERROR",
     message: str | None = None,
+    tool_name: str | None = None,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
-    """Build the standard config-error refusal envelope."""
+    """Build the standard config-error refusal envelope.
+
+    When *tool_name* is given, the envelope's ``next`` is the registry
+    continuation for that tool bound to *config_path* (degrading to
+    ``input_required=("config",)``), keeping recovery executable (MSP-R13).
+    """
     msg = message or "; ".join(config_errors) or "Configuration error"
-    return _error_envelope(error_code, msg, config_errors=config_errors)
+    next_call: dict[str, Any] | None = None
+    if tool_name:
+        if config_path is not None:
+            next_call = workflow.WorkflowCall(
+                tool_name,
+                {"config": config_path},
+                reason="Fix the reported configuration errors and retry.",
+            ).to_dict()
+        else:
+            next_call = workflow.WorkflowCall(
+                tool_name,
+                {},
+                reason="Provide a valid configuration and retry.",
+                input_required=("config",),
+            ).to_dict()
+    return _error_envelope(
+        error_code,
+        msg,
+        config_errors=config_errors,
+        next_call=next_call,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -779,10 +858,10 @@ def sofer_validate(
         except PathOutsideRootError:
             raise
         except MCPToolError as exc:
-            return _error_envelope("CONFIG_ERROR", str(exc), config_errors=[str(exc)])
+            return _refusal([str(exc)], tool_name="sofer_validate", config_path=config)
         if cfg is None or report is None:
             if config_errors:
-                return _refusal(config_errors)
+                return _refusal(config_errors, tool_name="sofer_validate", config_path=config)
             return _error_envelope(
                 "VALIDATION_FAILED", "Validation failed", config_errors=config_errors
             )
@@ -803,6 +882,7 @@ def sofer_validate(
             "ran_checks": sorted(report.ran_checks),
             "confidential": cfg.confidential,
             "config_errors": config_errors,
+            "next": _workflow_next("sofer_validate", config),
         }
 
 
@@ -844,7 +924,7 @@ def sofer_prepare(
     with _tool_execution(), _capture_output() as (out, err):
         cfg, _report, config_errors = _load_dataset(config, run_checks=run_checks)
         if cfg is None or config_errors:
-            return _refusal(config_errors)
+            return _refusal(config_errors, tool_name="sofer_prepare", config_path=config)
         output_path = (
             _contained_path(output_dir, root=cfg._base_dir, what="output_dir", must_exist=False)
             if output_dir is not None
@@ -867,6 +947,7 @@ def sofer_prepare(
             "output": _captured_text(out, err),
             "confidential": cfg.confidential,
             "config_errors": config_errors,
+            "next": _workflow_next("sofer_prepare", config),
         }
 
 
@@ -913,7 +994,7 @@ def sofer_publish(
     with _tool_execution(), _capture_output() as (out, err):
         cfg, report, config_errors = _load_dataset(config)
         if cfg is None or report is None or config_errors:
-            return _refusal(config_errors)
+            return _refusal(config_errors, tool_name="sofer_publish", config_path=config)
         if not dry_run and target != "local":
             return _error_envelope(
                 "TARGET_INVALID",
@@ -943,6 +1024,7 @@ def sofer_publish(
             "target": target,
             "confidential": cfg.confidential,
             "config_errors": config_errors,
+            "next": _workflow_next("sofer_publish", config),
         }
 
 
@@ -994,7 +1076,7 @@ def sofer_publish_confirm(
     with _tool_execution(), _capture_output() as (out, err):
         cfg, report, config_errors = _load_dataset(config)
         if cfg is None or report is None or config_errors:
-            return _refusal(config_errors)
+            return _refusal(config_errors, tool_name="sofer_publish_confirm", config_path=config)
 
         if target != "hf":
             return _error_envelope(
@@ -1035,6 +1117,11 @@ def sofer_publish_confirm(
                 "PUBLISH_RISK_NOT_ACKD",
                 "sofer_publish_confirm requires acknowledge_risk=True — state the publish risk to the human BEFORE calling this tool.",
                 next_hint={"acknowledge_risk": True},
+                next_call=workflow.WorkflowCall(
+                    "sofer_publish_confirm",
+                    {"config": config},
+                    input_required=("acknowledge_risk",),
+                ).to_dict(),
                 config_errors=config_errors,
                 extra={
                     "confidential": cfg.confidential,
@@ -1200,7 +1287,7 @@ def sofer_codebook_all(
     with _tool_execution(), _capture_output() as (out, err):
         cfg, _report, config_errors = _load_dataset(config, run_checks=False)
         if cfg is None or config_errors:
-            return _refusal(config_errors)
+            return _refusal(config_errors, tool_name="sofer_codebook_all", config_path=config)
         if output_dir is not None:
             output_path = _contained_path(
                 output_dir, root=cfg._base_dir, what="output_dir", must_exist=False
@@ -1236,6 +1323,7 @@ def sofer_codebook_all(
             "files": generated,
             "confidential": cfg.confidential,
             "config_errors": config_errors,
+            "next": _workflow_next("sofer_codebook_all", config),
         }
 
 
@@ -1350,7 +1438,7 @@ def sofer_profile_all(
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
         config_errors.extend(_validate_doc_files(cfg))
         if config_errors:
-            return _refusal(config_errors)
+            return _refusal(config_errors, tool_name="sofer_profile_all", config_path=config)
         if not cfg.files:
             return _error_envelope(
                 "CONFIG_ERROR",
@@ -1382,6 +1470,7 @@ def sofer_profile_all(
             "output": _captured_text(out, err),
             "files": files,
             "config_errors": [],
+            "next": _workflow_next("sofer_profile_all", config),
         }
 
 
@@ -1481,7 +1570,7 @@ def sofer_render_all(
         config_errors.extend(_validate_output_targets(cfg, root=_get_root()))
         config_errors.extend(_validate_doc_files(cfg))
         if config_errors:
-            return _refusal(config_errors)
+            return _refusal(config_errors, tool_name="sofer_render_all", config_path=config)
         if not cfg.files:
             return _error_envelope(
                 "CONFIG_ERROR",
@@ -1513,6 +1602,7 @@ def sofer_render_all(
             "output": _captured_text(out, err),
             "files": files,
             "config_errors": [],
+            "next": _workflow_next("sofer_render_all", config),
         }
 
 
@@ -1600,7 +1690,8 @@ def sofer_auth_status(
             "requires_ack_confidential": requires_ack_confidential,
             "approval_configured": approval_configured,
             "requires_approval_phrase": requires_approval_phrase,
-            "next": next_hint,
+            "next": _workflow_next("sofer_auth_status", config),
+            "hints": next_hint,
             "config_errors": config_errors,
         }
 
@@ -1651,10 +1742,10 @@ def sofer_scan_dry_run(
     with _tool_execution(), _capture_output() as (out, err):
         _toml_path, raw_toml, base_dir, errors = _scan_prologue(config)
         if errors:
-            return _refusal(errors)
+            return _refusal(errors, tool_name="sofer_scan_dry_run", config_path=config)
         errors = _validate_output_targets(None, root=_get_root(), base=base_dir)
         if errors:
-            return _refusal(errors)
+            return _refusal(errors, tool_name="sofer_scan_dry_run", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
         discovered = discover_files(base_dir, None, exclude_dirs=exclude)
@@ -1713,6 +1804,7 @@ def sofer_scan_dry_run(
             "discovered": len(discovered),
             "registered": registered,
             "config_errors": [],
+            "next": _workflow_next("sofer_scan_dry_run", config),
         }
 
 
@@ -1745,10 +1837,10 @@ def sofer_scan_apply(
     with _tool_execution(), _capture_output() as (out, err):
         toml_path, raw_toml, base_dir, errors = _scan_prologue(config)
         if errors:
-            return _refusal(errors)
+            return _refusal(errors, tool_name="sofer_scan_apply", config_path=config)
         errors = _validate_output_targets(None, root=_get_root(), base=base_dir)
         if errors:
-            return _refusal(errors)
+            return _refusal(errors, tool_name="sofer_scan_apply", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
         discovered = discover_files(base_dir, None, exclude_dirs=exclude)
@@ -1805,6 +1897,7 @@ def sofer_scan_apply(
             "registered": registered,
             "copied": len(copied),
             "config_errors": [],
+            "next": _workflow_next("sofer_scan_apply", config),
         }
 
 
@@ -1947,6 +2040,7 @@ def sofer_init(
                     "output": _captured_text(out, err),
                     "config_errors": [],
                     **report_identity(identity),
+                    "next": _workflow_next("sofer_init", str(toml_path)),
                 }
         if dry_run and not move_existing:
             print(f"  DRY RUN  Would create {toml_path.name}")
@@ -1957,6 +2051,7 @@ def sofer_init(
                 "output": _captured_text(out, err),
                 "config_errors": [],
                 **report_identity(identity),
+                "next": _workflow_next("sofer_init", str(toml_path)),
             }
         # TOML write BEFORE the raw/ scaffold: a write failure never leaves
         # an orphan raw/ (no partial state, INIT-05 robustness).
@@ -1979,6 +2074,7 @@ def sofer_init(
             "output": _captured_text(out, err),
             "config_errors": [],
             **report_identity(identity),
+            "next": _workflow_next("sofer_init", str(toml_path)),
         }
 
 
@@ -1986,6 +2082,7 @@ def _register_tools(server: _FastMCP) -> None:
     """Register the 14 tool callables on *server*."""
     server.tool(
         sofer_validate,
+        description=_workflow_description(sofer_validate),
         annotations={
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -2013,6 +2110,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_prepare,
+        description=_workflow_description(sofer_prepare),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2034,6 +2132,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_publish,
+        description=_workflow_description(sofer_publish),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2057,6 +2156,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_publish_confirm,
+        description=_workflow_description(sofer_publish_confirm),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2082,6 +2182,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_codebook,
+        description=_workflow_description(sofer_codebook),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2102,6 +2203,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_codebook_all,
+        description=_workflow_description(sofer_codebook_all),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2124,6 +2226,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_profile,
+        description=_workflow_description(sofer_profile),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2144,6 +2247,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_profile_all,
+        description=_workflow_description(sofer_profile_all),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2165,6 +2269,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_render,
+        description=_workflow_description(sofer_render),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2184,6 +2289,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_render_all,
+        description=_workflow_description(sofer_render_all),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2205,6 +2311,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_scan_dry_run,
+        description=_workflow_description(sofer_scan_dry_run),
         annotations={
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -2227,6 +2334,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_scan_apply,
+        description=_workflow_description(sofer_scan_apply),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2250,6 +2358,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_init,
+        description=_workflow_description(sofer_init),
         annotations={
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -2272,6 +2381,7 @@ def _register_tools(server: _FastMCP) -> None:
     )
     server.tool(
         sofer_auth_status,
+        description=_workflow_description(sofer_auth_status),
         annotations={
             "readOnlyHint": True,
             "destructiveHint": False,

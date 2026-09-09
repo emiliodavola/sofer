@@ -320,8 +320,11 @@ class TestEnvelope:
         assert envelope["requires_approval_phrase"] is True
         # sofer_auth_status is the ONLY tool whose output_schema declares next —
         # this is the sole boundary-level next assertion (spec delta s7).
-        assert envelope["next"]["acknowledge_risk"] is True
-        assert envelope["next"]["approval_phrase"] == "<from human>"
+        # MSP-R13: next is the executable registry continuation; the flat
+        # preflight hints live under ``hints``.
+        assert envelope["next"]["tool"] == "sofer_publish"
+        assert envelope["hints"]["acknowledge_risk"] is True
+        assert envelope["hints"]["approval_phrase"] == "<from human>"
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
 
     def test_auth_status_approval_not_configured(
@@ -342,8 +345,8 @@ class TestEnvelope:
         ).data
         assert envelope["approval_configured"] is False
         assert envelope["requires_approval_phrase"] is True
-        assert envelope["next"]["action"] == "configure_approval_phrase"
-        assert "approval_phrase" not in envelope["next"]
+        assert envelope["hints"]["action"] == "configure_approval_phrase"
+        assert "approval_phrase" not in envelope["hints"]
 
 
 class TestHappyPath:
