@@ -1675,16 +1675,37 @@ def sofer_scan_dry_run(
         before = len(raw_toml.get("file", []))
         merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
         registered = len(merged.get("file", [])) - before
-        planned = copy_files(discovered, base_dir, data_dir, dry_run=True, force=False)
+        try:
+            planned = copy_files(discovered, base_dir, data_dir, dry_run=True, force=False)
+        except FileExistsError as exc:
+            # A destination that would FAIL on apply must not be listed as a
+            # would-copy — surface the conflict (honest dry-run prediction,
+            # mirror of the apply path) so the caller can retry with force.
+            return {
+                "ok": False,
+                "exit_code": 1,
+                "output": _captured_text(out, err),
+                "discovered": len(discovered),
+                "registered": 0,
+                "config_errors": [str(exc)],
+                "error_code": "CONFIG_ERROR",
+                "message": str(exc),
+                "next": {"force": True},
+            }
 
         lines = [f"Discovered {len(discovered)} supported file(s)."]
         if registered:
             lines.append(f"Registered {registered} new [[file]] entry(s).")
         else:
             lines.append("All discovered files already registered (idempotent).")
-        lines.append("Would copy the following files:")
-        for _src, dest in planned:
-            lines.append(f"  -> {dest.relative_to(base_dir).as_posix()}")
+        if planned:
+            lines.append("Would copy the following files:")
+            for _src, dest in planned:
+                lines.append(f"  -> {dest.relative_to(base_dir).as_posix()}")
+        else:
+            lines.append(
+                "Nothing to copy — all files already present in the artifact cache (idempotent)."
+            )
         return {
             "ok": True,
             "exit_code": 0,

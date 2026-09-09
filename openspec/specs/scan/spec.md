@@ -102,6 +102,17 @@ System MUST copy to `cache/` (`OUTPUT_DIR`) flattening first segment (`raw/sub/d
 - WHEN `scan --dry-run`
 - THEN report lists flattened `cache/` dests, no files created, TOML unchanged
 
+#### Scenario: Dry-run is an honest prediction of apply
+- GIVEN `cache/a.csv` already exists with content IDENTICAL to discovered `a.csv`
+- WHEN `scan --dry-run` executes
+- THEN `a.csv` SHALL NOT be listed as a would-copy (apply skips it, SCN-08)
+
+#### Scenario: Dry-run surfaces apply-time collisions
+- GIVEN `cache/a.csv` already exists with content DIFFERENT from discovered `a.csv` and no `--force`
+- WHEN `scan --dry-run` executes
+- THEN the command SHALL report the `FileExistsError` (exit 1) naming the destination and `--force`
+- AND no file SHALL be written and the TOML SHALL stay unchanged
+
 ---
 
 ### Requirement: CLI Interface (SCN-04)

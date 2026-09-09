@@ -559,9 +559,15 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
-        print("  DRY RUN  Would copy the following files:")
-        for _src, dest in copied:
-            print(f"     → {dest.relative_to(base_dir).as_posix()}")
+        if copied:
+            print("  DRY RUN  Would copy the following files:")
+            for _src, dest in copied:
+                print(f"     → {dest.relative_to(base_dir).as_posix()}")
+        else:
+            print(
+                "  DRY RUN  Nothing to copy — all files already present in the"
+                f" artifact cache ({config.OUTPUT_DIR}/, idempotent)."
+            )
         if new_count:
             print(f"  DRY RUN  Would register {new_count} new [[file]] entry(s).")
         else:

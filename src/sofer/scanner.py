@@ -474,16 +474,22 @@ def copy_files(
         flat = flatten_first_level(relative)
         dest = data_dir / flat
 
+        # Idempotency/collision decisions apply identically under dry_run: the
+        # preview must replicate what apply would do (skip an already-identical
+        # destination; surface the FileExistsError a differing destination
+        # would raise) so ``scan --dry-run`` output is an honest prediction.
+        # The checks above are read-only; only mkdir + copy2 are skipped.
+        if dest.exists() and not force:
+            if _files_identical(src, dest):
+                # Already copied with identical content — re-scan is
+                # idempotent, skip without error (SCN-08).
+                continue
+            raise FileExistsError(
+                f"Destination already exists and differs: {dest} (use --force to overwrite)"
+            )
+
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists() and not force:
-                if _files_identical(src, dest):
-                    # Already copied with identical content — re-scan is
-                    # idempotent, skip without error (SCN-08).
-                    continue
-                raise FileExistsError(
-                    f"Destination already exists and differs: {dest} (use --force to overwrite)"
-                )
             shutil.copy2(src, dest)
 
         copied.append((src, dest))

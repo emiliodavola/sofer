@@ -2167,6 +2167,25 @@ class TestScanDryRunBehavior:
         assert not (tmp_path / "cache").exists(), "dry-run must not copy files"
         assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
 
+    def test_scan_dry_run_conflict_surfaces_force(self, tmp_path, restore_tool_config):
+        """A destination that would FAIL on apply must not be listed as a copy:
+        dry-run surfaces the FileExistsError as an ok:false envelope with
+        next.force instead of an honest-looking but impossible "would copy"."""
+        _make_dataset(tmp_path)
+        # Pre-populate cache/ with a DIFFERENT version of the discovered file.
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        (cache_dir / "data.csv").write_text("different;content\n", encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert "--force" in envelope["output"] or "--force" in envelope["message"]
+        assert envelope["next"] == {"force": True}
+
 
 # ---------------------------------------------------------------------------
 #  Review fix 5 — MSP-R03 prepare overwrite refusal: a second sofer_prepare

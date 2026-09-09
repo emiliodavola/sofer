@@ -608,6 +608,34 @@ class TestCopyFiles:
         assert len(copied) == 1
         assert not (data_dir / "a.csv").exists()
 
+    def test_dry_run_skips_identical_dest(self, tmp_path: Path) -> None:
+        """dry_run=True must NOT list an already-identical destination: apply
+        skips it (SCN-08 idempotent re-scan), so the preview must too —
+        otherwise the dry-run output is misleading ("would copy" a file that
+        apply leaves untouched)."""
+        _touch(tmp_path / "a.csv", content="same")
+        data_dir = tmp_path / "data"
+        _touch(data_dir / "a.csv", content="same")
+
+        copied = copy_files([tmp_path / "a.csv"], tmp_path, data_dir, dry_run=True)
+        assert copied == []
+        # Read-only: destination untouched, no new files.
+        assert (data_dir / "a.csv").read_text(encoding="utf-8") == "same"
+
+    def test_dry_run_raises_on_differing_dest(self, tmp_path: Path) -> None:
+        """dry_run=True must surface the apply-time failure: a destination
+        that exists with DIFFERENT content raises FileExistsError on apply,
+        so the preview must raise the same error instead of reporting a copy
+        that would never happen."""
+        _touch(tmp_path / "a.csv", content="source")
+        data_dir = tmp_path / "data"
+        _touch(data_dir / "a.csv", content="different-dest")
+
+        with pytest.raises(FileExistsError, match="--force"):
+            copy_files([tmp_path / "a.csv"], tmp_path, data_dir, dry_run=True)
+        # Read-only: destination untouched, no new files.
+        assert (data_dir / "a.csv").read_text(encoding="utf-8") == "different-dest"
+
     def test_file_exists_error_without_force(self, tmp_path: Path) -> None:
         """FileExistsError is raised when dest exists with DIFFERENT content and force=False."""
         _touch(tmp_path / "a.csv", content="source")
