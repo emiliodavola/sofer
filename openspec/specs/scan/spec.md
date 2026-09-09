@@ -10,7 +10,7 @@ copying them to `cache/` (`OUTPUT_DIR`, gitignored), and writing the updated con
 
 ### Requirement: File Discovery (SCN-01)
 
-System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.jsonl`) from config dir. `EXCLUSIONS` (`.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, `build`) MUST be skipped. `cache/` (`OUTPUT_DIR`) SHALL be excluded; `raw/` SHALL never be excluded. `flatten_first_level` drops first segment.
+System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.jsonl`) from config dir. `EXCLUSIONS` (`.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, `build`) MUST be skipped. `cache/` (`OUTPUT_DIR`) SHALL be excluded; `raw/` SHALL never be excluded. `flatten_first_level` drops first segment. Symlinks (and Windows junctions) SHALL be excluded from discovery: a linked entry SHALL NOT be discovered, and no entry whose path passes through a linked directory SHALL be discovered — on Python 3.10–3.12 `Path.rglob` follows directory links, so without this guard a link inside the scan root pointing OUTSIDE it would have its contents discovered, copied into `cache/`, registered, and published.
 
 #### Scenario: Discover supported
 - GIVEN `raw/survey.csv`, `raw/notes.txt`, `archive/data.parquet`
@@ -31,6 +31,17 @@ System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.js
 - GIVEN `raw/a.csv` and `cache/a.csv`
 - WHEN `scan` executes
 - THEN `raw/a.csv` SHALL be discovered, `cache/a.csv` SHALL NOT
+
+#### Scenario: Symlinked file outside root excluded
+- GIVEN a symlink `leak.csv` inside the scan root pointing to a file OUTSIDE it
+- AND a regular `real.csv` inside the root
+- WHEN `scan` executes
+- THEN `leak.csv` SHALL NOT be discovered (nor its external target), `real.csv` SHALL be discovered
+
+#### Scenario: Symlinked directory outside root excluded
+- GIVEN a directory symlink `leakdir/` inside the scan root pointing OUTSIDE it, containing `leakdir/secret.csv`
+- WHEN `scan` executes
+- THEN `leakdir/secret.csv` SHALL NOT be discovered (rglob's link traversal is rejected by the ancestor guard)
 
 ---
 
@@ -90,6 +101,17 @@ System MUST copy to `cache/` (`OUTPUT_DIR`) flattening first segment (`raw/sub/d
 - GIVEN 3 files
 - WHEN `scan --dry-run`
 - THEN report lists flattened `cache/` dests, no files created, TOML unchanged
+
+#### Scenario: Dry-run is an honest prediction of apply
+- GIVEN `cache/a.csv` already exists with content IDENTICAL to discovered `a.csv`
+- WHEN `scan --dry-run` executes
+- THEN `a.csv` SHALL NOT be listed as a would-copy (apply skips it, SCN-08)
+
+#### Scenario: Dry-run surfaces apply-time collisions
+- GIVEN `cache/a.csv` already exists with content DIFFERENT from discovered `a.csv` and no `--force`
+- WHEN `scan --dry-run` executes
+- THEN the command SHALL report the `FileExistsError` (exit 1) naming the destination and `--force`
+- AND no file SHALL be written and the TOML SHALL stay unchanged
 
 ---
 

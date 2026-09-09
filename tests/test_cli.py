@@ -20,11 +20,20 @@ from sofer import cli
 
 class TestParser:
     def test_init_command(self):
-        """`sofer init my-dataset` should parse to the init command."""
-        args = cli._build_parser().parse_args(["init", "my-dataset"])
+        """`sofer init my-dataset --user alice` should parse to the init command."""
+        args = cli._build_parser().parse_args(["init", "my-dataset", "--user", "alice"])
         assert args.command == "init"
         assert args.name == "my-dataset"
         assert callable(args.func)
+
+    def test_init_requires_user(self, capsys):
+        """`sofer init my-dataset` without --user exits 2 naming --user (CLI-R07)."""
+        import pytest
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._build_parser().parse_args(["init", "my-dataset"])
+        assert excinfo.value.code == 2
+        assert "--user" in capsys.readouterr().err
 
     def test_init_user_flag(self):
         """`sofer init my-dataset --user alice` should parse user."""
@@ -89,9 +98,9 @@ class TestParser:
 
 class TestInitCommand:
     def test_init_creates_toml(self, tmp_path, monkeypatch):
-        """`sofer init <name>` should write a .toml file."""
+        """`sofer init <name> --user alice` should write a .toml file."""
         monkeypatch.chdir(tmp_path)
-        rc = cli._cmd_init(Namespace(name="my-dataset"))
+        rc = cli._cmd_init(Namespace(name="my-dataset", user="alice"))
         assert rc == 0
         assert (tmp_path / "my-dataset.toml").exists()
 
@@ -99,7 +108,7 @@ class TestInitCommand:
         """`sofer init <name>` on an existing file should fail."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / "existing.toml").write_text("hello", encoding="utf-8")
-        rc = cli._cmd_init(Namespace(name="existing"))
+        rc = cli._cmd_init(Namespace(name="existing", user="alice"))
         assert rc == 1  # refuses to overwrite
 
     def test_init_content_is_valid_toml(self, tmp_path, monkeypatch):
@@ -110,16 +119,16 @@ class TestInitCommand:
             import tomllib as _tomli
 
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="test-ds"))
+        cli._cmd_init(Namespace(name="test-ds", user="alice"))
         content = (tmp_path / "test-ds.toml").read_text(encoding="utf-8")
         parsed = _tomli.loads(content)
         assert parsed["dataset"]["name"] == "test-ds"
-        assert parsed["dataset"]["repo_id"] == "YOUR_USER/test-ds"
+        assert parsed["dataset"]["repo_id"] == "alice/test-ds"
 
     def test_init_content_has_placeholders(self, tmp_path, monkeypatch):
         """The template should contain TODO markers to guide the user."""
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="ds"))
+        cli._cmd_init(Namespace(name="ds", user="alice"))
         content = (tmp_path / "ds.toml").read_text(encoding="utf-8")
         assert "TODO" in content
 
@@ -133,7 +142,7 @@ class TestInitCommand:
             import tomllib as _tomli
 
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="ds-win"))
+        cli._cmd_init(Namespace(name="ds-win", user="alice"))
         content = (tmp_path / "ds-win.toml").read_text(encoding="utf-8")
         parsed = _tomli.loads(content)
         locals_list = [e.get("local", "") for e in parsed.get("file", [])]
@@ -154,7 +163,7 @@ class TestInitCommand:
             import tomllib as _tomli
 
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="build-ds"))
+        cli._cmd_init(Namespace(name="build-ds", user="alice"))
         content = (tmp_path / "build-ds.toml").read_text(encoding="utf-8")
         parsed = _tomli.loads(content)
         assert parsed["dataset"]["build_dir"] == "build"
@@ -173,18 +182,23 @@ class TestInitCommand:
         parsed = _tomli.loads(content)
         assert parsed["dataset"]["repo_id"] == "alice/myds"
 
-    def test_init_default_user_placeholder(self, tmp_path, monkeypatch):
-        """Without --user the repo_id placeholder stays YOUR_USER."""
-        try:
-            import tomli as _tomli
-        except ImportError:
-            import tomllib as _tomli
-
+    def test_init_missing_user_rejected_handler(self, tmp_path, monkeypatch, capsys):
+        """A direct _cmd_init call without user exits 1, no TOML written (defense-in-depth)."""
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="myds2"))
-        content = (tmp_path / "myds2.toml").read_text(encoding="utf-8")
-        parsed = _tomli.loads(content)
-        assert parsed["dataset"]["repo_id"] == "YOUR_USER/myds2"
+        rc = cli._cmd_init(Namespace(name="myds2"))
+        assert rc == 1
+        assert not (tmp_path / "myds2.toml").exists()
+        assert not (tmp_path / "raw").exists()
+        err = capsys.readouterr().err
+        assert "user must be non-empty" in err
+
+    def test_init_missing_user_rejected_subprocess(self, tmp_path):
+        """`sofer init myds` without --user exits 2 naming --user (CLI-R07), no TOML."""
+        result = run_cli(["init", "myds2"], cwd=tmp_path)
+        assert result.returncode == 2
+        assert "--user" in result.stderr
+        assert not (tmp_path / "myds2.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
 
 # ─── Entry point smoke test ────────────────────────────────────────────────────
@@ -206,7 +220,7 @@ class TestInitTemplateCommands:
     def test_init_template_uses_prepare_publish(self, tmp_path, monkeypatch):
         """_INIT_TEMPLATE usage comments reference prepare/publish, never upload."""
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="ds"))
+        cli._cmd_init(Namespace(name="ds", user="alice"))
         content = (tmp_path / "ds.toml").read_text(encoding="utf-8")
         assert "sofer upload" not in content
         assert "sofer prepare" in content
@@ -215,7 +229,7 @@ class TestInitTemplateCommands:
     def test_init_prints_prepare_publish(self, tmp_path, monkeypatch, capsys):
         """_cmd_init success prints prepare + publish hints, never upload."""
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="ds"))
+        cli._cmd_init(Namespace(name="ds", user="alice"))
         captured = capsys.readouterr()
         assert "sofer upload" not in captured.out
         assert "sofer prepare" in captured.out
@@ -432,9 +446,35 @@ class TestCodebookPlaceholderValidation:
             Namespace(all_files=True, config=str(toml_path), csv=None, output=None)
         )
         assert rc == 0
-        root = tmp_path / "cache" / "codebook.md"
+        # CLI parity with MCP sofer_codebook_all: codebooks land in the package
+        # build_dir (where publish collects them), never the shared cache/.
+        root = tmp_path / "build" / "codebook.md"
         assert root.exists()
+        assert not (tmp_path / "cache" / "codebook.md").exists()
         assert not (tmp_path / "codebook.md").exists()
+
+    def test_all_files_output_override_writes_to_output_dir(self, tmp_path, monkeypatch):
+        """`codebook --all-files --output out` honours the override, writing
+        under out/ instead of the default build_dir."""
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "f.csv").write_text("col\n1\n", encoding="utf-8")
+
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "alice/my-dataset"\n\n'
+            '[[file]]\nlocal = "data/f.csv"\nremote = "data/f.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml_path), csv=None, output="out")
+        )
+        assert rc == 0
+        assert (tmp_path / "out" / "codebook.md").exists()
+        assert (tmp_path / "out" / "codebooks" / "data" / "f.md").exists()
+        assert not (tmp_path / "build" / "codebook.md").exists()
 
 
 # ── raw-folder organization: init + --move-existing (CLI-R07 / CLI-R08) ────────
@@ -446,7 +486,9 @@ class TestInitRawFolder:
     def test_init_creates_raw_dir(self, tmp_path, monkeypatch):
         """sofer init creates raw/ and TOML contains raw/ guidance (SCN-07 template)."""
         monkeypatch.chdir(tmp_path)
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=False, dry_run=False, force=False)
+        )
         assert rc == 0
         assert (tmp_path / "raw").is_dir()
         assert (tmp_path / "my-ds.toml").exists()
@@ -459,10 +501,12 @@ class TestInitRawFolder:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "keep.csv").write_text("a\n1\n", encoding="utf-8")
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=False, dry_run=False, force=False)
+        )
         assert rc == 0
         rc2 = cli._cmd_init(
-            Namespace(name="other", move_existing=False, dry_run=False, force=False)
+            Namespace(name="other", user="alice", move_existing=False, dry_run=False, force=False)
         )
         assert rc2 == 0
         assert (tmp_path / "raw").is_dir()
@@ -477,7 +521,9 @@ class TestInitRawFolder:
         (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
         (tmp_path / "cache").mkdir()
         (tmp_path / "cache" / "c.csv").write_text("x\n1\n", encoding="utf-8")
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=True)
+        )
         assert rc == 0
         assert (tmp_path / "raw" / "a.csv").exists()
         assert not (tmp_path / "a.csv").exists()
@@ -485,13 +531,39 @@ class TestInitRawFolder:
         assert (tmp_path / "notes.txt").exists()
         assert (tmp_path / "cache" / "c.csv").exists()
 
+    def test_move_existing_skips_symlink(self, tmp_path, tmp_path_factory, monkeypatch):
+        """A symlinked CSV at the dataset root is never moved into raw/
+        (SCN-01 exfiltration guard, CF-3)."""
+        import pytest
+
+        monkeypatch.chdir(tmp_path)
+        outside = tmp_path_factory.mktemp("outside")
+        secret = outside / "secret.csv"
+        secret.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        try:
+            link.symlink_to(secret)
+        except OSError:
+            pytest.skip("symlink creation unavailable on this host")
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=True)
+        )
+        assert rc == 0
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert not (tmp_path / "raw" / "leak.csv").exists(), "symlink must not be moved"
+        assert link.exists(), "the link itself must remain in place"
+
     def test_move_existing_collision_guard(self, tmp_path, monkeypatch, capsys):
         """Collision with existing raw/ content fails naming both sources."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "a.csv").write_text("existing\n", encoding="utf-8")
         (tmp_path / "a.csv").write_text("loose\n", encoding="utf-8")
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=True)
+        )
         assert rc == 1
         err = capsys.readouterr().err.lower()
         assert "collision" in err
@@ -501,27 +573,46 @@ class TestInitRawFolder:
         assert (tmp_path / "raw" / "a.csv").exists()
 
     def test_move_existing_dry_run_no_mutation(self, tmp_path, monkeypatch, capsys):
-        """--dry-run previews moves, creates TOML, but not raw/ when absent nor moves."""
+        """--dry-run previews moves, writes NO TOML, no raw/ when absent, no moves."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
         (tmp_path / "b.xlsx").write_text("x", encoding="utf-8")
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=True, force=False))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=True, force=False)
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "dry run" in out.lower()
         assert "a.csv" in out
-        assert (tmp_path / "my-ds.toml").exists()
+        assert "Would create my-ds.toml" in out
+        assert not (tmp_path / "my-ds.toml").exists()
         # raw/ not created when absent under dry-run
         assert not (tmp_path / "raw").exists()
         assert (tmp_path / "a.csv").exists()
         assert (tmp_path / "b.xlsx").exists()
+
+    def test_init_plain_dry_run_no_mutation(self, tmp_path, monkeypatch, capsys):
+        """`init --dry-run` (no --move-existing) previews, writes no TOML/raw/ (CLI-R07)."""
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=False, dry_run=True, force=False)
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN" in out
+        assert "Would create my-ds.toml" in out
+        assert "Would scaffold raw" in out
+        assert not (tmp_path / "my-ds.toml").exists()
+        assert not (tmp_path / "raw").exists()
 
     def test_move_existing_non_interactive_guard(self, tmp_path, monkeypatch, capsys):
         """not isatty without --force skips move, creates raw/, hints --force."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=False))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=False)
+        )
         assert rc == 0
         err = capsys.readouterr().err
         assert "Skipping move" in err
@@ -536,7 +627,9 @@ class TestInitRawFolder:
         (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda _p="": "N")
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=False))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=False)
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "Aborted" in out
@@ -549,7 +642,9 @@ class TestInitRawFolder:
         (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda _p="": "y")
-        rc = cli._cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=False))
+        rc = cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=True, dry_run=False, force=False)
+        )
         assert rc == 0
         assert (tmp_path / "raw" / "a.csv").exists()
         assert not (tmp_path / "a.csv").exists()
@@ -557,7 +652,9 @@ class TestInitRawFolder:
     def test_template_mentions_raw_no_stale_path(self, tmp_path, monkeypatch):
         """Generated TOML mentions raw/ guidance and no stale path/to hint."""
         monkeypatch.chdir(tmp_path)
-        cli._cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        cli._cmd_init(
+            Namespace(name="my-ds", user="alice", move_existing=False, dry_run=False, force=False)
+        )
         content = (tmp_path / "my-ds.toml").read_text(encoding="utf-8")
         assert "raw/" in content
         assert "path/to" not in content
@@ -725,6 +822,40 @@ class TestScanMoveCLI:
             assert not (tmp_path / name).exists()
         assert (tmp_path / "f.txt").exists()
         assert not (tmp_path / "raw" / "f.txt").exists()
+
+
+class TestScanTruthfulReport:
+    """SCN-08: ``Registered N`` is only printed AFTER copy + TOML write succeed."""
+
+    def test_write_toml_failure_does_not_report_registered(self, tmp_path, monkeypatch, capsys):
+        """A TOML write failure exits 1 and never prints a ``Registered``
+        success line — the cache copy happened but registration did not."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def _boom(_raw_toml, _config_path):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli, "write_toml", _boom)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Registered" not in captured.out
+        assert "Failed to write TOML" in captured.err
+
+    def test_success_reports_registered_after_write(self, tmp_path, monkeypatch, capsys):
+        """A successful scan prints the registration line after the copy and
+        TOML write complete."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Registered 1 new [[file]] entry(s)." in out
 
 
 # ── Fix 1: ran_checks propagation ─────────────────────────────────────────
@@ -1125,3 +1256,130 @@ class TestSubprocessBoundary:
         result = run_cli(["definitely-not-a-command"], cwd=tmp_path)
         assert result.returncode == 2
         assert "invalid choice" in result.stderr
+
+    def test_init_prints_absolute_config_path(self, tmp_path) -> None:
+        """Success prints the canonical absolute config_path (CLI-R07)."""
+        result = run_cli(["init", "myds", "--user", "alice"], cwd=tmp_path)
+        assert result.returncode == 0
+        assert str(tmp_path.resolve() / "myds.toml") in result.stdout
+        assert (tmp_path / "myds.toml").exists()
+
+    def test_init_dry_run_no_mutation(self, tmp_path) -> None:
+        """`init --dry-run` exits 0, previews, and writes nothing (CLI-R07).
+
+        Parity with MCP ``sofer_init(dry_run=True)`` (no-mutation in both
+        branches): the plain init branch must not write the TOML nor create
+        raw/ under ``--dry-run``.
+        """
+        result = run_cli(["init", "myds", "--user", "alice", "--dry-run"], cwd=tmp_path)
+        assert result.returncode == 0
+        assert "DRY RUN" in result.stdout
+        assert "Would create myds.toml" in result.stdout
+        assert "Would scaffold raw" in result.stdout
+        assert not (tmp_path / "myds.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_init_placeholder_user_rejected(self, tmp_path) -> None:
+        """`--user YOUR_USER` exits 1 naming the placeholder, no file written."""
+        result = run_cli(["init", "myds", "--user", "YOUR_USER"], cwd=tmp_path)
+        assert result.returncode == 1
+        assert "placeholder" in result.stderr
+        assert not (tmp_path / "myds.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_init_unsafe_name_rejected(self, tmp_path) -> None:
+        """Unsafe name `a/../b` exits 1 naming the component, no file written."""
+        result = run_cli(["init", "a/../b", "--user", "alice"], cwd=tmp_path)
+        assert result.returncode == 1
+        assert "a/../b" in result.stderr
+        assert not (tmp_path / "b.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_init_windows_invalid_name_rejected(self, tmp_path) -> None:
+        """Windows-invalid char name `a*b` exits 1 pre-write, no TOML/raw."""
+        result = run_cli(["init", "a*b", "--user", "alice"], cwd=tmp_path)
+        assert result.returncode == 1
+        assert "Windows-invalid" in result.stderr
+        assert not (tmp_path / "a*b.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_init_reserved_device_name_rejected(self, tmp_path) -> None:
+        """Reserved device name `CON` exits 1 pre-write — no TOML, no raw/
+        (no partial state; on Windows CON.toml would be unmaterializable)."""
+        result = run_cli(["init", "CON", "--user", "alice"], cwd=tmp_path)
+        assert result.returncode == 1
+        assert "reserved" in result.stderr.lower()
+        assert not (tmp_path / "CON.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_codebook_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file ``-o`` anchors to the INPUT's parent, not cwd.
+
+        MSP-R10 parity with the MCP side (D9): the codebook must land next to
+        the analysed file. The input lives in ``data/`` while the subprocess
+        cwd is the parent, so an un-anchored output would land at
+        ``<cwd>/out.md`` — this pins the anchored ``<data>/out.md`` instead.
+        """
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        result = run_cli(["codebook", "data/sample.csv", "-o", "out.md"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "data" / "out.md").is_file(), "output must land next to the input"
+        assert not (tmp_path / "out.md").exists(), "output must not land in cwd"
+
+    def test_profile_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file profile ``--output`` anchors to the INPUT's
+        parent (metadata.yaml lands in ``data/out/``, never ``<cwd>/out/``)."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        result = run_cli(["profile", "data/sample.csv", "--output", "out"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "data" / "out" / "metadata.yaml").is_file(), (
+            "output must land next to the input"
+        )
+        assert not (tmp_path / "out" / "metadata.yaml").exists(), "output must not land in cwd"
+
+    def test_render_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file render ``--output`` anchors to the package's
+        parent (README.md lands in ``data/out/``, never ``<cwd>/out/``)."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        profiled = run_cli(["profile", "data/sample.csv"], cwd=tmp_path)
+        assert profiled.returncode == 0, profiled.stderr
+        assert (tmp_path / "data" / "metadata.yaml").is_file()
+        result = run_cli(["render", "data/metadata.yaml", "--output", "out"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "data" / "out" / "README.md").is_file(), (
+            "output must land next to the package"
+        )
+        assert not (tmp_path / "out" / "README.md").exists(), "output must not land in cwd"
+
+    def test_prepare_reads_relative_readme_from_toml_dir(self, tmp_path) -> None:
+        """CLI prepare resolves a relative [meta] readme against the TOML's
+        directory (PRP-03), never the process cwd.
+
+        The TOML lives in ``proj/`` while the subprocess cwd is the parent —
+        an un-anchored read would miss ``proj/custom.md`` and fall back to the
+        generated card.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "custom.md").write_text("# PROJ CARD\n", encoding="utf-8")
+        (proj / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
+        (proj / "dataset.toml").write_text(
+            "[dataset]\n"
+            'name = "test-ds"\n'
+            'repo_id = "user/test-ds"\n'
+            "\n"
+            "[meta]\n"
+            "confidential = false\n"
+            'readme = "custom.md"\n'
+            "\n"
+            "[[file]]\n"
+            'local = "data.csv"\n'
+            'remote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(["prepare", "proj/dataset.toml"], cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"

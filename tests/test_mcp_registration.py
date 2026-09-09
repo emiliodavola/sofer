@@ -85,10 +85,23 @@ class TestBuildEntry:
         cwd.mkdir()
         env = {"HF_TOKEN": "hf123", "SOFER_MCP_APPROVAL_PHRASE": "secret"}
         entry = mcp_registration.build_entry("gemini", cwd, env)
-        assert entry["env"]["HF_TOKEN"] == "hf123"
-        assert entry["env"]["SOFER_MCP_APPROVAL_PHRASE"] == "secret"
+        # Secret VALUES are never persisted — only the $VAR references (CF-3).
+        # Gemini CLI expands host env vars at runtime from this object form.
+        assert entry["env"] == {
+            "HF_TOKEN": "$HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
+        }
+        assert "hf123" not in str(entry)
+        assert "secret" not in str(entry)
         assert entry["command"] == "sofer-mcp"
         assert entry["cwd"] == str(cwd.resolve())
+
+    def test_gemini_env_omits_absent_keys(self, tmp_path):
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("gemini", cwd, {"HF_TOKEN": "hf123"})
+        assert entry["env"] == {"HF_TOKEN": "$HF_TOKEN"}
+        assert "SOFER_MCP_APPROVAL_PHRASE" not in entry["env"]
 
     def test_codex_env_vars_allow_list(self, tmp_path):
         cwd = tmp_path / "proj"
@@ -430,9 +443,16 @@ class TestEnvForwarding:
         )
         assert rc == 0
         path = proj / ".gemini" / "settings.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
-        assert data["mcpServers"]["sofer"]["env"]["HF_TOKEN"] == "hf123"
-        assert data["mcpServers"]["sofer"]["env"]["SOFER_MCP_APPROVAL_PHRASE"] == "phrase"
+        raw_text = path.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
+        # Only env $VAR references are persisted — never the secret values
+        # (CF-3). Gemini CLI expands these from the host environment.
+        assert data["mcpServers"]["sofer"]["env"] == {
+            "HF_TOKEN": "$HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
+        }
+        assert "hf123" not in raw_text
+        assert "phrase" not in raw_text
 
     def test_codex_env_vars(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

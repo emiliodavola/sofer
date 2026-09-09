@@ -201,6 +201,16 @@ Auto-generated files — `README.md`, `LICENSE`, `codebook.md`, and
 even without `--force`. For all other remote files, overwrite protection SHALL
 apply unless `--force` is given.
 
+Remote inspection SHALL be fail-closed: `_inspect_repo` SHALL return an empty
+list ONLY when the repository does not exist (`RepositoryNotFoundError`); ANY
+other inspection failure (network, authentication, rate limit) SHALL raise and
+abort the publish with exit code 1 BEFORE any staging or upload — inspection
+failure is NEVER treated as an empty repo, so overwrite protection always
+sees the true remote state. `_ensure_repo` SHALL likewise raise (not print and
+continue) when `create_repo` fails for a reason other than "already exists".
+A post-upload inspection failure SHALL NOT fail an already-successful upload:
+it prints a warning and skips the split report only.
+
 #### Scenario: Auto-generated files always overwrite
 
 - GIVEN `README.md` and `LICENSE` already exist on the Hub
@@ -215,6 +225,26 @@ apply unless `--force` is given.
 - WHEN `publish` executes
 - THEN overwrite protection SHALL refuse the file
 - AND with `--force` the file SHALL be overwritten
+
+#### Scenario: Repo-not-found reads as empty
+
+- GIVEN `list_repo_files` raises `RepositoryNotFoundError`
+- WHEN `_inspect_repo` executes
+- THEN it SHALL return `[]` (empty repo) and publish SHALL proceed normally
+
+#### Scenario: Inspection failure fails closed
+
+- GIVEN `list_repo_files` raises any other error (e.g. network failure)
+- WHEN `publish` executes against hf
+- THEN the publish SHALL abort with exit code 1 BEFORE any upload
+- AND `upload_folder` SHALL NOT be called
+- AND the error SHALL be surfaced (never a silent empty list)
+
+#### Scenario: create_repo failure fails closed
+
+- GIVEN `create_repo` fails for a reason other than "already exists"
+- WHEN `_ensure_repo` executes
+- THEN the failure SHALL raise (publish aborts, exit code 1)
 
 ---
 

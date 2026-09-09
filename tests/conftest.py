@@ -10,9 +10,11 @@ so global state never leaks between tests.
 Also hosts the shared process-boundary helpers (PB-01..PB-09): ``mcp_payload``
 (the Root-model unwrap), ``call_tool`` (shared client-boundary call wrapper),
 ``run_cli`` (executable CLI subprocess), the module-scoped
-``mcp_stdio_server`` fixture (one stdio spawn config per module), and
-``_make_dataset`` (canonical minimal-dataset helper — the single home for the
-fixture logic, AGENTS.md rule 4).
+``mcp_stdio_server`` fixture (one stdio spawn config per module) and its
+parent-root sibling ``mcp_stdio_parent_root`` (the PB-09 second fixture for
+the parent-root/child-cwd layout), and ``_make_dataset`` (canonical
+minimal-dataset helper — the single home for the fixture logic, AGENTS.md
+rule 4).
 Sibling test modules reuse these helpers instead of re-implementing them.
 """
 
@@ -231,10 +233,15 @@ class McpStdioServer:
     args: tuple[str, ...] = ("-c", "from sofer.mcp_server import main; main()")
     """Python args invoking the MCP server entry point over stdio."""
 
+    command: str | None = None
+    """Executable to spawn; ``None`` (default) uses ``sys.executable`` with
+    *args*. Set to a console-script path (e.g. ``shutil.which("sofer-mcp")``)
+    to prove the installed entry point instead of the checkout module."""
+
     def spawn(self) -> StdioServerParameters:
         """Return stdio parameters for one client session (one spawn each)."""
         return StdioServerParameters(
-            command=sys.executable,
+            command=self.command or sys.executable,
             args=list(self.args),
             cwd=str(self.cwd),
         )
@@ -289,3 +296,21 @@ def mcp_stdio_server(tmp_path_factory: pytest.TempPathFactory) -> McpStdioServer
     root = tmp_path_factory.mktemp("mcp-stdio")
     _make_dataset(root)
     return McpStdioServer(cwd=root)
+
+
+@pytest.fixture(scope="module")
+def mcp_stdio_parent_root(tmp_path_factory: pytest.TempPathFactory) -> McpStdioServer:
+    """Yield one stdio server spawn config per module for the parent-root layout (PB-09).
+
+    Second module-scoped stdio fixture — PB-09 permits one extra fixture for
+    the parent-root/child-cwd layout. Creates a parent server-root directory
+    containing an existing ``child/`` dataset directory and returns the spawn
+    configuration for ``sofer.mcp_server.main()`` with server root = parent.
+    One spawn per module (lean-spawn bound). Used by
+    ``TestParentRootIdentity`` (PB-04) to prove the ground-truth reproduction:
+    ``cwd=None`` at the parent root fails closed naming ``cwd``, while
+    ``cwd="child"`` anchors identity under ``child/``.
+    """
+    parent = tmp_path_factory.mktemp("mcp-stdio-parent")
+    (parent / "child").mkdir()
+    return McpStdioServer(cwd=parent)

@@ -18,13 +18,29 @@ parent), checks raw-dest collisions atomically via
 ``raw/`` excluded only during the MOVE discovery phase via
 ``EXCLUSIONS|{RAW_DIR, OUTPUT_DIR}``.
 
+``copy_files`` is idempotent on re-scan (an already-identical destination is
+skipped, SCN-08) and ``write_toml`` commits atomically (temp file +
+``os.replace``) so a TOML write failure can never leave a partial config.
+The TOML is written LAST (after all copies) so a failure cannot leave an
+inconsistent cache/TOML state — recovery is a plain re-run with ``--force``.
+
 All functions are pure logic — they raise on errors; the CLI handler
 catches and translates to exit codes.
+
+Symlinks are EXCLUDED from discovery (SCN-01): :func:`discover_files`
+skips symlinked entries AND entries reached through a symlinked (or, on
+Windows, junctioned) directory. On Python 3.10-3.12 ``Path.rglob`` follows
+directory links, so a link inside the scan root pointing OUTSIDE it would
+otherwise have its contents discovered, copied into ``cache/`` by
+:func:`copy_files`, registered, and published — an exfiltration vector.
 """
 
 from __future__ import annotations
 
+import filecmp
+import os
 import shutil
+import stat
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -39,6 +55,34 @@ from .model import FileEntry
 EXCLUSIONS: frozenset[str] = frozenset(
     {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
 )
+
+
+def _is_link(path: Path) -> bool:
+    """Return ``True`` when *path* is a symlink or a Windows reparse point.
+
+    ``Path.is_symlink()`` alone misses NTFS junctions (``mklink /J``): on
+    every supported Python version junctions report ``is_symlink() == False``
+    (``Path.is_junction()`` exists only on 3.12+). Junctions are detected via
+    the ``FILE_ATTRIBUTE_REPARSE_POINT`` stat flag on Windows. POSIX never
+    has reparse points, so the ``os.name != "nt"`` short-circuit keeps the
+    check free of platform-specific stat fields.
+
+    Args:
+        path: The path to inspect.
+
+    Returns:
+        ``True`` when *path* is a symlink or (Windows) a reparse point such
+        as a junction.
+    """
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        attrs = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def flatten_first_level(relative: Path) -> Path:
@@ -120,6 +164,55 @@ def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
         raise ValueError("\n".join(errors))
 
 
+def collect_init_moves(
+    root: Path,
+    toml_name: str,
+    raw_dir: Path,
+) -> tuple[list[Path], list[Path]]:
+    """Collect the ``--move-existing`` move set for ``sofer init``.
+
+    Single shared home (AGENTS.md rule 4) for the collection logic that the
+    CLI ``_cmd_init`` and MCP ``sofer_init`` adapters both need: depth-1
+    ``SUPPORTED_FORMATS`` files directly under *root* — excluding the TOML
+    itself (``entry.name == toml_name``) and any symlink/junction
+    (:func:`_is_link`, SCN-01 exfiltration guard) — become the sorted
+    *candidates*; supported files already present under *raw_dir* become
+    *existing*. The flatten-collision check against the two lists is the
+    caller's concern (the CLI gates it on non-empty candidates, the MCP runs
+    it whenever ``move_existing`` is set).
+
+    Args:
+        root:      Dataset root whose depth-1 files are inspected.
+        toml_name: The TOML filename to exclude from the move set.
+        raw_dir:   The ``raw/`` directory whose existing files are collected.
+
+    Returns:
+        ``(candidates, existing)`` — sorted absolute move candidates and the
+        existing supported files under *raw_dir* (possibly empty).
+    """
+    candidates: list[Path] = []
+    for entry in root.iterdir():
+        if not entry.is_file():
+            continue
+        if _is_link(entry):
+            # Symlinks/junctions are never moved into raw/ (SCN-01
+            # exfiltration guard, mirrored from discover_files).
+            continue
+        if entry.suffix.lower() not in SUPPORTED_FORMATS:
+            continue
+        if entry.name == toml_name:
+            continue
+        candidates.append(entry.resolve())
+    candidates.sort()
+
+    existing: list[Path] = []
+    if raw_dir.exists():
+        for q in raw_dir.rglob("*"):
+            if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
+                existing.append(q.resolve())
+    return candidates, existing
+
+
 def _file_entry_from_raw(entry: dict[str, Any]) -> FileEntry:
     """Build a :class:`FileEntry` from a raw TOML ``[[file]]`` dict."""
     return FileEntry(
@@ -142,6 +235,13 @@ def discover_files(
     When *extensions* is supplied (e.g. via ``--ext .csv``), only those suffixes
     are considered — the global registry is ignored.
 
+    Symlinks (and Windows junctions) are excluded from discovery (SCN-01): a
+    symlinked entry itself is skipped, and so is any entry whose path passes
+    through a linked directory. This matters on Python 3.10-3.12, where
+    ``Path.rglob`` follows directory links — without the ancestor guard a
+    link inside the scan root pointing OUTSIDE it would have its contents
+    discovered, copied into ``cache/``, registered, and publishable.
+
     Returns an empty list when no supported files are found.
     """
     if extensions is not None:
@@ -153,6 +253,21 @@ def discover_files(
     for entry in root.rglob("*"):
         # Skip entries whose path contains an excluded directory name anywhere.
         if any(part in exclude_dirs for part in entry.parts):
+            continue
+        if _is_link(entry):
+            continue
+        # On 3.10-3.12 rglob follows directory links: a file reached THROUGH
+        # a linked directory is itself not a link, so also reject entries whose
+        # path contains a link ancestor (checked up to, but not including, the
+        # scan root itself).
+        linked_ancestor = False
+        for parent in entry.parents:
+            if parent == root:
+                break
+            if _is_link(parent):
+                linked_ancestor = True
+                break
+        if linked_ancestor:
             continue
         if entry.is_file() and entry.suffix.lower() in ext_set:
             results.append(entry)
@@ -292,6 +407,29 @@ def move_to_raw(
     return moved
 
 
+def _files_identical(a: Path, b: Path) -> bool:
+    """Return ``True`` when *a* and *b* have identical byte content.
+
+    Powers the idempotent re-scan contract (SCN-08): :func:`copy_files`
+    treats a destination that already mirrors the source byte-for-byte as
+    already copied, while a destination that *differs* still raises
+    :class:`FileExistsError` unless ``--force``.
+
+    Args:
+        a: First path to compare.
+        b: Second path to compare.
+
+    Returns:
+        ``True`` when both paths are regular files with identical content;
+        ``False`` on any difference or comparison failure (missing file,
+        unreadable, differing bytes).
+    """
+    try:
+        return filecmp.cmp(a, b, shallow=False)
+    except OSError:
+        return False
+
+
 def copy_files(
     discovered: list[Path],
     base_dir: Path,
@@ -306,19 +444,28 @@ def copy_files(
     ``data_dir / <flatten_first_level(relative)>``.  Parent directories are
     created lazily on first use.
 
+    Idempotent re-scan (SCN-08): when a destination already exists with
+    content identical to the source, it is skipped (not re-copied, no error),
+    so ``scan`` run twice against unchanged sources is safe. A destination
+    whose content *differs* from the source is still protected — it raises
+    :class:`FileExistsError` unless *force* is ``True``.
+
     Parameters:
         dry_run: When ``True``, only compute what *would* be copied — do not
             touch the filesystem.
         force: When ``True``, overwrite existing destination files silently.
-            When ``False`` (the default), :class:`FileExistsError` is raised
-            on collision.
+            When ``False`` (the default), an already-identical destination is
+            skipped and a differing destination raises
+            :class:`FileExistsError`.
 
     Returns:
         A list of ``(source, destination)`` tuples for every file that was
-        copied (or would have been copied under ``dry_run=True``).
+        copied (or would have been copied under ``dry_run=True``). Files
+        skipped as already-identical are not included.
 
     Raises:
-        FileExistsError: If a destination already exists and *force* is ``False``.
+        FileExistsError: If a destination already exists with *different*
+            content and *force* is ``False``.
     """
     copied: list[tuple[Path, Path]] = []
 
@@ -327,12 +474,22 @@ def copy_files(
         flat = flatten_first_level(relative)
         dest = data_dir / flat
 
+        # Idempotency/collision decisions apply identically under dry_run: the
+        # preview must replicate what apply would do (skip an already-identical
+        # destination; surface the FileExistsError a differing destination
+        # would raise) so ``scan --dry-run`` output is an honest prediction.
+        # The checks above are read-only; only mkdir + copy2 are skipped.
+        if dest.exists() and not force:
+            if _files_identical(src, dest):
+                # Already copied with identical content — re-scan is
+                # idempotent, skip without error (SCN-08).
+                continue
+            raise FileExistsError(
+                f"Destination already exists and differs: {dest} (use --force to overwrite)"
+            )
+
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists() and not force:
-                raise FileExistsError(
-                    f"Destination already exists: {dest} (use --force to overwrite)"
-                )
             shutil.copy2(src, dest)
 
         copied.append((src, dest))
@@ -341,5 +498,12 @@ def copy_files(
 
 
 def write_toml(raw_toml: dict[str, Any], config_path: Path) -> None:
-    """Serialize *raw_toml* and overwrite *config_path*."""
-    config_path.write_text(tomli_w.dumps(raw_toml), encoding=config.OUTPUT_ENCODING)
+    """Serialize *raw_toml* and atomically replace *config_path* (SCN-08).
+
+    The TOML is written to a temporary file in the same directory, then moved
+    into place with :func:`os.replace` — so a crash or failure mid-write can
+    never leave a truncated or partial TOML at *config_path*.
+    """
+    tmp = config_path.with_name(config_path.name + ".tmp")
+    tmp.write_text(tomli_w.dumps(raw_toml), encoding=config.OUTPUT_ENCODING)
+    os.replace(tmp, config_path)

@@ -18,6 +18,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from sofer import publish as publish_mod
 from sofer.model import DatasetConfig, FileEntry
@@ -25,6 +26,8 @@ from sofer.prepare import prepare
 from sofer.publish import (
     _check_overwrite_protection,
     _copy_package,
+    _ensure_repo,
+    _inspect_repo,
     _needs_prepare,
     _repo_diff_summary,
     publish,
@@ -128,6 +131,40 @@ class TestNeedsPrepare:
         cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
         assert _needs_prepare(cfg, out) is False
 
+    def test_custom_toml_name_newer_than_parquet_returns_true(self, tmp_path: Path) -> None:
+        """A custom-named TOML (issue #116 canonical init: ``test.toml``)
+        modified after the newest parquet -> True.
+
+        The stale check keys on the REAL config path stored by
+        ``DatasetConfig.from_toml`` (``_config_path``), not a hardcoded
+        ``dataset.toml`` — with the old code the custom TOML was never
+        compared and the package stayed stale.
+        """
+        out = tmp_path / "build"
+        out.mkdir()
+        pq.write_table(pa.table({"a": [1]}), out / "data.parquet")
+        toml = tmp_path / "test.toml"
+        toml.write_text('[dataset]\nname = "test"\nrepo_id = "user/test"\n', encoding="utf-8")
+        os.utime(out / "data.parquet", (_MID, _MID))
+        os.utime(toml, (_NEW, _NEW))
+
+        cfg = DatasetConfig.from_toml(toml)
+        assert _needs_prepare(cfg, out) is True
+
+    def test_custom_toml_name_unchanged_returns_false(self, tmp_path: Path) -> None:
+        """A custom-named TOML older than the newest parquet -> False (no
+        false regeneration trigger from the real config path)."""
+        out = tmp_path / "build"
+        out.mkdir()
+        pq.write_table(pa.table({"a": [1]}), out / "data.parquet")
+        toml = tmp_path / "test.toml"
+        toml.write_text('[dataset]\nname = "test"\nrepo_id = "user/test"\n', encoding="utf-8")
+        os.utime(out / "data.parquet", (_NEW, _NEW))
+        os.utime(toml, (_OLD, _OLD))
+
+        cfg = DatasetConfig.from_toml(toml)
+        assert _needs_prepare(cfg, out) is False
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PUB-02 — local target
@@ -173,6 +210,42 @@ class TestLocalTarget:
         assert rc == 0
         assert after == before, "in-place summary must not mutate the package"
         assert "Local target" in captured.out
+
+    def test_local_refuses_overwrite_without_force(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """PUB-13: local --output refuses (rc 1) instead of silently
+        overwriting an existing destination file when force=False."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        prepare(cfg, tmp_path / "build")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        (dest / "data.parquet").write_text("existing", encoding="utf-8")
+
+        rc = publish(cfg, target="local", output_dir="./out")
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert (dest / "data.parquet").read_text(encoding="utf-8") == "existing"
+        assert "Use --force" in captured.out
+
+    def test_local_overwrites_with_force(self, tmp_path: Path, monkeypatch) -> None:
+        """PUB-13: local --output --force overwrites an existing destination file."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        prepare(cfg, tmp_path / "build")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        (dest / "data.parquet").write_text("existing", encoding="utf-8")
+
+        rc = publish(cfg, target="local", output_dir="./out", force=True)
+        assert rc == 0
+        assert (dest / "data.parquet").read_bytes() != b"existing"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -279,6 +352,25 @@ class TestDryRun:
         assert not (out / "data.parquet").exists(), "dry-run must not run prepare"
         assert "Dry-run complete" in captured.out
         assert "ADDED" in captured.out  # diff summary from planned remotes
+
+    def test_dry_run_honors_output_dir_source(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """PUB-13: a dry-run with --output names the package source, so the
+        plan reflects the codebooks prepare --all-files wrote into it."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        custom = tmp_path / "custom"
+        prepare(cfg, custom, all_files=True)  # codebooks land in custom/
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True, output_dir="./custom")
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "codebook.md" in captured.out, (
+            "dry-run must collect codebooks from the --output package dir"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -537,6 +629,84 @@ class TestHfPublish:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Repo diff summary (moved from test_uploader, PR 4)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRemoteFailClosed:
+    """PUB-05: remote inspection is fail-closed — only a repo-not-found
+    reads as empty; any other failure aborts before upload."""
+
+    def test_inspect_repo_returns_empty_on_repo_not_found(self, tmp_path, monkeypatch):
+        """RepositoryNotFoundError (repo missing/empty) -> [] — the only
+        'empty' case, exactly what _check_overwrite_protection must see."""
+        import httpx
+        from huggingface_hub.utils import RepositoryNotFoundError
+
+        def _raise_not_found(*_a, **_kw):
+            request = httpx.Request("GET", "https://huggingface.co/api/datasets/u/x")
+            response = httpx.Response(404, request=request)
+            raise RepositoryNotFoundError("not found", response=response)
+
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", _raise_not_found)
+        cfg = _cfg(tmp_path, [])
+        assert _inspect_repo(cfg) == []
+
+    def test_inspect_repo_raises_on_other_failure(self, tmp_path, monkeypatch):
+        """A non-not-found failure (network/auth) RAISES — never a silent []."""
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down")),
+        )
+        cfg = _cfg(tmp_path, [])
+        with pytest.raises(RuntimeError, match="network down"):
+            _inspect_repo(cfg)
+
+    def test_ensure_repo_raises_on_non_exists_error(self, tmp_path, monkeypatch):
+        """create_repo failing for a reason other than 'already exists'
+        RAISES instead of printing and continuing."""
+        monkeypatch.setattr(
+            publish_mod._api,
+            "create_repo",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("unauthorized")),
+        )
+        cfg = _cfg(tmp_path, [])
+        with pytest.raises(RuntimeError, match="unauthorized"):
+            _ensure_repo(cfg)
+
+    def test_publish_refuses_before_upload_when_inspection_fails(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Inspection failure fails the whole publish BEFORE any upload:
+        rc 1, upload_folder never called, message names the failure."""
+        from sofer.checks import ValidationReport
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down")),
+        )
+        monkeypatch.setattr(
+            publish_mod._api,
+            "upload_folder",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("upload attempted despite failed inspection")
+            ),
+        )
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        report = ValidationReport("test")  # clean report — gate passes
+        rc = publish(cfg, target="hf", quality_report=report)
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "Remote inspection failed" in captured.out
+        assert "network down" in captured.out
 
 
 class TestRepoDiffSummary:

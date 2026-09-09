@@ -190,6 +190,42 @@ class TestAnnotations:
         val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
         assert val is True
 
+    _READ_ONLY_TOOLS = frozenset({"sofer_validate", "sofer_scan_dry_run", "sofer_auth_status"})
+    _WRITING_TOOLS = frozenset(
+        {
+            "sofer_prepare",
+            "sofer_publish",
+            "sofer_publish_confirm",
+            "sofer_codebook",
+            "sofer_codebook_all",
+            "sofer_profile",
+            "sofer_profile_all",
+            "sofer_render",
+            "sofer_render_all",
+            "sofer_scan_apply",
+            "sofer_init",
+        }
+    )
+
+    def test_readonly_hint_matches_side_effects(self, tmp_path: Path):
+        """readOnlyHint is True ONLY for genuinely read-only tools.
+
+        Every tool that writes files (codebooks, metadata profiles, README
+        renders, scan_apply registration, init scaffolding, prepare, publish)
+        must report readOnlyHint False so agents treat it as side-effecting.
+        The roster partition covers all 14 tools.
+        """
+        tools = _tools_dict(tmp_path)
+        assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS
+        for name in self._READ_ONLY_TOOLS:
+            ann = tools[name].annotations
+            val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
+            assert val is True, f"{name} must stay readOnly"
+        for name in self._WRITING_TOOLS:
+            ann = tools[name].annotations
+            val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
+            assert val is False, f"{name} writes files — readOnlyHint must be False"
+
 
 class TestOutputSchema:
     def test_output_schema_typed(self, tmp_path: Path):
@@ -205,6 +241,32 @@ class TestOutputSchema:
             assert "ok" in props, f"{name} output_schema missing ok"
             assert "exit_code" in props, f"{name} output_schema missing exit_code"
             assert "output" in props, f"{name} output_schema missing output"
+
+    def test_sofer_init_identity_fields_in_schema(self, tmp_path: Path):
+        """MSP-R03 / PB-03: sofer_init output_schema declares the identity
+        fields as string properties, NOT in ``required``."""
+        tools = _tools_dict(tmp_path)
+        schema = tools["sofer_init"].outputSchema  # type: ignore[attr-defined]
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        assert "config_path" in props, "sofer_init output_schema missing config_path"
+        assert "dataset_root" in props, "sofer_init output_schema missing dataset_root"
+        assert props["config_path"]["type"] == "string"
+        assert props["dataset_root"]["type"] == "string"
+        required = schema.get("required", [])
+        assert "config_path" not in required
+        assert "dataset_root" not in required
+        assert required == ["ok", "exit_code", "output"]
+
+    def test_sofer_init_user_required(self, tmp_path: Path):
+        """INIT-05: sofer_init input schema requires ``user`` as a
+        non-nullable string (mandatory, never optional)."""
+        tools = _tools_dict(tmp_path)
+        schema = tools["sofer_init"].inputSchema or {}
+        props = schema.get("properties", {})
+        user_schema = props.get("user", {})
+        assert "user" in schema.get("required", []), "user must be a required parameter"
+        assert user_schema.get("type") == "string", user_schema
+        assert "null" not in str(user_schema), "user must not be nullable"
 
 
 class TestEnvelope:
@@ -254,12 +316,34 @@ class TestEnvelope:
         assert envelope["token"] in ("present", "missing")
         assert "secret123" not in str(envelope)
         assert "phrase123" not in str(envelope)
+        assert envelope["approval_configured"] is True
         assert envelope["requires_approval_phrase"] is True
         # sofer_auth_status is the ONLY tool whose output_schema declares next —
         # this is the sole boundary-level next assertion (spec delta s7).
         assert envelope["next"]["acknowledge_risk"] is True
         assert envelope["next"]["approval_phrase"] == "<from human>"
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+
+    def test_auth_status_approval_not_configured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a server phrase, the preflight reports approval_configured
+        False, still requires an approval phrase (fail-closed), and points the
+        next hint at configuring it instead of supplying a phrase."""
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "dataset.toml").write_text(
+            '[dataset]\nname="x"\nrepo_id="u/x"\n\n[[file]]\nlocal="data.csv"\nremote="data.csv"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HF_TOKEN", "secret123")
+        server = build_server(root=tmp_path)  # no approval phrase
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["approval_configured"] is False
+        assert envelope["requires_approval_phrase"] is True
+        assert envelope["next"]["action"] == "configure_approval_phrase"
+        assert "approval_phrase" not in envelope["next"]
 
 
 class TestHappyPath:
@@ -283,7 +367,7 @@ class TestHappyPath:
         import sofer.config as cfg
 
         cfg.reload(tmp_path)
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
 
         # Mock publish._api so the HF path stays offline and deterministic
         import sofer.publish as pub_mod

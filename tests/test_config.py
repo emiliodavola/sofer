@@ -527,7 +527,15 @@ class TestTc10RawDirBootstrap:
         monkeypatch.chdir(tree)
         config.reload(None)
         assert config.RAW_DIR == "inputs"
-        rc = _cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        rc = _cmd_init(
+            Namespace(
+                name="my-ds",
+                user="testuser",
+                move_existing=False,
+                dry_run=False,
+                force=False,
+            )
+        )
         assert rc == 0
         assert (tree / "inputs").is_dir()
         assert not (tree / "raw").exists()

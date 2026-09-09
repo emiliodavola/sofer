@@ -35,6 +35,30 @@ _PLACEHOLDERS: frozenset[str] = frozenset(
 )
 
 
+def resolve_doc_path(value: str | None, base: Path) -> Path | None:
+    """Resolve an optional documentation path against the config directory.
+
+    ``[dataset] readme`` / ``study_design`` / ``recipe`` (and ``codebook``)
+    are optional file paths read by :func:`sofer.prepare.prepare` and
+    embedded into the published dataset card. They resolve against *base*
+    (the TOML's directory, ``cfg._base_dir``) — never the process working
+    directory — so a TOML declaring ``readme = "docs/readme.md"`` is read
+    from next to the TOML regardless of where the CLI/MCP process runs.
+    Absolute values are returned as-is.
+
+    Args:
+        value: The raw declared path, or ``None``/empty when not declared.
+        base: Anchor directory for relative values (the config directory).
+
+    Returns:
+        The resolved path, or ``None`` when *value* is empty.
+    """
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else base / path
+
+
 class InferenceStatus(str, Enum):
     """Frozen vocabulary describing how a value was inferred.
 
@@ -314,13 +338,16 @@ class DatasetConfig:
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
+    _config_path: Path = field(
+        default=Path(), compare=False, repr=False
+    )  # resolved TOML path (set by from_toml)
 
     # ------------------------------------------------------------------
     #  Factory / loading
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> DatasetConfig:
+    def from_toml(cls, path: str | Path, discovery_root: Path | None = None) -> DatasetConfig:
         """Parse a TOML file and return a :class:`DatasetConfig`.
 
         The TOML format is::
@@ -358,6 +385,10 @@ class DatasetConfig:
 
         Args:
             path: Path to the TOML configuration file.
+            discovery_root: Optional upper bound for ``[tool.sofer]``
+                discovery (TC-05): the walk-up never passes this directory,
+                so overrides declared above it do not apply. ``None`` keeps
+                the unbounded CLI behavior.
 
         Returns:
             A fully populated :class:`DatasetConfig` instance.
@@ -374,8 +405,16 @@ class DatasetConfig:
         # the dataset TOML's directory so every subsequent read of a module
         # constant (config.X) reflects the dataset-tree overrides for this
         # invocation (TC-04/TC-05). Harmless if called repeatedly — resolution
-        # is a pure function of (anchor, filesystem).
-        config.reload(base_dir)
+        # is a pure function of (anchor, filesystem). The optional
+        # ``discovery_root`` bounds the walk-up (TC-05): discovery never
+        # passes it, so overrides declared above the bound do not apply. The
+        # ``stop_at`` keyword is only passed when a bound is given — the
+        # unbounded CLI path keeps the exact ``reload(base_dir)`` call shape
+        # (TC-04 spies on ``config.reload`` and accept no keywords).
+        if discovery_root is not None:
+            config.reload(base_dir, stop_at=discovery_root)
+        else:
+            config.reload(base_dir)
 
         with open(path, "rb") as fh:
             data = _tomli.load(fh)
@@ -506,6 +545,7 @@ class DatasetConfig:
             demo_url=meta.get("demo_url", ""),
             dataset_card_authors=meta.get("dataset_card_authors", ""),
             _base_dir=base_dir,
+            _config_path=path.resolve(),
         )
 
     # ------------------------------------------------------------------
@@ -536,8 +576,10 @@ class DatasetConfig:
                 )
                 break
 
-        # repo_id format
-        if not re.match(r"^[\w\-]+/[\w\-]+$", self.repo_id):
+        # repo_id format — `\Z` (not `$`) so a trailing newline is rejected,
+        # matching the exact no-trailing-newline contract used for `user` in
+        # validate_identity (INIT-05).
+        if not re.match(r"^[\w\-]+/[\w\-]+\Z", self.repo_id):
             errors.append(f"Invalid repo_id: '{self.repo_id}'. Must be 'user/repo'.")
 
         # file entries
@@ -554,14 +596,17 @@ class DatasetConfig:
         # any staging write.
         errors.extend(_validate_case_fold_collisions(self))
 
-        # optional docs
+        # optional docs — resolved against the config's directory (PRP-03),
+        # never the process cwd, so a relative declaration like
+        # ``readme = "docs/readme.md"`` is found next to the TOML.
         for field_name, doc_path in (
             ("readme", self.readme),
             ("codebook", self.codebook),
             ("study_design", self.study_design),
             ("recipe", self.recipe),
         ):
-            if doc_path and not Path(doc_path).exists():
-                errors.append(f"Declared {field_name} not found: {doc_path}")
+            doc_resolved = resolve_doc_path(doc_path, base)
+            if doc_resolved is not None and not doc_resolved.exists():
+                errors.append(f"Declared {field_name} not found: {doc_resolved}")
 
         return errors

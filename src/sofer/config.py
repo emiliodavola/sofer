@@ -83,6 +83,12 @@ _DEFAULTS: dict[str, Any] = {
     # sofer://metadata): resources larger than this are refused with a clear
     # error naming the limit instead of being slurped into an LLM context.
     "agent_resource_max_bytes": 50_000_000,
+    # Size cap for the MCP tool "output" envelope (captured stdout/stderr).
+    # Larger outputs are truncated with a "... [truncated: N bytes]" marker so
+    # a verbose validation/prepare/codebook run can never blow up the agent
+    # context. Separate from agent_resource_max_bytes (which REFUSES a whole
+    # resource): the output envelope is truncated, not refused.
+    "output_max_bytes": 1_000_000,
     # Card collapse threshold: columns per table above which Data Fields
     # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
     "card_collapse_threshold": 15,
@@ -327,5 +333,8 @@ CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]
 
 # MCP agent resource size guard (see ``_DEFAULTS["agent_resource_max_bytes"]``).
 AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
+
+# MCP tool output envelope cap (see ``_DEFAULTS["output_max_bytes"]``).
+OUTPUT_MAX_BYTES: int = _DEFAULTS["output_max_bytes"]
 
 CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]

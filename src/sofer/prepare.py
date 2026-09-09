@@ -63,6 +63,7 @@ from ._mirror import copy_to_mirror, parquet_remote_for
 from ._parquet_helpers import _parquet_to_hf_dtype
 from .checks import DatasetValidator
 from .codebook import generate_all as generate_all_codebooks
+from .model import resolve_doc_path
 from .quality import QualityValidator
 from .repo_compliance import (
     ColumnSchema,
@@ -808,23 +809,23 @@ def prepare(
 
         recipe_content: str | None = None
         if cfg.recipe:
-            recipe_path = Path(cfg.recipe)
-            if recipe_path.exists():
+            recipe_path = resolve_doc_path(cfg.recipe, base)
+            if recipe_path is not None and recipe_path.exists():
                 recipe_content = recipe_path.read_text(encoding="utf-8")
 
         study_design_content: str | None = None
         if cfg.study_design:
-            study_design_path = Path(cfg.study_design)
-            if study_design_path.exists():
+            study_design_path = resolve_doc_path(cfg.study_design, base)
+            if study_design_path is not None and study_design_path.exists():
                 study_design_content = study_design_path.read_text(encoding="utf-8")
             else:
                 print(f"  \u26a0  study_design declared but not found: {cfg.study_design}")
 
         # Readme override — if cfg.readme is set, use that file instead of generating.
         if cfg.readme:
-            readme_path = Path(cfg.readme)
-            if readme_path.exists():
-                print(f"  [i] Using custom README from: {cfg.readme}")
+            readme_path = resolve_doc_path(cfg.readme, base)
+            if readme_path is not None and readme_path.exists():
+                print(f"  [i] Using custom README from: {readme_path}")
                 card = readme_path.read_text(encoding="utf-8")
             else:
                 print(f"  \u26a0  readme declared but not found: {cfg.readme} — generating card")

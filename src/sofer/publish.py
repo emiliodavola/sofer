@@ -10,7 +10,11 @@ it to a target:
   repository exists, inspects it, prints a diff summary, applies overwrite
   protection, stages the *planned artifacts only* from the output directory,
   and pushes the whole tree with a single ``HfApi.upload_folder`` call
-  (PUB-01).  A post-upload split report is printed.
+  (PUB-01).  Remote inspection is fail-closed (PUB-05): a repository that
+  does not exist reads as empty, but any OTHER inspection or ``create_repo``
+  failure aborts the publish with rc 1 before upload — inspection failure is
+  never treated as an empty repo, so overwrite protection always sees the
+  true remote state.  A post-upload split report is printed.
 - ``target="local"``: copies the package to ``--output`` with zero network
   access; without ``--output``, prints an in-place package summary without
   mutating anything (PUB-02).
@@ -62,6 +66,7 @@ if TYPE_CHECKING:
     from .model import DatasetConfig
 
 from huggingface_hub import HfApi
+from huggingface_hub.utils import RepositoryNotFoundError
 
 from . import config
 from ._mirror import copy_to_mirror, expanded_planned_remotes, planned_remotes
@@ -100,11 +105,20 @@ def _is_auto_generated(remote: str) -> bool:
 
 
 def _ensure_repo(cfg: DatasetConfig, api: HfApi | None = None) -> None:
-    """Create the HF repository if it doesn't exist (idempotent).
+    """Create the HF repository if it doesn't exist (idempotent, fail-closed).
+
+    A ``create_repo`` failure for a reason other than "already exists" (e.g.
+    an authentication error, a quota violation, or a network failure) RAISES
+    instead of printing and continuing — proceeding after a failed
+    ``create_repo`` could upload into a repo the caller cannot even manage.
 
     Args:
         cfg: Dataset configuration (``repo_id``, ``repo_type``, ``private``).
         api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
+
+    Raises:
+        Exception: Any ``create_repo`` failure that is not an already-exists
+            response (the already-exists case prints and returns).
     """
     target_api = api if api is not None else _api
     try:
@@ -119,7 +133,7 @@ def _ensure_repo(cfg: DatasetConfig, api: HfApi | None = None) -> None:
         if "already exists" in msg:
             print(f"  i  Repository already exists: {cfg.repo_id}")
         else:
-            print(f"  \u26a0  {exc}")
+            raise
 
 
 def _hf_upload(
@@ -197,19 +211,30 @@ def _hf_upload_folder(
 def _inspect_repo(cfg: DatasetConfig, api: HfApi | None = None) -> list[str]:
     """Query the HF repo and return a list of existing remote file paths.
 
+    Fail-closed (PUB-05): a :class:`RepositoryNotFoundError` — the repo does
+    not exist yet, or is empty — returns an empty list; ANY other failure
+    (network, authentication, rate limit) RAISES. Swallowing those into
+    ``[]`` would make the repo look empty, so overwrite protection would
+    find nothing to protect and the upload could overwrite protected
+    remotes — inspection failure is NEVER treated as an empty repo.
+
     Args:
         cfg: Dataset configuration (``repo_id``, ``repo_type``).
         api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
 
     Returns:
-        The list of existing remote paths; empty when the repo does not
-        exist yet, the network is unavailable, or the call fails.
+        The list of existing remote paths; empty only when the repo does
+        not exist (or has no files).
+
+    Raises:
+        Exception: Any inspection failure other than
+            :class:`RepositoryNotFoundError`.
     """
     target_api = api if api is not None else _api
     try:
         existing = target_api.list_repo_files(repo_id=cfg.repo_id, repo_type=cfg.repo_type)
         return list(existing)
-    except Exception:
+    except RepositoryNotFoundError:
         return []
 
 
@@ -407,7 +432,9 @@ def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
     the package needs regenerating when
 
     - the output directory has no ``.parquet`` files (existence fallback), or
-    - ``dataset.toml`` was modified after the newest Parquet, or
+    - the config TOML (``cfg._config_path`` — whatever its name, e.g.
+      ``dataset.toml`` or a custom ``test.toml``) was modified after the
+      newest Parquet, or
     - any declared source file (all supported formats: CSV, TSV, Parquet,
       Excel, JSONL) was modified after the newest Parquet.
 
@@ -424,7 +451,12 @@ def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
     newest = max(p.stat().st_mtime for p in parquets)
 
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
-    toml_path = base / config.DEFAULT_CONFIG_NAME
+    # The config's real path wins (custom-named TOMLs — issue #116 canonical
+    # init produces e.g. ``test.toml``); ``Path()`` is the hand-built-config
+    # sentinel (truthy in bool()), so compare explicitly before falling back.
+    toml_path = (
+        cfg._config_path if cfg._config_path != Path() else base / config.DEFAULT_CONFIG_NAME
+    )
     if toml_path.is_file() and toml_path.stat().st_mtime > newest:
         return True
 
@@ -465,6 +497,7 @@ def _copy_package(
     *,
     keep_csv: bool,
     protected: set[str] | None = None,
+    force: bool = True,
 ) -> None:
     """Copy the planned package from *source* to *dest*.
 
@@ -481,6 +514,10 @@ def _copy_package(
                    entries at their remote paths.
         protected: Lowercased remote names skipped by overwrite protection
                    (``None`` = nothing skipped).
+        force:     When ``False``, refuse to overwrite an existing
+                   destination FILE or directory (raises :class:`FileExistsError`) —
+                   the local target's overwrite guard (PUB-13). The hf staging
+                   root is always fresh, so it keeps the default ``True``.
     """
     skip = protected or set()
     # Shared expanded set (PUB-10) so copy set == diff set (PUB-09)
@@ -497,7 +534,7 @@ def _copy_package(
             continue
         src = source / _PP(remote)
         if src.exists():
-            copy_to_mirror(src, dest, remote)
+            copy_to_mirror(src, dest, remote, force=force)
             staged.add(remote.lower())
         else:
             # Fallback for keep_csv CSV original not in mirror (copied from local)
@@ -507,25 +544,25 @@ def _copy_package(
                 if entry.remote == remote:
                     local = entry.resolve(base)
                     if local.exists():
-                        copy_to_mirror(local, dest, remote)
+                        copy_to_mirror(local, dest, remote, force=force)
                         staged.add(remote.lower())
                     break
 
     if "readme.md" not in skip:
         src = source / "README.md"
         if src.exists():
-            copy_to_mirror(src, dest, "README.md")
+            copy_to_mirror(src, dest, "README.md", force=force)
     if "license" not in skip:
         src = source / "LICENSE"
         if src.exists():
-            copy_to_mirror(src, dest, "LICENSE")
+            copy_to_mirror(src, dest, "LICENSE", force=force)
 
     codebooks_dir = source / config.CODEBOOKS_DIR
     if codebooks_dir.is_dir():
         for cb in sorted(codebooks_dir.rglob("*.md")):
-            copy_to_mirror(cb, dest, cb.relative_to(source).as_posix())
+            copy_to_mirror(cb, dest, cb.relative_to(source).as_posix(), force=force)
     if (source / "codebook.md").is_file():
-        copy_to_mirror(source / "codebook.md", dest, "codebook.md")
+        copy_to_mirror(source / "codebook.md", dest, "codebook.md", force=force)
 
 
 def _print_local_package_summary(cfg: DatasetConfig, source: Path) -> None:
@@ -574,7 +611,11 @@ def publish(
                        or ``"local"`` (copy to ``--output``).
         output_dir:    ``hf``: override the prepare output directory
                        (default ``[dataset] build_dir``).  ``local``:
-                       destination directory for the package copy.
+                       destination directory for the package copy.  Under
+                       ``--dry-run`` (any target) it names the package
+                       source, so the plan reflects where the earlier
+                       prepare/codebook_all/profile_all/render_all steps
+                       wrote.
         force:         When ``True``, skip overwrite protection on the hf
                        target.
         verify:        Accepted for signature compatibility; verification
@@ -615,9 +656,12 @@ def publish(
         Exit code (``0`` success, ``1`` quality-gate failure, prepare
         failure, or hf upload failure).
     """
-    # For the hf target this is the prepare-output / staging source; for the
-    # local target it is the *destination* of the package copy.
-    source = resolve_output_dir(cfg, output_dir if target == "hf" else None)
+    # output_dir is the package-source override for the hf target and for any
+    # dry-run plan (so the plan reflects where prepare/codebook_all/etc.
+    # wrote). For the local target's ACTUAL copy, output_dir is the
+    # DESTINATION (resolved later at the local branch), so the source stays
+    # the build dir.
+    source = resolve_output_dir(cfg, output_dir if (target == "hf" or dry_run) else None)
 
     print(f"\n{'=' * 60}")
     print(f"  Dataset:   {cfg.name}")
@@ -667,7 +711,14 @@ def publish(
         dest = resolve_output_dir(cfg, output_dir)
         print(f"  [i] Copying package from {source} to {dest} ...")
         # --keep-csv has no effect on the local target (PUB-07).
-        _copy_package(cfg, source, dest, keep_csv=False)
+        try:
+            # PUB-13: without --force, refuse to overwrite an existing
+            # destination file (fail-closed, no silent copy2 overwrite).
+            _copy_package(cfg, source, dest, keep_csv=False, force=force)
+        except FileExistsError as exc:
+            print(f"\n  X  {exc}")
+            print("     Use --force to overwrite the existing files.")
+            return 1
         print(f"\n{'=' * 60}")
         print(f"  Result: package copied to {dest}")
         print(f"{'=' * 60}\n")
@@ -689,8 +740,18 @@ def publish(
         return 1
 
     api = HfApi(token=token) if token is not None else None
-    _ensure_repo(cfg, api=api)
-    existing_files = _inspect_repo(cfg, api=api)
+    # Fail-closed remote prologue (PUB-05): a create_repo failure or an
+    # inspection failure (anything but repo-not-found) aborts the publish
+    # with rc 1 BEFORE any staging/upload — remote state is unknown, so
+    # overwrite protection cannot be trusted and proceeding could overwrite
+    # protected remotes. Inspection failure is NEVER treated as an empty repo.
+    try:
+        _ensure_repo(cfg, api=api)
+        existing_files = _inspect_repo(cfg, api=api)
+    except Exception as exc:
+        print(f"\n  \u2717  Remote inspection failed: {exc}")
+        print("  Publish aborted — remote state unknown, refusing to upload (fail closed).")
+        return 1
 
     codebook_remotes = _collect_codebook_remotes(source)
 
@@ -745,7 +806,14 @@ def publish(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ── 6. Post-upload split report ──────────────────────────────────────
-    updated_files = _inspect_repo(cfg, api=api)
+    # The upload already succeeded; a post-upload inspection failure warns
+    # and skips the split report — it never fails the completed upload.
+    try:
+        updated_files = _inspect_repo(cfg, api=api)
+    except Exception as exc:
+        print(f"  \u26a0  Post-upload inspection failed: {exc}")
+        print("     Upload completed; the split report is skipped.")
+        updated_files = []
     if updated_files:
         report = detect_splits(updated_files)
         _print_split_report(report)

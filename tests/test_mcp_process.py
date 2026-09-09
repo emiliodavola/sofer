@@ -38,7 +38,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import PROCESS_TIMEOUT_SECONDS, _make_dataset, call_tool
+from conftest import (
+    PROCESS_TIMEOUT_SECONDS,
+    McpStdioServer,
+    _make_dataset,
+    call_tool,
+)
 
 from sofer.mcp_server import build_server
 
@@ -56,6 +61,22 @@ def _run(coro: Any) -> Any:
 def _call(server: Any, name: str, args: dict[str, Any] | None = None) -> Any:
     """Call a registered tool through the shared client wrapper (PB-09)."""
     return call_tool(server, name, args)
+
+
+@pytest.fixture(scope="module")
+def mcp_stdio_chain_root(tmp_path_factory: pytest.TempPathFactory) -> McpStdioServer:
+    """Module-scoped stdio spawn config for the greenfield ground-truth chain.
+
+    Server root = parent dir with an intended ``child/`` dataset dir holding a
+    single loose source file. One spawn per module (PB-09 lean-spawn bound);
+    the chain test runs init → scan_apply → validate → prepare → codebook_all
+    → publish(dry_run) over ONE stdio session with no manual file moves.
+    """
+    parent = tmp_path_factory.mktemp("mcp-stdio-chain")
+    child = parent / "child"
+    child.mkdir()
+    (child / "data.csv").write_text("col_a;col_b\n1;2\n3;4\n", encoding="utf-8-sig")
+    return McpStdioServer(cwd=parent)
 
 
 class TestStdioFraming:
@@ -110,12 +131,219 @@ class TestNestedCwd:
         server = build_server(root=parent)
         monkeypatch.chdir(nested)
 
-        envelope = _call(server, "sofer_init", {"name": "nested-ds"}).data
+        envelope = _call(server, "sofer_init", {"name": "nested-ds", "user": "testuser"}).data
         assert envelope["ok"] is True, envelope
         assert (nested / "nested-ds.toml").is_file()
         assert (nested / "raw").is_dir()
         assert not (parent / "nested-ds.toml").exists()
         assert not (parent / "raw").exists()
+
+
+class TestParentRootIdentity:
+    """PB-04: real-process parent-root identity contract (the #116 reproduction).
+
+    Launches the REAL ``sofer-mcp`` process via the module-scoped
+    ``mcp_stdio_parent_root`` fixture (server root = parent dir with an
+    existing ``child/`` dataset dir) — ``build_server(root=child)`` or
+    imported-function tests are insufficient for the parent/child identity
+    contract (PB-04 spec). One spawn per module (PB-09 lean-spawn bound): both
+    scenarios run sequentially over a single stdio session whose live CWD is
+    the parent root, so ``cwd=None`` MUST fail closed (no silent parent-root
+    selection) and ``cwd="child"`` MUST anchor identity under ``child/``.
+    """
+
+    def test_cwd_omitted_fails_closed_then_cwd_child_anchors(
+        self, mcp_stdio_parent_root: Any
+    ) -> None:
+        """(a) cwd omitted at the parent root -> input-required refusal naming
+        ``cwd``, NO parent ``test.toml`` and NO parent ``raw/``; then (b)
+        ``cwd="child"`` -> ``child/test.toml`` + ``child/raw/`` exist,
+        ``parent/test.toml`` absent, and the envelope reports the absolute
+        ``config_path`` / ``dataset_root``."""
+        params = mcp_stdio_parent_root.spawn()
+        parent = mcp_stdio_parent_root.cwd
+        child = parent / "child"
+
+        async def _go() -> None:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                ) as session:
+                    await session.initialize()
+
+                    # (a) cwd omitted: the live CWD equals the parent server
+                    # root, which is NOT a strict descendant of itself — the
+                    # call must be refused naming the required cwd argument,
+                    # with NO writes at the parent (fail-closed, INIT-02).
+                    omitted = await session.call_tool(
+                        "sofer_init", {"name": "test", "user": "testuser"}
+                    )
+                    assert not omitted.isError
+                    refusal = json.loads(omitted.content[0].text)
+                    assert refusal["ok"] is False
+                    assert refusal["exit_code"] == 1
+                    assert any("cwd" in e for e in refusal["config_errors"]), refusal
+                    assert not (parent / "test.toml").exists()
+                    assert not (parent / "raw").exists()
+
+                    # (b) cwd="child": identity anchors under child/, the
+                    # parent stays clean, and the envelope reports the
+                    # canonical absolute identity (INIT-03, PB-03).
+                    anchored = await session.call_tool(
+                        "sofer_init", {"name": "test", "user": "testuser", "cwd": "child"}
+                    )
+                    assert not anchored.isError
+                    envelope = json.loads(anchored.content[0].text)
+                    assert envelope["ok"] is True, envelope
+                    assert (child / "test.toml").is_file()
+                    assert (child / "raw").is_dir()
+                    assert not (parent / "test.toml").exists()
+                    assert not (parent / "raw").exists()
+                    assert envelope["config_path"] == str((child / "test.toml").resolve())
+                    assert envelope["dataset_root"] == str(child.resolve())
+
+        _run(_go())
+
+
+class TestInstalledBinary:
+    """E2E: the REAL installed ``sofer-mcp`` console script over stdio.
+
+    The module-scoped fixtures spawn ``sys.executable -c 'from sofer.mcp_server
+    import main; main()'`` — the checkout module. This class proves the
+    INSTALLED ``sofer-mcp`` console-script entry point (``pyproject.toml
+    [project.scripts]``, the boundary real users hit) drives the same server:
+    a parent/child layout where ``sofer_init`` with ``cwd="child"`` anchors
+    identity under the child and reports the canonical envelope. Skips when
+    ``sofer-mcp`` is not on PATH (e.g. an uninstalled dev checkout) — CI's
+    ``uv run`` places the project venv's scripts dir on PATH, so it runs there.
+    """
+
+    @pytest.mark.skipif(
+        shutil.which("sofer-mcp") is None,
+        reason="sofer-mcp not installed",
+    )
+    def test_installed_binary_init_anchors_under_child(
+        self, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """``sofer_init(name="probe", user="testuser", cwd="child")`` via the
+        installed binary: ``child/probe.toml`` + ``child/raw/`` exist,
+        ``parent/probe.toml`` absent, and the envelope reports the absolute
+        ``config_path`` / ``dataset_root`` (INIT-03, PB-03)."""
+        parent = tmp_path_factory.mktemp("installed-binary")
+        (parent / "child").mkdir()
+        server = McpStdioServer(cwd=parent, command=shutil.which("sofer-mcp"), args=())
+        params = server.spawn()
+        child = parent / "child"
+
+        async def _go() -> None:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                ) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        "sofer_init",
+                        {"name": "probe", "user": "testuser", "cwd": "child"},
+                    )
+                    assert not result.isError
+                    envelope = json.loads(result.content[0].text)
+                    assert envelope["ok"] is True, envelope
+                    assert (child / "probe.toml").is_file()
+                    assert (child / "raw").is_dir()
+                    assert not (parent / "probe.toml").exists()
+                    assert not (parent / "raw").exists()
+                    assert envelope["config_path"] == str((child / "probe.toml").resolve())
+                    assert envelope["dataset_root"] == str(child.resolve())
+
+        _run(_go())
+
+
+class TestStdioGroundTruthChain:
+    """PB-04/PB-06: the canonical greenfield chain over a REAL stdio session.
+
+    issue #115 criterion #1: reproduce ``init → … → publish dry-run`` over the
+    real stdio transport with no manual file moves. The chain is fully offline
+    — ``sofer_publish(dry_run=True)`` returns before any network branch
+    (publish.py:693-704), so the server subprocess needs no ``publish._api``
+    monkeypatch to stay deterministic. The in-process layers are covered by
+    ``TestDeliveryHandoff`` (upload branch) and
+    ``TestConfigStates.test_greenfield_bootstrap_init_scan_apply_validate``;
+    this test pins the init → prepare → publish(dry_run) prefix over stdio.
+    """
+
+    def test_init_scan_validate_prepare_codebook_publish_dry_run(
+        self, mcp_stdio_chain_root: Any
+    ) -> None:
+        """One stdio session walks the chain with config/root anchored under
+        ``child/`` and reaches the dry-run plan without any manual file move."""
+        params = mcp_stdio_chain_root.spawn()
+        parent = mcp_stdio_chain_root.cwd
+        child = parent / "child"
+
+        async def _go() -> None:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                ) as session:
+                    await session.initialize()
+
+                    init = await session.call_tool(
+                        "sofer_init", {"name": "chain-ds", "user": "chainuser", "cwd": "child"}
+                    )
+                    assert not init.isError
+                    init_env = json.loads(init.content[0].text)
+                    assert init_env["ok"] is True, init_env
+                    assert (child / "chain-ds.toml").is_file()
+                    assert (child / "raw").is_dir()
+                    assert not (parent / "chain-ds.toml").exists()
+
+                    applied = await session.call_tool(
+                        "sofer_scan_apply", {"config": "child/chain-ds.toml"}
+                    )
+                    assert not applied.isError
+                    applied_env = json.loads(applied.content[0].text)
+                    assert applied_env["ok"] is True, applied_env
+                    assert applied_env["copied"] == 1, applied_env
+                    assert (child / "cache" / "data.csv").is_file()
+
+                    validated = await session.call_tool(
+                        "sofer_validate", {"config": "child/chain-ds.toml"}
+                    )
+                    validated_env = json.loads(validated.content[0].text)
+                    assert validated_env["ok"] is True, validated_env
+
+                    prepared = await session.call_tool(
+                        "sofer_prepare", {"config": "child/chain-ds.toml"}
+                    )
+                    prepared_env = json.loads(prepared.content[0].text)
+                    assert prepared_env["ok"] is True, prepared_env
+                    assert (child / "build" / "data.parquet").is_file()
+
+                    codebooks = await session.call_tool(
+                        "sofer_codebook_all", {"config": "child/chain-ds.toml"}
+                    )
+                    codebooks_env = json.loads(codebooks.content[0].text)
+                    assert codebooks_env["ok"] is True, codebooks_env
+                    assert (child / "build" / "codebook.md").is_file()
+
+                    plan = await session.call_tool(
+                        "sofer_publish", {"config": "child/chain-ds.toml", "dry_run": True}
+                    )
+                    assert not plan.isError
+                    plan_env = json.loads(plan.content[0].text)
+                    assert plan_env["ok"] is True, plan_env
+                    assert plan_env["dry_run"] is True
+
+        _run(_go())
 
 
 class TestRecoveryPublishConfirm:
@@ -165,7 +393,7 @@ class TestRecoveryInit:
         from sofer.cli import _INIT_TEMPLATE
 
         server = build_server(root=tmp_path)
-        args: dict[str, Any] = {"name": "my-ds"}
+        args: dict[str, Any] = {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
 
         first = _call(server, "sofer_init", args).data
         assert first["ok"] is True
@@ -180,7 +408,7 @@ class TestRecoveryInit:
         # {"force": True}) merged into the replayed args.
         replayed = _call(server, "sofer_init", {**args, "force": True}).data
         assert replayed["ok"] is True
-        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="testuser")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
 
     def test_replay_corrected_name_past_name_empty(
@@ -192,7 +420,9 @@ class TestRecoveryInit:
 
         server = build_server(root=tmp_path)
 
-        refused = _call(server, "sofer_init", {"name": "   "}).data
+        refused = _call(
+            server, "sofer_init", {"name": "   ", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert refused["ok"] is False
         assert refused["exit_code"] == 1
         assert any("non-empty" in e for e in refused["config_errors"])
@@ -200,9 +430,11 @@ class TestRecoveryInit:
 
         # Documented hint VALUE for the name-empty refusal is {} — the
         # correction is a non-empty name in the replayed args.
-        replayed = _call(server, "sofer_init", {"name": "my-ds"}).data
+        replayed = _call(
+            server, "sofer_init", {"name": "my-ds", "user": "testuser", "cwd": str(tmp_path)}
+        ).data
         assert replayed["ok"] is True
-        expected = _INIT_TEMPLATE.format(name="my-ds", user="YOUR_USER")
+        expected = _INIT_TEMPLATE.format(name="my-ds", user="testuser")
         assert (tmp_path / "my-ds.toml").read_text(encoding="utf-8") == expected
 
 
@@ -259,7 +491,11 @@ class TestConfigStates:
         """
         server = build_server(root=tmp_path)
 
-        init = _call(server, "sofer_init", {"name": "green-ds", "user": "myuser"}).data
+        init = _call(
+            server,
+            "sofer_init",
+            {"name": "green-ds", "user": "myuser", "cwd": str(tmp_path)},
+        ).data
         assert init["ok"] is True, init
         assert (tmp_path / "green-ds.toml").is_file()
         assert (tmp_path / "raw").is_dir()
@@ -359,7 +595,7 @@ class TestDeliveryHandoff:
 
         monkeypatch.setattr(pub_mod, "HfApi", _fake_hf_api)
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-        server = build_server(root=tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
         config_arg = str(tmp_path / "dataset.toml")
 
         validated = _call(server, "sofer_validate", {"config": config_arg}).data
@@ -382,12 +618,16 @@ class TestDeliveryHandoff:
         assert plan["dry_run"] is True
 
         # confidential=false in the fixture, so acknowledge_risk alone
-        # satisfies the acknowledgments (no confidential ack, no approval
-        # phrase on this server).
+        # satisfies the acknowledgment booleans; the fail-closed approval gate
+        # additionally requires the server-configured phrase on every publish.
         confirmed = _call(
             server,
             "sofer_publish_confirm",
-            {"config": config_arg, "acknowledge_risk": True},
+            {
+                "config": config_arg,
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
         ).data
         assert confirmed["ok"] is True, confirmed
         assert confirmed["acknowledge_risk"] is True

@@ -476,7 +476,7 @@ def generate_all(
     delimiter: str | None = None,
     encoding: str | None = None,
 ) -> list[str]:
-    """Generate one codebook per ``[[file]]`` entry under ``cache/codebooks/``.
+    """Generate one codebook per ``[[file]]`` entry under ``output_dir``.
 
     For ``.xlsx`` with N sheets, N codebooks are emitted as
     ``codebooks/<rel>/<stem>__<sanitized>.md`` (single sheet → ``stem.md``).
@@ -488,13 +488,13 @@ def generate_all(
 
     Args:
         cfg: A ``DatasetConfig`` loaded from a TOML file.
-        output_dir: When given (Option B — ``prepare`` calls this with its
-            output directory), per-file codebooks are written under
-            ``output_dir/codebooks/`` and the root index to
-            ``output_dir/codebook.md``; the shared ``cache/codebooks/``
-            directory is never mutated.  When ``None`` (default, standalone
-            ``codebook --all-files``), codebooks go to ``cache/codebooks/``
-            and the root index to the config directory.
+        output_dir: When given (the CLI/MCP adapters pass the package
+            ``build_dir``; ``prepare`` passes its output directory), per-file
+            codebooks are written under ``output_dir/codebooks/`` and the
+            root index to ``output_dir/codebook.md``; the shared
+            ``cache/codebooks/`` directory is never mutated.  When ``None``,
+            codebooks fall back to ``cache/codebooks/`` with the root index
+            next to them (``cache/codebook.md``).
         delimiter: CSV delimiter override. ``None`` resolves to
             ``cfg.csv_delimiter`` (the dataset's ``[meta] csv_delimiter`` —
             the authoritative source; rule-3 fix for the CLI's hardcoded
