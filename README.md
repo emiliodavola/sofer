@@ -59,7 +59,7 @@ Then run `sofer --help`. `sofer --version` always matches the release tag
 
 ```bash
 # 1. Generate a configuration template
-sofer init my-dataset
+sofer init my-dataset --user myuser
 
 # 2. Scan for data files
 sofer scan my-dataset.toml
@@ -136,7 +136,7 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 | Topic | What to do | Why / detail |
 |-------|------------|--------------|
 | **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
-| **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it auto-detects the live `Path.cwd()` when inside the server root, otherwise falls back to the server root. Explicit `cwd="C:/Users/elaze/Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). Auto case is contained by `is_relative_to` check — never escapes, never mutates `_SERVER_ROOT`. |
+| **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/elaze/Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
 | **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `flatten_first_level`. |
 | **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
 
@@ -222,7 +222,7 @@ expected = ["column_a", "column_b"]
 
 ```
 raw/            tracked source root — loose CSV/XLSX/JSONL MOVEs to raw/<relative> then scan copies to cache/ (e.g. raw/DPTO.csv -> cache/DPTO.csv)
-cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan destination (Phase 2 copy via flatten_first_level); codebook --all-files writes cache/codebooks/ + cache/codebook.md
+cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan destination (Phase 2 copy via flatten_first_level); codebook --all-files writes build/codebooks/ + build/codebook.md
 build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
 ```
 
@@ -315,14 +315,14 @@ detector class, no changes to the pipeline.
 
 | Command | Description |
 |---|---|
-| `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Flag: `--user USER` (HF username/org for `repo_id "USER/<name>"`; default: `YOUR_USER` placeholder). |
+| `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` or `__<sanitized>.metadata.yaml` per sheet for `.xlsx` N>1, `PurePath.suffixes`, sanitization + `seen _{n}`, normalized `__+`→`_` collision `ValueError` with `::sheet`), `--force` (overwrite guard), `--config` (TOML path for batch). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
 | `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` or `__<sanitized>.README.md` per sheet for `.xlsx` N>1 with same sanitization/dedup/collision parity, skip missing `metadata.yaml`), `--force`, `--config`. |
 | `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. |
-| `codebook --all-files` | Generate one codebook per `[[file]]` entry under `cache/codebooks/`, plus a root `cache/codebook.md` index. Use `--config` to specify the TOML file. |
+| `codebook --all-files` | Generate one codebook per `[[file]]` entry under the package `build_dir` (`build/codebooks/`), plus a root `build/codebook.md` index. Use `--config` to specify the TOML file and `--output` to override the directory. |
 | `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Orphan pruning: with `--force` removes stale files not in `expanded_planned_remotes` plus `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotent; `--force` off leaves orphans). |
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (delete build after successful `hf` upload only when `fail==0`, quality passed, not `--dry-run`; `--output` anchoring via `resolve_output_dir`), `--clean-cache`/`--all` (also delete `cache/` at `cfg._base_dir/cache`, shared tool-wide — sibling datasets may be affected; requires `--clean`). For `--target local`, `--clean` deletes the resolved destination only. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
@@ -342,10 +342,10 @@ detector class, no changes to the pipeline.
 | `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
 | `--clean` | `publish` | Delete the build directory after a successful `hf` publish (`fail==0`, quality passed, not `--dry-run`); build-only by default. Anchored via `resolve_output_dir(cfg, --output)` so `--output ./staging` deletes `./staging`. For `local`, deletes the resolved destination only; without `--clean` nothing is deleted. |
 | `--clean-cache` / `--all` | `publish` (with `--clean`) | Also delete `cache/` (`cfg._base_dir/cache`, `config.OUTPUT_DIR`, shared tool-wide). Requires explicit opt-in; sibling datasets share `cache/` — warn before use. |
-| `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`cache/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
+| `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`build/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
 | `--config` | `codebook`, `profile`, `render` | Path to the TOML config for `--all-files` (default: `default_config_name` from `[tool.sofer]`). |
 | `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
-| `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); default: `YOUR_USER` placeholder. |
+| `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); required — missing `--user` exits 2, placeholder (`YOUR_USER`) or unsafe values exit 1, no file written. |
 | `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
 | `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
@@ -451,9 +451,10 @@ typed formats), unique values, missing percentage, and a sample value.
 sofer codebook --all-files --config my-dataset.toml
 ```
 
-Generates one codebook per registered file under `cache/codebooks/<rel-stem>.md`,
-plus a root `codebook.md` index with a table of contents and relative links to
-all per-table codebooks.  Files from the same source directory that would
+Generates one codebook per registered file under `build/codebooks/<rel-stem>.md`
+(the package `build_dir`, where `publish` collects codebooks), plus a root
+`build/codebook.md` index with a table of contents and relative links to all
+per-table codebooks.  Files from the same source directory that would
 resolve to the same output stem (collision) are detected before writing — the
 non-colliding files still get their codebook written; the run fails with an
 error listing the colliding sources.

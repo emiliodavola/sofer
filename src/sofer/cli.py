@@ -19,6 +19,7 @@ from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
+from .execution_context import resolve_dataset_root, validate_identity
 from .mcp_registration import AgentName as _AgentName
 from .mcp_registration import Scope as _Scope
 from .model import DatasetConfig
@@ -32,6 +33,7 @@ from .scanner import (
     EXCLUSIONS,
     check_flatten_collisions,
     check_raw_collisions,
+    collect_init_moves,
     copy_files,
     discover_files,
     flatten_first_level,
@@ -177,7 +179,9 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     Without ``--all-files``: analyse *FILE* and print the codebook to
     stdout (or write to ``--output``).  With ``--all-files``: read every
     ``[[file]]`` entry from the TOML and write one codebook per file
-    under ``cache/codebooks/``, plus a root index.
+    under the package ``build_dir`` (``--output`` overrides it), plus a
+    root index — mirroring where ``sofer_codebook_all`` and ``publish``
+    collect codebooks.
     """
     if args.all_files:
         if args.csv:
@@ -197,7 +201,7 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
                 print(f"Error: {err}", file=sys.stderr)
             return 1
         try:
-            generate_all_codebooks(cfg)
+            generate_all_codebooks(cfg, output_dir=resolve_output_dir(cfg, args.output))
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -214,9 +218,18 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # time (post-reload), never from a frozen argparse default.
     max_sample = args.max_sample if args.max_sample is not None else config.CODEBOOK_MAX_SAMPLE
 
+    # Anchor a relative --output to the input file's parent (MSP-R10): the
+    # codebook lands next to the analysed file, never in an unrelated cwd.
+    output_path = args.output
+    if output_path:
+        out = Path(output_path)
+        if not out.is_absolute():
+            out = Path(args.csv).parent / out
+        output_path = str(out)
+
     codebook = generate_codebook(
         args.csv,
-        output_path=args.output,
+        output_path=output_path,
         max_sample=max_sample,
     )
     if not args.output:
@@ -286,10 +299,15 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     if not getattr(args, "dataset", None):
         print("Error: Must specify a dataset file or use --all-files.", file=sys.stderr)
         return 1
+    # Anchor a relative --output to the dataset's parent (MSP-R10): the
+    # metadata.yaml lands next to the profiled file, never in an unrelated cwd.
+    output_dir = Path(args.output) if args.output else None
+    if output_dir is not None and not output_dir.is_absolute():
+        output_dir = Path(args.dataset).parent / output_dir
     try:
         return run_profile(
             Path(args.dataset),
-            output_dir=Path(args.output) if args.output else None,
+            output_dir=output_dir,
             force=bool(getattr(args, "force", False)),
         )
     except FileExistsError as exc:
@@ -355,10 +373,16 @@ def _cmd_render(args: argparse.Namespace) -> int:
     if not getattr(args, "package", None):
         print("Error: Must specify a package path or use --all-files.", file=sys.stderr)
         return 1
+    # Anchor a relative --output to the package dir-or-file (MSP-R10): the
+    # README.md lands next to metadata.yaml, never in an unrelated cwd.
+    output_dir = Path(args.output) if args.output else None
+    if output_dir is not None and not output_dir.is_absolute():
+        pkg = Path(args.package)
+        output_dir = (pkg if pkg.is_dir() else pkg.parent) / output_dir
     try:
         return run_render(
             Path(args.package),
-            output_dir=Path(args.output) if args.output else None,
+            output_dir=output_dir,
             force=bool(getattr(args, "force", False)),
         )
     except FileExistsError as exc:
@@ -392,7 +416,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                :func:`flatten_first_level` + ``shutil.copy2``), ``write_toml``.
 
     Atomicity: collision or ``N``/``--dry-run`` leaves TOML and moved files
-    untouched — no partial moves.
+    untouched — no partial moves. Phase 2 copies files first and writes the
+    TOML last via an atomic :func:`write_toml` (temp + ``os.replace``), so a
+    TOML write failure cannot corrupt the config; the documented recovery is
+    a plain re-run with ``--force`` (the cache copy is overwritten and the
+    TOML re-registered, SCN-08).
     """
     config_path = Path(args.config).resolve()
 
@@ -506,10 +534,6 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     new_count = after_count - before_count
 
     print(f"  OK  Discovered {len(discovered)} supported file(s).")
-    if new_count:
-        print(f"  OK  Registered {new_count} new [[file]] entry(s).")
-    else:
-        print("  OK  All discovered files already registered (idempotent).")
 
     # 4. Confirm with the user before copying when Phase 1 had no candidates
     #    and thus no prompt yet; when Phase 1 moved files, the gate already
@@ -535,9 +559,19 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
-        print("  DRY RUN  Would copy the following files:")
-        for _src, dest in copied:
-            print(f"     → {dest.relative_to(base_dir).as_posix()}")
+        if copied:
+            print("  DRY RUN  Would copy the following files:")
+            for _src, dest in copied:
+                print(f"     → {dest.relative_to(base_dir).as_posix()}")
+        else:
+            print(
+                "  DRY RUN  Nothing to copy — all files already present in the"
+                f" artifact cache ({config.OUTPUT_DIR}/, idempotent)."
+            )
+        if new_count:
+            print(f"  DRY RUN  Would register {new_count} new [[file]] entry(s).")
+        else:
+            print("  DRY RUN  All discovered files already registered (idempotent).")
     else:
         for _src, dest in copied:
             print(f"     OK  {dest.relative_to(base_dir).as_posix()}")
@@ -549,7 +583,17 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             print(f"  OK  Updated {config_path.name}")
         except Exception as exc:
             print(f"  X  Failed to write TOML: {exc}", file=sys.stderr)
+            print(
+                "  i  Re-run with --force to recover (cache/ copies are already in place).",
+                file=sys.stderr,
+            )
             return 1
+        # Registration is only truthful AFTER the copy and the TOML write have
+        # both succeeded — a partial failure must never report a registration.
+        if new_count:
+            print(f"  OK  Registered {new_count} new [[file]] entry(s).")
+        else:
+            print("  OK  All discovered files already registered (idempotent).")
 
     return 0
 
@@ -579,7 +623,8 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
     from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
-    receives an explicit ``env`` dict, opencode receives no env.
+    receives an ``env`` name list (NAMES only — values are never persisted),
+    opencode receives no env.
     """
     from . import mcp_registration
 
@@ -827,63 +872,71 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     Orchestration:
 
-        1. ``mkdir -p RAW_DIR`` idempotently (``exist_ok=True``) before the
-           TOML write — skipped only when ``--move-existing --dry-run`` is
-           active (preview, no mutation).
-        2. When ``--move-existing`` is set: collect depth-1 supported files
-           (``SUPPORTED_FORMATS``, direct children of ``cwd``), run
+        1. Validate the identity pre-write via :func:`validate_identity`
+           (INIT-05 / CLI-R07): a missing/blank/placeholder/unsafe ``name``
+           or ``user`` prints each error to stderr and exits 1 — neither
+           the TOML nor ``raw/`` is created.
+        2. Resolve the dataset root — no bound, so the live working
+           directory (:func:`resolve_dataset_root` mode (a)) — and derive
+           ``<root>/<name>.toml`` and ``<root>/RAW_DIR`` from it; refuse to
+           overwrite an existing TOML.
+        3. Write the TOML FIRST, then ``mkdir -p RAW_DIR`` idempotently
+           (``exist_ok=True``) — a TOML write failure never leaves an orphan
+           ``raw/`` (no partial state). Both steps are skipped under
+           ``--dry-run`` in BOTH branches (preview only, no mutation),
+           matching the MCP ``sofer_init`` no-mutation semantics.
+        4. When ``--move-existing`` is set: collect depth-1 supported files
+           (``SUPPORTED_FORMATS``, direct children of the dataset root), run
            :func:`check_flatten_collisions` against existing ``raw/`` content
-           before any move, honour ``--dry-run`` (preview, no ``raw/`` mkdir
-           when absent, no moves), ``--force`` / ``not isatty`` guard (skip
-           prompt), else prompt ``[y/N]`` and abort on ``N``, then
-           :func:`shutil.move` each file into ``RAW_DIR``.
+           before any move, honour ``--dry-run`` (preview: no TOML, no
+           ``raw/`` mkdir when absent, no moves), ``--force`` / ``not
+           isatty`` guard (skip prompt), else prompt ``[y/N]`` and abort on
+           ``N``, then :func:`shutil.move` each file into ``RAW_DIR``.
     """
-    output = Path(f"{args.name}.toml")
+    errors = validate_identity(args.name, getattr(args, "user", None))
+    if errors:
+        for err in errors:
+            print(f"  X  {err}", file=sys.stderr)
+        return 1
+
+    dataset_root = resolve_dataset_root(None, live_cwd=Path.cwd().resolve())
+    output = dataset_root / f"{args.name}.toml"
     if output.exists():
         print(f"  X  File already exists: {output}")
         return 1
 
     raw_dir_name: str = config.RAW_DIR
-    raw_dir_path = Path.cwd() / raw_dir_name
+    raw_dir_path = dataset_root / raw_dir_name
     move_existing: bool = bool(getattr(args, "move_existing", False))
     dry_run: bool = bool(getattr(args, "dry_run", False))
     force: bool = bool(getattr(args, "force", False))
-    user_val: str = getattr(args, "user", None) or "YOUR_USER"
+    user_val: str = args.user
     toml_text = _INIT_TEMPLATE.format(name=args.name, user=user_val)
 
     if not move_existing:
-        # Always scaffold raw/ idempotently before TOML write (CLI-R07).
-        raw_dir_path.mkdir(parents=True, exist_ok=True)
+        if dry_run:
+            # No-mutation preview (CLI-R07 / MCP parity): neither the TOML
+            # nor raw/ is created.
+            print(f"  DRY RUN  Would create {output.name}")
+            print(f"  DRY RUN  Would scaffold {raw_dir_name}")
+            return 0
+        # TOML write BEFORE the raw/ scaffold: a write failure never leaves
+        # an orphan raw/ (no partial state, INIT-05 robustness).
         output.write_text(toml_text, encoding="utf-8")
+        raw_dir_path.mkdir(parents=True, exist_ok=True)
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
         print(f"       sofer publish {output.name}")
         return 0
 
-    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in cwd.
-    candidates: list[Path] = []
-    for entry in Path.cwd().iterdir():
-        if not entry.is_file():
-            continue
-        if entry.suffix.lower() not in SUPPORTED_FORMATS:
-            continue
-        if entry.name == output.name:
-            continue
-        # Exclude the template's own TOML name and already-tracked raw reuse;
-        # top-level files inside cache/build/raw are not iterdir children, but
-        # guard against a file literally named like those dirs (e.g. "cache").
-        candidates.append(entry.resolve())
-    candidates.sort()
+    # --move-existing: collect depth-1 SUPPORTED_FORMATS files in the dataset
+    # root (shared helper, AGENTS.md rule 4).
+    candidates, existing = collect_init_moves(dataset_root, output.name, raw_dir_path)
 
     # Pre-move collision check against existing raw/ content.
     if candidates:
-        existing: list[Path] = []
-        if raw_dir_path.exists():
-            for q in raw_dir_path.rglob("*"):
-                if q.is_file() and q.suffix.lower() in SUPPORTED_FORMATS:
-                    existing.append(q.resolve())
-        base_dir = Path.cwd().resolve()
+        base_dir = dataset_root
         try:
             check_flatten_collisions(candidates + existing, base_dir)
         except ValueError as exc:
@@ -897,12 +950,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 print(f"     {src.name} -> {raw_dir_name}/{src.name}")
         else:
             print("  DRY RUN  No supported files to move.")
-        # Preview only: no raw/ mkdir when absent, no moves.
-        output.write_text(toml_text, encoding="utf-8")
-        print(f"  OK  Created {output}")
-        print("     Edit the file and run:")
-        print(f"       sofer prepare {output.name}")
-        print(f"       sofer publish {output.name}")
+        # Preview only — dry_run performs NO filesystem writes (CLI-R07
+        # no-mutation contract): neither the TOML nor raw/ is created, no
+        # moves, matching the MCP sofer_init no-mutation semantics.
+        print(f"  DRY RUN  Would create {output.name}")
+        print(f"  DRY RUN  Would scaffold {raw_dir_name}")
         return 0
 
     # Non-dry-run move_existing: honour --force / isatty guard.
@@ -912,8 +964,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
             "  !  Skipping move of existing files (non-interactive). Use --force to move.",
             file=sys.stderr,
         )
-        raw_dir_path.mkdir(parents=True, exist_ok=True)
         output.write_text(toml_text, encoding="utf-8")
+        raw_dir_path.mkdir(parents=True, exist_ok=True)
         print(f"  OK  Created {output}")
         print("     Edit the file and run:")
         print(f"       sofer prepare {output.name}")
@@ -930,17 +982,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
             answer = "n"
         if answer not in ("y", "yes"):
             print("  OK  Aborted move.")
-            raw_dir_path.mkdir(parents=True, exist_ok=True)
             output.write_text(toml_text, encoding="utf-8")
+            raw_dir_path.mkdir(parents=True, exist_ok=True)
             print(f"  OK  Created {output}")
             print("     Edit the file and run:")
             print(f"       sofer prepare {output.name}")
             print(f"       sofer publish {output.name}")
             return 0
 
-    # Proceed: scaffold raw/ then move.
-    raw_dir_path.mkdir(parents=True, exist_ok=True)
+    # Proceed: write the TOML, then scaffold raw/ and move.
     output.write_text(toml_text, encoding="utf-8")
+    raw_dir_path.mkdir(parents=True, exist_ok=True)
     print(f"  OK  Created {output}")
     for src in candidates:
         dest = raw_dir_path / src.name
@@ -963,7 +1015,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "validation.\n"
             "\n"
             "Every dataset is configured via a TOML file.  Run:\n"
-            "  sofer init my-dataset      # create a template\n"
+            "  sofer init my-dataset --user myuser # create a template\n"
             "  sofer prepare dataset.toml # generate the package locally (build/)\n"
             "  sofer publish dataset.toml # deliver to HF Hub or a local dir"
         ),
@@ -1127,7 +1179,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "and a sample value.\n"
             "\n"
             "Use --all-files to generate one codebook per [[file]] entry "
-            "in the TOML configuration, written under cache/codebooks/."
+            "in the TOML configuration, written under the package build_dir/."
         ),
     )
     c.add_argument(
@@ -1288,8 +1340,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "into raw/; files inside cache/, build/, raw/, or EXCLUSIONS are "
             "never moved, subdirectories are ignored, and collisions with "
             "existing raw/ content are checked via check_flatten_collisions "
-            "before any move. --dry-run previews moves without mutation "
-            "(raw/ not created when absent); --force or non-interactive "
+            "before any move. --dry-run performs no writes in either branch "
+            "(no <name>.toml, no raw/, no moves); --force or non-interactive "
             "(not isatty) skips the [y/N] prompt, else prompt aborts on N.\n"
             "\n"
             "Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) "
@@ -1300,11 +1352,12 @@ def _build_parser() -> argparse.ArgumentParser:
     i.add_argument("name", help="Short name for the dataset.")
     i.add_argument(
         "--user",
-        default=None,
+        required=True,
         help=(
             "Hugging Face username or organization for repo_id "
-            "(e.g. --user myuser -> repo_id 'myuser/<name>'); "
-            "default: YOUR_USER placeholder."
+            "(e.g. --user myuser -> repo_id 'myuser/<name>'). Required: "
+            "a missing --user exits 2, and placeholder (YOUR_USER) or "
+            "unsafe values are rejected with exit 1 before any write."
         ),
     )
     i.add_argument(
@@ -1320,7 +1373,10 @@ def _build_parser() -> argparse.ArgumentParser:
     i.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview moves (a.csv -> raw/a.csv) without creating raw/ or moving files.",
+        help=(
+            "Preview without writing any files: no <name>.toml, no raw/, no "
+            "moves — for plain init and --move-existing alike."
+        ),
     )
     i.add_argument(
         "--force",

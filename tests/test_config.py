@@ -129,6 +129,39 @@ class TestSemanticPriorsValidation:
         cfg = self._load_with_toml(monkeypatch, tmp_path, toml)
         assert cfg["semantic_priors"] == {"email": 0.98}
 
+    # -- TC-13: [tool.sofer] typed-key validation (fix-dataset-config-type-validation)
+
+    def test_tool_config_rejects_wrong_type_for_int_key(self, monkeypatch, tmp_path):
+        """output_max_bytes = "huge" must raise a stable diagnostic instead of
+        reaching the module constant as a str."""
+        toml = '[tool.sofer]\noutput_max_bytes = "huge"\n'
+        with pytest.raises(ValueError, match=r"output_max_bytes.*integer"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
+    def test_tool_config_rejects_wrong_type_for_str_key(self, monkeypatch, tmp_path):
+        """A numeric csv_delimiter in [tool.sofer] must be rejected."""
+        toml = "[tool.sofer]\ncsv_delimiter = 5\n"
+        with pytest.raises(ValueError, match=r"csv_delimiter.*string"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
+    def test_tool_config_rejects_wrong_type_for_float_key(self, monkeypatch, tmp_path):
+        """codebook_numeric_threshold must be a number."""
+        toml = '[tool.sofer]\ncodebook_numeric_threshold = "high"\n'
+        with pytest.raises(ValueError, match=r"codebook_numeric_threshold.*number"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
+    def test_tool_config_rejects_bool_for_int_key(self, monkeypatch, tmp_path):
+        """bool is not an int: output_max_bytes = true must be rejected."""
+        toml = "[tool.sofer]\noutput_max_bytes = true\n"
+        with pytest.raises(ValueError, match=r"output_max_bytes.*integer"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
+    def test_tool_config_keeps_string_to_list_coercion(self, monkeypatch, tmp_path):
+        """A bare string for a list key keeps the documented [val] coercion."""
+        toml = '[tool.sofer]\ncard_modality_tags = "tabular"\n'
+        cfg = self._load_with_toml(monkeypatch, tmp_path, toml)
+        assert cfg["card_modality_tags"] == ["tabular"]
+
 
 class TestImportTimeIsolation:
     """Import binds constants from _DEFAULTS only — no filesystem access."""
@@ -527,7 +560,15 @@ class TestTc10RawDirBootstrap:
         monkeypatch.chdir(tree)
         config.reload(None)
         assert config.RAW_DIR == "inputs"
-        rc = _cmd_init(Namespace(name="my-ds", move_existing=False, dry_run=False, force=False))
+        rc = _cmd_init(
+            Namespace(
+                name="my-ds",
+                user="testuser",
+                move_existing=False,
+                dry_run=False,
+                force=False,
+            )
+        )
         assert rc == 0
         assert (tree / "inputs").is_dir()
         assert not (tree / "raw").exists()
@@ -604,12 +645,12 @@ class TestTc08SourceVisibility:
 
 
 # ---------------------------------------------------------------------------
-#  TC-11 — profile_dir / render_dir (feat-profile-render-all-files)
+#  TC-13 — profile_dir / render_dir (feat-profile-render-all-files)
 # ---------------------------------------------------------------------------
 
 
 class TestTc11ProfileRenderDir:
-    """TC-11 defaults, overrides, reload rebinding, and no-hardcode contract."""
+    """TC-13 defaults, overrides, reload rebinding, and no-hardcode contract."""
 
     def test_defaults_are_profiles_renders(self, restore_tool_config, monkeypatch, tmp_path):
         """No pyproject -> PROFILE_DIR=profiles, RENDER_DIR=renders."""

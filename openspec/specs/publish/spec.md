@@ -201,6 +201,16 @@ Auto-generated files — `README.md`, `LICENSE`, `codebook.md`, and
 even without `--force`. For all other remote files, overwrite protection SHALL
 apply unless `--force` is given.
 
+Remote inspection SHALL be fail-closed: `_inspect_repo` SHALL return an empty
+list ONLY when the repository does not exist (`RepositoryNotFoundError`); ANY
+other inspection failure (network, authentication, rate limit) SHALL raise and
+abort the publish with exit code 1 BEFORE any staging or upload — inspection
+failure is NEVER treated as an empty repo, so overwrite protection always
+sees the true remote state. `_ensure_repo` SHALL likewise raise (not print and
+continue) when `create_repo` fails for a reason other than "already exists".
+A post-upload inspection failure SHALL NOT fail an already-successful upload:
+it prints a warning and skips the split report only.
+
 #### Scenario: Auto-generated files always overwrite
 
 - GIVEN `README.md` and `LICENSE` already exist on the Hub
@@ -215,6 +225,26 @@ apply unless `--force` is given.
 - WHEN `publish` executes
 - THEN overwrite protection SHALL refuse the file
 - AND with `--force` the file SHALL be overwritten
+
+#### Scenario: Repo-not-found reads as empty
+
+- GIVEN `list_repo_files` raises `RepositoryNotFoundError`
+- WHEN `_inspect_repo` executes
+- THEN it SHALL return `[]` (empty repo) and publish SHALL proceed normally
+
+#### Scenario: Inspection failure fails closed
+
+- GIVEN `list_repo_files` raises any other error (e.g. network failure)
+- WHEN `publish` executes against hf
+- THEN the publish SHALL abort with exit code 1 BEFORE any upload
+- AND `upload_folder` SHALL NOT be called
+- AND the error SHALL be surfaced (never a silent empty list)
+
+#### Scenario: create_repo failure fails closed
+
+- GIVEN `create_repo` fails for a reason other than "already exists"
+- WHEN `_ensure_repo` executes
+- THEN the failure SHALL raise (publish aborts, exit code 1)
 
 ---
 
@@ -316,3 +346,54 @@ entries.)
 - GIVEN `publish --target hf --output ./staging --clean` succeeds
 - WHEN upload completes
 - THEN `./staging/` SHALL be removed and `cfg._base_dir / "cache"` SHALL remain unless `--clean-cache` given
+
+
+### Requirement: Package artifact manifest with explicit publishable/intermediate boundary (PUB-12)
+
+The publish flow SHALL operate on one machine-readable package manifest listing every artifact of the selected build profile — `source` (the real config path), `artifact_type`, `path`, and `status` — with artifacts classified as **publishable** (parquet incl. multi-sheet expansion, csv when keep_csv, README, LICENSE, codebook.md, codebooks/**) or **intermediate** (profiles, renders, per-sheet intermediates, schema/card inputs). `prepare` writes the manifest into the output dir; publish dry-run and confirm SHALL read the SAME manifest to plan and to enforce contents (no divergence).
+
+Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
+
+(Previously: the package boundary was implicit — plan_remote_files derived the dry-run set and codebook_remotes were collected from the output dir, with a warning when codebooks were absent that could be a false positive for optional artifacts.)
+
+#### Scenario: Manifest lists exact publishable set for single-sheet source
+
+- GIVEN a single-CSV dataset and a fresh prepare
+- THEN `output_dir/manifest.json` SHALL list each parquet, README.md, LICENSE, and codebook.md as `staged`
+- AND profiles/renders present in the tree SHALL be `intermediate` (never publishable)
+
+#### Scenario: Multi-sheet Excel expansion is manifest-correct
+
+- GIVEN an XLSX source converted to `stem__sheet.parquet` sheets
+- THEN every sheet parquet SHALL appear in the manifest with its per-sheet path
+
+#### Scenario: Missing required artifact blocks confirm with recovery
+
+- GIVEN a manifest missing a required codebook that the profile promises
+- WHEN confirm runs
+- THEN it SHALL fail with a stable `error_code` and a `recovery` naming re-run prepare
+
+#### Scenario: Optional absent artifact does not warn
+
+- GIVEN a profile whose renders are optional and absent
+- WHEN dry-run/confirm run
+- THEN no "missing" warning SHALL be emitted for the optional artifact and its manifest entry SHALL read `optional`
+
+#### Scenario: Dry-run and confirm share one manifest
+
+- GIVEN a prepared package
+- WHEN dry-run plans and confirm uploads
+- THEN both SHALL consume the same `manifest.json` entries (structure, not re-derived sets)
+
+#### Scenario: Custom config TOML name invalidates the package
+
+- GIVEN a dataset configured via `custom-name.toml`
+- WHEN the TOML is modified after the newest parquet
+- THEN the package SHALL be treated as stale
+
+#### Scenario: Local delivery overwrite protection honors force
+
+- GIVEN a local target with an existing conflicting file
+- WHEN `force=false`
+- THEN the delivery SHALL refuse to overwrite
+- AND with `force=true` it SHALL overwrite

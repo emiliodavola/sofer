@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -273,6 +275,33 @@ def _make_tree(tmp_path: Path, entries: list[str]) -> None:
         _touch(tmp_path / p)
 
 
+def _make_link(link: Path, target: Path) -> bool:
+    """Create a symlink (or NTFS junction on win32) ``link -> target``.
+
+    Returns ``True`` on success. On win32, ``os.symlink`` requires
+    developer-mode privileges — falls back to ``mklink /J`` (junction). When
+    the OS refuses both, returns ``False`` so the caller skips with a
+    documented reason instead of stalling. Mirrors the helper in
+    ``test_mcp_server.py`` (link creation is a platform capability, not
+    sofer logic).
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return True
+    except OSError:
+        if os.name != "nt":
+            return False
+        try:
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0 and link.exists()
+        except OSError:
+            return False
+
+
 # ------------------------------------------------------------------
 # TestDiscoverFiles
 # ------------------------------------------------------------------
@@ -339,6 +368,58 @@ class TestDiscoverFiles:
         names = {p.name for p in result}
         # build.csv is a file, so kept; build/nested.csv is in excluded dir, so skipped
         assert names == {"build.csv"}
+
+    def test_symlinked_file_outside_not_discovered(self, tmp_path, tmp_path_factory) -> None:
+        """A file symlink pointing OUTSIDE tmp_path is never discovered (SCN-01).
+
+        On Python 3.10-3.12 ``rglob`` yields the link and ``is_file()``
+        follows it — without the ``_is_link`` guard the external file would
+        be discovered, copied into cache/, registered, and publishable.
+        """
+        outside = tmp_path_factory.mktemp("outside-leak")
+        secret = outside / "secret.csv"
+        secret.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        if not _make_link(link, secret):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        _make_tree(tmp_path, ["real.csv"])
+        result = discover_files(tmp_path)
+        assert link not in result, "external file reached via symlink must not be discovered"
+        assert {p.name for p in result} == {"real.csv"}
+
+    def test_symlinked_dir_outside_not_discovered(self, tmp_path, tmp_path_factory) -> None:
+        """A directory symlink pointing OUTSIDE tmp_path is not traversed.
+
+        The link's target contents must not be discovered even though on
+        3.10-3.12 ``rglob`` follows directory links and would yield the
+        children as regular (non-link) entries — the ancestor guard rejects
+        them.
+        """
+        outside = tmp_path_factory.mktemp("outside-leak")
+        (outside / "secret.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leakdir"
+        if not _make_link(link, outside):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        _make_tree(tmp_path, ["real.csv"])
+        result = discover_files(tmp_path)
+        assert all("secret" not in p.name for p in result), (
+            f"external dir contents leaked into discovery: {result}"
+        )
+        assert {p.name for p in result} == {"real.csv"}
+
+    def test_regular_file_still_discovered_alongside_links(
+        self, tmp_path, tmp_path_factory
+    ) -> None:
+        """A regular file next to a symlink is still discovered (only links are excluded)."""
+        outside = tmp_path_factory.mktemp("outside-leak")
+        (outside / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        link = tmp_path / "leak.csv"
+        if not _make_link(link, outside / "x.csv"):
+            pytest.skip("symlink/junction creation unavailable on this host")
+        _touch(tmp_path / "keep.csv")
+        result = discover_files(tmp_path)
+        names = {p.name for p in result}
+        assert names == {"keep.csv"}
 
 
 # ------------------------------------------------------------------
@@ -527,14 +608,54 @@ class TestCopyFiles:
         assert len(copied) == 1
         assert not (data_dir / "a.csv").exists()
 
-    def test_file_exists_error_without_force(self, tmp_path: Path) -> None:
-        """FileExistsError is raised when dest exists and force=False."""
-        _touch(tmp_path / "a.csv")
+    def test_dry_run_skips_identical_dest(self, tmp_path: Path) -> None:
+        """dry_run=True must NOT list an already-identical destination: apply
+        skips it (SCN-08 idempotent re-scan), so the preview must too —
+        otherwise the dry-run output is misleading ("would copy" a file that
+        apply leaves untouched)."""
+        _touch(tmp_path / "a.csv", content="same")
         data_dir = tmp_path / "data"
-        _touch(data_dir / "a.csv")
+        _touch(data_dir / "a.csv", content="same")
+
+        copied = copy_files([tmp_path / "a.csv"], tmp_path, data_dir, dry_run=True)
+        assert copied == []
+        # Read-only: destination untouched, no new files.
+        assert (data_dir / "a.csv").read_text(encoding="utf-8") == "same"
+
+    def test_dry_run_raises_on_differing_dest(self, tmp_path: Path) -> None:
+        """dry_run=True must surface the apply-time failure: a destination
+        that exists with DIFFERENT content raises FileExistsError on apply,
+        so the preview must raise the same error instead of reporting a copy
+        that would never happen."""
+        _touch(tmp_path / "a.csv", content="source")
+        data_dir = tmp_path / "data"
+        _touch(data_dir / "a.csv", content="different-dest")
+
+        with pytest.raises(FileExistsError, match="--force"):
+            copy_files([tmp_path / "a.csv"], tmp_path, data_dir, dry_run=True)
+        # Read-only: destination untouched, no new files.
+        assert (data_dir / "a.csv").read_text(encoding="utf-8") == "different-dest"
+
+    def test_file_exists_error_without_force(self, tmp_path: Path) -> None:
+        """FileExistsError is raised when dest exists with DIFFERENT content and force=False."""
+        _touch(tmp_path / "a.csv", content="source")
+        data_dir = tmp_path / "data"
+        _touch(data_dir / "a.csv", content="different-dest")
 
         with pytest.raises(FileExistsError, match="--force"):
             copy_files([tmp_path / "a.csv"], tmp_path, data_dir)
+
+    def test_identical_dest_skipped_without_force(self, tmp_path: Path) -> None:
+        """An already-identical destination is skipped, not an error (SCN-08
+        idempotent re-scan) — ``scan twice is safe`` without ``--force``."""
+        _touch(tmp_path / "a.csv", content="same")
+        data_dir = tmp_path / "data"
+        _touch(data_dir / "a.csv", content="same")
+
+        copied = copy_files([tmp_path / "a.csv"], tmp_path, data_dir)
+
+        assert copied == []
+        assert (data_dir / "a.csv").read_text(encoding="utf-8") == "same"
 
     def test_force_overwrites(self, tmp_path: Path) -> None:
         """force=True overwrites existing dest without error."""
@@ -586,6 +707,14 @@ class TestWriteToml:
         config.write_text("old", encoding="utf-8")
         write_toml({"dataset": {"name": "new", "repo_id": "u/r"}}, config)
         assert "new" in config.read_text(encoding="utf-8")
+
+    def test_atomic_write_no_tmp_leftover(self, tmp_path: Path) -> None:
+        """write_toml commits via temp + os.replace — no .tmp file remains."""
+        config = tmp_path / "out.toml"
+        write_toml({"dataset": {"name": "x", "repo_id": "u/r"}}, config)
+
+        assert config.exists()
+        assert not config.with_name(config.name + ".tmp").exists()
 
 
 # ------------------------------------------------------------------
@@ -681,6 +810,38 @@ class TestIntegration:
 
         second_cfg = DatasetConfig.from_toml(config)
         assert len(second_cfg.files) == first_count
+
+    def test_partial_failure_recovery_via_force(self, tmp_path: Path, monkeypatch) -> None:
+        """A TOML write failure after the cache copy leaves the TOML untouched;
+        a re-run with --force recovers (SCN-08)."""
+        import sofer.cli as cli_mod
+        from sofer.cli import _cmd_scan
+
+        _touch(tmp_path / "raw" / "a.csv", content="x,y\n1,2\n")
+        config = tmp_path / "dataset.toml"
+        config.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        original = config.read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        # Simulate a TOML write failure AFTER the copy phase succeeds.
+        monkeypatch.setattr(
+            cli_mod, "write_toml", lambda _raw, _path: (_ for _ in ()).throw(OSError("disk full"))
+        )
+        rc = _cmd_scan(Namespace(config=str(config), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        # TOML unchanged — no partial registration.
+        assert config.read_text(encoding="utf-8") == original
+        # Cache copy happened before the failed TOML write.
+        assert (tmp_path / "cache" / "a.csv").exists()
+
+        # Recovery: restore the real writer and re-run with --force.
+        monkeypatch.undo()
+        rc2 = _cmd_scan(Namespace(config=str(config), dry_run=False, force=True, ext=None))
+        assert rc2 == 0
+        cfg = DatasetConfig.from_toml(config)
+        assert len(cfg.files) == 1
 
     def test_missing_config_returns_error(self, tmp_path: Path, monkeypatch) -> None:
         """Calling scan with a nonexistent config returns exit code 1."""
@@ -922,7 +1083,9 @@ class TestE2EInitMoveScan:
         (tmp_path / "a.csv").write_text("x,y\n1,2\n", encoding="utf-8")
         (tmp_path / "b.parquet").write_text("fake", encoding="utf-8")
 
-        rc = _cmd_init(Namespace(name="my-ds", move_existing=True, dry_run=False, force=True))
+        rc = _cmd_init(
+            Namespace(name="my-ds", user="testuser", move_existing=True, dry_run=False, force=True)
+        )
         assert rc == 0
         assert (tmp_path / "raw" / "a.csv").exists()
         assert not (tmp_path / "a.csv").exists()
@@ -930,11 +1093,7 @@ class TestE2EInitMoveScan:
         assert (tmp_path / "raw" / "b.parquet").exists()
 
         cfg = tmp_path / "my-ds.toml"
-        # Patch placeholder repo_id so validation passes (init template uses YOUR_USER).
-        cfg.write_text(
-            cfg.read_text(encoding="utf-8").replace("YOUR_USER/my-ds", "u/my-ds"),
-            encoding="utf-8",
-        )
+        # init embeds a validated repo_id (identity checked pre-write)
         # scan registers raw/ files into TOML and copies to cache/
         monkeypatch.setattr("builtins.input", lambda _p="": "y")
         rc2 = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))

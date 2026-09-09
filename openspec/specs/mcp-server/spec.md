@@ -82,9 +82,11 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ### Requirement: Tool roster and schema contract (MSP-R03)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`.
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03.
 
-Server SHALL expose 14 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1); `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02. (Previously: 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
+Server SHALL expose 14 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1); `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
+
+(Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
 #### Scenario: Constrained schemas
 
@@ -103,6 +105,12 @@ Server SHALL expose 14 callables: `sofer_validate, sofer_prepare, sofer_publish,
 - GIVEN `tools/list` `sofer_init`
 - WHEN inspected
 - THEN `cwd` SHALL be optional `str`, default `None`, and `C:/Windows` SHALL raise `PathOutsideRootError`
+
+#### Scenario: sofer_init identity fields in schema
+
+- GIVEN `tools/list` `sofer_init` `output_schema`
+- WHEN inspected
+- THEN `config_path` and `dataset_root` SHALL be declared as string properties and SHALL appear in the call envelope
 
 ---
 
@@ -126,7 +134,7 @@ Every tool description SHALL be ≤3 sentences plus `When to use:` (≤1 sentenc
 
 `sofer_publish` SHALL default to `dry_run=True` and SHALL never write to HF under any parameter combination: `target="hf"` with `dry_run=False` SHALL raise a typed error directing to `sofer_publish_confirm`. `sofer_publish_confirm` SHALL be the ONLY callable that writes to HF, SHALL require `HF_TOKEN` (clear typed error before any network call), and SHALL gate on the quality report. There SHALL be no implicit state coupling: each call is independent; no session state carries between publish and confirm.
 
-`sofer_publish_confirm` SHALL enforce a fail-closed authorization ladder: it SHALL require `acknowledge_risk=True` (default `False`; a call without it SHALL be refused with a typed error, never a warning); SHALL require `acknowledge_confidential=True` when the config's `[meta] confidential` is true; SHALL accept an optional host-configured `approval_phrase` (from `build_server(root, approval_phrase)` or the `SOFER_MCP_APPROVAL_PHRASE` environment variable) and SHALL refuse on absent or mismatched phrase, compared with a constant-time comparison (`hmac.compare_digest`). The confirm envelope SHALL expose `confidential`, both acknowledgment flags, `skipped_protected`, and `partial`. Empty-string and absent `HF_TOKEN` SHALL fail identically; `HF_HUB_TOKEN` SHALL be accepted as an alias. The quality gate SHALL run before the token check (offline, deterministic fail).
+`sofer_publish_confirm` SHALL enforce a fail-closed authorization ladder: it SHALL require `acknowledge_risk=True` (default `False`; a call without it SHALL be refused with a typed error, never a warning); SHALL require `acknowledge_confidential=True` when the config's `[meta] confidential` is true; SHALL require a host-configured `approval_phrase` (from `build_server(root, approval_phrase)` or the `SOFER_MCP_APPROVAL_PHRASE` environment variable) and SHALL refuse on absent or mismatched phrase, compared with a constant-time comparison (`hmac.compare_digest`). When the server has NO phrase configured — including an empty or whitespace-only value, which SHALL be normalized to unconfigured — `sofer_publish_confirm` SHALL refuse with `PUBLISH_APPROVAL_NOT_CONFIGURED` and never reach the upload; the acknowledgment booleans alone are never sufficient. The confirm envelope SHALL expose `confidential`, both acknowledgment flags, `skipped_protected`, and `partial`. Empty-string and absent `HF_TOKEN` SHALL fail identically; `HF_HUB_TOKEN` SHALL be accepted as an alias. The quality gate SHALL run before the token check (offline, deterministic fail).
 
 #### Scenario: Publish dry-run returns a plan without network
 
@@ -241,17 +249,31 @@ Tool outputs SHALL include the config's `meta.confidential` flag and detected PI
 
 ### Requirement: Config contract (MSP-R10)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28).
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `fix-dataset-identity-context` (archived 2026-09-04).
 
-Every dataset tool SHALL take `config: str` (TOML path) as its first parameter; `DatasetConfig.from_toml` SHALL re-anchor `config.reload(toml_dir)` (verified at model.py:355). Codebook and scan tools SHALL NOT silently apply `default_config_name` — agents pass explicit paths. Relative paths SHALL resolve against the client cwd (stdio server inherits it). Codebook tools SHALL inject post-reload `config.CSV_DELIMITER`/`config.CSV_ENCODING` — never the hardcoded `";"`/`"utf-8-sig"` debt in `codebook.generate` (rule-3 fix).
+Every dataset tool SHALL take `config: str` (TOML path) as its first parameter; `DatasetConfig.from_toml` SHALL accept an optional `discovery_root: Path | None = None` and SHALL pass `stop_at=discovery_root` into `config.reload` — when provided, tool-config discovery SHALL be bounded (walk-up stops at `discovery_root`); the MCP adapter SHALL ALWAYS supply `discovery_root=_get_root()` so discovery never escapes the server root, and the post-hoc `_bound_discovery` re-bind SHALL be retired. The CLI SHALL pass no bound (unbounded, behavior unchanged). Codebook and scan tools SHALL NOT silently apply `default_config_name` — agents pass explicit paths. Relative paths SHALL resolve against the client cwd (stdio server inherits it). Relative `output_dir`/`output_file` overrides SHALL anchor to the config's `config_path.parent` — never the server root or process cwd. Codebook tools SHALL inject post-reload `config.CSV_DELIMITER`/`config.CSV_ENCODING` — never the hardcoded `";"`/`"utf-8-sig"` debt in `codebook.generate` (rule-3 fix).
 
 Every dataset tool SHALL self-anchor config state per call to avoid cross-call module-state pollution: scan tools SHALL reload from the config's directory before reading output directories; `sofer_codebook(path)`, `sofer_profile(dataset)`, and `sofer_render(package)` SHALL anchor on their input's directory. `sofer_codebook_all` SHALL use `cfg.csv_delimiter`/`cfg.csv_encoding` from the dataset's `[meta]` (the authoritative source), not the process-global `config.CSV_DELIMITER`. `sofer_prepare` SHALL pass `run_checks=not no_checks` to match CLI parity.
+
+(Previously: `from_toml` had no `discovery_root`; MCP compensated with the post-hoc `_bound_discovery` re-bind; output overrides anchored to the server root.)
 
 #### Scenario: Tool config resolves per dataset directory
 
 - GIVEN a TOML under a tree with `[tool.sofer]` overrides
 - WHEN any dataset tool calls `DatasetConfig.from_toml(config)`
 - THEN `config.reload(toml_dir)` SHALL rebind module constants before the domain function runs
+
+#### Scenario: Discovery bounded at server root
+
+- GIVEN `[tool.sofer]` overrides in a `pyproject.toml` ABOVE the server root and a dataset TOML inside it
+- WHEN `sofer_prepare(config)` runs via MCP
+- THEN the above-root overrides SHALL NOT apply (walk-up stops at the server root)
+
+#### Scenario: Relative output override anchors to config dir
+
+- GIVEN dataset at `<root>/proj/dataset.toml` and `sofer_prepare(config, output_dir="build")`
+- WHEN the call runs
+- THEN the package SHALL be written under `<root>/proj/build`, not `<root>/build`
 
 #### Scenario: Codebook honors configured delimiter/encoding
 
@@ -365,7 +387,7 @@ The MCP server SHALL be fully testable offline with no LLM: unit tests on tool f
 
 > Added by change `mcp-dx-audit-surface` (archived 2026-08-31).
 
-System MUST return expected failures as `{"ok":false,"error_code":E,"message":str,"next":obj,"config_errors":[...]}` and MUST NOT throw `McpError` for them; only transport/containment MAY throw typed `PathOutsideRootError`/`PublishRefusedError`. `error_code` MUST be `CONFIG_ERROR|VALIDATION_FAILED|QUALITY_GATE_FAILED|PUBLISH_RISK_NOT_ACKD|PUBLISH_CONFIDENTIAL_NOT_ACKD|PUBLISH_APPROVAL_REQUIRED|PATH_OUTSIDE_ROOT|TARGET_INVALID`.
+System MUST return expected failures as `{"ok":false,"error_code":E,"message":str,"next":obj,"config_errors":[...]}` and MUST NOT throw `McpError` for them; only transport/containment MAY throw typed `PathOutsideRootError`/`PublishRefusedError`. `error_code` MUST be `CONFIG_ERROR|VALIDATION_FAILED|QUALITY_GATE_FAILED|PUBLISH_RISK_NOT_ACKD|PUBLISH_CONFIDENTIAL_NOT_ACKD|PUBLISH_APPROVAL_REQUIRED|PUBLISH_APPROVAL_NOT_CONFIGURED|TARGET_INVALID` — `PATH_OUTSIDE_ROOT` is NOT an envelope code: path escapes are raised as `PathOutsideRootError` (transport-mapped to `isError`), never emitted through `_error_envelope`.
 
 #### Scenario: Refusal returns envelope with next
 
@@ -399,7 +421,7 @@ Server `instructions` MUST contain phased diagram `Phase 0 Bootstrap (conditiona
 
 > Added by change `mcp-dx-audit-surface` (archived 2026-08-31).
 
-System MUST expose `sofer_auth_status(config)` with `annotations.readOnlyHint:true`, returning `{token:"present"|"missing", confidential:bool, requires_approval_phrase:bool, next:obj}` without leaking token/phrase values or requiring network.
+System MUST expose `sofer_auth_status(config)` with `annotations.readOnlyHint:true`, returning `{token:"present"|"missing", confidential:bool, requires_ack_confidential:bool, approval_configured:bool, requires_approval_phrase:bool, next:obj}` without leaking token/phrase values or requiring network. `requires_approval_phrase` is always `true` (a phrase is always required for publish); `approval_configured` reflects whether the server has a non-blank phrase set. An empty or whitespace-only phrase MUST be treated as unconfigured (`approval_configured:false`). `ok` SHALL reflect publish readiness — `true` only when config validation passes AND a token is present AND (when `requires_approval_phrase`) the approval phrase is configured; a dataset that cannot publish never reads `ok:true`.
 
 #### Scenario: Preflight without publish
 
@@ -468,57 +490,87 @@ System MUST emit `_INIT_TEMPLATE` with Windows-safe `[[file]] local`. Placeholde
 
 ### Requirement: sofer_init cwd containment (INIT-02)
 
-> Added by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31).
+> Added by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31). Modified by `fix-dataset-identity-context` (archived 2026-09-04).
 
-`sofer_init` SHALL expose `cwd: str | None = None`. `None` → effective root is `_get_root()` (back-compat). `str` → resolved via `_contained_path(cwd, root=_SERVER_ROOT, must_exist=False)` and MUST satisfy `is_relative_to(_SERVER_ROOT.resolve())`, per-call `effective_root`, MUST NOT mutate `_SERVER_ROOT`. Escape → `PathOutsideRootError`.
+`sofer_init` SHALL expose `cwd: str | None = None`. Resolution SHALL be fail-closed strict-descendant: `cwd=None` SHALL select the live process CWD only when it is a STRICT descendant of the server root (`live != root.resolve() AND live.is_relative_to(root.resolve())`); otherwise SHALL refuse with an actionable `IdentityResolutionError` naming the required `cwd` argument — the server root SHALL NEVER be silently selected. `cwd=str` SHALL be resolved via `_contained_path(cwd, root=_SERVER_ROOT, must_exist=False)`, MUST satisfy `is_relative_to(_SERVER_ROOT.resolve())`, per-call `effective_root`, MUST NOT mutate `_SERVER_ROOT`. Escape → `PathOutsideRootError`.
 
-#### Scenario: cwd None back-compat
-- GIVEN `build_server(root=Desktop)` live CWD `Desktop/test`
+(Previously: `cwd=None` back-compat auto-selected `_get_root()`, silently picking the parent root when live CWD equaled or escaped the root.)
+
+#### Scenario: cwd omitted with live CWD strictly inside root
+
+- GIVEN `build_server(root=Desktop)`, live CWD `Desktop/test` (a real directory)
 - WHEN `sofer_init(name="test", cwd=None)`
-- THEN root is `Desktop`
+- THEN effective root SHALL be `Desktop/test` and `Desktop/test/test.toml` SHALL be written
+
+#### Scenario: cwd omitted with live CWD equal to root fails closed
+
+- GIVEN `build_server(root=Desktop)`, live CWD `Desktop` (root == dataset root)
+- WHEN `sofer_init(name="test", cwd=None)`
+- THEN `IdentityResolutionError` SHALL name the required `cwd` argument and NO file SHALL be written
+
+#### Scenario: cwd omitted with live CWD outside root fails closed
+
+- GIVEN `build_server(root=Desktop)`, live CWD `C:/elsewhere`
+- WHEN `sofer_init(name="test", cwd=None)`
+- THEN `IdentityResolutionError` SHALL name the required `cwd` argument and NO file SHALL be written
 
 #### Scenario: cwd contained succeeds
+
 - GIVEN `cwd="Desktop/test"` under `Desktop`
 - WHEN `sofer_init(cwd="Desktop/test", name="test")`
 - THEN succeeds with root `Desktop/test`
 
 #### Scenario: cwd outside rejected
+
 - GIVEN `_SERVER_ROOT=Desktop`
 - WHEN `sofer_init(cwd="C:/Windows")`
 - THEN `PathOutsideRootError`, no write
 
 #### Scenario: traversal rejected
+
 - GIVEN `_SERVER_ROOT=Desktop`
 - WHEN `cwd="Desktop/../Windows"`
 - THEN `PathOutsideRootError`
 
 #### Scenario: no global mutation
+
 - GIVEN `_SERVER_ROOT=Desktop`
 - WHEN `sofer_init(cwd="Desktop/test", name="test")` done
 - THEN `_get_root()` still `Desktop`
 
 ---
 
-### Requirement: Anchored writes under effective_root (INIT-03)
+### Requirement: Anchored writes and canonical identity reporting (INIT-03)
 
-> Added by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31).
+> Added by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31). Modified by `fix-dataset-identity-context` (archived 2026-09-04).
 
-`sofer_init` MUST create `<name>.toml` and `raw/` only inside `effective_root` (INIT-02). No parent writes.
+`sofer_init` MUST create `<name>.toml` and `raw/` only inside `effective_root` (INIT-02). No parent writes. The TOML SHALL be written BEFORE `raw/` is scaffolded (and the CLI `init` SHALL do the same) so a TOML write failure never leaves an orphan `raw/` — no partial state. The success envelope SHALL report the canonical identity: `config_path` (absolute `effective_root/<name>.toml`) and `dataset_root` (absolute resolved `effective_root`) — both SHALL appear in the envelope AND in the tool's `output_schema` (INIT-03, MSP-R03).
+
+(Previously: anchored writes only; the envelope reported no identity fields.)
 
 #### Scenario: stale-root anchored
+
 - GIVEN `build_server(root=Desktop)` + dir `Desktop/test`
 - WHEN `sofer_init(cwd="Desktop/test", name="test")`
 - THEN `Desktop/test/test.toml` + `Desktop/test/raw/` exist, `Desktop/test.toml` absent
 
 #### Scenario: idempotent
+
 - GIVEN `Desktop/test/test.toml` + `raw/keep.csv`
 - WHEN re-run `sofer_init(cwd="Desktop/test", name="test")`
 - THEN succeeds, `keep.csv` preserved
 
 #### Scenario: cleanup not parent
+
 - GIVEN effective root `Desktop/test`
 - WHEN init completes
 - THEN parent `Desktop/raw` not created
+
+#### Scenario: canonical identity reported
+
+- GIVEN `sofer_init(cwd="Desktop/test", name="test")` succeeds
+- WHEN the envelope is inspected
+- THEN it SHALL contain absolute `config_path` `Desktop/test/test.toml` and absolute resolved `dataset_root` `Desktop/test`
 
 ---
 
@@ -542,3 +594,103 @@ After `sofer_init` → `sofer_scan_apply`, scanner MUST discover `DATA_GOT_ALL.x
 - GIVEN post-scan with 2 entries
 - WHEN `sofer_scan_apply` rerun
 - THEN count stays 2, no dupes
+
+---
+
+### Requirement: Dataset identity validation before any write (INIT-05)
+
+> Added by `fix-dataset-identity-context` (archived 2026-09-04).
+
+`sofer_init` SHALL validate identity BEFORE any write: `name` and `user` SHALL both be mandatory, non-empty, and safe single components — no `/`, no `\`, no drive/UNC path (`ntpath.splitdrive`), no `.`/`..` components, no quotes, no newlines/control characters, no leading/trailing whitespace. `name` SHALL additionally contain no Windows-invalid filename character (`<>:"/\|?*`) and SHALL NOT be a Windows reserved device name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, case-insensitive, stem-matched so `CON.txt` is rejected too (dots are legal in names; `<name>.toml` with a reserved stem is unmaterializable on Windows, and the validation is platform-independent pre-write). `user` SHALL match `^[\w\-]+\Z` — the `\Z` end-of-string anchor, NOT `$` (Python `$` also matches before a trailing `\n`, so `\Z` is the exact no-trailing-newline contract; it is a strict superset of the earlier `^[\w\-]+$` prose form) — and SHALL NOT be a placeholder (`YOUR_USER` or any normalized `model._PLACEHOLDERS` value). Any violation SHALL refuse the call with an actionable error BEFORE creating `<name>.toml` or `raw/`; the generated TOML SHALL NEVER contain `YOUR_USER`. CLI parity is specified in CLI-R07.
+
+(Previously: only empty `name` was refused; a missing/blank `user` silently emitted the `YOUR_USER` placeholder.)
+
+#### Scenario: Valid identity accepted
+
+- GIVEN `sofer_init(name="test", user="emiliodavola", cwd="Desktop/test")`
+- WHEN the call executes
+- THEN `ok:true` and `Desktop/test/test.toml` SHALL contain `repo_id = "emiliodavola/test"`
+
+#### Scenario: Missing or blank identity refused before write
+
+- GIVEN `name` missing/blank or `user` missing/blank (`None`, `""`, `"   "`)
+- WHEN `sofer_init` executes
+- THEN a refusal SHALL name the missing value and NO TOML and NO `raw/` SHALL be created
+
+#### Scenario: Placeholder user banned pre-write
+
+- GIVEN `user="YOUR_USER"` (or any normalized `_PLACEHOLDERS` value)
+- WHEN `sofer_init` executes
+- THEN the call SHALL be refused before any write and the generated TOML SHALL NOT contain `YOUR_USER`
+
+#### Scenario: Unsafe or injection-shaped name rejected
+
+- GIVEN `name` containing a separator (`a/b`, `a\b`), drive (`C:/evil`), traversal (`a/../b`), quotes, newline, or control character
+- WHEN `sofer_init` executes
+- THEN the call SHALL be refused before any write
+
+#### Scenario: Windows-invalid or reserved name rejected
+
+- GIVEN `name` containing a Windows-invalid character (`a*b`, `a?b`, `a<b`, `a>b`, `a|b`, `a:b`) or a reserved device name (`CON`, `con.toml`, `COM1`, `LPT9`)
+- WHEN `sofer_init` executes
+- THEN the call SHALL be refused before any write, with NO TOML and NO `raw/`
+
+#### Scenario: Non-conforming user rejected
+
+- GIVEN `user` not matching `^[\w\-]+\Z` (e.g. `user.name`, `user name`, `alice\n`)
+- WHEN `sofer_init` executes
+- THEN the call SHALL be refused before any write
+
+
+### Requirement: Authoritative workflow registry with executable continuations (MSP-R13)
+
+The MCP server SHALL expose one authoritative workflow registry: every registered tool SHALL have exactly one registry entry with `phase`, `branch`, `requires`, and a valid `next` continuation or explicit human gate. The same registry SHALL drive `tools/list` metadata, tool descriptions, prompts, server instructions, and runtime envelopes (no per-tool hand-built `next` hints).
+
+A `next` continuation SHALL be executable only when its tool exists and every required argument resolves (a `<config_path>` binding with no config SHALL degrade to `input_required`). A human approval stop SHALL be a typed `human_gate` envelope (`{kind: "human_gate", name, reason}`), never a fake tool call. When a required human value is unknowable, the envelope SHALL name the missing input instead of emitting a guaranteed-failing call.
+
+Canonical branches: greenfield `sofer_init -> sofer_scan_dry_run -> sofer_scan_apply -> sofer_validate`; existing-config `sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all`; single-file triage `sofer_codebook` / `sofer_profile` / `sofer_render`; delivery `sofer_auth_status -> sofer_publish(dry_run=true) -> HUMAN APPROVAL STOP -> sofer_publish_confirm`.
+
+(Previously: workflows were described by `_PHASED_INSTRUCTIONS`, docstrings, prompts, and per-envelope `next` hints with no single source of truth.)
+
+#### Scenario: Every tool has exactly one registry entry
+
+- GIVEN the registered tool set
+- WHEN the registry is enumerated
+- THEN every tool SHALL have exactly one entry with phase, branch, requires, and valid next/gate
+
+#### Scenario: tools/list metadata comes from the registry
+
+- GIVEN a running server
+- WHEN `tools/list` is requested
+- THEN tool descriptions SHALL surface the registry entry's phase, branch, and continuation
+
+#### Scenario: Envelope next is executable against the registry
+
+- GIVEN an envelope carrying a `next` continuation
+- THEN a registered FastMCP client SHALL be able to invoke that tool with those arguments and receive an envelope, for every registry next
+- AND when the continuation needs a human value, `input_required` SHALL name it instead
+
+#### Scenario: Missing config recovery is structured
+
+- GIVEN a greenfield request with no dataset TOML
+- THEN the envelope SHALL carry `error_code`, `message`, and an executable `next` (or `input_required`) — never a Python repr and never a fabricated credential
+
+#### Scenario: Delivery branch routes render_all through auth_status
+
+- GIVEN the existing-config branch reaches `sofer_render_all`
+- THEN its registry continuation SHALL name `sofer_auth_status` before any publish dry-run
+
+#### Scenario: Single-file triage never advertises a config-bearing publish call
+
+- GIVEN `sofer_render` triage on a single file
+- THEN its metadata SHALL NOT suggest `sofer_publish` (a config-bearing call)
+
+#### Scenario: Human approval stop is a typed gate
+
+- GIVEN `sofer_publish(dry_run=true)` completes
+- THEN the envelope SHALL return the `human_gate` approval stop before `sofer_publish_confirm` is offered
+
+#### Scenario: Greenfield branch continues init -> scan_dry_run -> scan_apply -> validate
+
+- GIVEN `sofer_init` on a greenfield root
+- THEN its `next` SHALL name `sofer_scan_dry_run`, whose `next` names `sofer_scan_apply`, whose `next` names `sofer_validate`

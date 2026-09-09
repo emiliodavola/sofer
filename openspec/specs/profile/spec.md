@@ -94,7 +94,7 @@ non-zero exit code when the dataset format is unsupported.
 
 ### Requirement: Batch profile via --all-files (PRF-05)
 
-When `--all-files` is set the system MUST iterate `[[file]]` entries via `DatasetConfig.from_toml`; for each entry it MUST write one `metadata.yaml` namespaced by `rel_stem` under `profile_dir` as `<write_root>/profiles/<rel_stem>.metadata.yaml`. `rel_stem` MUST be `local.relative_to(data_dir)` when inside `data_dir = base_dir / config.OUTPUT_DIR`, otherwise `local.relative_to(base_dir)`, with output computed as `(profile_dir / rel_stem).with_suffix(PurePath.suffixes replacement)` (only last suffix → `.metadata.yaml`). The system MUST pre-compute the collision map `output → [sources]` before any write, MUST write non-colliding outputs first, then MUST raise `ValueError` naming every colliding source and MUST NOT write colliding outputs nor a root index. `--output` anchoring MUST follow Option B: relative dirs anchor to `cfg._base_dir`, writes go to `<output>/profiles/`, never mutating `cache/`. TOML without `[[file]]` MUST fail fast.
+When `--all-files` is set the system MUST iterate `[[file]]` entries via `DatasetConfig.from_toml`; for each entry it MUST derive `rel_stem` as `local.relative_to(data_dir)` when inside `data_dir = base_dir / config.OUTPUT_DIR`, otherwise `local.relative_to(base_dir)`. For non-`.xlsx` and single-sheet `.xlsx` entries it MUST write one `metadata.yaml` namespaced by `rel_stem` under `profile_dir` as `<write_root>/profiles/<rel_stem>.metadata.yaml`, computed as `(profile_dir / rel_stem).with_suffix(PurePath.suffixes replacement)` (only last suffix → `.metadata.yaml`). For `.xlsx` with N>1 sheets it MUST read all sheets via `_read_xlsx_sheets`, sanitize each sheet name via `sanitize_sheet_name` (lower→NFKD→ascii→space→`_`→strip; empty/whitespace-only → `sheet`) with `seen` dedup `_{n}`, and write N files `profiles/<rel>/<stem>__<sanitized>.metadata.yaml`. The system MUST pre-compute the collision map over sheet-expanded outputs normalized via `re.sub(r"__+", "_", str(path))` (so `a__ventas`≈`a_ventas`) as `output → [sources]` before any write, MUST write non-colliding outputs first, then MUST raise `ValueError` naming every colliding source as `<path>::<sheet>` and MUST NOT write colliding outputs nor a root index. `--output` anchoring MUST follow Option B: relative dirs anchor to `cfg._base_dir`, writes go to `<output>/profiles/`, never mutating `cache/`. TOML without `[[file]]` MUST fail fast.
 
 #### Scenario: Batch N-files
 
@@ -108,12 +108,47 @@ When `--all-files` is set the system MUST iterate `[[file]]` entries via `Datase
 - WHEN batch executes
 - THEN `profiles/Labels/etiquetas_a.metadata.yaml` SHALL be generated
 
+#### Scenario: Multisheet workbook 2 sheets yields 2 profiles
+
+- GIVEN `report.xlsx` with sheets `Sales` (id,amount) and `Inventory` (sku,qty) under `raw/`
+- WHEN `sofer profile dataset.toml --all-files` executes
+- THEN `profiles/report__sales.metadata.yaml` and `profiles/report__inventory.metadata.yaml` SHALL exist
+- AND each file's schema SHALL reflect only that sheet's headers and row counts
+
+#### Scenario: Single-sheet xlsx stays suffix-less
+
+- GIVEN an `.xlsx` with 1 sheet `Data`
+- WHEN batch or `generate_all_profiles` processes it
+- THEN exactly one file `profiles/<stem>.metadata.yaml` SHALL be written
+- AND the file SHALL be byte-identical to the pre-change single-sheet output
+
+#### Scenario: sanitize_sheet_name applied
+
+- GIVEN sheets named `DATA GOT Año` and `Ventas 2024!`
+- WHEN sanitized for the stem
+- THEN results SHALL be `data_got_ano` and `ventas_2024`
+- AND empty/whitespace-only names SHALL fallback to `sheet`
+
+#### Scenario: Dedup via seen _{n}
+
+- GIVEN an `.xlsx` with sheets `Ventas` and `VENTAS` (both → `ventas`)
+- WHEN profiles are emitted
+- THEN outputs SHALL be `__ventas.metadata.yaml` and `__ventas_2.metadata.yaml`
+- AND a third duplicate SHALL be `__ventas_3.metadata.yaml`
+
+#### Scenario: Sheet-aware collision via normalized __+→_
+
+- GIVEN `data/a__ventas.xlsx` sheet `Ventas` (→ `profiles/a__ventas.metadata.yaml`) and `data/a_ventas.csv` (→ `profiles/a_ventas.metadata.yaml` normalized `__+`→`_`)
+- WHEN `--all-files` expands sheets and builds the collision map
+- THEN the normalized key SHALL collide
+- AND system SHALL raise `ValueError` naming both sources with `::Ventas` suffix and write neither
+
 #### Scenario: Same-stem collision errors after partial write
 
-- GIVEN `raw/x.csv` and `raw/x.parquet` mapping to `profiles/x.metadata.yaml`
+- GIVEN `raw/x.csv` and `raw/x.parquet` mapping to `profiles/x.metadata.yaml` plus `raw/ok.csv`
 - WHEN batch executes
-- THEN non-colliding outputs SHALL be written
-- AND `ValueError` SHALL name both sources and colliding path
+- THEN `profiles/ok.metadata.yaml` SHALL be written
+- AND `ValueError` SHALL name both colliding sources and colliding path
 
 #### Scenario: Custom --output anchoring (Option B)
 

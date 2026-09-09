@@ -1,0 +1,8 @@
+# Deliberately malformed (unparseable) TOML for the PB-04 "Malformed config"
+# scenario: the table header is never closed, so tomllib raises
+# TOMLDecodeError. Consumed by the Phase 4 config-state tests; kept OUT of
+# mcp-happy-path/ (which test_mcp_schema.py copies wholesale).
+
+[dataset
+name = "malformed-ds"
+repo_id = "user/malformed-ds"

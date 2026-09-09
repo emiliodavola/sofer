@@ -35,6 +35,30 @@ _PLACEHOLDERS: frozenset[str] = frozenset(
 )
 
 
+def resolve_doc_path(value: str | None, base: Path) -> Path | None:
+    """Resolve an optional documentation path against the config directory.
+
+    ``[dataset] readme`` / ``study_design`` / ``recipe`` (and ``codebook``)
+    are optional file paths read by :func:`sofer.prepare.prepare` and
+    embedded into the published dataset card. They resolve against *base*
+    (the TOML's directory, ``cfg._base_dir``) — never the process working
+    directory — so a TOML declaring ``readme = "docs/readme.md"`` is read
+    from next to the TOML regardless of where the CLI/MCP process runs.
+    Absolute values are returned as-is.
+
+    Args:
+        value: The raw declared path, or ``None``/empty when not declared.
+        base: Anchor directory for relative values (the config directory).
+
+    Returns:
+        The resolved path, or ``None`` when *value* is empty.
+    """
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else base / path
+
+
 class InferenceStatus(str, Enum):
     """Frozen vocabulary describing how a value was inferred.
 
@@ -314,13 +338,16 @@ class DatasetConfig:
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
+    _config_path: Path = field(
+        default=Path(), compare=False, repr=False
+    )  # resolved TOML path (set by from_toml)
 
     # ------------------------------------------------------------------
     #  Factory / loading
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> DatasetConfig:
+    def from_toml(cls, path: str | Path, discovery_root: Path | None = None) -> DatasetConfig:
         """Parse a TOML file and return a :class:`DatasetConfig`.
 
         The TOML format is::
@@ -358,6 +385,10 @@ class DatasetConfig:
 
         Args:
             path: Path to the TOML configuration file.
+            discovery_root: Optional upper bound for ``[tool.sofer]``
+                discovery (TC-05): the walk-up never passes this directory,
+                so overrides declared above it do not apply. ``None`` keeps
+                the unbounded CLI behavior.
 
         Returns:
             A fully populated :class:`DatasetConfig` instance.
@@ -374,8 +405,16 @@ class DatasetConfig:
         # the dataset TOML's directory so every subsequent read of a module
         # constant (config.X) reflects the dataset-tree overrides for this
         # invocation (TC-04/TC-05). Harmless if called repeatedly — resolution
-        # is a pure function of (anchor, filesystem).
-        config.reload(base_dir)
+        # is a pure function of (anchor, filesystem). The optional
+        # ``discovery_root`` bounds the walk-up (TC-05): discovery never
+        # passes it, so overrides declared above the bound do not apply. The
+        # ``stop_at`` keyword is only passed when a bound is given — the
+        # unbounded CLI path keeps the exact ``reload(base_dir)`` call shape
+        # (TC-04 spies on ``config.reload`` and accept no keywords).
+        if discovery_root is not None:
+            config.reload(base_dir, stop_at=discovery_root)
+        else:
+            config.reload(base_dir)
 
         with open(path, "rb") as fh:
             data = _tomli.load(fh)
@@ -506,6 +545,7 @@ class DatasetConfig:
             demo_url=meta.get("demo_url", ""),
             dataset_card_authors=meta.get("dataset_card_authors", ""),
             _base_dir=base_dir,
+            _config_path=path.resolve(),
         )
 
     # ------------------------------------------------------------------
@@ -526,6 +566,13 @@ class DatasetConfig:
         """
         errors: list[str] = []
 
+        # TC-13: configuration type validation -- a malformed TOML value
+        # (int delimiter, list encoding, str min_files, ...) must surface a
+        # stable diagnostic here, before any reader or comparison executes
+        # (GitHub #118). Runs first so invalid values never reach the
+        # file/path resolution below as an arbitrary Python type.
+        errors.extend(_validate_config_types(self))
+
         # placeholder detection
         repo_user = self.repo_id.split("/")[0] if "/" in self.repo_id else ""
         for placeholder in _PLACEHOLDERS:
@@ -536,8 +583,10 @@ class DatasetConfig:
                 )
                 break
 
-        # repo_id format
-        if not re.match(r"^[\w\-]+/[\w\-]+$", self.repo_id):
+        # repo_id format — `\Z` (not `$`) so a trailing newline is rejected,
+        # matching the exact no-trailing-newline contract used for `user` in
+        # validate_identity (INIT-05).
+        if not re.match(r"^[\w\-]+/[\w\-]+\Z", self.repo_id):
             errors.append(f"Invalid repo_id: '{self.repo_id}'. Must be 'user/repo'.")
 
         # file entries
@@ -554,14 +603,83 @@ class DatasetConfig:
         # any staging write.
         errors.extend(_validate_case_fold_collisions(self))
 
-        # optional docs
+        # optional docs — resolved against the config's directory (PRP-03),
+        # never the process cwd, so a relative declaration like
+        # ``readme = "docs/readme.md"`` is found next to the TOML.
         for field_name, doc_path in (
             ("readme", self.readme),
             ("codebook", self.codebook),
             ("study_design", self.study_design),
             ("recipe", self.recipe),
         ):
-            if doc_path and not Path(doc_path).exists():
-                errors.append(f"Declared {field_name} not found: {doc_path}")
+            doc_resolved = resolve_doc_path(doc_path, base)
+            if doc_resolved is not None and not doc_resolved.exists():
+                errors.append(f"Declared {field_name} not found: {doc_resolved}")
 
         return errors
+
+
+def _validate_config_types(cfg: DatasetConfig) -> list[str]:
+    """Validate the *types* of configuration values, independent of files.
+
+    TOML is untyped, so a dataset TOML may declare ``csv_delimiter = 5`` or
+    ``min_files = "two"``; those values would otherwise reach comparisons and
+    readers as arbitrary Python types (a list compared with ``== ","``, a str
+    in ``len(files) < min_files``). Diagnostics are stable strings naming the
+    offending key, the expected type, and the received value (TC-13, #118).
+
+    Args:
+        cfg: The parsed configuration to inspect.
+
+    Returns:
+        A list of stable error messages (empty = all types valid).
+    """
+    errors: list[str] = []
+
+    def _add(key: str, expected: str, value: object) -> None:
+        errors.append(f"{key} must be {expected}, got {type(value).__name__}: {value!r}")
+
+    def _is_number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    # -- scalar meta fields ------------------------------------------------
+    if not isinstance(cfg.csv_delimiter, str) or len(cfg.csv_delimiter) != 1:
+        _add("csv_delimiter", "a single-character string", cfg.csv_delimiter)
+    if not isinstance(cfg.csv_encoding, str) or not cfg.csv_encoding:
+        _add("csv_encoding", "a non-empty string", cfg.csv_encoding)
+    if not isinstance(cfg.repo_type, str) or not cfg.repo_type:
+        _add("repo_type", "a non-empty string", cfg.repo_type)
+
+    for field_name in ("confidential", "private", "skip_cross_file_schema"):
+        value = getattr(cfg, field_name)
+        if not isinstance(value, bool):
+            _add(field_name, "a boolean", value)
+
+    # -- thresholds --------------------------------------------------------
+    if not isinstance(cfg.min_files, int) or isinstance(cfg.min_files, bool):
+        _add("min_files", "a non-negative integer (bool is not an int here)", cfg.min_files)
+    elif cfg.min_files < 0:
+        _add("min_files", "a non-negative integer", cfg.min_files)
+
+    if not _is_number(cfg.min_total_size_mb) or cfg.min_total_size_mb < 0:
+        _add("min_total_size_mb", "a non-negative number", cfg.min_total_size_mb)
+
+    # -- quality checks: numeric fields must be numbers when present -------
+    for check in cfg.quality.checks:
+        for field_name in ("max_null_pct", "min", "max", "min_unique"):
+            value = getattr(check, field_name)
+            if value is not None and not _is_number(value):
+                _add(f"quality check '{check.check}' {field_name}", "a number", value)
+
+    # -- column checks: expected must be a list of strings -----------------
+    for col_check in cfg.column_checks:
+        if not isinstance(col_check.expected, list) or not all(
+            isinstance(item, str) for item in col_check.expected
+        ):
+            _add(
+                f"column check '{col_check.filename}' expected",
+                "a list of strings",
+                col_check.expected,
+            )
+
+    return errors

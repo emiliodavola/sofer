@@ -83,6 +83,12 @@ _DEFAULTS: dict[str, Any] = {
     # sofer://metadata): resources larger than this are refused with a clear
     # error naming the limit instead of being slurped into an LLM context.
     "agent_resource_max_bytes": 50_000_000,
+    # Size cap for the MCP tool "output" envelope (captured stdout/stderr).
+    # Larger outputs are truncated with a "... [truncated: N bytes]" marker so
+    # a verbose validation/prepare/codebook run can never blow up the agent
+    # context. Separate from agent_resource_max_bytes (which REFUSES a whole
+    # resource): the output envelope is truncated, not refused.
+    "output_max_bytes": 1_000_000,
     # Card collapse threshold: columns per table above which Data Fields
     # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
     "card_collapse_threshold": 15,
@@ -155,16 +161,58 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     tool_section: dict[str, Any] = toml_data.get("tool", {}).get("sofer", {})
 
     merged = dict(_DEFAULTS)
+    # Keys with dedicated post-loop validation keep their specific
+    # diagnostics; every other key is type-checked here so a malformed
+    # TOML value never reaches a module constant (and thus a reader or
+    # comparison) as an arbitrary Python type (TC-13, #118).
+    _post_loop_keys = {
+        "semantic_priors",
+        "profile_dir",
+        "render_dir",
+        "card_collapse_threshold",
+    }
     for key, default in _DEFAULTS.items():
         val = tool_section.get(key)
-        if val is not None:
-            # Ensure types match the defaults where they matter
-            if isinstance(default, list) and isinstance(val, list):
+        if val is None:
+            continue
+        if key in _post_loop_keys:
+            merged[key] = val
+            continue
+        if isinstance(default, list):
+            if isinstance(val, list):
                 merged[key] = val
-            elif isinstance(default, list) and isinstance(val, str):
+            elif isinstance(val, str):
                 merged[key] = [val]
             else:
-                merged[key] = val
+                raise ValueError(
+                    f"'{key}' in [tool.sofer] must be an array, got {type(val).__name__}: {val!r}"
+                )
+        elif isinstance(default, bool):
+            if not isinstance(val, bool):
+                raise ValueError(
+                    f"'{key}' in [tool.sofer] must be a boolean, got {type(val).__name__}: {val!r}"
+                )
+            merged[key] = val
+        elif isinstance(default, int):
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ValueError(
+                    f"'{key}' in [tool.sofer] must be an integer, got {type(val).__name__}: {val!r}"
+                )
+            merged[key] = val
+        elif isinstance(default, float):
+            if not isinstance(val, (int, float)) or isinstance(val, bool):
+                raise ValueError(
+                    f"'{key}' in [tool.sofer] must be a number, got {type(val).__name__}: {val!r}"
+                )
+            merged[key] = float(val) if isinstance(val, int) else val
+        elif isinstance(default, str):
+            if not isinstance(val, str):
+                raise ValueError(
+                    f"'{key}' in [tool.sofer] must be a string, got {type(val).__name__}: {val!r}"
+                )
+            merged[key] = val
+        else:
+            merged[key] = val
 
     # ``semantic_priors`` maps a detector name to a prior probability. A
     # non-dict value (e.g. a stray string) is a user config error — reject it
@@ -327,5 +375,8 @@ CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]
 
 # MCP agent resource size guard (see ``_DEFAULTS["agent_resource_max_bytes"]``).
 AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
+
+# MCP tool output envelope cap (see ``_DEFAULTS["output_max_bytes"]``).
+OUTPUT_MAX_BYTES: int = _DEFAULTS["output_max_bytes"]
 
 CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]

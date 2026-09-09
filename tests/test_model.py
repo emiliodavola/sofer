@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import sofer.config as config
 from sofer.model import DatasetConfig, FileEntry, InferenceStatus
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -213,6 +214,52 @@ csv_encoding = "latin-1"
         assert cfg.pretty_name == ""
 
 
+# ── TC-05: from_toml discovery_root bound ────────────────────────────────────
+
+
+class TestFromTomlDiscoveryRoot:
+    """DatasetConfig.from_toml honors the optional discovery_root bound."""
+
+    MINIMAL_TOML = '[dataset]\nname = "x"\nrepo_id = "u/x"\n'
+
+    def test_discovery_root_applies_at_or_below(self, restore_tool_config, pytree):
+        """Values from a pyproject at/below discovery_root apply; above-root
+        overrides do not (TC-05 scenario 2)."""
+        pytree("[tool.sofer]\nschema_sample_size = 999\n", at="outer")
+        discovery_root = pytree(None, at="outer/proj")
+        inner = pytree("[tool.sofer]\nschema_sample_size = 250\n", at="outer/proj/data")
+        toml_path = inner / "dataset.toml"
+        toml_path.write_text(self.MINIMAL_TOML, encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path, discovery_root=discovery_root)
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == 250
+
+    def test_discovery_root_blocks_above_root_override(self, restore_tool_config, pytree):
+        """Without a pyproject at/below discovery_root, an above-root
+        override must NOT apply — built-in defaults do."""
+        pytree("[tool.sofer]\nschema_sample_size = 999\n", at="outer")
+        discovery_root = pytree(None, at="outer/proj")
+        toml_path = discovery_root / "dataset.toml"
+        toml_path.write_text(self.MINIMAL_TOML, encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path, discovery_root=discovery_root)
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == config._DEFAULTS["schema_sample_size"]
+
+    def test_omitted_discovery_root_stays_unbounded(self, restore_tool_config, pytree):
+        """CLI compatibility: without a bound the walk-up applies above-root
+        pyproject overrides (TC-05 scenario 1)."""
+        pytree("[tool.sofer]\nschema_sample_size = 250\n", at="outer")
+        data_dir = pytree(None, at="outer/proj/data")
+        toml_path = data_dir / "dataset.toml"
+        toml_path.write_text(self.MINIMAL_TOML, encoding="utf-8")
+
+        cfg = DatasetConfig.from_toml(toml_path)
+        assert cfg.name == "x"
+        assert config.SCHEMA_SAMPLE_SIZE == 250
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 
@@ -233,9 +280,76 @@ class TestValidate:
         errors = cfg.validate()
         assert any("repo_id" in e for e in errors)
 
+    # -- TC-13: configuration type validation (fix-dataset-config-type-validation)
+
+    def test_invalid_csv_delimiter_type_rejected(self):
+        """A non-string csv_delimiter (e.g. int 5) must produce a stable diagnostic
+        naming the key -- never reach a reader as an arbitrary type."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", csv_delimiter=5, files=[])
+        errors = cfg.validate()
+        assert any("csv_delimiter" in e and "string" in e for e in errors), errors
+
+    def test_multi_char_csv_delimiter_rejected(self):
+        """A multi-character delimiter is a config error (readers compare single chars)."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", csv_delimiter=";;", files=[])
+        errors = cfg.validate()
+        assert any("csv_delimiter" in e for e in errors), errors
+
+    def test_invalid_csv_encoding_type_rejected(self):
+        """A non-string csv_encoding (e.g. a list) must be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", csv_encoding=["utf-8"], files=[])
+        errors = cfg.validate()
+        assert any("csv_encoding" in e for e in errors), errors
+
+    def test_non_bool_confidential_rejected(self):
+        """confidential="yes" must not be silently truthy-coerced."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", confidential="yes", files=[])
+        errors = cfg.validate()
+        assert any("confidential" in e and "bool" in e for e in errors), errors
+
+    def test_invalid_min_files_type_rejected(self):
+        """min_files="two" and min_files=True (bool) must both be rejected."""
+        cfg = DatasetConfig(name="test", repo_id="user/x", min_files="two", files=[])
+        errors = cfg.validate()
+        assert any("min_files" in e and "integer" in e for e in errors), errors
+
+        cfg_bool = DatasetConfig(name="test", repo_id="user/x", min_files=True, files=[])
+        errors_bool = cfg_bool.validate()
+        assert any("min_files" in e for e in errors_bool), errors_bool
+
+    def test_negative_min_files_rejected(self):
+        cfg = DatasetConfig(name="test", repo_id="user/x", min_files=-1, files=[])
+        errors = cfg.validate()
+        assert any("min_files" in e and "non-negative" in e for e in errors), errors
+
+    def test_invalid_min_total_size_mb_rejected(self):
+        cfg = DatasetConfig(name="test", repo_id="user/x", min_total_size_mb=[1.0], files=[])
+        errors = cfg.validate()
+        assert any("min_total_size_mb" in e for e in errors), errors
+
+    def test_from_toml_invalid_delimiter_surfaces_in_validate(self, tmp_path):
+        """A real TOML with [meta] csv_delimiter = 5 parses (from_toml keeps its
+        contract) and validate() reports the stable type diagnostic."""
+        p = tmp_path / "dataset.toml"
+        p.write_text(
+            '[dataset]\nname = "x"\nrepo_id = "user/x"\n\n[meta]\ncsv_delimiter = 5\n',
+            encoding="utf-8",
+        )
+        cfg = DatasetConfig.from_toml(p)
+        errors = cfg.validate()
+        assert any("csv_delimiter" in e and "string" in e for e in errors), errors
+
     def test_invalid_repo_id_trailing_slash(self):
         """Trailing slash should fail."""
         cfg = DatasetConfig(name="test", repo_id="user/")
+        errors = cfg.validate()
+        assert any("repo_id" in e for e in errors)
+
+    def test_invalid_repo_id_trailing_newline_rejected(self):
+        """A trailing newline is rejected by the ``\\Z`` anchor — Python ``$``
+        also matches before a trailing ``\\n``, which would smuggle an invalid
+        repo through validation (INIT-05 parity)."""
+        cfg = DatasetConfig(name="test", repo_id="user/repo\n")
         errors = cfg.validate()
         assert any("repo_id" in e for e in errors)
 

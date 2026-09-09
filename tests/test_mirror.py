@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from sofer._mirror import (
     _validate_case_fold_collisions,
     copy_to_mirror,
@@ -176,6 +178,23 @@ class TestCopyToMirror:
 
         assert (dest / "f.txt").is_file()
         assert (dest / "existing.txt").read_text(encoding="utf-8") == "keep"
+
+    def test_directory_copy_refuses_without_force(self, tmp_path: Path) -> None:
+        """PUB-13 parity: ``force=False`` on an existing directory destination
+        raises :class:`FileExistsError` instead of silently merging — the dir
+        branch now honours the same overwrite guard as the file branch."""
+        src = tmp_path / "labels"
+        src.mkdir()
+        (src / "a.txt").write_text("a", encoding="utf-8")
+        dest = tmp_path / "mirror" / "labels"
+        dest.mkdir(parents=True)
+
+        with pytest.raises(FileExistsError, match="use --force to overwrite"):
+            copy_to_mirror(src, tmp_path / "mirror", "labels", force=False)
+
+        # force=True still merges (the guard is force-gated, not permanent).
+        copy_to_mirror(src, tmp_path / "mirror", "labels", force=True)
+        assert (dest / "a.txt").is_file()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
