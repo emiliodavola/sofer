@@ -243,6 +243,20 @@ class TestOutputSchema:
             assert "ok" in props, f"{name} output_schema missing ok"
             assert "exit_code" in props, f"{name} output_schema missing exit_code"
             assert "output" in props, f"{name} output_schema missing output"
+            # ADD (issue #145): sofer_auth_status alone declares the four
+            # additive posture properties (typed; NEVER required, NEVER enum).
+            if name == "sofer_auth_status":
+                expected_posture = {
+                    "phrase_source": "string",
+                    "server_process_id": "integer",
+                    "server_started_at": "string",
+                    "server_version": "string",
+                }
+                for prop_name, prop_type in expected_posture.items():
+                    assert prop_name in props, f"{name} output_schema missing {prop_name}"
+                    assert props[prop_name]["type"] == prop_type, f"{name} {prop_name}"
+                    assert "enum" not in props[prop_name], f"{name} {prop_name} enum"
+                assert schema.get("required") == ["ok", "exit_code", "output"]
 
     def test_sofer_init_identity_fields_in_schema(self, tmp_path: Path):
         """MSP-R03 / PB-03: sofer_init output_schema declares the identity
@@ -338,6 +352,19 @@ class TestEnvelope:
         # never import the server module (optional ``mcp`` extra), so the env-var
         # NAME is asserted equal here instead of being shared.
         assert ms._APPROVAL_PHRASE_ENV_VAR in mcp_registration._ENV_KEYS
+        # ADD (issue #145): posture fields are non-secret process-lifecycle
+        # metadata — the serialized envelope (posture fields included) never
+        # carries the phrase value or any phrase hash/length/probe key;
+        # phrase_source only names the configuration path.
+        assert envelope["phrase_source"] in {"env", "explicit", "none"}
+        posture_serialized = "".join(
+            str(envelope[k])
+            for k in ("phrase_source", "server_process_id", "server_started_at", "server_version")
+        )
+        assert "phrase123" not in posture_serialized
+        lowered_keys = {k.lower() for k in envelope}
+        assert not any(token in lowered_keys for token in ("hash", "length", "probe"))
+        assert "phrase123" not in str(envelope)
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
 
     def test_auth_status_approval_not_configured(
@@ -378,6 +405,9 @@ class TestEnvelope:
         assert envelope["hints"]["approval_phrase_env_var"] == "SOFER_MCP_APPROVAL_PHRASE"
         assert envelope["hints"]["approval_phrase_restart_required"] is True
         assert all(not isinstance(v, (dict, list)) for v in envelope["hints"].values())
+        # ADD (issue #145): unconfigured posture reports the source as
+        # "none", consistent with approval_configured False.
+        assert envelope["phrase_source"] == "none"
 
 
 class TestHappyPath:

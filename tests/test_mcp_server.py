@@ -14,6 +14,7 @@ import importlib
 import importlib.util
 import io
 import os
+import re
 import subprocess
 import sys
 from datetime import timedelta
@@ -29,6 +30,7 @@ import sofer.config as config
 import sofer.publish as publish_mod
 from sofer import mcp_registration as registration
 from sofer import mcp_server as ms
+from sofer._version import get_version
 from sofer.mcp_server import (
     build_server,
     sofer_codebook,
@@ -580,6 +582,212 @@ class TestAuthStatusValidity:
         assert envelope["exit_code"] == 1, envelope
         assert envelope["approval_configured"] is False
         assert envelope["requires_approval_phrase"] is True
+
+
+class TestAuthStatusPosture:
+    """Issue #145: the four additive posture fields on ``sofer_auth_status``.
+
+    ``phrase_source``, ``server_process_id``, ``server_started_at`` and
+    ``server_version`` are non-secret process-lifecycle metadata captured at
+    ``build_server`` and never re-derived. The phrase value (or any derived
+    form) never appears in any posture field; ``phrase_source`` only names the
+    configuration path. ``server_started_at`` is restart-proof (microsecond
+    stamps strictly increase across builds); ``server_process_id`` is
+    process-scoped (== ``os.getpid()``, never asserted to differ across
+    builds). Every ``none``/``blank`` case deletes the env var so an ambient
+    shell variable cannot flake CI.
+    """
+
+    _POSTURE_KEYS = frozenset(
+        {"phrase_source", "server_process_id", "server_started_at", "server_version"}
+    )
+
+    @staticmethod
+    def _clean_hf(monkeypatch) -> None:
+        """Remove ambient HF token + approval phrase env (hermetic tests)."""
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+
+    def _envelope(self, server, tmp_path):
+        return _call(server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}).data
+
+    def test_posture_fields_present_and_typed(self, tmp_path, monkeypatch) -> None:
+        """approval_phrase="phrase123" — the envelope carries all four posture
+        fields with the documented types/domains (additive, never required)."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="phrase123")
+        envelope = self._envelope(server, tmp_path)
+        assert envelope["phrase_source"] == "explicit"
+        assert envelope["phrase_source"] in ("env", "explicit", "none")
+        assert isinstance(envelope["server_process_id"], int)
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00",
+            envelope["server_started_at"],
+        ), envelope["server_started_at"]
+        assert isinstance(envelope["server_version"], str)
+        assert envelope["server_version"]
+
+    def test_server_version_equals_get_version(self, tmp_path, monkeypatch) -> None:
+        """Equality against the module global and the installed metadata —
+        never a hardcoded version literal."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="x")
+        envelope = self._envelope(server, tmp_path)
+        assert envelope["server_version"] == ms._SERVER_VERSION == get_version()
+
+    def test_posture_fields_confined_to_auth_status(self, tmp_path, monkeypatch) -> None:
+        """Roster-wide scan: no other tool's output_schema gains any of the 4
+        posture keys; the roster stays at 14 callables."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="x")
+
+        async def _scan():
+            async with Client(server) as client:
+                return await client.list_tools()
+
+        tools = _run(_scan())
+        assert len(tools) == 14, [t.name for t in tools]
+        for tool in tools:
+            schema = tool.outputSchema  # type: ignore[attr-defined]
+            props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+            if not props and hasattr(schema, "get"):
+                props = schema.get("properties", {})  # type: ignore[union-attr]
+            gained = set(props) & self._POSTURE_KEYS
+            if tool.name == "sofer_auth_status":
+                assert gained == self._POSTURE_KEYS, tool.name
+            else:
+                assert not gained, f"{tool.name} output_schema gained {gained}"
+
+    def test_phrase_source_explicit(self, tmp_path, monkeypatch) -> None:
+        """approval_phrase="x" ⇒ "explicit", approval_configured True."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="x")
+        envelope = self._envelope(server, tmp_path)
+        assert envelope["phrase_source"] == "explicit"
+        assert envelope["approval_configured"] is True
+
+    def test_phrase_source_env(self, tmp_path, monkeypatch) -> None:
+        """No arg + SOFER_MCP_APPROVAL_PHRASE="x" ⇒ "env"."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "x")
+        server = build_server(root=tmp_path)
+        envelope = self._envelope(server, tmp_path)
+        assert envelope["phrase_source"] == "env"
+        assert envelope["approval_configured"] is True
+
+    def test_phrase_source_none(self, tmp_path, monkeypatch) -> None:
+        """No arg + env deleted ⇒ "none", approval_configured False."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+        envelope = self._envelope(server, tmp_path)
+        assert envelope["phrase_source"] == "none"
+        assert envelope["approval_configured"] is False
+
+    def test_phrase_source_blank_env_is_none(self, tmp_path, monkeypatch) -> None:
+        """Empty and whitespace-only env values fail closed ("none")."""
+        for value in ("", "   "):
+            self._clean_hf(monkeypatch)
+            _make_dataset(tmp_path)
+            monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", value)
+            server = build_server(root=tmp_path)
+            envelope = self._envelope(server, tmp_path)
+            assert envelope["phrase_source"] == "none", repr(value)
+            assert envelope["approval_configured"] is False, repr(value)
+
+    def test_phrase_source_blank_explicit_beats_env(self, tmp_path, monkeypatch) -> None:
+        """Blank explicit arg never falls back to the env ("none")."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "x")
+        server = build_server(root=tmp_path, approval_phrase="")
+        envelope = self._envelope(server, tmp_path)
+        assert envelope["phrase_source"] == "none"
+        assert envelope["approval_configured"] is False
+
+    def test_phrase_source_consistent_with_approval_configured(self, tmp_path, monkeypatch) -> None:
+        """Invariant: phrase_source == "none" ⟺ approval_configured is False
+        across all five configuration paths plus a direct call with no
+        build_server (module default "none")."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        cases = []
+
+        # 1) explicit non-blank
+        cases.append(
+            (
+                "explicit",
+                self._envelope(build_server(root=tmp_path, approval_phrase="phrase123"), tmp_path),
+                True,
+            )
+        )
+        # 2) env non-blank
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
+        cases.append(("env", self._envelope(build_server(root=tmp_path), tmp_path), True))
+        # 3) none — env removed, no argument
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        cases.append(("none", self._envelope(build_server(root=tmp_path), tmp_path), False))
+        # 4) blank / whitespace-only env (fail-closed)
+        for value in ("", "  "):
+            monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", value)
+            cases.append(("none", self._envelope(build_server(root=tmp_path), tmp_path), False))
+        # 5) blank explicit beats env
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
+        cases.append(
+            (
+                "none",
+                self._envelope(build_server(root=tmp_path, approval_phrase=""), tmp_path),
+                False,
+            )
+        )
+        # 6) direct call without build_server — module default posture
+        ms._APPROVAL_PHRASE = None
+        ms._PHRASE_SOURCE = "none"
+        ms._SERVER_ROOT = tmp_path
+        cases.append(("none", ms.sofer_auth_status(config=str(tmp_path / "dataset.toml")), False))
+
+        for expected, envelope, configured in cases:
+            assert envelope["phrase_source"] == expected, envelope["phrase_source"]
+            assert (envelope["phrase_source"] == "none") == (
+                envelope["approval_configured"] is False
+            )
+            assert envelope["approval_configured"] is configured
+
+    def test_server_started_at_differs_across_builds(self, tmp_path, monkeypatch) -> None:
+        """Back-to-back builds: started_at differs AND is strictly greater
+        (lexicographic — microsecond stamps + monotonic bump). phrase_source
+        reflects each build's own config path. pid drift is never asserted."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        first = build_server(root=tmp_path)
+        first_env = self._envelope(first, tmp_path)
+        second = build_server(root=tmp_path, approval_phrase="x")
+        second_env = self._envelope(second, tmp_path)
+        assert first_env["server_started_at"] != second_env["server_started_at"]
+        assert first_env["server_started_at"] < second_env["server_started_at"]
+        assert first_env["phrase_source"] == "none"
+        assert second_env["phrase_source"] == "explicit"
+
+    def test_server_process_id_is_host_pid(self, tmp_path, monkeypatch) -> None:
+        """server_process_id == os.getpid() in both envelopes and identical
+        across the two builds. The pid is process-scoped and MUST NOT be
+        asserted to differ across builds — one process, one pid."""
+        self._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        first = build_server(root=tmp_path, approval_phrase="x")
+        first_env = self._envelope(first, tmp_path)
+        second = build_server(root=tmp_path)
+        second_env = self._envelope(second, tmp_path)
+        assert first_env["server_process_id"] == os.getpid()
+        assert second_env["server_process_id"] == os.getpid()
+        assert first_env["server_process_id"] == second_env["server_process_id"]
 
 
 # ---------------------------------------------------------------------------

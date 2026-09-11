@@ -46,7 +46,11 @@ Security model (REVISION-2 design, findings CF-1/CF-2):
 Every tool docstring states its side effects and network usage verbatim.
 The token and approval phrase are never logged, returned, or placed in
 docstrings or resources; the unconfigured-approval preflight guidance carries
-the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only.
+the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only. The four
+``sofer_auth_status`` posture fields (``phrase_source``, ``server_process_id``,
+``server_started_at``, ``server_version``) are non-secret process-lifecycle
+metadata: ``phrase_source`` describes the configuration path only — the phrase,
+any phrase-derived value, and the configured env value never appear in them.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ import re
 import sys
 import threading
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -79,6 +84,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
 
 from . import config as sofer_config
 from . import workflow
+from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
@@ -284,6 +290,66 @@ class HFTokenError(MCPToolError):
 _SERVER_ROOT: Path | None = None
 _APPROVAL_PHRASE: str | None = None
 _EXEC_LOCK = threading.Lock()
+
+# Monotonic stamp state (issue #145): the previous server_started_at, kept so
+# back-to-back captures within one process strictly increase even when the
+# wall clock (Windows/CPython 3.10 granularity) does not advance.
+_last_started_at: str | None = None
+
+
+def _next_started_at() -> str:
+    """Return an ISO-8601 UTC microsecond timestamp, strictly increasing across calls.
+
+    ``datetime.now(timezone.utc)`` can return the same instant for back-to-back
+    calls (Windows/CPython 3.10 clock granularity); ``server_started_at`` is the
+    restart-proof signal, so a 1 microsecond monotonic bump is applied against
+    the previous stamp when the wall clock did not advance. Fixed-width
+    ``timespec="microseconds"`` plus the constant ``+00:00`` offset keep the
+    lexicographic ordering equal to the chronological ordering, so callers can
+    compare stamps with plain string comparison.
+    """
+    global _last_started_at
+    stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    if _last_started_at is not None and stamp <= _last_started_at:
+        stamp = (datetime.fromisoformat(_last_started_at) + timedelta(microseconds=1)).isoformat(
+            timespec="microseconds"
+        )
+    _last_started_at = stamp
+    return stamp
+
+
+_PhraseSource = Literal["env", "explicit", "none"]
+
+
+def _resolve_approval_phrase(explicit: str | None) -> tuple[str | None, _PhraseSource]:
+    """Resolve the approval phrase exactly once, mirroring build_server's single read.
+
+    Precedence: explicit argument > ``SOFER_MCP_APPROVAL_PHRASE`` > none. A blank
+    or whitespace-only value (explicit or env) is treated as unconfigured and
+    maps to ``(None, "none")``; a blank explicit argument SHALL NOT fall back to
+    the environment. Performs exactly one environment read.
+
+    Returns:
+        ``(normalized_phrase, source)`` — the fail-closed phrase (None when
+        unconfigured) and the configuration path that produced it.
+    """
+    if explicit is not None:
+        if explicit.strip():
+            return explicit, "explicit"
+        return None, "none"
+    env_value = os.environ.get(_APPROVAL_PHRASE_ENV_VAR)
+    if env_value and env_value.strip():
+        return env_value, "env"
+    return None, "none"
+
+
+# Posture state (issue #145): process-lifecycle metadata captured at build_server
+# and reported by sofer_auth_status. Defaults are never None so a directly-called
+# sofer_auth_status without build_server still returns a well-typed envelope.
+_PHRASE_SOURCE: _PhraseSource = "none"
+_SERVER_PROCESS_ID: int = os.getpid()
+_SERVER_STARTED_AT: str = _next_started_at()
+_SERVER_VERSION: str = get_version()
 
 
 def _get_root() -> Path:
@@ -1735,15 +1801,30 @@ def sofer_auth_status(
     and ``requires_approval_phrase`` — always ``True``, because the publish
     ladder now treats a human approval phrase as mandatory (fail-closed). When
     ``approval_configured`` is ``False`` the flat ``hints`` object carries
-    ``action: "configure_approval_phrase"`` plus flat ``approval_phrase_*``
-    guidance: the variable NAME only, read once at server start, the variable
-    must be in the environment of the process that launches ``sofer-mcp``, a
-    full restart of the host process is required (signalled by
-    ``approval_phrase_restart_required: true``), the per-agent setup keys, and
-    the verify step; only the variable NAME is ever exposed, never the phrase,
-    a phrase-derived value, or an on-disk agent config file path. When
-    ``approval_configured`` is ``True`` the hints carry
-    ``{"approval_phrase": "<from human>"}`` and no ``approval_phrase_*`` key.
+    ``action: "configure_approval_phrase"`` plus flat
+    ``approval_phrase_*`` guidance — the variable NAME only, read once at
+    server start, in the environment of the process that launches
+    ``sofer-mcp``, requiring a full host-process restart
+    (``approval_phrase_restart_required: true``), the per-agent setup keys,
+    the verify step, and never the phrase, a phrase-derived value, or an
+    on-disk agent config file path); when configured the hints carry
+    ``{"approval_phrase": "<from human>"}`` and no ``approval_phrase_*``
+    key
+
+    The envelope carries four posture fields — non-secret
+    process-lifecycle metadata captured once at ``build_server`` and never
+    re-derived: ``phrase_source`` (``"env" | "explicit" | "none"``; explicit
+    argument > ``SOFER_MCP_APPROVAL_PHRASE`` > none; blank maps to
+    ``"none"``, and a blank explicit argument never falls back to the
+    environment), ``server_process_id`` (the hosting process id),
+    ``server_started_at`` (an ISO-8601 UTC microsecond stamp that strictly
+    increases across builds — the restart-proof signal), and
+    ``server_version`` (the package version from installed metadata,
+    non-empty, never raises). The phrase, any phrase-derived value, and the
+    configured env value never appear in any posture field —
+    ``phrase_source`` describes the configuration path only, and the
+    unconfigured guidance keeps the variable NAME and the read-once/restart
+    facts (APX-01).
 
     When to use: preflight before sofer_publish_confirm to learn required acknowledgments without triggering a publish.
     Example: sofer_auth_status(config="dataset.toml")
@@ -1806,6 +1887,10 @@ def sofer_auth_status(
             "requires_ack_confidential": requires_ack_confidential,
             "approval_configured": approval_configured,
             "requires_approval_phrase": requires_approval_phrase,
+            "phrase_source": _PHRASE_SOURCE,
+            "server_process_id": _SERVER_PROCESS_ID,
+            "server_started_at": _SERVER_STARTED_AT,
+            "server_version": _SERVER_VERSION,
             "next": _workflow_next("sofer_auth_status", config),
             "hints": next_hint,
             "config_errors": config_errors,
@@ -2515,6 +2600,22 @@ def _register_tools(server: _FastMCP) -> None:
                 "requires_ack_confidential": {"type": "boolean"},
                 "approval_configured": {"type": "boolean"},
                 "requires_approval_phrase": {"type": "boolean"},
+                "phrase_source": {
+                    "type": "string",
+                    "description": '"env" | "explicit" | "none" — the configuration path that produced approval_configured (explicit approval_phrase argument > SOFER_MCP_APPROVAL_PHRASE > none), captured once at build_server; never the phrase itself or any derived value.',
+                },
+                "server_process_id": {
+                    "type": "integer",
+                    "description": "os.getpid() of the hosting process at build_server — process-scoped, never a cross-restart signal.",
+                },
+                "server_started_at": {
+                    "type": "string",
+                    "description": "ISO-8601 UTC timestamp (microsecond precision) captured at build_server — differs and strictly increases across builds; the restart-proof signal.",
+                },
+                "server_version": {
+                    "type": "string",
+                    "description": "Package version from installed metadata (_version.get_version()), non-empty, never raises.",
+                },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
@@ -2723,16 +2824,20 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     """Build and return the sofer MCP server.
 
     .. warning::
-        One-server-per-process. The containment root and approval phrase are
-        process-module globals (:data:`_SERVER_ROOT`, :data:`_APPROVAL_PHRASE`);
-        embedding two servers with DIFFERENT roots or phrases in one process
-        inherits the LAST-built posture for every tool call. Each stdio
-        launch is its own process, so ``sofer-mcp`` is safe — but never
-        construct two servers in one test/process and expect them to stay
-        isolated. The approval phrase is read exactly once, here at build time
-        (argument or ``SOFER_MCP_APPROVAL_PHRASE``); the running server never
-        re-reads the environment, so a later change requires a full restart of
-        the host process.
+        One-server-per-process. The containment root, approval phrase, and
+        posture globals are process-module globals (:data:`_SERVER_ROOT`,
+        :data:`_APPROVAL_PHRASE`, :data:`_PHRASE_SOURCE`,
+        :data:`_SERVER_PROCESS_ID`, :data:`_SERVER_STARTED_AT`,
+        :data:`_SERVER_VERSION`); embedding two servers with DIFFERENT roots
+        or phrases in one process inherits the LAST-built posture for every
+        tool call. Each stdio launch is its own process, so ``sofer-mcp`` is
+        safe — but never construct two servers in one test/process and expect
+        them to stay isolated. The approval phrase and the four posture fields
+        are captured exactly once, here at build time (phrase via the argument
+        or ``SOFER_MCP_APPROVAL_PHRASE``; pid via ``os.getpid()``; started-at
+        via the monotonic ISO-8601 UTC stamp; version via the installed
+        metadata); the running server never re-reads the environment, so any
+        later change requires a full restart of the host process.
 
     Args:
         root: Containment root for every path-bearing tool argument and
@@ -2742,7 +2847,8 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
         approval_phrase: Host-supplied phrase required by
             ``sofer_publish_confirm`` (compared with ``hmac.compare_digest``).
             Defaults to the ``SOFER_MCP_APPROVAL_PHRASE`` environment
-            variable at build time. REQUIRED for any HF publish (fail-closed):
+            variable at build time, resolved exactly once here. REQUIRED for
+            any HF publish (fail-closed):
             when unset the publish is DISABLED and
             ``sofer_publish_confirm`` refuses with
             ``PUBLISH_APPROVAL_NOT_CONFIGURED`` — the acknowledgment booleans
@@ -2753,18 +2859,16 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
         prompts registered. Serve it with ``server.run("stdio")`` or via
         :func:`main`.
     """
-    global _SERVER_ROOT, _APPROVAL_PHRASE
+    global _SERVER_ROOT, _APPROVAL_PHRASE, _PHRASE_SOURCE, _SERVER_PROCESS_ID
+    global _SERVER_STARTED_AT, _SERVER_VERSION
     _SERVER_ROOT = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
-    raw_phrase = (
-        approval_phrase
-        if approval_phrase is not None
-        else os.environ.get("SOFER_MCP_APPROVAL_PHRASE")
-    )
-    # Fail-closed: an empty or whitespace-only phrase is treated as
-    # unconfigured (None), so it can never become a trivially-guessable
-    # ""-matching gate. A blank env var (e.g. ``SOFER_MCP_APPROVAL_PHRASE=``)
-    # must not silently enable the acknowledgment-only posture.
-    _APPROVAL_PHRASE = raw_phrase if raw_phrase and raw_phrase.strip() else None
+    # Resolve the approval phrase exactly once: explicit argument >
+    # SOFER_MCP_APPROVAL_PHRASE > none (fail-closed). A blank/whitespace value
+    # maps to None; a blank explicit argument never falls back to the env.
+    _APPROVAL_PHRASE, _PHRASE_SOURCE = _resolve_approval_phrase(approval_phrase)
+    _SERVER_PROCESS_ID = os.getpid()
+    _SERVER_STARTED_AT = _next_started_at()
+    _SERVER_VERSION = get_version()
     server = _FastMCP(
         "sofer",
         instructions=_PHASED_INSTRUCTIONS,
