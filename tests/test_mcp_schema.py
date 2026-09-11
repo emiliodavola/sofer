@@ -15,6 +15,8 @@ import pytest
 from conftest import call_tool
 from fastmcp import Client
 
+from sofer import mcp_registration
+from sofer import mcp_server as ms
 from sofer.mcp_server import build_server
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "mcp-happy-path"
@@ -325,6 +327,17 @@ class TestEnvelope:
         assert envelope["next"]["tool"] == "sofer_publish"
         assert envelope["hints"]["acknowledge_risk"] is True
         assert envelope["hints"]["approval_phrase"] == "<from human>"
+        # ADD (issue #144, NEVER-LEAK): the refusal message and the unconfigured
+        # guidance carry the variable NAME only — the configured phrase value
+        # never reaches either surface.
+        unconfigured_surface = (
+            f"{ms._APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE}{ms._approval_phrase_guidance_hints()}"
+        )
+        assert "phrase123" not in unconfigured_surface
+        # Accepted duplication (design D3): the CLI-side registration module must
+        # never import the server module (optional ``mcp`` extra), so the env-var
+        # NAME is asserted equal here instead of being shared.
+        assert ms._APPROVAL_PHRASE_ENV_VAR in mcp_registration._ENV_KEYS
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
 
     def test_auth_status_approval_not_configured(
@@ -339,6 +352,7 @@ class TestEnvelope:
             encoding="utf-8",
         )
         monkeypatch.setenv("HF_TOKEN", "secret123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
         server = build_server(root=tmp_path)  # no approval phrase
         envelope = _call(
             server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
@@ -347,6 +361,23 @@ class TestEnvelope:
         assert envelope["requires_approval_phrase"] is True
         assert envelope["hints"]["action"] == "configure_approval_phrase"
         assert "approval_phrase" not in envelope["hints"]
+        # ADD (issue #144): the unconfigured hints additionally carry the flat,
+        # namespaced guidance block alongside the stable action.
+        guidance_keys = {
+            "approval_phrase_env_var",
+            "approval_phrase_when",
+            "approval_phrase_where",
+            "approval_phrase_restart",
+            "approval_phrase_restart_required",
+            "approval_phrase_setup_opencode",
+            "approval_phrase_setup_codex",
+            "approval_phrase_setup_gemini",
+            "approval_phrase_verify",
+        }
+        assert guidance_keys <= set(envelope["hints"])
+        assert envelope["hints"]["approval_phrase_env_var"] == "SOFER_MCP_APPROVAL_PHRASE"
+        assert envelope["hints"]["approval_phrase_restart_required"] is True
+        assert all(not isinstance(v, (dict, list)) for v in envelope["hints"].values())
 
 
 class TestHappyPath:
