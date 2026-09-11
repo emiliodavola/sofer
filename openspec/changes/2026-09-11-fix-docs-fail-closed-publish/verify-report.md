@@ -1,20 +1,20 @@
 ```yaml
 schema: gentle-ai.verify-result/v1
-change: 2026-09-11-fix-docs-fail-closed-publish
 evidence_revision: sha256:0c754720485abc1478d8920c36513c85387fce707d72f50c0c2d6d8360abc7ac
-# sha256 of `git diff` (README.md + README_ES.md) — there is NO commit; verified
-# against the working tree on branch docs/fix-readme-fail-closed-publish.
+# sha256 of `git diff` (README.md + README_ES.md) — verified against the working
+# tree on branch docs/fix-readme-fail-closed-publish; the same blobs shipped in
+# commit 1ad9837 (README.md e7cfba34, README_ES.md c9fbb51c), so the verdict
+# carries over unchanged to the delivered PR (#156).
 artifact_blobs:
   README.md: e7cfba3468b6b1dd6f9a40156b9f0e1c6b71e192
   README_ES.md: c9fbb51c5e6ff587369428e3e3fe1798fb9565c4
-verdict: pass-with-archive-blockers
-requirements: 0/0            # no-delta change: no requirement delta introduced
-scenarios: 0/0               # no-delta change: no new scenario introduced
-acceptance_criteria: 8/8     # issue #148 criteria (proposal *Success Criteria*)
+verdict: pass
+blockers: 0
 critical_findings: 0
+requirements: 0/0           # no-delta change: no requirement delta introduced
+scenarios: 0/0              # no-delta change: no new scenario introduced
 warnings: 0
-suggestions: 3
-archive_blockers: 3          # tasks 4.1, 4.2, 4.3 unchecked (delivery phase withheld)
+acceptance_criteria: 8/8    # issue #148 criteria (proposal *Success Criteria*)
 test_command: uv run pytest tests/ -q
 test_exit_code: 0
 test_result: 1468 passed, 6 skipped, 13 warnings

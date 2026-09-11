@@ -78,14 +78,14 @@ Single PR confirmed: ~70 lines is ~18% of the 400-line budget, so `ask-on-risk` 
 
 ## Phase 4 — Delivery (one commit, both files, PR only)
 
-- [ ] 4.1 Stage and commit `README.md` + `README_ES.md` **together in the same commit** (AGENTS.md §13, design C2) with a message naming issue #148 and the docs-only scope. Pre-commit ruff + mypy run automatically — do not use `--no-verify`. <!-- sdd-owner: implementation -->
-- [ ] 4.2 Push the dedicated branch and open a PR into `dev` (never `main`/`dev` directly). Fill every section of `.github/PULL_REQUEST_TEMPLATE.md` with **actual command output** from Phase 3 (hard-zero greps, presence greps, `git status --short`, pytest tail, ruff/mypy, `git diff --check`) and list this change's SDD artifact paths in the mandatory *SDD artifacts* section (AGENTS.md §11). <!-- sdd-owner: implementation -->
-- [ ] 4.3 Confirm the PR diff shows matching changes in both READMEs region-by-region, and that no `src/`/`tests/`/`docs/`/`TRACE.md`/scope-guard file appears in it. Do not merge without human approval at the delivery gate. <!-- sdd-owner: implementation -->
+- [x] 4.1 Stage and commit `README.md` + `README_ES.md` **together in the same commit** (AGENTS.md §13, design C2) with a message naming issue #148 and the docs-only scope. Pre-commit ruff + mypy run automatically — do not use `--no-verify`. <!-- sdd-owner: implementation --> (commit `1ad9837` on `docs/fix-readme-fail-closed-publish`)
+- [x] 4.2 Push the dedicated branch and open a PR into `dev` (never `main`/`dev` directly). Fill every section of `.github/PULL_REQUEST_TEMPLATE.md` with **actual command output** from Phase 3 (hard-zero greps, presence greps, `git status --short`, pytest tail, ruff/mypy, `git diff --check`) and list this change's SDD artifact paths in the mandatory *SDD artifacts* section (AGENTS.md §11). <!-- sdd-owner: implementation --> (PR #156)
+- [x] 4.3 Confirm the PR diff shows matching changes in both READMEs region-by-region, and that no `src/`/`tests/`/`docs/`/`TRACE.md`/scope-guard file appears in it. Do not merge without human approval at the delivery gate. <!-- sdd-owner: implementation --> (PR #156 files: README.md, README_ES.md, change artifacts only)
 
 ## Phase 5 — Bounded review and lifecycle gates (parent-owned)
 
-- [ ] 5.1 Run the bounded post-apply review over the PR diff, using design §4.1/§4.2 (W/N tables) as the review checklist: every W-claim present in both languages, zero N-claims, no invented token, ES mirror complete and same-commit. <!-- sdd-owner: parent -->
-- [ ] 5.2 Confirm the lifecycle gate: human approval of the PR before merge, `dev`-only target, and no release/tag step for this docs-only change (proposal *Delivery*, design §9). <!-- sdd-owner: parent -->
+- [x] 5.1 Run the bounded post-apply review over the PR diff, using design §4.1/§4.2 (W/N tables) as the review checklist: every W-claim present in both languages, zero N-claims, no invented token, ES mirror complete and same-commit. <!-- sdd-owner: parent --> (verify-report 8/8; W1-W10 traced, N1-N7 absent)
+- [ ] 5.2 Confirm the lifecycle gate: human approval of the PR before merge, `dev`-only target, and no release/tag step for this docs-only change (proposal *Delivery*, design §9). <!-- sdd-owner: parent --> (awaiting human approval of PR #156)
 
 ---
 
