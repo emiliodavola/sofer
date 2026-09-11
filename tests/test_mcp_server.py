@@ -9,6 +9,7 @@ uses the shared ``restore_tool_config`` fixture.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import importlib.util
 import io
@@ -26,6 +27,7 @@ from fastmcp.exceptions import ToolError
 
 import sofer.config as config
 import sofer.publish as publish_mod
+from sofer import mcp_registration as registration
 from sofer import mcp_server as ms
 from sofer.mcp_server import (
     build_server,
@@ -251,6 +253,149 @@ class TestNextHintContract:
         assert envelope["next"]["tool"] == "sofer_publish"
         assert envelope["next"]["arguments"]["dry_run"] is True
         assert envelope["hints"]["acknowledge_risk"] is True
+
+
+class TestHintContentActionable:
+    """Issue #144: the unconfigured approval hint must be a usable recovery path.
+
+    The phrase is read exactly once at build time, so the only way out is to set
+    the variable in the LAUNCHER process environment and restart the host. The
+    preflight ``hints`` must say so in flat scalars (MSP-R13) without ever
+    leaking the phrase or naming an on-disk agent config path as the place to
+    put it.
+    """
+
+    _GUIDANCE_KEYS: frozenset[str] = frozenset(
+        {
+            "approval_phrase_env_var",
+            "approval_phrase_when",
+            "approval_phrase_where",
+            "approval_phrase_restart",
+            "approval_phrase_restart_required",
+            "approval_phrase_setup_opencode",
+            "approval_phrase_setup_codex",
+            "approval_phrase_setup_gemini",
+            "approval_phrase_verify",
+        }
+    )
+
+    def _unconfigured_hints(self, tmp_path: Path, monkeypatch: Any) -> dict[str, Any]:
+        """Return the ``sofer_auth_status`` hints of a no-phrase server.
+
+        The environment is cleared BEFORE ``build_server`` because the phrase is
+        read once at build time - setting it afterwards would prove nothing.
+        """
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        server = build_server(root=tmp_path)
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["approval_configured"] is False, envelope
+        return dict(envelope["hints"])
+
+    def test_auth_status_unconfigured_hint_is_actionable(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """The hint keeps its stable action and names var, read-once, launcher
+        env, restart and the verification step."""
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        assert hints["action"] == "configure_approval_phrase"
+        assert hints["approval_phrase_env_var"] == "SOFER_MCP_APPROVAL_PHRASE"
+        assert hints["approval_phrase_when"] == ms._PHRASE_READ_ONCE_FACT
+        assert "read exactly once" in hints["approval_phrase_when"]
+        assert "process starts" in hints["approval_phrase_when"]
+        assert hints["approval_phrase_where"] == ms._PHRASE_LAUNCH_ENV_FACT
+        assert "separate shell or terminal" in hints["approval_phrase_where"]
+        assert hints["approval_phrase_restart"] == ms._PHRASE_RESTART_FACT
+        assert "full restart" in hints["approval_phrase_restart"]
+        assert hints["approval_phrase_verify"] == ms._PHRASE_VERIFY_FACT
+        assert "approval_configured:true" in hints["approval_phrase_verify"]
+
+    def test_auth_status_unconfigured_hint_restart_required_is_true(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Restart is signalled machine-readably as a flat boolean."""
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        assert hints["approval_phrase_restart_required"] is True
+
+    def test_auth_status_unconfigured_hints_are_flat_scalars(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """The enriched payload keeps the MSP-R13 flatness invariant."""
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        assert TestNextHintContract._is_flat_hint_dict(hints)
+        assert all(not isinstance(v, (dict, list)) for v in hints.values())
+        assert all(isinstance(v, str) or v is True for v in hints.values())
+        # Fresh dict per call: no shared mutable module state to leak into.
+        assert ms._approval_phrase_guidance_hints() is not ms._approval_phrase_guidance_hints()
+
+    def test_auth_status_configured_hints_have_no_guidance_keys(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """The configured branch is unchanged: bare key in, guidance out."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+        hints = _call(server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}).data[
+            "hints"
+        ]
+        assert hints["approval_phrase"] == "<from human>"
+        assert [k for k in hints if k.startswith("approval_phrase_")] == []
+
+    def test_auth_status_unconfigured_hint_uses_verified_registration_keys(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Per-agent guidance claims only the keys registration really writes.
+
+        The claimed key table is asserted against the real
+        :func:`sofer.mcp_registration.build_entry` output, and opencode's value
+        must state that no environment is forwarded (it writes no env field).
+        """
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        env = {"HF_TOKEN": "hf_test_token", "SOFER_MCP_APPROVAL_PHRASE": "a-phrase"}
+        for agent, keys in ms._APPROVAL_PHRASE_AGENT_ENTRY_KEYS.items():
+            entry = registration.build_entry(agent, tmp_path, env)  # type: ignore[arg-type]
+            for key in keys:
+                assert key in entry, (agent, key, sorted(entry))
+                assert key in hints[f"approval_phrase_setup_{agent}"], (agent, key)
+        assert "env" not in ms._APPROVAL_PHRASE_AGENT_ENTRY_KEYS["opencode"]
+        opencode_setup = hints["approval_phrase_setup_opencode"]
+        assert "no environment is forwarded" in opencode_setup
+
+    def test_auth_status_unconfigured_guidance_has_no_phrase_material(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """A configured value never reaches the guidance surface (NEVER-LEAK)."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        configured = build_server(root=tmp_path, approval_phrase="phrase123")
+        configured_envelope = _call(
+            configured, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert configured_envelope["hints"]["approval_phrase"] == "<from human>"
+        assert "phrase123" not in str(configured_envelope)
+
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        serialized = f"{hints}{ms._APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE}"
+        assert "phrase123" not in serialized
+        assert hashlib.sha256(b"phrase123").hexdigest() not in serialized
+        assert "approval_phrase" not in hints
+        # No unexpected (phrase-probe) keys: the payload is exactly the stable
+        # action + the namespaced guidance + the pre-existing ack hint.
+        assert set(hints) == self._GUIDANCE_KEYS | {"action", "acknowledge_risk"}
+
+    def test_auth_status_unconfigured_guidance_names_no_config_path(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Guidance points at the launcher environment, never at a config file."""
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        for forbidden in ("opencode.json", "config.toml", "settings.json", ".codex", ".config"):
+            for key, value in hints.items():
+                assert forbidden not in str(value), (key, value)
 
 
 class TestToolRoster:
@@ -784,6 +929,16 @@ class TestPublishAuthorizationLadder:
         assert envelope["hints"] == {"action": "configure_approval_phrase"}
         assert "publish is disabled" in envelope["output"]
         assert upload_calls == []
+        # Issue #144: the same process-start semantics ride in the message — the
+        # refusal must name the variable, the read-once-at-start rule, the
+        # launcher environment and the restart requirement.
+        refusal_text = f"{envelope['message']}{envelope['output']}"
+        assert ms._APPROVAL_PHRASE_ENV_VAR in refusal_text
+        assert ms._PHRASE_READ_ONCE_FACT in refusal_text
+        assert ms._PHRASE_LAUNCH_ENV_FACT in refusal_text
+        assert ms._PHRASE_RESTART_FACT in refusal_text
+        assert "separate shell" in refusal_text
+        assert "full restart" in refusal_text
 
     def test_blank_phrase_treated_as_unconfigured(self, tmp_path, monkeypatch, restore_tool_config):
         """An empty/whitespace approval phrase must fail closed, not open.
@@ -819,6 +974,83 @@ class TestPublishAuthorizationLadder:
         assert envelope["ok"] is False
         assert envelope["error_code"] == "PUBLISH_APPROVAL_NOT_CONFIGURED"
         assert upload_calls == []
+
+
+class TestApprovalNotConfiguredMessage:
+    """Issue #144: the PUBLISH_APPROVAL_NOT_CONFIGURED refusal is actionable.
+
+    The message carries the same four process-start facts as the preflight
+    ``hints`` (one fact source), while the refusal ``hints`` payload stays
+    minimal and byte-for-byte unchanged (MSP-R13).
+    """
+
+    def _refusal_envelope(
+        self, tmp_path: Path, monkeypatch: Any, upload_calls: list[str]
+    ) -> dict[str, Any]:
+        """Call publish_confirm on a no-phrase server with upload trapped."""
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(
+            publish_mod._api,
+            "upload_folder",
+            lambda *a, **kw: upload_calls.append("upload_folder"),
+        )
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        server = build_server(root=tmp_path)  # no approval phrase configured
+        return dict(
+            _call(
+                server,
+                "sofer_publish_confirm",
+                {
+                    "config": str(tmp_path / "dataset.toml"),
+                    "acknowledge_risk": True,
+                    "approval_phrase": "anything",
+                },
+            ).data
+        )
+
+    def test_publish_approval_not_configured_message_process_start_semantics(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Refusal keeps its code/prefix, never uploads, and explains recovery."""
+        upload_calls: list[str] = []
+        envelope = self._refusal_envelope(tmp_path, monkeypatch, upload_calls)
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "PUBLISH_APPROVAL_NOT_CONFIGURED"
+        assert upload_calls == []
+        message = str(envelope["message"])
+        assert message.startswith("publish is disabled:")
+        assert ms._APPROVAL_PHRASE_ENV_VAR in message
+        assert ms._PHRASE_READ_ONCE_FACT in message
+        assert ms._PHRASE_LAUNCH_ENV_FACT in message
+        assert ms._PHRASE_RESTART_FACT in message
+        assert "publish is disabled" in envelope["output"]
+
+    def test_publish_refusal_hints_unchanged_exact_dict(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """The refusal hints stay the minimal exact dict (guidance rides in the
+        message there) — the shared action literal changes nothing."""
+        upload_calls: list[str] = []
+        envelope = self._refusal_envelope(tmp_path, monkeypatch, upload_calls)
+        assert envelope["hints"] == {"action": "configure_approval_phrase"}
+
+    def test_approval_phrase_facts_not_drifted_between_hints_and_message(self) -> None:
+        """Drift guard: each process-start fact is a substring of its hint value
+        AND of the refusal message — one fact source, two carriers."""
+        hints = ms._approval_phrase_guidance_hints()
+        message = ms._APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE
+        facts = {
+            "approval_phrase_env_var": ms._APPROVAL_PHRASE_ENV_VAR,
+            "approval_phrase_when": ms._PHRASE_READ_ONCE_FACT,
+            "approval_phrase_where": ms._PHRASE_LAUNCH_ENV_FACT,
+            "approval_phrase_restart": ms._PHRASE_RESTART_FACT,
+        }
+        for hint_key, fact in facts.items():
+            assert fact in hints[hint_key], hint_key
+            assert fact in message, hint_key
 
 
 class TestContainment:

@@ -45,7 +45,8 @@ Security model (REVISION-2 design, findings CF-1/CF-2):
 
 Every tool docstring states its side effects and network usage verbatim.
 The token and approval phrase are never logged, returned, or placed in
-docstrings or resources.
+docstrings or resources; the unconfigured-approval preflight guidance carries
+the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only.
 """
 
 from __future__ import annotations
@@ -169,6 +170,73 @@ _PHASED_INSTRUCTIONS: str = (
     "contained under the server root. Preflight: sofer_auth_status checks token/confidential/approval without network. "
     f"{_UNTRUSTED_NOTE}\n"
     "Next hint: start with sofer_validate for existing datasets, or sofer_init + sofer_scan_apply for greenfield. sofer_auth_status is the preflight tool."
+)
+
+# ---------------------------------------------------------------------------
+#  Approval-phrase process-start facts (issue #144)
+# ---------------------------------------------------------------------------
+# Single fact source for the two surfaces that report the unconfigured
+# approval-phrase state: the ``sofer_auth_status`` flat ``hints`` payload and
+# the ``PUBLISH_APPROVAL_NOT_CONFIGURED`` refusal message. Every carrier value
+# is composed from these constants (never re-typed), so a drift-guard test can
+# assert each fact is a substring of both surfaces.
+#
+# Constraints: ASCII only; only the variable NAME is ever interpolated (never a
+# value, never a phrase-derived signal, never an on-disk config file or
+# directory path - AGENTS.md 1/3); the fail-closed gate wording is deliberately
+# NOT user-tunable, so there is no ``[tool.sofer]`` key and no
+# ``pyproject.toml`` entry for it.
+_APPROVAL_PHRASE_ENV_VAR: str = "SOFER_MCP_APPROVAL_PHRASE"
+_APPROVAL_PHRASE_ACTION: str = "configure_approval_phrase"
+_PHRASE_READ_ONCE_FACT: str = (
+    "the approval phrase is read exactly once, when the MCP server process starts "
+    "(build_server), from the approval_phrase argument or the environment"
+)
+_PHRASE_LAUNCH_ENV_FACT: str = (
+    f"{_APPROVAL_PHRASE_ENV_VAR} must be in the environment of the process that "
+    "launches sofer-mcp - a value set in a separate shell or terminal does not "
+    "reach the server"
+)
+_PHRASE_RESTART_FACT: str = (
+    "a full restart of the agent/server host process is required for a new value to take effect"
+)
+_PHRASE_VERIFY_FACT: str = "after the restart sofer_auth_status reports approval_configured:true"
+
+# Per-agent registration shapes the setup guidance is composed from, verified
+# against ``mcp_registration.build_entry``: opencode's ``mcp.sofer`` entry
+# carries only ``type``/``command``/``cwd`` (NO environment forwarding), codex
+# persists an ``env_vars`` allow-list of NAMES, gemini persists an ``env``
+# mapping of NAME -> ``$NAME`` references. Secret VALUES are never on disk.
+_APPROVAL_PHRASE_AGENT_ENTRY_KEYS: dict[str, tuple[str, ...]] = {
+    "opencode": ("type", "command", "cwd"),
+    "codex": ("env_vars",),
+    "gemini": ("env",),
+}
+_OPENCODE_SETUP_FACT: str = (
+    "opencode (sofer mcp add --agent opencode): the entry carries only type, "
+    "command and cwd - no environment is forwarded, so set the variable in the "
+    "terminal that launches opencode itself"
+)
+_CODEX_SETUP_FACT: str = (
+    "codex (sofer mcp add --agent codex): the entry persists an env_vars "
+    "allow-list of variable NAMES - set the variable before launching codex, and "
+    "values are never written to disk"
+)
+_GEMINI_SETUP_FACT: str = (
+    "gemini (sofer mcp add --agent gemini): the entry persists an env mapping of "
+    "NAME to $NAME references expanded at launch - values are never written to disk"
+)
+
+# Composed fail-closed refusal message: verbatim "publish is disabled" prefix,
+# each process-start fact exactly once, ASCII ``-`` separators only, no phrase
+# material, and no repetition of the per-agent setup (that rides in the
+# preflight ``hints``; the error envelope stays minimal - MSP-R13).
+_APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE: str = (
+    "publish is disabled: no approval phrase is configured on this server - "
+    f"{_PHRASE_READ_ONCE_FACT} "
+    f"(build_server(approval_phrase=...) or {_APPROVAL_PHRASE_ENV_VAR}); "
+    f"{_PHRASE_LAUNCH_ENV_FACT}; {_PHRASE_RESTART_FACT} - "
+    "a human approval phrase is required for any Hugging Face publish"
 )
 
 
@@ -750,6 +818,45 @@ def _workflow_description(fn: Callable[..., Any]) -> str:
     return f"{doc}\n\n{line}" if line else doc
 
 
+def _approval_phrase_guidance_hints() -> dict[str, Any]:
+    """Return the flat unconfigured-approval guidance hints (issue #144).
+
+    Single source for the ``sofer_auth_status`` unconfigured ``hints`` payload:
+    the caller merges this dict, so :data:`_APPROVAL_PHRASE_ACTION` is owned
+    here too and the stable machine-readable ``action`` value is never re-typed
+    at the call site. The same four process-start facts also compose
+    :data:`_APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE`, so both reporting surfaces
+    share one fact source.
+
+    Contract:
+        - returns a FRESH flat dict on every call (no shared mutable module
+          state, no in-place mutation of a global);
+        - every value is a flat scalar (``str`` or ``True``) - no nested dict
+          or list anywhere, i.e. the MSP-R13 flatness invariant asserted by
+          ``tests/test_mcp_server.py::TestNextHintContract._is_flat_hint_dict``;
+        - only the approval-phrase variable NAME is ever exposed: never the
+          phrase, a phrase-derived signal, or an on-disk agent config file or
+          directory path.
+
+    Returns:
+        Flat ``approval_phrase_*``-namespaced guidance plus the stable
+        ``action`` key (the bare ``approval_phrase`` key stays out of the
+        unconfigured payload).
+    """
+    return {
+        "action": _APPROVAL_PHRASE_ACTION,
+        "approval_phrase_env_var": _APPROVAL_PHRASE_ENV_VAR,
+        "approval_phrase_when": _PHRASE_READ_ONCE_FACT,
+        "approval_phrase_where": _PHRASE_LAUNCH_ENV_FACT,
+        "approval_phrase_restart": _PHRASE_RESTART_FACT,
+        "approval_phrase_restart_required": True,
+        "approval_phrase_setup_opencode": _OPENCODE_SETUP_FACT,
+        "approval_phrase_setup_codex": _CODEX_SETUP_FACT,
+        "approval_phrase_setup_gemini": _GEMINI_SETUP_FACT,
+        "approval_phrase_verify": _PHRASE_VERIFY_FACT,
+    }
+
+
 def _error_envelope(
     error_code: str,
     message: str,
@@ -1152,8 +1259,8 @@ def sofer_publish_confirm(
             # gates, never sufficient on their own.
             return _error_envelope(
                 "PUBLISH_APPROVAL_NOT_CONFIGURED",
-                "publish is disabled: no approval phrase is configured on this server (set SOFER_MCP_APPROVAL_PHRASE and restart) — a human approval phrase is required for any Hugging Face publish",
-                next_hint={"action": "configure_approval_phrase"},
+                _APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE,
+                next_hint={"action": _APPROVAL_PHRASE_ACTION},
                 config_errors=config_errors,
                 extra={
                     "confidential": cfg.confidential,
@@ -1627,9 +1734,16 @@ def sofer_auth_status(
     (``SOFER_MCP_APPROVAL_PHRASE`` / ``build_server(approval_phrase=...)``);
     and ``requires_approval_phrase`` — always ``True``, because the publish
     ladder now treats a human approval phrase as mandatory (fail-closed). When
-    ``approval_configured`` is ``False`` the ``next`` hint carries
-    ``{"action": "configure_approval_phrase"}``; when ``True`` it carries
-    ``{"approval_phrase": "<from human>"}`` instead.
+    ``approval_configured`` is ``False`` the flat ``hints`` object carries
+    ``action: "configure_approval_phrase"`` plus flat ``approval_phrase_*``
+    guidance: the variable NAME only, read once at server start, the variable
+    must be in the environment of the process that launches ``sofer-mcp``, a
+    full restart of the host process is required (signalled by
+    ``approval_phrase_restart_required: true``), the per-agent setup keys, and
+    the verify step; only the variable NAME is ever exposed, never the phrase,
+    a phrase-derived value, or an on-disk agent config file path. When
+    ``approval_configured`` is ``True`` the hints carry
+    ``{"approval_phrase": "<from human>"}`` and no ``approval_phrase_*`` key.
 
     When to use: preflight before sofer_publish_confirm to learn required acknowledgments without triggering a publish.
     Example: sofer_auth_status(config="dataset.toml")
@@ -1669,7 +1783,9 @@ def sofer_auth_status(
         if approval_configured:
             next_hint["approval_phrase"] = "<from human>"
         else:
-            next_hint["action"] = "configure_approval_phrase"
+            # The whole unconfigured payload (including the stable ``action``)
+            # comes from one pure source so both reporting surfaces cannot drift.
+            next_hint.update(_approval_phrase_guidance_hints())
         next_hint["acknowledge_risk"] = True
         # ok reflects publish readiness, not merely config validity: a valid
         # config still cannot publish without a token or (when required) a
@@ -2613,7 +2729,10 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
         inherits the LAST-built posture for every tool call. Each stdio
         launch is its own process, so ``sofer-mcp`` is safe — but never
         construct two servers in one test/process and expect them to stay
-        isolated.
+        isolated. The approval phrase is read exactly once, here at build time
+        (argument or ``SOFER_MCP_APPROVAL_PHRASE``); the running server never
+        re-reads the environment, so a later change requires a full restart of
+        the host process.
 
     Args:
         root: Containment root for every path-bearing tool argument and
