@@ -719,6 +719,29 @@ codex `env_vars` y gemini `env` persisten solo el **nombre** del env, nunca el
 secreto; opencode no recibe env de `sofer mcp add`, así que usa el entorno del
 lanzador o un literal `environment` explícito (texto plano en disco).
 
+En Windows, genera la misma frase de 32 caracteres hexadecimales sin `openssl`,
+usando el RNG criptográfico de .NET, y defínela solo para la sesión actual:
+
+```powershell
+# Portable on Windows PowerShell 5.1 (the default) and PowerShell 7+:
+# the legacy RNG constructor is deprecated, and the static .NET 5+ hex
+# helpers do not exist on 5.1, so use the instance API below.
+$bytes = New-Object byte[] 16
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:SOFER_MCP_APPROVAL_PHRASE = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+```
+
+`$env:` (PowerShell) y `set` (cmd) afectan solo a la sesión actual — un proceso
+hereda el valor únicamente si se lanza desde esa sesión. Para que el host lo
+vea, el valor debe estar en el entorno que lanza el servidor MCP, o persistido
+con `setx` y seguido de un reinicio completo del host:
+`setx SOFER_MCP_APPROVAL_PHRASE <value>` escribe en el entorno de usuario
+(`HKCU\Environment`) solo para los procesos **recién creados** — no cambia el
+shell actual, almacena el valor sin cifrar y trunca los valores de más de
+1024 caracteres. Un servidor que ya está en ejecución nunca vuelve a leer el
+entorno, así que tras `setx` debes reiniciar por completo el host. Confírmalo
+con `sofer_auth_status` → `approval_configured` (ver **Verificación** abajo).
+
 **Windows:** la variable debe estar en el entorno del lanzador — el proceso que
 inicia `sofer-mcp` —, no solo en el shell donde escribiste, y el host debe
 reiniciarse por completo para que el cambio surta efecto.
