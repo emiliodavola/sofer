@@ -677,8 +677,10 @@ Ubicaciones y formas por agente:
 - **Autorización de publicación a prueba de fallos (fail-closed).**
   `sofer_publish_confirm` es el único callable que escribe en Hugging Face Hub.
   Requiere `acknowledge_risk=True`, requiere `acknowledge_confidential=True`
-  para las configuraciones marcadas como `[meta] confidential` y — cuando está
-  configurada — una frase de aprobación comparada con `hmac.compare_digest`. El
+  para las configuraciones marcadas como `[meta] confidential` y siempre
+  requiere una frase de aprobación del servidor comparada con
+  `hmac.compare_digest` — sin frase configurada la llamada se rechaza con
+  `PUBLISH_APPROVAL_NOT_CONFIGURED`; la publicación queda deshabilitada. El
   token se resuelve vía `HF_TOKEN` → `HF_HUB_TOKEN` (alias compat de sofer) →
   `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (caché de
   `hf auth login` vía `HF_TOKEN_PATH` + OIDC vía `HF_OIDC_RESOURCE` + Colab) con
@@ -696,18 +698,36 @@ Ubicaciones y formas por agente:
 
 ### Endurecimiento para hosts sensibles
 
-Los hosts que manejan datos sensibles DEBERÍAN configurar una frase de
-aprobación para que un agente solo pueda publicar después de que un humano la
-revele:
+No confíes solo en los dos flags `acknowledge_*` — la frase de aprobación es
+**obligatoria para toda publicación en Hugging Face** hecha a través de
+`sofer_publish_confirm`. Sin una, la llamada se rechaza con
+`PUBLISH_APPROVAL_NOT_CONFIGURED` y la subida queda deshabilitada por completo;
+un valor vacío o solo con espacios cuenta como no configurado. Un agente solo
+puede publicar después de que un humano revele la frase:
 
 ```bash
 export SOFER_MCP_APPROVAL_PHRASE="$(openssl rand -hex 16)"
 sofer-mcp
 ```
 
-Cuando no hay frase configurada, solo los dos booleanos de reconocimiento
-protegen la publicación en HF — una postura más débil, adecuada para
-configuraciones stdio de un solo usuario y confianza alta.
+Se lee **una sola vez al iniciar el proceso** (`build_server(root,
+approval_phrase=...)` o `SOFER_MCP_APPROVAL_PHRASE`) y permanece inmutable
+durante la vida de ese proceso — cambia el valor en el lanzador y reinicia por
+completo el host del agente. Configúrala como cada agente persiste el env MCP
+(ver [Registrar sofer-mcp con agentes de IA](#registrar-sofer-mcp-con-agentes-de-ia-opencode-codex-gemini)):
+codex `env_vars` y gemini `env` persisten solo el **nombre** del env, nunca el
+secreto; opencode no recibe env de `sofer mcp add`, así que usa el entorno del
+lanzador o un literal `environment` explícito (texto plano en disco).
+
+**Windows:** la variable debe estar en el entorno del lanzador — el proceso que
+inicia `sofer-mcp` —, no solo en el shell donde escribiste, y el host debe
+reiniciarse por completo para que el cambio surta efecto.
+
+**Verificación:** `sofer_auth_status(config)` → `approval_configured` (`true`
+cuando el servidor tiene una frase no vacía; `requires_approval_phrase` es
+siempre `true`). `PUBLISH_APPROVAL_NOT_CONFIGURED` = no hay frase en el
+servidor; `PUBLISH_APPROVAL_REQUIRED` = la frase pasada en la llamada falta o
+no coincide.
 
 ## Configuración
 

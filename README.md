@@ -643,8 +643,10 @@ Per-agent locations and shapes:
 - **Fail-closed publish authorization.** `sofer_publish_confirm` is the only
   callable that writes to Hugging Face Hub. It requires
   `acknowledge_risk=True`, requires `acknowledge_confidential=True` for
-  configs marked `[meta] confidential`, and — when configured — an approval
-  phrase compared with `hmac.compare_digest`. Token is resolved via
+  configs marked `[meta] confidential`, and always requires a server
+  approval phrase compared with `hmac.compare_digest` — with no phrase
+  configured the call is refused with `PUBLISH_APPROVAL_NOT_CONFIGURED` and
+  the publish is disabled. Token is resolved via
   `HF_TOKEN` → `HF_HUB_TOKEN` (sofer compat alias) →
   `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (`hf auth login`
   cache via `HF_TOKEN_PATH` + OIDC via `HF_OIDC_RESOURCE` + Colab) with
@@ -661,16 +663,36 @@ Per-agent locations and shapes:
 
 ### Hardening for sensitive hosts
 
-Hosts handling sensitive data SHOULD configure an approval phrase so an
-agent can only publish after a human reveals it:
+Do not rely on the two `acknowledge_*` flags alone — the approval phrase is
+**mandatory for every Hugging Face publish** made through
+`sofer_publish_confirm`. Without one, the call is refused with
+`PUBLISH_APPROVAL_NOT_CONFIGURED` and the upload is disabled entirely; an empty
+or whitespace-only value counts as unconfigured. An agent can publish only
+after a human reveals the phrase:
 
 ```bash
 export SOFER_MCP_APPROVAL_PHRASE="$(openssl rand -hex 16)"
 sofer-mcp
 ```
 
-When no phrase is configured, only the two acknowledgment booleans gate the
-HF publish — a weaker posture suited to trusted single-user stdio setups.
+It is read **once at process start** (`build_server(root, approval_phrase=...)`
+or `SOFER_MCP_APPROVAL_PHRASE`) and stays immutable for that process — change
+the value in the launcher, then fully restart the agent host. Configure it the
+way each agent persists MCP env (see
+[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini)):
+codex `env_vars` and gemini `env` persist the env **name** only, never the
+secret; opencode receives no env from `sofer mcp add`, so use the launcher
+environment or an explicit `environment` literal (plaintext on disk).
+
+**Windows:** the variable must be in the launcher's environment — the process
+that starts `sofer-mcp` — not merely in the shell you typed in, and the host
+must be fully restarted for the change to take effect.
+
+**Verify:** `sofer_auth_status(config)` → `approval_configured` (`true` when the
+server has a non-blank phrase; `requires_approval_phrase` is always `true`).
+`PUBLISH_APPROVAL_NOT_CONFIGURED` = no phrase on the server;
+`PUBLISH_APPROVAL_REQUIRED` = the phrase passed to the call is missing or does
+not match.
 
 ## Configuration
 
