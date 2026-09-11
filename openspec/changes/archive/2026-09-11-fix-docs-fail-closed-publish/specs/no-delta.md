@@ -75,3 +75,32 @@ posture, and the existing README-grep test class (`tests/test_mcp_server.py`, `T
 covers the tool chain and arguments but not this surface. Preventing recurrence would require a
 **separate** change introducing a docs-conformance requirement plus its grep test. That is recorded
 here as a follow-up candidate and is intentionally **not** created by this change.
+
+---
+
+## 6. Sync outcome — verified no-op (`sdd-sync`, 2026-09-11)
+
+**Status**: verified no-op (no delta to merge) · **Canonical writes**: none · **`openspec/specs/**`** unchanged.
+
+Re-verified independently by the sync phase (not carried over from the proposal):
+
+| Check | Evidence | Result |
+|---|---|---|
+| Zero domain deltas | `find openspec/changes/2026-09-11-fix-docs-fail-closed-publish/specs -mindepth 1 -maxdepth 1` | ✅ `no-delta.md` only — no `<domain>/spec.md` |
+| No delta sections in the change | `grep -rn '^## \(ADDED\|MODIFIED\|REMOVED\|RENAMED\)' …/specs/` | ✅ zero matches |
+| No `RENAMED` delta (unsupported by the native helper) | same grep | ✅ zero matches |
+| Canonical already normative | verbatim anchors, 1 match each: `mcp-server/spec.md` L137 `the acknowledgment booleans alone are never sufficient`; L390 `PUBLISH_APPROVAL_NOT_CONFIGURED\|TARGET_INVALID`; L424 ``requires_approval_phrase` is always `true``; `mcp-registration/spec.md` L19 ``SOFER_MCP_APPROVAL_PHRASE`) are never written to disk`` | ✅ §2 stands |
+| `openspec/specs/**` untouched | `git status --porcelain openspec/specs/` | ✅ empty |
+| Active same-domain collisions | `ls openspec/changes/` | ✅ this change + `archive` only |
+| Destructive delta needing approval | no `REMOVED`, no large `MODIFIED` | ✅ none applies |
+
+**No `sync-report.md` was written, deliberately.** This repository records spec-sync outcomes in the
+`## Spec Sync` section of `archive-report.md` (25 archived changes do so; 8 use `## Spec Sync Summary`),
+and **no `sync-report.md` exists anywhere under `openspec/`** — creating one would invent a convention.
+The archive phase must therefore record `## Spec Sync → None — no delta was authored for this change`
+(precedent: `openspec/changes/archive/2026-09-09-fix-mcp-hf-token-fallback/archive-report.md`), citing
+§2/§3 and this section.
+
+**Engine reconciliation.** The status engine's `blockedReasons: ["specs/ has files but no non-empty
+<domain>/spec.md"]` / `artifacts.specs: "missing"` is the known false positive for a deliberately
+no-delta change; this section is the reconciliation record. It is **not** an archive blocker.
