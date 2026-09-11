@@ -13,6 +13,7 @@ import hashlib
 import importlib
 import importlib.util
 import io
+import json
 import os
 import re
 import subprocess
@@ -30,6 +31,7 @@ import sofer.config as config
 import sofer.publish as publish_mod
 from sofer import mcp_registration as registration
 from sofer import mcp_server as ms
+from sofer import workflow
 from sofer._version import get_version
 from sofer.mcp_server import (
     build_server,
@@ -1640,6 +1642,186 @@ class TestResources:
 
         with pytest.raises(McpError, match="outside the server root"):
             _run(_go())
+
+
+class TestStatusResource:
+    """Issue #146: the static ``sofer://status`` posture resource.
+
+    Registered with NO path variables, so fastmcp lists it under
+    ``resources/list`` — never under ``resources/templates/list``, which is
+    where the three URI templates appear (the issue: resources/list was empty
+    because every resource was a template). The payload is exactly six posture
+    fields mirrored from the ``sofer_auth_status`` envelope globals (one fact
+    source, two surfaces); reading it has zero side effects and never leaks
+    the approval phrase. Env is kept hermetic by deleting
+    ``SOFER_MCP_APPROVAL_PHRASE`` so an ambient shell variable cannot flake CI
+    (mirroring the #145 fixtures).
+    """
+
+    @staticmethod
+    def _status_text(server) -> str:
+        """Read ``sofer://status`` through the in-memory client; return the JSON text."""
+
+        async def _go():
+            async with Client(server) as client:
+                contents = await client.read_resource("sofer://status")
+                return contents[0].text
+
+        return _run(_go())
+
+    @staticmethod
+    def _payload(server) -> dict[str, Any]:
+        """Parse the ``sofer://status`` JSON text into a dict."""
+        return json.loads(TestStatusResource._status_text(server))
+
+    def test_status_resource_listed(self, tmp_path, monkeypatch) -> None:
+        """Scenario: Static status resource listed with posture content.
+
+        ``resources/list`` becomes non-empty and includes ``sofer://status``;
+        ``resources/templates/list`` does NOT include it and still lists the 3
+        URI templates (static, not a template)."""
+        TestAuthStatusPosture._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="phrase123")
+
+        async def _go():
+            async with Client(server) as client:
+                resources = await client.list_resources()
+                templates = await client.list_resource_templates()
+                contents = await client.read_resource("sofer://status")
+                return resources, templates, contents[0].text
+
+        resources, templates, text = _run(_go())
+        uris = {str(r.uri) for r in resources}
+        assert uris, "resources/list must not be empty"
+        assert "sofer://status" in uris
+        template_uris = {t.uriTemplate for t in templates}
+        assert "sofer://status" not in template_uris
+        assert template_uris == {
+            "sofer://dataset/{config_path*}",
+            "sofer://codebook/{data_file*}",
+            "sofer://metadata/{data_file*}",
+        }
+        assert text, "status resource must carry posture content"
+
+    def test_status_resource_content_explicit(self, tmp_path, monkeypatch) -> None:
+        """Scenario: Static status resource listed (content) — explicit phrase.
+
+        The payload is exactly the six fields with build-time values, asserted
+        by equality against the sources of truth (never hardcoded literals)."""
+        TestAuthStatusPosture._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="phrase123")
+        payload = self._payload(server)
+        assert set(payload) == {
+            "approval_configured",
+            "phrase_source",
+            "root",
+            "version",
+            "started_at",
+            "tool_count",
+        }
+        assert payload["approval_configured"] is True
+        assert payload["phrase_source"] == "explicit"
+        assert payload["root"] == str(tmp_path.resolve())
+        assert payload["version"] == get_version()
+        assert payload["version"]
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00",
+            payload["started_at"],
+        ), payload["started_at"]
+        assert payload["tool_count"] == len(workflow.WORKFLOW_METADATA)
+
+    def test_status_resource_consistent_with_auth_status(self, tmp_path, monkeypatch) -> None:
+        """Scenario: Status posture consistent across surfaces (one fact source).
+
+        The resource payload and the ``sofer_auth_status`` envelope of the same
+        build agree on the shared posture fields: explicit wins over env, and
+        env-only resolves to ``"env"``."""
+        TestAuthStatusPosture._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "envphrase456")
+        servers = [
+            build_server(root=tmp_path, approval_phrase="phrase123"),  # explicit wins
+            build_server(root=tmp_path),  # env only -> "env"
+        ]
+        for server in servers:
+            payload = self._payload(server)
+            envelope = _call(
+                server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+            ).data
+            assert payload["approval_configured"] is envelope["approval_configured"]
+            assert payload["phrase_source"] == envelope["phrase_source"]
+            assert payload["started_at"] == envelope["server_started_at"]
+            assert payload["version"] == envelope["server_version"]
+
+    def test_status_resource_no_phrase_leak(self, tmp_path, monkeypatch) -> None:
+        """Scenario: Status posture … free of secret material (NEVER-LEAK).
+
+        The phrase, any phrase-derived value (sha256 probe), and the configured
+        env value never appear in the serialized payload. The bare prefix
+        "phrase" is intentionally NOT probed — it is a substring of
+        ``phrase_source``."""
+        TestAuthStatusPosture._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "envphrase456")
+        server = build_server(root=tmp_path, approval_phrase="phrase123")
+        payload = self._payload(server)
+        assert payload["phrase_source"] in ("env", "explicit", "none")
+        assert set(payload) == {
+            "approval_configured",
+            "phrase_source",
+            "root",
+            "version",
+            "started_at",
+            "tool_count",
+        }
+        serialized = json.dumps(payload)
+        assert "phrase123" not in serialized
+        assert "envphrase456" not in serialized
+        assert hashlib.sha256(b"phrase123").hexdigest() not in serialized
+        assert hashlib.sha256(b"envphrase456").hexdigest() not in serialized
+
+    def test_status_resource_unconfigured_invariant(self, tmp_path, monkeypatch) -> None:
+        """Scenario: Status posture … unconfigured paths.
+
+        Across (a) no arg + env deleted, (b) env ``""``, (c) env ``"   "``,
+        (d) blank explicit ``approval_phrase=""`` with env set — the invariant
+        ``phrase_source == "none"`` ⟺ ``approval_configured is False`` holds on
+        every row."""
+        TestAuthStatusPosture._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        payloads = []
+        # (a) no argument + env deleted
+        payloads.append(self._payload(build_server(root=tmp_path)))
+        # (b) empty env value
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "")
+        payloads.append(self._payload(build_server(root=tmp_path)))
+        # (c) whitespace-only env value
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "   ")
+        payloads.append(self._payload(build_server(root=tmp_path)))
+        # (d) blank explicit arg beats env (never falls back)
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "x")
+        payloads.append(self._payload(build_server(root=tmp_path, approval_phrase="")))
+        for payload in payloads:
+            assert payload["phrase_source"] == "none"
+            assert payload["approval_configured"] is False
+            assert (payload["phrase_source"] == "none") == (payload["approval_configured"] is False)
+            assert payload["phrase_source"] in ("env", "explicit", "none")
+
+    def test_status_resource_hermetic_deterministic(self, tmp_path, monkeypatch) -> None:
+        """Zero-side-effect clause: two reads are byte-identical, nothing is
+        written under the root, and ``started_at`` stays stable within a build."""
+        TestAuthStatusPosture._clean_hf(monkeypatch)
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path, approval_phrase="phrase123")
+        before = sorted(p.name for p in tmp_path.rglob("*"))
+        first = self._status_text(server)
+        second = self._status_text(server)
+        after = sorted(p.name for p in tmp_path.rglob("*"))
+        assert first == second
+        assert before == after, "reading sofer://status must not write anything"
+        assert json.loads(first)["started_at"] == json.loads(second)["started_at"]
 
 
 # ---------------------------------------------------------------------------

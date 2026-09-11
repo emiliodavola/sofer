@@ -2694,10 +2694,33 @@ def _resource_metadata(data_file: str) -> str:
         return path.read_text(encoding="utf-8")
 
 
-def _register_resources(server: _FastMCP) -> None:
-    """Register the 3 resource templates on *server* (MSP-R07).
+def _resource_status() -> dict[str, Any]:
+    """Static posture snapshot for agents (issue #146) — non-secret
+    process-lifecycle metadata; no path variables, no file reads.
 
-    Templates use fastmcp's rest-pattern syntax (``{name*}``, RFC 6570
+    Mirrors the ``sofer_auth_status`` envelope diagnostics: ``approval_configured``
+    reflects whether the server has a non-blank approval phrase set;
+    ``phrase_source`` is the configuration path that produced it ("env" |
+    "explicit" | "none"); ``root`` is the resolved containment root; ``version``
+    and ``started_at`` are the #145 build-time posture globals; ``tool_count`` is
+    the size of the workflow registry (MSP-R13). No secrets: the phrase, any
+    phrase-derived value, and the configured env value never appear. Side
+    effects: none. Network usage: none.
+    """
+    return {
+        "approval_configured": _APPROVAL_PHRASE is not None,
+        "phrase_source": _PHRASE_SOURCE,
+        "root": str(_get_root()),
+        "version": _SERVER_VERSION,
+        "started_at": _SERVER_STARTED_AT,
+        "tool_count": len(workflow.WORKFLOW_METADATA),
+    }
+
+
+def _register_resources(server: _FastMCP) -> None:
+    """Register the 3 resource templates + 1 static status resource (MSP-R07) on *server*.
+
+    The 3 URI templates use fastmcp's rest-pattern syntax (``{name*}``, RFC 6570
     wildcard -> ``(?P<name>.+)``) so a URI path containing ``/`` matches:
     absolute POSIX paths arrive with a leading ``/`` and inner separators
     (e.g. ``sofer://dataset//tmp/root/dataset.toml``), and a plain
@@ -2707,10 +2730,30 @@ def _register_resources(server: _FastMCP) -> None:
     relative-to-root and absolute-inside-root paths and rejects anything
     outside the root, so no leading-slash stripping is needed (lstripping
     would corrupt the absolute-inside-root case, whose parent *is* the root).
+
+    The static ``sofer://status`` resource is registered AFTER the templates
+    for one structural reason: its URI has no ``{name}``/``{name*}`` path
+    variables and its handler takes no arguments, so fastmcp classifies it as
+    a static :class:`Resource` listed under ``resources/list`` — never under
+    ``resources/templates/list``, which is where the three templates appear.
+    Before it, every registered resource was a template and ``resources/list``
+    was empty by design (issue #146).
     """
     server.resource("sofer://dataset/{config_path*}")(_resource_dataset)
     server.resource("sofer://codebook/{data_file*}")(_resource_codebook)
     server.resource("sofer://metadata/{data_file*}")(_resource_metadata)
+    # Static (no path variables): fastmcp lists ``sofer://status`` under
+    # resources/list, NOT resources/templates/list — the three templates above
+    # live under templates; the issue's empty-list surprise is exactly that gap.
+    # No wrapping: the handler is applied directly.
+    server.resource(
+        "sofer://status",
+        description=(
+            "Server posture snapshot — approval_configured, phrase_source, root, "
+            "version, started_at, tool_count. Non-secret process-lifecycle "
+            "metadata only; no secrets, no side effects, no network."
+        ),
+    )(_resource_status)
 
 
 # ---------------------------------------------------------------------------
