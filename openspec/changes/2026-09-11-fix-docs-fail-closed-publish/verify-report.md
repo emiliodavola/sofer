@@ -1,26 +1,26 @@
 ```yaml
 schema: gentle-ai.verify-result/v1
 evidence_revision: sha256:0c754720485abc1478d8920c36513c85387fce707d72f50c0c2d6d8360abc7ac
-# sha256 of `git diff` (README.md + README_ES.md) — verified against the working
-# tree on branch docs/fix-readme-fail-closed-publish; the same blobs shipped in
-# commit 1ad9837 (README.md e7cfba34, README_ES.md c9fbb51c), so the verdict
-# carries over unchanged to the delivered PR (#156).
-artifact_blobs:
-  README.md: e7cfba3468b6b1dd6f9a40156b9f0e1c6b71e192
-  README_ES.md: c9fbb51c5e6ff587369428e3e3fe1798fb9565c4
 verdict: pass
 blockers: 0
 critical_findings: 0
-requirements: 0/0           # no-delta change: no requirement delta introduced
-scenarios: 0/0              # no-delta change: no new scenario introduced
-warnings: 0
-acceptance_criteria: 8/8    # issue #148 criteria (proposal *Success Criteria*)
+requirements: 0/0
+scenarios: 0/0
 test_command: uv run pytest tests/ -q
 test_exit_code: 0
-test_result: 1468 passed, 6 skipped, 13 warnings
+test_output_hash: sha256:97769db4716caeffdc144ea43ff7c63836b2b0a25fc8ddbc1a61e4b49049f97d
 build_command: uv run ruff check src/ tests/ && uv run mypy src/ && git diff --check
 build_exit_code: 0
+build_output_hash: sha256:beb5f2fbd1d6f8f0504c8c9abaa93358f761601efeb202fe75d01bc85e4ea3d7
 ```
+
+> NOTE (2026-09-11, post-delivery): the machine-readable envelope above reflects the
+> re-verification round at delivery time. `evidence_revision` is the sha256 of the
+> verified working-tree `git diff` (README.md + README_ES.md); the same blobs
+> shipped in commit `1ad9837` (README.md `e7cfba34`, README_ES.md `c9fbb51c`), so
+> the verdict carries over unchanged to PR #156. Delivery facts (acceptance
+> criteria 8/8, artifact blobs, commit/PR) live in the body sections below; the
+> YAML frontmatter uses only the repo-standard fields the status engine parses.
 
 ## Verification Report
 
