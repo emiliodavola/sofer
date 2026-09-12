@@ -2088,6 +2088,201 @@ class TestScanApplyTruthfulReport:
 
 
 # ---------------------------------------------------------------------------
+#  #152 + #154 — MCP scan parity: Phase-1 move-to-raw/ (move_loose) and the
+#  CLI --ext extension filter (extensions) on both scan tools.
+# ---------------------------------------------------------------------------
+
+
+def _scanned_dataset(root: Path) -> None:
+    """Post-scan layout: the registered file lives in cache/, raw/ exists.
+
+    The canonical ``_make_dataset`` fixture registers ``local = "data.csv"``
+    (pre-cache legacy), whose file sits loose in root — Phase-1 move would
+    relocate it too (CLI parity: the move does not distinguish registered
+    state). These tests need a dataset whose registered file is already in
+    cache/ so the only loose file is the one under test.
+    """
+    _make_dataset(root)
+    cache = root / "cache"
+    cache.mkdir()
+    (cache / "data.csv").write_bytes((root / "data.csv").read_bytes())
+    (root / "data.csv").unlink()
+    toml = root / "dataset.toml"
+    text = toml.read_text(encoding="utf-8").replace(
+        'local = "data.csv"', 'local = "cache/data.csv"'
+    )
+    toml.write_text(text, encoding="utf-8")
+
+
+class TestScanMoveLoosePhase:
+    """#152: MCP scan offers the CLI's Phase-1 move-to-raw/ via explicit opt-in."""
+
+    def test_scan_apply_move_loose_moves_to_raw(self, tmp_path, restore_tool_config):
+        """move_loose=True moves the loose file into raw/ AND copies it to cache/."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_apply",
+            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope.get("moved") == 1, envelope
+        assert (tmp_path / "raw" / "loose.csv").is_file()
+        assert (tmp_path / "cache" / "loose.csv").is_file()
+        assert not (tmp_path / "loose.csv").exists(), "loose file must be MOVED, not copied"
+        assert 'local = "cache/loose.csv"' in (tmp_path / "dataset.toml").read_text(
+            encoding="utf-8"
+        )
+
+    def test_scan_apply_without_move_loose_leaves_files_loose(self, tmp_path, restore_tool_config):
+        """Opt-in default: nothing moves silently without move_loose=True."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope.get("moved", 0) == 0, envelope
+        assert (tmp_path / "loose.csv").is_file()
+        assert not (tmp_path / "raw").exists()
+
+    def test_scan_apply_move_loose_collision_aborts_atomically(self, tmp_path, restore_tool_config):
+        """A raw/ collision fails BEFORE any move; TOML untouched."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        raw_dir = tmp_path / "raw"
+        raw_dir.mkdir()
+        (raw_dir / "loose.csv").write_text("existing;content\n", encoding="utf-8-sig")
+        before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_apply",
+            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert "Collision" in envelope["message"]
+        assert (tmp_path / "loose.csv").is_file(), "collision must abort before any move"
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
+
+    def test_scan_dry_run_move_loose_previews_without_mutation(self, tmp_path, restore_tool_config):
+        """move_loose dry-run previews the moves; no raw/, no cache/, no TOML write."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_dry_run",
+            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert "raw/loose.csv" in envelope["output"], envelope
+        assert (tmp_path / "loose.csv").is_file(), "dry-run must not move files"
+        assert not (tmp_path / "raw").exists(), "dry-run must not scaffold raw/"
+        assert not (tmp_path / "cache" / "loose.csv").exists(), "dry-run must not copy files"
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
+
+    def test_scan_dry_run_hints_move_loose_when_loose_files_exist(
+        self, tmp_path, restore_tool_config
+    ):
+        """Without move_loose, dry-run reports the loose files and names the opt-in."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert "move_loose" in envelope["output"], envelope
+
+
+class TestScanExtensionsFilter:
+    """#154: MCP scan exposes the CLI --ext filter on both scan tools."""
+
+    def test_scan_apply_extensions_filters(self, tmp_path, restore_tool_config):
+        """extensions=["csv"] discovers/copies/registers only csv files."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "extra.xlsx").write_bytes(b"PK\x03\x04")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_apply",
+            {"config": str(tmp_path / "dataset.toml"), "extensions": ["csv"]},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["discovered"] == 1, envelope
+        assert (tmp_path / "cache" / "loose.csv").is_file()
+        assert not (tmp_path / "cache" / "extra.xlsx").exists()
+
+    def test_scan_dry_run_extensions_filters(self, tmp_path, restore_tool_config):
+        """dry-run applies the same filter honestly."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "extra.xlsx").write_bytes(b"PK\x03\x04")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_dry_run",
+            {"config": str(tmp_path / "dataset.toml"), "extensions": ["csv"]},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope["discovered"] == 1, envelope
+        assert "loose.csv" in envelope["output"]
+        assert "extra.xlsx" not in envelope["output"]
+
+    def test_scan_invalid_extension_refused(self, tmp_path, restore_tool_config):
+        """Unsupported extensions are refused with a clear error, nothing mutated."""
+        _scanned_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_dry_run",
+            {"config": str(tmp_path / "dataset.toml"), "extensions": ["txt"]},
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert "txt" in envelope["message"] or "txt" in envelope["output"]
+
+    def test_scan_move_loose_with_extensions_filters_both_phases(
+        self, tmp_path, restore_tool_config
+    ):
+        """extensions filters the Phase-1 move set AND the Phase-2 cache copy."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "extra.xlsx").write_bytes(b"PK\x03\x04")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_scan_apply",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "extensions": ["csv"],
+                "move_loose": True,
+            },
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert envelope.get("moved") == 1, envelope
+        assert (tmp_path / "raw" / "loose.csv").is_file()
+        assert not (tmp_path / "raw" / "extra.xlsx").exists(), "xlsx must not be moved"
+        assert not (tmp_path / "cache" / "extra.xlsx").exists()
+
+
+# ---------------------------------------------------------------------------
 #  MSP-R12 — wheel packaging: entry point + mcp extra (CI-marked integration)
 # ---------------------------------------------------------------------------
 
