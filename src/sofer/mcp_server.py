@@ -84,6 +84,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
 
 from . import config as sofer_config
 from . import workflow
+from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .cli import _INIT_TEMPLATE
@@ -107,6 +108,7 @@ from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
     check_flatten_collisions,
+    check_raw_collisions,
     collect_init_moves,
     copy_files,
     discover_files,
@@ -1897,6 +1899,37 @@ def sofer_auth_status(
         }
 
 
+def _normalize_scan_extensions(extensions: list[str] | None) -> frozenset[str] | None:
+    """Validate/normalize the MCP ``extensions`` argument against SUPPORTED_FORMATS.
+
+    Accepts suffixes with or without a leading dot (``"csv"`` / ``".csv"``),
+    case-insensitively, mirroring CLI ``--ext`` choices as a set passed to
+    :func:`scanner.discover_files`. Raises :class:`ValueError` naming every
+    unsupported value — the caller converts it to a refusal envelope.
+
+    Args:
+        extensions: Raw suffix list from the MCP argument (``None`` = all
+            supported formats, current behavior).
+
+    Returns:
+        Normalized extension set (leading dot, lowercase) or ``None``.
+
+    Raises:
+        ValueError: When any suffix is not a supported format.
+    """
+    if extensions is None:
+        return None
+    normalized: set[str] = set()
+    for raw in extensions:
+        ext = raw.lower() if raw.startswith(".") else f".{raw.lower()}"
+        if ext not in SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Unsupported extension {raw!r} — supported: {', '.join(sorted(SUPPORTED_FORMATS))}"
+            )
+        normalized.add(ext)
+    return frozenset(normalized)
+
+
 def _scan_prologue(
     config: str,
 ) -> tuple[Path, dict[str, Any], Path, list[str]]:
@@ -1930,6 +1963,28 @@ def sofer_scan_dry_run(
             description="Path to the dataset TOML file under the server root to preview scan for"
         ),
     ],
+    extensions: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional suffix filter (e.g. ['csv']): only files with these "
+                "extensions are considered. Accepts 'csv' or '.csv' (case-"
+                "insensitive); unsupported suffixes are refused. Omitted = all "
+                "supported formats."
+            )
+        ),
+    ] = None,
+    move_loose: Annotated[
+        bool,
+        Field(
+            description=(
+                "Preview the Phase-1 move of loose files (outside raw//cache/) "
+                "into raw/ preserving the relative tree. Read-only: nothing is "
+                "moved in dry-run. When False, loose files are reported with a "
+                "move_loose=True hint instead of a preview."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Discover unregistered data files in a dataset tree (read-only).
 
@@ -1947,9 +2002,48 @@ def sofer_scan_dry_run(
         errors = _validate_output_targets(None, root=_get_root(), base=base_dir)
         if errors:
             return _refusal(errors, tool_name="sofer_scan_dry_run", config_path=config)
+        try:
+            ext_set = _normalize_scan_extensions(extensions)
+        except ValueError as exc:
+            return _refusal([str(exc)], tool_name="sofer_scan_dry_run", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
+        lines: list[str] = []
+
+        # Phase 1 - loose files to raw/ (preview only, never mutating).
+        exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
+        loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
+        if move_loose:
+            raw_dir = base_dir / sofer_config.RAW_DIR
+            try:
+                check_raw_collisions(loose, raw_dir, base_dir)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "exit_code": 1,
+                    "output": _captured_text(out, err),
+                    "discovered": len(loose),
+                    "registered": 0,
+                    "config_errors": [str(exc)],
+                    "error_code": "CONFIG_ERROR",
+                    "message": str(exc),
+                    "next": {},
+                }
+            plan = move_to_raw(loose, base_dir, raw_dir, dry_run=True)
+            if plan:
+                lines.append("Phase 1 - would MOVE to raw/ (move_loose):")
+                for _src, dest in plan:
+                    rel = dest.relative_to(base_dir).relative_to(sofer_config.RAW_DIR)
+                    lines.append(f"  -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
+            else:
+                lines.append("Phase 1 - no loose files to move (move_loose).")
+        elif loose:
+            lines.append(
+                f"Phase 1 - {len(loose)} loose file(s) outside raw//cache/ would be "
+                "moved into raw/ on apply with move_loose=True."
+            )
+
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
-        discovered = discover_files(base_dir, None, exclude_dirs=exclude)
+        discovered = discover_files(base_dir, ext_set, exclude_dirs=exclude)
         try:
             check_flatten_collisions(discovered, base_dir)
         except ValueError as exc:
@@ -1985,7 +2079,8 @@ def sofer_scan_dry_run(
                 "next": {"force": True},
             }
 
-        lines = [f"Discovered {len(discovered)} supported file(s)."]
+        if not lines:
+            lines.append(f"Discovered {len(discovered)} supported file(s).")
         if registered:
             lines.append(f"Registered {registered} new [[file]] entry(s).")
         else:
@@ -2019,6 +2114,29 @@ def sofer_scan_apply(
     force: Annotated[
         bool, Field(description="Overwrite existing destination files when true.")
     ] = False,
+    extensions: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional suffix filter (e.g. ['csv']): only files with these "
+                "extensions are considered. Accepts 'csv' or '.csv' (case-"
+                "insensitive); unsupported suffixes are refused. Omitted = all "
+                "supported formats."
+            )
+        ),
+    ] = None,
+    move_loose: Annotated[
+        bool,
+        Field(
+            description=(
+                "Explicit opt-in (never silent): MOVE loose files (outside raw//"
+                "cache/) into raw/ preserving the relative tree BEFORE the "
+                "cache/ copy, matching the CLI scan Phase 1. Collisions in raw/ "
+                "abort before any move. False = current behavior (only the "
+                "cache/ copy)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Register discovered data files and copy them into the artifact cache.
 
@@ -2042,9 +2160,39 @@ def sofer_scan_apply(
         errors = _validate_output_targets(None, root=_get_root(), base=base_dir)
         if errors:
             return _refusal(errors, tool_name="sofer_scan_apply", config_path=config)
+        try:
+            ext_set = _normalize_scan_extensions(extensions)
+        except ValueError as exc:
+            return _refusal([str(exc)], tool_name="sofer_scan_apply", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
+
+        # Phase 1 - loose files to raw/ (explicit move_loose opt-in only).
+        moved: list[tuple[Path, Path]] = []
+        if move_loose:
+            exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
+            loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
+            raw_dir = base_dir / sofer_config.RAW_DIR
+            try:
+                check_raw_collisions(loose, raw_dir, base_dir)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "exit_code": 1,
+                    "output": _captured_text(out, err),
+                    "discovered": len(loose),
+                    "registered": 0,
+                    "config_errors": [str(exc)],
+                    "error_code": "CONFIG_ERROR",
+                    "message": str(exc),
+                    "next": {},
+                }
+            moved = move_to_raw(loose, base_dir, raw_dir, dry_run=False)
+            for src, dest in moved:
+                rel = dest.relative_to(base_dir).relative_to(sofer_config.RAW_DIR)
+                print(f"     {src.name} -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
+
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
-        discovered = discover_files(base_dir, None, exclude_dirs=exclude)
+        discovered = discover_files(base_dir, ext_set, exclude_dirs=exclude)
         try:
             check_flatten_collisions(discovered, base_dir)
         except ValueError as exc:
@@ -2097,6 +2245,7 @@ def sofer_scan_apply(
             "discovered": len(discovered),
             "registered": registered,
             "copied": len(copied),
+            "moved": len(moved),
             "config_errors": [],
             "next": _workflow_next("sofer_scan_apply", config),
         }
@@ -2551,6 +2700,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "discovered": {"type": "integer"},
                 "registered": {"type": "integer"},
                 "copied": {"type": "integer"},
+                "moved": {"type": "integer"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },

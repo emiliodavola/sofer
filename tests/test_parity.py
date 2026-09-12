@@ -188,15 +188,19 @@ AREAS: list[AreaParity] = [
     AreaParity(
         cli_command="scan",
         mcp_tools=("sofer_scan_dry_run", "sofer_scan_apply"),
-        flag_map={"force": "force"},
+        flag_map={
+            "force": "force",
+            "ext": "extensions",  # #154: now exposed on both scan tools
+        },
         positionals={"config": "config"},
         exempt_flags={
             "dry_run": "split design: sofer_scan_dry_run is the dry-run surface (MSP-R03)",
-            "ext": "gap #154 — extension filter not exposed in MCP (flake in fixing change)",
         },
-        known_gaps={
-            ("ext", "sofer_scan_dry_run"): "#154",
-            ("ext", "sofer_scan_apply"): "#154",
+        exempt_params={
+            "move_loose": (
+                "#152: MCP-only Phase-1 opt-in (never silent move; CLI uses the "
+                "interactive [y/N] prompt)"
+            ),
         },
     ),
     AreaParity(
