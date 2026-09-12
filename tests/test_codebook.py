@@ -1279,3 +1279,20 @@ class TestCodebookMultisheet:
 
         with pytest.raises(ValueError, match="Collision"):
             generate_all(cfg)
+
+
+def test_generate_all_max_sample_override(tmp_path):
+    """#155: generate_all threads max_sample into per-file codebooks."""
+    from sofer.model import DatasetConfig, FileEntry
+
+    (tmp_path / "data.csv").write_text("col_a;col_b\n1;x\n2;y\n3;z\n", encoding="utf-8-sig")
+    cfg = DatasetConfig(
+        name="ds",
+        repo_id="u/ds",
+        files=[FileEntry(local=tmp_path / "data.csv", remote="data.csv")],
+        _base_dir=tmp_path,
+    )
+    out = tmp_path / "build"
+    generate_all(cfg, output_dir=out, max_sample=1)
+    cb = out / "codebooks" / "data.md"
+    assert "Analysed rows:** 1 (sample)" in cb.read_text(encoding="utf-8")

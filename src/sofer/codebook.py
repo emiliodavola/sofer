@@ -475,6 +475,7 @@ def generate_all(
     output_dir: str | Path | None = None,
     delimiter: str | None = None,
     encoding: str | None = None,
+    max_sample: int | None = None,
 ) -> list[str]:
     """Generate one codebook per ``[[file]]`` entry under ``output_dir``.
 
@@ -635,7 +636,7 @@ def generate_all(
             except Exception as exc:
                 print(f"  ⚠  Error reading {local}: {exc}", file=sys.stderr)
                 continue
-            codebook = _build_markdown(headers, columns, dtypes, str(local))
+            codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(codebook, encoding=config.OUTPUT_ENCODING)
             generated.append(str(out_path))
@@ -651,7 +652,7 @@ def generate_all(
                 if out_path2 is None:
                     continue
                 # No sheets: placeholder using local name
-                codebook = _build_markdown([], [], None, str(local))
+                codebook = _build_markdown([], [], None, str(local), max_sample)
                 out_path2.parent.mkdir(parents=True, exist_ok=True)
                 out_path2.write_text(codebook, encoding=config.OUTPUT_ENCODING)
                 generated.append(str(out_path2))
@@ -671,7 +672,7 @@ def generate_all(
                 headers, columns, dtypes = sheets[first_key]
                 # File display name stays local.name (e.g., Report.xlsx) — _build_markdown
                 # will title as local.name even for single-sheet.
-                codebook = _build_markdown(headers, columns, dtypes, str(local))
+                codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample)
                 out_path3.parent.mkdir(parents=True, exist_ok=True)
                 out_path3.write_text(codebook, encoding=config.OUTPUT_ENCODING)
                 generated.append(str(out_path3))
@@ -691,9 +692,7 @@ def generate_all(
                     # Keep original local path for _build_markdown but the output path
                     # carries __sheet for traceability.
                     try:
-                        codebook = _build_markdown(
-                            headers, columns, dtypes, str(local), max_sample=None
-                        )
+                        codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample)
                     except Exception as exc:
                         print(
                             f"  ⚠  Error building {local} sheet {sanitized}: {exc}", file=sys.stderr

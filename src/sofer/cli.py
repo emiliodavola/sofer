@@ -201,7 +201,11 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
                 print(f"Error: {err}", file=sys.stderr)
             return 1
         try:
-            generate_all_codebooks(cfg, output_dir=resolve_output_dir(cfg, args.output))
+            generate_all_codebooks(
+                cfg,
+                output_dir=resolve_output_dir(cfg, args.output),
+                max_sample=args.max_sample,
+            )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
