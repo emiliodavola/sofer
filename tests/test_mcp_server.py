@@ -4762,7 +4762,9 @@ class TestCodebookAllMaxSample:
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml"), "max_sample": 1}
+            server,
+            "sofer_codebook_all",
+            {"config": str(tmp_path / "dataset.toml"), "max_sample": 1},
         ).data
         assert envelope["ok"] is True, envelope
         cb = tmp_path / "build" / "codebooks" / "data.md"

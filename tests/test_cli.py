@@ -436,7 +436,9 @@ class TestCodebookPlaceholderValidation:
             encoding="utf-8",
         )
 
-        rc = cli._cmd_codebook(Namespace(all_files=True, config=str(toml_path), csv=None))
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml_path), csv=None, max_sample=None)
+        )
         assert rc == 1
         captured = capsys.readouterr()
         assert "placeholder" in captured.err.lower()
@@ -457,7 +459,7 @@ class TestCodebookPlaceholderValidation:
         )
 
         rc = cli._cmd_codebook(
-            Namespace(all_files=True, config=str(toml_path), csv=None, output=None)
+            Namespace(all_files=True, config=str(toml_path), csv=None, output=None, max_sample=None)
         )
         assert rc == 0
         # CLI parity with MCP sofer_codebook_all: codebooks land in the package
@@ -483,7 +485,9 @@ class TestCodebookPlaceholderValidation:
         )
 
         rc = cli._cmd_codebook(
-            Namespace(all_files=True, config=str(toml_path), csv=None, output="out")
+            Namespace(
+                all_files=True, config=str(toml_path), csv=None, output="out", max_sample=None
+            )
         )
         assert rc == 0
         assert (tmp_path / "out" / "codebook.md").exists()
@@ -1403,8 +1407,7 @@ def test_codebook_all_files_max_sample_parity(tmp_path):
     """#155: CLI codebook --all-files forwards --max-sample (CLI/MCP parity)."""
     (tmp_path / "data.csv").write_text("col_a;col_b\n1;x\n2;y\n3;z\n", encoding="utf-8-sig")
     (tmp_path / "dataset.toml").write_text(
-        "[dataset]\nname='ds'\nrepo_id='u/ds'\n\n"
-        "[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+        "[dataset]\nname='ds'\nrepo_id='u/ds'\n\n[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
         encoding="utf-8",
     )
     result = run_cli(

@@ -108,23 +108,15 @@ AREAS: list[AreaParity] = [
             "output": "output_dir",
             "force": "force",
             "keep_csv": "keep_csv",
+            "clean": "clean",
+            "clean_cache": "clean_cache",
             "dry_run": "dry_run",
         },
         positionals={"config": "config"},
-        exempt_flags={
-            "clean": "gap #153 — publish cleanup not exposed in MCP (flake in fixing change)",
-            "clean_cache": "gap #153 — publish cleanup not exposed in MCP (flake in fixing change)",
-        },
         exempt_params={
             "acknowledge_risk": "MCP-only human gate (actor design A)",
             "acknowledge_confidential": "MCP-only human gate (actor design A)",
             "approval_phrase": "MCP-only human gate (actor design A)",
-        },
-        known_gaps={
-            ("clean", "sofer_publish"): "#153",
-            ("clean", "sofer_publish_confirm"): "#153",
-            ("clean_cache", "sofer_publish"): "#153",
-            ("clean_cache", "sofer_publish_confirm"): "#153",
         },
     ),
     AreaParity(
@@ -143,7 +135,6 @@ AREAS: list[AreaParity] = [
             "config": "batch main argument (CLI --config exempt above)",
             "output_dir": "batch-only: TOML build_dir driven (spec 10.6)",
         },
-        known_gaps={("max_sample", "sofer_codebook_all"): "#155"},
     ),
     AreaParity(
         cli_command="profile",

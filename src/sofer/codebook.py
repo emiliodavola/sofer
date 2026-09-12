@@ -692,9 +692,7 @@ def generate_all(
                     # Keep original local path for _build_markdown but the output path
                     # carries __sheet for traceability.
                     try:
-                        codebook = _build_markdown(
-                            headers, columns, dtypes, str(local), max_sample
-                        )
+                        codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample)
                     except Exception as exc:
                         print(
                             f"  ⚠  Error building {local} sheet {sanitized}: {exc}", file=sys.stderr
