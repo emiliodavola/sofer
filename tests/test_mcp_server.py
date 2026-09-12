@@ -4620,3 +4620,163 @@ class TestWorkflowRegistryConformance:
 
 # ---------------------------------------------------------------------------
 # MSP-R13: authoritative workflow registry conformance (PR 2, #117)
+
+
+# ---------------------------------------------------------------------------
+#  #153 + #155 — residual parity: publish clean/clean_cache + batch
+#  max_sample (the last known_gaps flipped by this change).
+# ---------------------------------------------------------------------------
+
+
+class TestPublishCleanup:
+    """#153: publish clean/clean_cache exposed on the MCP publish tools."""
+
+    @staticmethod
+    def _mock_hf_offline(monkeypatch):
+        import sofer.publish as pub_mod
+
+        monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
+
+        def _fake_hf_api(*_a, **_kw):
+            return pub_mod._api
+
+        monkeypatch.setattr(pub_mod, "HfApi", _fake_hf_api)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+    def _prepared(self, server, tmp_path):
+        _make_dataset(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "keep.txt").write_text("keep", encoding="utf-8")
+        prep = _call(server, "sofer_prepare", {"config": str(tmp_path / "dataset.toml")}).data
+        assert prep["ok"] is True, prep
+        cb = _call(server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}).data
+        assert cb["ok"] is True, cb
+
+    def test_publish_confirm_clean_deletes_build_keeps_cache(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        self._mock_hf_offline(monkeypatch)
+        server = build_server(root=tmp_path, approval_phrase="phrase")
+        self._prepared(server, tmp_path)
+        assert (tmp_path / "build" / "manifest.json").is_file()
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "phrase",
+                "clean": True,
+            },
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert not (tmp_path / "build").exists(), "clean must delete build/ after success"
+        assert (tmp_path / "cache" / "keep.txt").is_file(), "clean alone must NOT delete cache/"
+
+    def test_publish_confirm_clean_cache_requires_clean(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        self._mock_hf_offline(monkeypatch)
+        server = build_server(root=tmp_path, approval_phrase="phrase")
+        self._prepared(server, tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "phrase",
+                "clean_cache": True,
+            },
+        ).data
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "CLEAN_CACHE_WITHOUT_CLEAN", envelope
+        assert (tmp_path / "build").is_dir()
+        assert (tmp_path / "cache" / "keep.txt").is_file()
+
+    def test_publish_confirm_clean_cache_deletes_cache(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        self._mock_hf_offline(monkeypatch)
+        server = build_server(root=tmp_path, approval_phrase="phrase")
+        self._prepared(server, tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "phrase",
+                "clean": True,
+                "clean_cache": True,
+            },
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert not (tmp_path / "build").exists()
+        assert not (tmp_path / "cache").exists(), "clean_cache must delete cache/ too"
+
+    def test_publish_dry_run_clean_never_deletes(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        self._prepared(server, tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_publish",
+            {"config": str(tmp_path / "dataset.toml"), "dry_run": True, "clean": True},
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert (tmp_path / "build" / "manifest.json").is_file(), "dry-run must never delete build/"
+        assert (tmp_path / "cache" / "keep.txt").is_file(), "dry-run must never delete cache/"
+
+    def test_publish_local_clean_deletes_destination(self, tmp_path, restore_tool_config):
+        server = build_server(root=tmp_path)
+        self._prepared(server, tmp_path)
+        dest = tmp_path / "delivered"
+
+        envelope = _call(
+            server,
+            "sofer_publish",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "target": "local",
+                "dry_run": False,
+                "output_dir": str(dest),
+                "clean": True,
+            },
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert not dest.exists(), "local clean must delete the delivered destination"
+        assert (tmp_path / "build" / "manifest.json").is_file(), "source build must survive"
+
+
+class TestCodebookAllMaxSample:
+    """#155: batch codebook max_sample override."""
+
+    def test_codebook_all_max_sample_override(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml"), "max_sample": 1}
+        ).data
+        assert envelope["ok"] is True, envelope
+        cb = tmp_path / "build" / "codebooks" / "data.md"
+        assert cb.is_file(), envelope
+        assert "Analysed rows:** 1 (sample)" in cb.read_text(encoding="utf-8")
+
+    def test_codebook_all_default_uses_config(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_codebook_all", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        cb = tmp_path / "build" / "codebooks" / "data.md"
+        assert cb.is_file(), envelope
+        assert "Analysed rows:** 2 (full scan)" in cb.read_text(encoding="utf-8")

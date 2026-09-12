@@ -1157,6 +1157,24 @@ def sofer_publish(
             description="When true (default), only print a diff plan without copying or uploading."
         ),
     ] = True,
+    clean: Annotated[
+        bool,
+        Field(
+            description=(
+                "Delete the build dir after a successful delivery (PUB-11). "
+                "No effect on dry-run, quality-gate block, or failure."
+            )
+        ),
+    ] = False,
+    clean_cache: Annotated[
+        bool,
+        Field(
+            description=(
+                "Also delete cache/ (tool-wide, sibling-shared) when clean=True. "
+                "Requires clean=True; refused otherwise (explicit opt-in)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Plan or perform a local delivery of a prepared dataset package.
 
@@ -1182,6 +1200,13 @@ def sofer_publish(
             if output_dir is not None
             else None
         )
+        if clean_cache and not clean:
+            return _error_envelope(
+                "CLEAN_CACHE_WITHOUT_CLEAN",
+                "clean_cache=True requires clean=True (explicit opt-in, PUB-11)",
+                next_hint={"clean": True},
+                config_errors=config_errors,
+            )
         rc = run_publish(
             cfg,
             target=target,
@@ -1190,6 +1215,8 @@ def sofer_publish(
             keep_csv=keep_csv,
             dry_run=dry_run,
             quality_report=report,
+            clean=clean,
+            clean_cache=clean_cache,
         )
         return {
             "ok": rc == 0,
@@ -1238,6 +1265,24 @@ def sofer_publish_confirm(
             description="Human approval phrase (env SOFER_MCP_APPROVAL_PHRASE). ALWAYS required for publish — the server refuses with PUBLISH_APPROVAL_NOT_CONFIGURED when no phrase is configured, and PUBLISH_APPROVAL_REQUIRED on a missing/mismatched phrase."
         ),
     ] = None,
+    clean: Annotated[
+        bool,
+        Field(
+            description=(
+                "Delete the build dir after a successful HF upload (PUB-11). "
+                "No effect on dry-run, quality-gate block, or failure."
+            )
+        ),
+    ] = False,
+    clean_cache: Annotated[
+        bool,
+        Field(
+            description=(
+                "Also delete cache/ (tool-wide, sibling-shared) when clean=True. "
+                "Requires clean=True; refused otherwise (explicit opt-in)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Upload a prepared dataset package to Hugging Face Hub.
 
@@ -1359,6 +1404,13 @@ def sofer_publish_confirm(
             else None
         )
         protected: set[str] = set()
+        if clean_cache and not clean:
+            return _error_envelope(
+                "CLEAN_CACHE_WITHOUT_CLEAN",
+                "clean_cache=True requires clean=True (explicit opt-in, PUB-11)",
+                next_hint={"clean": True},
+                config_errors=config_errors,
+            )
         rc = run_publish(
             cfg,
             target=target,
@@ -1369,6 +1421,8 @@ def sofer_publish_confirm(
             quality_report=report,
             protected_out=protected,
             token=token,
+            clean=clean,
+            clean_cache=clean_cache,
         )
         return {
             "ok": rc == 0,
@@ -1449,6 +1503,15 @@ def sofer_codebook_all(
             description="Override directory for per-file codebooks (default: the package build_dir, where publish collects codebooks). Must stay under server root."
         ),
     ] = None,
+    max_sample: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Maximum rows to sample for codebook inference; defaults to "
+                "config codebook_max_sample. Omitted = config default."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Generate one codebook per [[file]] entry in a dataset config.
 
@@ -1479,6 +1542,7 @@ def sofer_codebook_all(
                 output_dir=output_path,
                 delimiter=cfg.csv_delimiter,
                 encoding=cfg.csv_encoding,
+                max_sample=max_sample,
             )
         except ValueError as exc:
             return _error_envelope(

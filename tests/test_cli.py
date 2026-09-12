@@ -1397,3 +1397,20 @@ class TestSubprocessBoundary:
         result = run_cli(["prepare", "proj/dataset.toml"], cwd=tmp_path)
         assert result.returncode == 0, result.stderr
         assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"
+
+
+def test_codebook_all_files_max_sample_parity(tmp_path):
+    """#155: CLI codebook --all-files forwards --max-sample (CLI/MCP parity)."""
+    (tmp_path / "data.csv").write_text("col_a;col_b\n1;x\n2;y\n3;z\n", encoding="utf-8-sig")
+    (tmp_path / "dataset.toml").write_text(
+        "[dataset]\nname='ds'\nrepo_id='u/ds'\n\n"
+        "[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+        encoding="utf-8",
+    )
+    result = run_cli(
+        ["codebook", "--all-files", "--config", "dataset.toml", "--max-sample", "1"],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    cb = tmp_path / "build" / "codebooks" / "data.md"
+    assert "Analysed rows:** 1 (sample)" in cb.read_text(encoding="utf-8")
