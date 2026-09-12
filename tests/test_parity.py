@@ -238,11 +238,7 @@ def _cli_surface() -> dict[str, tuple[set[str], set[str]]]:
         if not isinstance(action, argparse._SubParsersAction):
             continue
         for name, subp in action.choices.items():
-            nested = [
-                a
-                for a in subp._actions
-                if isinstance(a, argparse._SubParsersAction)
-            ]
+            nested = [a for a in subp._actions if isinstance(a, argparse._SubParsersAction)]
             if nested:
                 for sub_action in nested:
                     for sub_name, sub_subp in sub_action.choices.items():
@@ -270,9 +266,7 @@ class TestRoster:
 
 
 class TestAreaParity:
-    @pytest.mark.parametrize(
-        "area", AREAS, ids=lambda a: a.cli_command or a.mcp_tools[0]
-    )
+    @pytest.mark.parametrize("area", AREAS, ids=lambda a: a.cli_command or a.mcp_tools[0])
     def test_area_surface_contract(self, area: AreaParity, tmp_path: Path) -> None:
         tools = _tools_dict(tmp_path)
         surface = _cli_surface()
@@ -301,8 +295,7 @@ class TestAreaParity:
             # A3 — every real CLI positional is mapped.
             undeclared_pos = real_pos - set(area.positionals)
             assert not undeclared_pos, (
-                f"{area.cli_command}: CLI positionals without MCP mapping: "
-                f"{sorted(undeclared_pos)}"
+                f"{area.cli_command}: CLI positionals without MCP mapping: {sorted(undeclared_pos)}"
             )
 
             # A4 — mapped params exist in at least one tool of the area.
