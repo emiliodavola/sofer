@@ -165,9 +165,10 @@ Every tool description SHALL be ≤3 sentences plus `When to use:` (≤1 sentenc
 
 ### Requirement: Scan non-interactivity (MSP-R06)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28).
+> Added by change `sofer-mcp-server` (archived 2026-08-28); modified by
+> `fix-scan-parity-mcp`.
 
-`sofer_scan_apply` SHALL never prompt — the explicit call IS the confirmation. It SHALL chain the pure scanner functions `discover_files → check_flatten_collisions → merge_entries → copy_files → write_toml`, honoring `force`.
+`sofer_scan_apply` SHALL never prompt — the explicit call IS the confirmation. It SHALL chain the pure scanner functions `discover_files → check_flatten_collisions → merge_entries → copy_files → write_toml`, honoring `force`. When `move_loose` is `True`, the chain SHALL be `discover_files(exclude raw/) → check_raw_collisions → move_to_raw → discover_files → check_flatten_collisions → merge_entries → copy_files → write_toml`, still honoring `force` and never prompting (SCN phase order: MOVE before COPY).
 
 #### Scenario: Apply never blocks on input
 
@@ -176,6 +177,13 @@ Every tool description SHALL be ≤3 sentences plus `When to use:` (≤1 sentenc
 - THEN files SHALL be copied and the TOML updated
 - AND the call SHALL never block on `input()`
 
+#### Scenario: Apply with move_loose chains the MOVE phase (unchanged scenarios preserved)
+
+- GIVEN a TOML directory with loose supported files outside `raw/`/`cache/`/`EXCLUSIONS`
+- WHEN `sofer_scan_apply` runs with `move_loose=True`
+- THEN each loose file SHALL be MOVED into `raw/<relative_to(base_dir)>`
+- AND the same files SHALL be copied into `cache/` (flattened) and registered
+- AND the loose originals SHALL no longer exist at their old paths
 ---
 
 ### Requirement: Resources (MSP-R07)
@@ -243,9 +251,17 @@ The containment, size-guard, and per-resource extension-allow-list clauses above
 
 ### Requirement: Prompts (MSP-R08)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28).
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `2026-09-13-test-mcp-injection-semantics` — adds the injection-semantics contract and its probe suite (test-only; no runtime change). Modified by `2026-09-13-fix-prompt-intro-repr` — resolves the #169 known-limitation carve-out: the three intro sentences now repr-contain caller arguments at parity with the executable surfaces; intro-region containment is asserted by the probe suite; runtime change is exactly the three intro interpolation tokens (issue #169).
 
 The server SHALL expose 3 user-controlled workflow templates — `prepare_dataset`, `assess_dataset`, `finalize_and_publish` — encoding the validate → prepare → confirm-before-publish idiom. Any publish step SHALL instruct calling `sofer_publish` (dry-run) and stopping for human approval before `sofer_publish_confirm`.
+
+Caller-controlled prompt arguments (`config`, `output`, and `dataset` for `assess_dataset`) SHALL be rendered as DATA inside every template: a hostile argument carrying newlines, instruction-like prose, fake numbered-step lines, fake tool-call lines, quotes, or backslashes SHALL NOT add a workflow step, SHALL NOT remove or reorder an existing step, SHALL NOT split or break out of any executable line (step, numbered step, or copy-paste block), and SHALL NOT displace the human-approval STOP that precedes `sofer_publish_confirm`. Every executable argument position SHALL be `repr`-quoted, so a payload newline SHALL appear as the escaped literal `\n` inside a quoted position — never as a real line break that could start a new instruction line. `prompts/list` SHALL still return exactly 3 prompts and the canonical-chain text SHALL be unchanged by any caller argument. The static `_with_untrusted_note` guard SHALL still be appended to each rendered prompt under hostile arguments.
+
+**RESOLVED (change `2026-09-13-fix-prompt-intro-repr`, issue #169):** the containment contract SHALL extend to the intro sentences. Caller-controlled `config`/`dataset` arguments SHALL be `repr`-contained in ALL interpolations of the three prompt templates — intro sentences AND executable surfaces. Every intro sentence SHALL render each caller-controlled argument it interpolates (`config` on all three templates; `config` and `dataset` for `assess_dataset`) in its `repr()` form — quoted and escaped exactly like the executable argument positions — and SHALL NOT interpolate any caller-controlled argument raw. No raw, non-`repr` interpolation of `config`/`dataset` SHALL remain in any prompt template; a hostile payload SHALL therefore appear only as data, never as real instruction-shaped prose. (`output` is never interpolated into any intro sentence; its containment remains asserted over the executable block.)
+
+The dedicated injection probe suite SHALL live in `tests/test_mcp_server.py` (`TestPrompts`) as net-new, additive tests; every scenario below SHALL map to a test (AGENTS.md rule 6 / `openspec/config.yaml` specs rule). A probe that fails because a payload genuinely altered rendered semantics SHALL STOP — the red probe plus rendered output is the finding; `src/sofer/mcp_server.py` SHALL change only by the three intro interpolation tokens specified by this change (issue #169 fix scope), never silently beyond them. The suite SHALL additionally assert intro-region containment for all three templates: over the intro region — `text` up to the existing `"Canonical chain:"` anchor (the established slice; no new literals) — `repr(payload)` SHALL be present for every caller-controlled intro argument and no raw `_INJECT_*` marker SHALL appear. The #139 probes that assert executable-surface containment remain unchanged and green; their wording-only docstring refresh records the resolution, not a behavior change.
+
+(Previously: the injection-semantics contract and its probe suite covered the executable surfaces only; the three intro sentences interpolated caller arguments raw at the pre-fix sites and were recorded as known limitation #169 — probes expressly did NOT assert intro prose purity. Resolved by this change: intros repr-contain caller arguments; intro-region assertions added.)
 
 #### Scenario: Prompt list shows 3 templates
 
@@ -259,6 +275,79 @@ The server SHALL expose 3 user-controlled workflow templates — `prepare_datase
 - WHEN it is inspected
 - THEN every HF-publish step SHALL mandate a human-approval stop before the confirm call
 
+#### Scenario: Hostile payload cannot alter the prepare_dataset workflow
+
+- GIVEN `build_server(root=tmp_path)` and a `prepare_dataset` call whose `config` and `output` arguments each carry a hostile `_INJECT_*` payload (real newlines + instruction-like prose; a fake `\n6. sofer_publish(...)` step line; a fake `sofer_publish_confirm(...)` tool-call line; quotes/backslashes)
+- WHEN the prompt is rendered via `client.get_prompt("prepare_dataset", {...})`
+- THEN the ordered `sofer_*` call sequence SHALL equal the builder's static canonical sequence (`sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all → sofer_publish` dry-run) with no added, removed, or reordered call
+- AND every payload newline SHALL appear as an escaped `\n` literal inside a repr-quoted argument position — no raw line break SHALL split any step or copy-paste line
+- AND no payload marker SHALL appear as a line-start call (every marker SHALL sit inside a repr-quoted literal)
+- AND `STOP` and the human-approval wording SHALL be present BEFORE `sofer_publish_confirm`
+- AND the `_UNTRUSTED_NOTE` text SHALL still be appended
+
+#### Scenario: Hostile payload cannot alter the assess_dataset workflow
+
+- GIVEN `build_server(root=tmp_path)` and an `assess_dataset` call whose `config` and `dataset` arguments each carry a hostile `_INJECT_*` payload
+- WHEN the prompt is rendered via `client.get_prompt("assess_dataset", {...})`
+- THEN the rendered `sofer_*` call sequence SHALL equal the builder's static assess chain (`sofer_validate → sofer_profile → sofer_render`) with no added, removed, or reordered call
+- AND every payload newline SHALL appear as an escaped `\n` literal inside a repr-quoted argument position — no raw line break SHALL split any step or copy-paste line
+- AND no payload marker SHALL appear as a line-start call
+- AND the `_UNTRUSTED_NOTE` text SHALL still be appended
+
+#### Scenario: Hostile payload cannot alter the finalize_and_publish workflow
+
+- GIVEN `build_server(root=tmp_path)` and a `finalize_and_publish` call whose `config` and `output` arguments each carry a hostile `_INJECT_*` payload
+- WHEN the prompt is rendered via `client.get_prompt("finalize_and_publish", {...})`
+- THEN the ordered `sofer_*` call sequence SHALL equal the builder's static canonical sequence (through `sofer_publish` dry-run and the confirm step) with no added, removed, or reordered call
+- AND every payload newline SHALL appear as an escaped `\n` literal inside a repr-quoted argument position — no raw line break SHALL split any step or copy-paste line
+- AND no payload marker SHALL appear as a line-start call
+- AND `STOP` and the human-approval wording SHALL be present BEFORE `sofer_publish_confirm`
+- AND the `_UNTRUSTED_NOTE` text SHALL still be appended
+
+#### Scenario: Canonical chain order is payload-invariant
+
+- GIVEN any of the 3 templates rendered with a hostile `_INJECT_*` payload in every caller-controlled argument
+- WHEN relative `text.index()` ordering is measured across `sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile(_all) → sofer_render(_all) → sofer_publish(dry_run) → STOP → sofer_publish_confirm` (where applicable to the template)
+- THEN each marker's relative order SHALL be unchanged from the payload-free render, proving order is payload-invariant
+
+#### Scenario: Intro raw interpolation is resolved — intro sentences repr-contain caller arguments (formerly known limitation #169)
+
+> (Previously: the three intro sentences interpolated caller arguments raw at the pre-fix sites — a KNOWN LIMITATION tracked by issue #169 — and the #139 probes asserted containment over the executable surfaces only, expressly NOT asserting intro prose purity. Resolved by change `2026-09-13-fix-prompt-intro-repr`.)
+
+- GIVEN a hostile payload in `config` (and `dataset` for `assess_dataset`)
+- WHEN the rendered prompts of all three templates are inspected at the intro sentences (the text before the `"Canonical chain:"` anchor)
+- THEN each intro sentence SHALL contain `repr(payload)` for every caller-controlled argument it interpolates — `config` on all three templates, plus `dataset` on `assess_dataset`
+- AND no raw `_INJECT_*` marker SHALL appear verbatim in any intro region (every payload newline SHALL appear only as the escaped `\n` literal inside the repr-quoted position)
+- AND no raw, non-`repr` interpolation of `config`/`dataset` SHALL remain in any prompt template
+
+#### Scenario: prepare_dataset intro repr-contains a hostile config payload
+
+- GIVEN `build_server(root=tmp_path)` and a `prepare_dataset` call whose `config` argument carries a hostile `_INJECT_*` payload (real newlines + instruction-like prose + quotes/backslashes; reuse `_INJECT_ARGS_PREPARE`)
+- WHEN the prompt is rendered via `client.get_prompt("prepare_dataset", {...})` and the intro region (`text[:text.index("Canonical chain:")]`) is inspected
+- THEN `repr(_INJECT_ARGS_PREPARE["config"])` SHALL be present in the intro region
+- AND no raw `_INJECT_*` marker SHALL appear verbatim in the intro region
+- AND the intro region SHALL contain no raw payload line break (hostile newlines render only as the escaped `\n` literal inside the quoted position)
+
+#### Scenario: assess_dataset intro repr-contains hostile dataset and config payloads
+
+- GIVEN `build_server(root=tmp_path)` and an `assess_dataset` call whose `config` and `dataset` arguments each carry a hostile `_INJECT_*` payload (reuse `_INJECT_ARGS_ASSESS`)
+- WHEN the prompt is rendered via `client.get_prompt("assess_dataset", {...})` and the two-line intro region (`text[:text.index("Canonical chain:")]`) is inspected
+- THEN `repr(_INJECT_ARGS_ASSESS["config"])` and `repr(_INJECT_ARGS_ASSESS["dataset"])` SHALL both be present in the intro region
+- AND no raw `_INJECT_*` marker SHALL appear verbatim in the intro region
+
+#### Scenario: finalize_and_publish intro repr-contains a hostile config payload
+
+- GIVEN `build_server(root=tmp_path)` and a `finalize_and_publish` call whose `config` argument carries a hostile `_INJECT_*` payload (reuse `_INJECT_ARGS_FINALIZE`)
+- WHEN the prompt is rendered via `client.get_prompt("finalize_and_publish", {...})` and the intro region (`text[:text.index("Canonical chain:")]`) is inspected
+- THEN `repr(_INJECT_ARGS_FINALIZE["config"])` SHALL be present in the intro region
+- AND no raw `_INJECT_*` marker SHALL appear verbatim in the intro region
+
+#### Scenario: No raw caller-argument interpolation remains in any rendered prompt
+
+- GIVEN all three templates rendered with hostile `_INJECT_*` payloads in every caller-controlled argument (`_INJECT_ARGS_PREPARE` / `_INJECT_ARGS_ASSESS` / `_INJECT_ARGS_FINALIZE`)
+- WHEN the full rendered text of each prompt — intro region AND executable block — is scanned for raw payload markers and for `repr()`-quoted payload forms
+- THEN zero raw `_INJECT_*` marker SHALL appear verbatim anywhere in any of the three rendered prompts (intro region and executable surfaces combined)
+- AND every caller-controlled argument SHALL appear in each rendered prompt exclusively in its `repr()`-quoted form — no argument value SHALL appear as raw, non-`repr` interpolation
 ---
 
 ### Requirement: Confidential/PII surfacing (MSP-R09)
@@ -834,3 +923,124 @@ Canonical branches: greenfield `sofer_init -> sofer_scan_dry_run -> sofer_scan_a
 
 - GIVEN `sofer_init` on a greenfield root
 - THEN its `next` SHALL name `sofer_scan_dry_run`, whose `next` names `sofer_scan_apply`, whose `next` names `sofer_validate`
+
+---
+
+### Requirement: Scan extensions filter (MSP-R14)
+
+> Added by change `fix-scan-parity-mcp` (closes #154).
+
+`sofer_scan_dry_run` and `sofer_scan_apply` SHALL accept an `extensions: list[str] | None = None` argument. When omitted, all supported formats SHALL be scanned (current behavior). When supplied, only files whose suffix matches one of the given extensions SHALL be discovered, moved, and copied. Suffixes SHALL be accepted with or without a leading dot, case-insensitively; any suffix not in `SUPPORTED_FORMATS` SHALL be refused with a clear error before any mutation. The filter SHALL apply to BOTH phases when `move_loose=True`.
+
+#### Scenario: Filter restricts discovery
+
+- GIVEN a scan tool call with `extensions=["csv"]` and a directory containing both `.csv` and `.xlsx` loose files
+- WHEN the tool runs
+- THEN only the `.csv` files SHALL be discovered/registered/copied
+- AND the `.xlsx` files SHALL be untouched
+
+#### Scenario: Unsorted suffix forms accepted
+
+- GIVEN `extensions=["csv", ".parquet"]`
+- WHEN the tool runs
+- THEN both `csv` and `parquet` files SHALL be included
+
+#### Scenario: Unsupported extension refused
+
+- GIVEN `extensions=["txt"]`
+- WHEN the tool runs
+- THEN an `ok:false` refusal SHALL be returned before any mutation
+- AND the error SHALL name the unsupported suffix and the supported set
+---
+
+### Requirement: Scan Phase-1 move opt-in (MSP-R15)
+
+> Added by change `fix-scan-parity-mcp` (closes #152).
+
+`sofer_scan_dry_run` and `sofer_scan_apply` SHALL accept a `move_loose: bool = False` argument. It is an explicit opt-in: `False` SHALL keep the cache-only behavior (never a silent move), and `True` shall run the Phase-1 MOVE (see MST-R06) before the cache copy. Collisions against existing `raw/` destinations SHALL abort atomically before any move (`registered: 0`, TOML untouched). `sofer_scan_apply` SHALL report `moved: int` in a successful envelope (declared in `output_schema`). `sofer_scan_dry_run` with `move_loose=True` SHALL preview the moves with no mutation; without it, the dry-run SHALL report the loose file count and name the `move_loose=True` opt-in as a hint.
+
+#### Scenario: Dry-run previews moves without mutation
+
+- GIVEN a loose file outside `raw/`/`cache/`
+- WHEN `sofer_scan_dry_run` runs with `move_loose=True`
+- THEN the output SHALL show `-> raw/<rel>`
+- AND no file SHALL be moved, `raw/` SHALL NOT be scaffolded, and the TOML SHALL be untouched
+
+#### Scenario: Collision aborts before any move
+
+- GIVEN a loose file whose `raw/` destination already exists
+- WHEN `sofer_scan_apply` runs with `move_loose=True`
+- THEN an `ok:false` refusal SHALL be returned naming the collision
+- AND the loose file SHALL remain at its original path and the TOML SHALL be untouched
+
+#### Scenario: Default leaves files loose
+
+- GIVEN loose supported files and `move_loose` omitted
+- WHEN `sofer_scan_apply` runs
+- THEN the loose files SHALL remain in place (no `raw/` writes)
+- AND the cache copy/registration SHALL behave as before
+---
+
+### Requirement: Publish cleanup (MSP-R16)
+
+> Added by change `fix-residual-parity` (closes #153).
+
+`sofer_publish` and `sofer_publish_confirm` SHALL accept `clean: bool = False`
+and `clean_cache: bool = False`, forwarded verbatim to `publish.publish(...)`.
+Cleanup SHALL follow PUB-11 and live in the domain: the build directory (hf
+target) or the local destination is deleted ONLY after a successful delivery —
+never on dry-run, quality-gate block, or failure. `clean_cache=True` without
+`clean=True` SHALL be refused — never silently ignored — with `error_code`
+`CLEAN_CACHE_WITHOUT_CLEAN` and a `next` hint to set `clean=True` (explicit
+opt-in: a caller cannot enable cache deletion as a side effect).
+
+#### Scenario: clean deletes the build after success and keeps cache/
+
+- GIVEN a successful HF delivery with `clean=True, clean_cache=False`
+- WHEN `sofer_publish_confirm` completes
+- THEN the build directory SHALL be deleted
+- AND `cache/` SHALL remain (tool-wide sibling-shared state untouched)
+
+#### Scenario: clean_cache without clean is refused
+
+- GIVEN `clean_cache=True` and `clean` omitted or `False`
+- WHEN either publish tool runs
+- THEN an `ok:false` refusal SHALL be returned with `error_code`
+  `CLEAN_CACHE_WITHOUT_CLEAN`
+- AND no directory SHALL be deleted
+- AND the hint SHALL name `clean=True` as the fix
+
+#### Scenario: Dry-run never deletes
+
+- GIVEN `clean=True` on a dry-run call (default for `sofer_publish`)
+- WHEN the tool runs
+- THEN the result SHALL be a plan only
+- AND no build or cache directory SHALL be deleted
+---
+
+### Requirement: Batch codebook max_sample (MSP-R17)
+
+> Added by change `fix-residual-parity` (closes #155).
+
+`sofer_codebook_all` SHALL accept `max_sample: int | None = None`, forwarded to
+`codebook.generate_all(...)`. `None` SHALL resolve to
+`[tool.sofer] codebook_max_sample` (default `100_000`) at call time — the same
+resolution the single-file path uses (CB-R08); never a frozen literal. Each
+per-file codebook SHALL cap analysis at `min(total_rows, max_sample)` and SHALL
+label the header `**Analysed rows:** N (sample)` when capped, `(full scan)`
+when the file fits.
+
+#### Scenario: Override applies
+
+- GIVEN a batch TOML config whose files exceed the cap
+- WHEN `sofer_codebook_all(config, max_sample=1)` runs
+- THEN every emitted codebook SHALL report `**Analysed rows:** 1 (sample)`
+- AND the sampling cap SHALL apply to each per-file codebook
+
+#### Scenario: Omitted uses the config default
+
+- GIVEN `[tool.sofer] codebook_max_sample` configured (or its default) and
+  files below the cap
+- WHEN `sofer_codebook_all` runs without `max_sample`
+- THEN the batch SHALL analyse up to the configured rows per file
+- AND codebooks whose files fit SHALL report `(full scan)`
