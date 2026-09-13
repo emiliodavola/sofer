@@ -95,6 +95,7 @@ source = ["src/sofer"]
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 90
 
 # ── sofer tool-wide defaults ──────────────────────────────────────
 
