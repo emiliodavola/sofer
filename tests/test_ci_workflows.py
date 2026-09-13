@@ -289,7 +289,7 @@ def test_coverage_jobs_generate_and_upload_htmlcov() -> None:
     assert len(_coverage_jobs()) == 2  # ci.yml + release.yml
     for job in _coverage_jobs():
         assert _find_step(job, run="uv run coverage html") is not None
-        upload = _find_step(job, uses="actions/upload-artifact@v4")
+        upload = _find_step(job, uses="actions/upload-artifact@v7")
         assert upload is not None
         assert upload.get("with", {}).get("name") == "coverage-html"
         assert upload.get("with", {}).get("path") == "htmlcov"
@@ -354,10 +354,10 @@ def test_codeql_security_write_permission_and_python() -> None:
         "security-events": "write",
     }
     analyze_job = codeql.get("jobs", {}).get("analyze", {})
-    init = _find_step(analyze_job, uses="github/codeql-action/init@v3")
+    init = _find_step(analyze_job, uses="github/codeql-action/init@v4")
     assert init is not None
     assert init.get("with", {}).get("languages") == "python"
-    assert _find_step(analyze_job, uses="github/codeql-action/analyze@v3") is not None
+    assert _find_step(analyze_job, uses="github/codeql-action/analyze@v4") is not None
 
 
 def test_codeql_init_references_config_file() -> None:
@@ -365,11 +365,31 @@ def test_codeql_init_references_config_file() -> None:
     codeql, _ = _workflow("codeql.yml")
     init = _find_step(
         codeql.get("jobs", {}).get("analyze", {}),
-        uses="github/codeql-action/init@v3",
+        uses="github/codeql-action/init@v4",
     )
     assert init is not None
     assert init.get("with", {}).get("config-file") == "./.github/codeql/config.yml"
     assert init.get("with", {}).get("languages") == "python"
+
+
+def test_codeql_private_window_publishes_sarif_artifact_without_upload() -> None:
+    """While the repository is private, SARIF is an artifact, not an upload.
+
+    Code scanning cannot be enabled on a private repository without GitHub Code
+    Security, so uploading SARIF to the Security tab would fail every run. The
+    analyze step therefore sets ``upload: never`` and the SARIF is published as
+    a workflow artifact instead. When the repository becomes public, ``upload``
+    goes back to ``always`` and this test must change with it.
+    """
+    codeql, _ = _workflow("codeql.yml")
+    analyze_job = codeql.get("jobs", {}).get("analyze", {})
+    analyze = _find_step(analyze_job, uses="github/codeql-action/analyze@v4")
+    assert analyze is not None
+    assert analyze.get("with", {}).get("upload") == "never"
+    artifact = _find_step(analyze_job, uses="actions/upload-artifact@v7")
+    assert artifact is not None
+    assert artifact.get("with", {}).get("name") == "codeql-sarif"
+    assert artifact.get("with", {}).get("path") == "codeql-results/*.sarif"
 
 
 def test_codeql_paths_ignore_covers_non_code_trees() -> None:
