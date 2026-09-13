@@ -192,7 +192,6 @@ def test_ci_workflow_files_present() -> None:
     """Supporting guard: the three workflow files exist before any parse."""
     required = {"ci.yml", "release.yml", "codeql.yml"}
     assert required.issubset(set(_workflow_names()))
-90%
 
 def test_pyproject_declares_coverage_fail_under_90() -> None:
     """CI-01 S1: pyproject.toml declares the 90% floor next to show_missing."""
@@ -333,7 +332,7 @@ def test_openspec_config_declares_coverage_available_at_90() -> None:
     assert config["rules"]["verify"][-1]["coverage_threshold"] == 90
 
 
-def test_con90%buting_documents_coverage_floor() -> None:
+def test_contributing_documents_coverage_floor() -> None:
     """CI-06 S2: CONTRIBUTING.md documents the floor and both commands."""
     text = _read_text("CONTRIBUTING.md")
     assert "90%" in text
