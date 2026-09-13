@@ -49,3 +49,42 @@ jobs:
 
       - name: Run CLI help smoke test
         run: uv run sofer --help
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      # ── Complete-suite coverage gate (CI-01 + PB-05) ─────────────────────
+      # `uv run coverage run -m pytest` re-executes the FULL suite under
+      # instrumentation — never a focused subset. The 90% floor is declared
+      # once in pyproject.toml under [tool.coverage.report]; the gate is
+      # config-declared and never flag-driven — coverage.py reads the floor
+      # itself, so no threshold literal or CLI flag belongs in this file.
+      - name: Run tests under coverage
+        run: uv run coverage run -m pytest
+
+      # The gate: coverage.py enforces the config-declared floor and exits
+      # non-zero below it. `-m` puts per-file missed lines in the job log.
+      - name: Report coverage with missing lines (the gate)
+        run: uv run coverage report -m
+
+      - name: Generate HTML coverage report
+        run: uv run coverage html
+
+      # Self-hosted evidence (CI-02): htmlcov artifact, no third-party service.
+      # retention-days deliberately omitted — GitHub's 90-day default is
+      # platform policy, not a value this repo should hardcode.
+      - name: Upload htmlcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov

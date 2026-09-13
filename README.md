@@ -33,6 +33,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [AI and MCP server](#ai-and-mcp-server)
 - [Configuration](#configuration)
 - [Architecture summary](#architecture-summary)
+- [Quality gates and security scanning](#quality-gates-and-security-scanning)
 - [Related](#related)
 
 ## Install
@@ -745,6 +746,19 @@ mcp_registration). The annotated module tree lives in
 [CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
 Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Quality gates and security scanning
+
+- **Coverage gate**: total test coverage is gated at **90%** — the floor lives
+  in `pyproject.toml` (`[tool.coverage.report] fail_under = 90`) and is enforced
+  by coverage.py on every PR (`ci.yml`) and before every release
+  (`release.yml`). Evidence is self-hosted: an `htmlcov` artifact
+  (`coverage-html`) plus a missing-lines report in the job log
+  (`uv run coverage report -m`). No third-party coverage service is used.
+- **CodeQL scanning**: the Python codebase is scanned on every push and pull
+  request to `main`/`dev`, and weekly (`.github/workflows/codeql.yml`,
+  Advanced Setup with `.github/codeql/config.yml`). SARIF results appear in the
+  **Security** tab; alerts are informational and never block merges.
 
 ## Related
 

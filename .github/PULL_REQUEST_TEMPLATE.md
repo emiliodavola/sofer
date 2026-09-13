@@ -44,6 +44,7 @@ Specs updated: `openspec/specs/<domain>/spec.md`
 - [ ] `uv run ruff format --check src/ tests/` — clean
 - [ ] `uv run mypy src/` — clean
 - [ ] New behaviour covered by tests
+- [ ] Coverage gate met — `uv run coverage report -m` ≥ 90% (CI enforces `fail_under = 90`)
 - [ ] README updated if CLI surface changed
 - [ ] README_ES.md updated if a translated README section changed
 - [ ] Related issues linked (`Closes #N`)
