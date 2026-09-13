@@ -2984,7 +2984,7 @@ def _prompt_prepare_dataset(config: str, output: str | None = None) -> str:
     """
     output_repr = repr(output) if output is not None else "None"
     return _with_untrusted_note(
-        f"You are preparing the dataset configured at {config} for publication.\n"
+        f"You are preparing the dataset configured at {config!r} for publication.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run) -> sofer_publish_confirm.\n"
         f"1. sofer_validate(config={config!r}) — validate config/data/quality; if it fails, stop and fix.\n"
@@ -3014,8 +3014,8 @@ def _prompt_assess_dataset(config: str, dataset: str) -> str:
     plus the full canonical note.
     """
     return _with_untrusted_note(
-        f"You are assessing the dataset at {dataset} using its configuration "
-        f"at {config}.\n"
+        f"You are assessing the dataset at {dataset!r} using its configuration "
+        f"at {config!r}.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run) -> sofer_publish_confirm.\n"
         f"1. sofer_validate(config={config!r}) — validate config/data/quality; wait for report.\n"
@@ -3039,7 +3039,7 @@ def _prompt_finalize_and_publish(config: str, output: str | None = None) -> str:
     """
     output_repr = repr(output) if output is not None else "None"
     return _with_untrusted_note(
-        f"You are finalizing the dataset configured at {config} for publication "
+        f"You are finalizing the dataset configured at {config!r} for publication "
         "on Hugging Face Hub.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run=True) -> STOP -> sofer_publish_confirm.\n"
