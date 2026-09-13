@@ -1,7 +1,7 @@
 [project]
 name = "sofer"
 dynamic = ["version"]
-description = "Publish any dataset to Hugging Face Hub with built-in validation and data-sharing standards."
+description = "Turn raw datasets into documented, profiled, and quality-assessed packages (codebooks, semantic inference, PII detection, validation, and an optional MCP server for AI agents) publishable to Hugging Face Hub or any local directory."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -48,6 +48,7 @@ dev = [
     "mypy>=1.15.0",
     "pre-commit>=4.0.0",
     "fastmcp>=3.4,<4",
+    "coverage>=7.16.0",
 ]
 
 # ── Ruff: linter & formatter ─────────────────────────────────────────────
