@@ -1281,3 +1281,225 @@ class TestScanMoveScenarios:
         rc2 = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
         assert rc2 == 0
         assert cfg.read_text(encoding="utf-8") == toml_after_first
+
+
+# ------------------------------------------------------------------
+# Unit C: drive scanner.py to 100.00% (COV-06)
+# ------------------------------------------------------------------
+
+
+class TestLinkDetection:
+    """Unit tests for the private :func:`_is_link` tail via a FakePath stub.
+
+    The real-symlink leg needs FS privileges that CI-ish hosts may deny, so the
+    Windows reparse-point / OSError / non-NT arms are driven through an
+    injectable stub (D-strategy) with ``os.name`` patched.
+    """
+
+    @pytest.mark.parametrize(
+        "is_symlink,os_name,attrs,raise_lstat,expected",
+        [
+            (True, "posix", 0, False, True),  # real-symlink leg (is_symlink True)
+            (False, "posix", 0, False, False),  # non-NT short-circuit
+            (False, "nt", 0, True, False),  # lstat OSError → False
+            (False, "nt", 0, False, False),  # attrs=0 → False
+            (False, "nt", 0x400, False, True),  # REPARSE_POINT flag → True
+            (False, "nt", 0x10, False, False),  # plain DIRECTORY attr → False
+        ],
+    )
+    def test_is_link_reparse_point_and_oserror_branches(
+        self, monkeypatch, is_symlink, os_name, attrs, raise_lstat, expected
+    ) -> None:
+        """Every ``_is_link`` tail arm returns the documented value."""
+        from sofer import scanner as scanner_mod
+
+        class _StatLike:
+            st_file_attributes = attrs
+
+        class _FakePath:
+            def is_symlink(self) -> bool:
+                return is_symlink
+
+            def lstat(self):
+                if raise_lstat:
+                    raise OSError("no stat")
+                return _StatLike()
+
+        monkeypatch.setattr(scanner_mod.os, "name", os_name)
+        from typing import cast as _cast
+
+        fake = _cast(Path, _cast(object, _FakePath()))
+        assert scanner_mod._is_link(fake) is expected
+
+
+class TestCollectInitMoves:
+    """Unit tests for :func:`collect_init_moves` (init --move-existing)."""
+
+    @pytest.mark.parametrize("raw_exists", [True, False])
+    def test_collect_init_moves_existing_raw_and_absent_raw(
+        self, tmp_path: Path, raw_exists: bool
+    ) -> None:
+        """Existing raw/ files become *existing*; a missing raw/ yields empty."""
+        from sofer.scanner import collect_init_moves
+
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "a.csv").write_text("1\n", encoding="utf-8")
+        (root / "notes.txt").write_text("x", encoding="utf-8")
+        raw_dir = root / "raw"
+        if raw_exists:
+            raw_dir.mkdir()
+            (raw_dir / "old.csv").write_text("old\n", encoding="utf-8")
+            (raw_dir / "ignore.txt").write_text("x", encoding="utf-8")
+            (raw_dir / "nested").mkdir()
+            (raw_dir / "nested" / "deep.csv").write_text("d\n", encoding="utf-8")
+
+        candidates, existing = collect_init_moves(root, "ds.toml", raw_dir)
+
+        assert [c.name for c in candidates] == ["a.csv"]
+        if raw_exists:
+            assert sorted(e.name for e in existing) == ["deep.csv", "old.csv"]
+        else:
+            assert existing == []
+
+    def test_collect_init_moves_skips_links_and_toml_name(self, tmp_path, monkeypatch) -> None:
+        """Links are never candidates; a supported file matching the TOML name is
+        excluded from the move set (SCN-01 + INIT-05)."""
+        from sofer import scanner as scanner_mod
+
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "keep.csv").write_text("1\n", encoding="utf-8")
+        (root / "link.csv").write_text("2\n", encoding="utf-8")
+        (root / "data.csv").write_text("3\n", encoding="utf-8")
+
+        # A junction/symlink at the root cannot be fabricated without FS
+        # privileges on every host; the exclusion contract is pinned through the
+        # _is_link seam (the exclusion logic is what is under test).
+        monkeypatch.setattr(scanner_mod, "_is_link", lambda p: p.name == "link.csv")
+        candidates, _existing = scanner_mod.collect_init_moves(root, "data.csv", root / "raw")
+        names = [c.name for c in candidates]
+        assert "link.csv" not in names
+        assert "data.csv" not in names  # excluded as the TOML name
+        assert names == ["keep.csv"]
+
+
+class TestDiscoverRegistryDefault:
+    """Default registry extension set (``ext_set = set(SUPPORTED_FORMATS.keys())``)."""
+
+    def test_default_extension_registry(self, tmp_path: Path) -> None:
+        """discover_files with no --ext uses the full supported-format registry."""
+        from sofer.scanner import discover_files
+
+        _make_tree(tmp_path, ["a.csv", "b.tsv", "c.parquet", "d.xlsx", "e.jsonl", "f.txt"])
+        result = discover_files(tmp_path)
+        names = {p.name for p in result}
+        assert names == {"a.csv", "b.tsv", "c.parquet", "d.xlsx", "e.jsonl"}
+
+
+class TestMergeEntriesEdgeCases:
+    """Edge arcs of :func:`merge_entries` (malformed entries, remotes, layout)."""
+
+    def test_merge_skips_malformed_entry_without_dedup(self, tmp_path: Path) -> None:
+        """An unparseable [[file]] entry is preserved but never blocks discovery."""
+        from sofer.scanner import merge_entries
+
+        (tmp_path / "a.csv").write_text("1\n", encoding="utf-8")
+        raw: dict[str, Any] = {
+            "dataset": {"name": "x", "repo_id": "u/r"},
+            "file": [{"local": "data/broken.csv"}],  # missing remote → KeyError
+        }
+        merge_entries([tmp_path / "a.csv"], raw, tmp_path, tmp_path / "cache")
+        assert len(raw["file"]) == 2  # malformed preserved + new entry
+        remotes = [e.get("remote", "") for e in raw["file"]]
+        assert "a.csv" in remotes
+
+    def test_merge_empty_remote_skips_remote_dedup(self, tmp_path: Path) -> None:
+        """A falsy ``remote`` skips the remote-based dedup arm (loop-back arc)."""
+        from sofer.scanner import merge_entries
+
+        (tmp_path / "a.csv").write_text("1\n", encoding="utf-8")
+        raw: dict[str, Any] = {
+            "dataset": {"name": "x", "repo_id": "u/r"},
+            "file": [{"local": "data/other.csv", "remote": ""}],
+        }
+        merge_entries([tmp_path / "a.csv"], raw, tmp_path, tmp_path / "cache")
+        remotes = [e.get("remote", "") for e in raw["file"]]
+        assert "a.csv" in remotes
+        assert "" in remotes  # preserved untouched
+
+    def test_merge_data_dir_outside_base_falls_back_to_name(self, tmp_path: Path) -> None:
+        """data_dir not relative to base_dir falls back to ``<name>/<flat>``."""
+        from sofer.scanner import merge_entries
+
+        base = tmp_path / "proj"
+        base.mkdir()
+        (base / "a.csv").write_text("1\n", encoding="utf-8")
+        data_dir = tmp_path / "elsewhere"  # sibling, outside base_dir
+        raw: dict[str, Any] = {"file": []}
+        merge_entries([base / "a.csv"], raw, base, data_dir)
+        assert raw["file"][0]["local"] == "elsewhere/a.csv"
+        assert raw["file"][0]["remote"] == "a.csv"
+
+
+class TestCopyFilesOserrorArc:
+    """filecmp.cmp raising OSError is treated as differing (copy_files decision)."""
+
+    def test_files_identical_oserror_treated_as_different(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A comparison failure must NOT skip a differing destination (fail-open
+        would silently keep stale cache/ content on re-scan)."""
+        from sofer import scanner as scanner_mod
+        from sofer.scanner import copy_files
+
+        src = tmp_path / "a.csv"
+        src.write_text("same\n", encoding="utf-8")
+        dest_dir = tmp_path / "cache"
+        dest_dir.mkdir()
+        (dest_dir / "a.csv").write_text("same\n", encoding="utf-8")
+
+        def _boom(*_a, **_k):
+            raise OSError("cmp failed")
+
+        monkeypatch.setattr(scanner_mod.filecmp, "cmp", _boom)
+        assert scanner_mod._files_identical(src, dest_dir / "a.csv") is False
+        with pytest.raises(FileExistsError):
+            copy_files([src], tmp_path, dest_dir)
+
+
+class TestDiscoverNoParentChain:
+    """A discovery entry whose ``parents`` chain is empty (defensive branch).
+
+    ``Path.parents`` is never empty for real rglob-yielded paths under an
+    absolute root, so the parent-guard loop's natural-exit arm is driven through
+    the FS-walk seam: a fake rglob result with no parents must NOT be flagged as
+    a linked ancestor and must be discovered normally.
+    """
+
+    def test_entry_without_parents_is_discovered(self, tmp_path: Path, monkeypatch) -> None:
+        from pathlib import Path as _Path
+
+        from sofer import scanner as scanner_mod
+
+        class _FakeEntry:
+            parts = ("secret.csv",)
+            suffix = ".csv"
+
+            def is_symlink(self) -> bool:
+                return False
+
+            def is_file(self) -> bool:
+                return True
+
+            def lstat(self):
+                raise OSError("no lstat needed")
+
+            @property
+            def parents(self):
+                return []
+
+        fake = _FakeEntry()
+        monkeypatch.setattr(_Path, "rglob", lambda self, pattern: iter([fake]))
+        result = scanner_mod.discover_files(tmp_path)
+        assert result == [fake]  # not flagged as linked, appended to the results
