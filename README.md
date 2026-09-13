@@ -756,9 +756,13 @@ Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
   (`coverage-html`) plus a missing-lines report in the job log
   (`uv run coverage report -m`). No third-party coverage service is used.
 - **CodeQL scanning**: the Python codebase is scanned on every push and pull
-  request to `main`/`dev`, and weekly (`.github/workflows/codeql.yml`,
-  Advanced Setup with `.github/codeql/config.yml`). SARIF results appear in the
-  **Security** tab; alerts are informational and never block merges.
+  request to `main`/`dev`, and weekly (`.github/workflows/codeql.yml`, Advanced
+  Setup with `.github/codeql/config.yml`). While the repository is private, code
+  scanning cannot be enabled (it requires GitHub Code Security on private
+  repositories), so the SARIF report is published as the `codeql-sarif` workflow
+  artifact; once the repository is public the results move to the **Security**
+  tab (set `upload: always` in the workflow). Alerts are informational and never
+  block merges.
 
 ## Related
 

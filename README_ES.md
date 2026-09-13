@@ -796,8 +796,12 @@ mcp_registration). El árbol de módulos anotado está en
   (`uv run coverage report -m`). No se usa ningún servicio de cobertura externo.
 - **CodeQL scanning**: el código Python se analiza en cada push y pull request a
   `main`/`dev`, y semanalmente (`.github/workflows/codeql.yml`, Advanced Setup
-  con `.github/codeql/config.yml`). Los resultados SARIF aparecen en la pestaña
-  **Security**; las alertas son informativas y nunca bloquean merges.
+  con `.github/codeql/config.yml`). Mientras el repositorio es privado, code
+  scanning no puede habilitarse (requiere GitHub Code Security en repos
+  privados), así que el informe SARIF se publica como artefacto de workflow
+  `codeql-sarif`; cuando el repositorio sea público, los resultados pasan a la
+  pestaña **Security** (basta con `upload: always` en el workflow). Las alertas
+  son informativas y nunca bloquean merges.
 
 ## Referencias
 
