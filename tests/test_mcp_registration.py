@@ -477,6 +477,168 @@ class TestEnvForwarding:
             doc = _tomli.load(fh)
         assert "HF_TOKEN" in doc["mcp_servers"]["sofer"]["env_vars"]
 
+    def test_opencode_warning_env_present(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "receives no env" in err
+        assert "See README" in err
+        assert "HF_TOKEN" in err
+        assert "SOFER_MCP_APPROVAL_PHRASE" in err
+        # entry stays exactly {type, command, cwd} with no env key
+        path = proj / "opencode.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["mcp"]["sofer"] == {
+            "type": "local",
+            "command": ["sofer-mcp"],
+            "cwd": str(proj.resolve()),
+        }
+        assert "env" not in data["mcp"]["sofer"]
+
+    def test_opencode_warning_dry_run(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=True)
+        )
+        assert rc == 0
+        assert "receives no env" in capsys.readouterr().err
+        # dry-run writes nothing: no config file and no .bak
+        assert not (proj / "opencode.json").exists()
+        assert not Path(str(proj / "opencode.json") + ".bak").exists()
+
+    def test_opencode_warning_all_once(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
+        rc = cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        # exactly one warning, for the opencode member only
+        assert err.count("receives no env") == 1
+        # all still expands to exactly the three agents
+        assert (proj / "opencode.json").exists()
+        assert (proj / ".codex" / "config.toml").exists()
+        assert (proj / ".gemini" / "settings.json").exists()
+        # codex/gemini persist names only, values absent
+        try:
+            import tomli as _tomli2
+        except ImportError:
+            import tomllib as _tomli2
+
+        codex_path = proj / ".codex" / "config.toml"
+        codex_doc = _tomli2.load(codex_path.open("rb"))
+        assert codex_doc["mcp_servers"]["sofer"]["env_vars"] == [
+            "HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE",
+        ]
+        assert "hf123" not in codex_path.read_text(encoding="utf-8")
+        gemini_data = json.loads((proj / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+        assert gemini_data["mcpServers"]["sofer"]["env"] == {
+            "HF_TOKEN": "$HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
+        }
+
+    def test_no_warning_without_env(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 0
+        assert "receives no env" not in capsys.readouterr().err
+
+    def test_no_warning_codex_gemini_env(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
+        for agent in ("codex", "gemini"):
+            rc = cli._cmd_mcp_add(
+                Namespace(agent=agent, scope="project", cwd=str(proj), dry_run=False)
+            )
+            assert rc == 0
+        # no warning for forwarding agents
+        assert "receives no env" not in capsys.readouterr().err
+        # codex allow-list of names present, gemini $KEY refs; values absent
+        try:
+            import tomli as _tomli3
+        except ImportError:
+            import tomllib as _tomli3
+
+        codex_path = proj / ".codex" / "config.toml"
+        codex_doc = _tomli3.load(codex_path.open("rb"))
+        assert codex_doc["mcp_servers"]["sofer"]["env_vars"] == [
+            "HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE",
+        ]
+        gemini_path = proj / ".gemini" / "settings.json"
+        gemini_data = json.loads(gemini_path.read_text(encoding="utf-8"))
+        assert gemini_data["mcpServers"]["sofer"]["env"] == {
+            "HF_TOKEN": "$HF_TOKEN",
+            "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
+        }
+        assert "hf123" not in gemini_path.read_text(encoding="utf-8")
+
+    def test_warning_values_never_leak(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
+        # real run
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "hf123" not in captured.out
+        assert "hf123" not in captured.err
+        assert "phrase123" not in captured.out
+        assert "phrase123" not in captured.err
+        path = proj / "opencode.json"
+        raw_text = path.read_text(encoding="utf-8")
+        assert "hf123" not in raw_text
+        assert "phrase123" not in raw_text
+        # dry-run mode
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=True)
+        )
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "hf123" not in captured.out
+        assert "hf123" not in captured.err
+        assert "phrase123" not in captured.out
+        assert "phrase123" not in captured.err
+
 
 # ── delegation ────────────────────────────────────────────────────────
 

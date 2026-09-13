@@ -142,7 +142,7 @@ reciente que el Parquet más nuevo).
 ### Notas para Windows — CWD, placeholders y separadores
 
 | Tema | Qué hacer | Por qué / detalle |
-|------|-----------|------------------|
+| ------ | ----------- | ------------------ |
 | **CWD en CLI** | Ejecuta siempre `sofer init` desde el directorio del dataset (p. ej. `C:\Users\...\test`). La CLI usa `Path.cwd()` en vivo — `test.toml` y `raw/` se crean exactamente donde la ejecutes. | Ejecutarlo desde el padre crea `test.toml`/`raw/` en el lugar equivocado. Haz `cd` al directorio del dataset primero. |
 | **Parámetro `cwd` en MCP** | `sofer_init` tiene un `cwd` opcional. Cuando `cwd` es `None` usa el `Path.cwd()` en vivo solo si es un **descendiente estricto** de la raíz del servidor; en caso contrario la llamada es RECHAZADA (fails closed) indicando el argumento requerido `cwd="<directorio del dataset>"` — **no** vuelve a la raíz del servidor. Un `cwd="C:/Users/elaze/Desktop/test"` explícito sigue soportado como `effective_root` por llamada vía `_contained_path` y nunca muta la raíz global. | Rechaza con `PathOutsideRootError` para `cwd` explícito fuera de la raíz (sin `../` por encima, sin `C:/evil`, sin escape por symlink). El caso auto con `cwd=None` está contenido por una verificación de descendiente estricto `is_relative_to` — nunca escapa ni muta `_SERVER_ROOT`, y rechaza (indicando `cwd`) en vez de volver a la raíz cuando el `cwd` en vivo no es un descendiente estricto. |
 | **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `flatten_first_level`. |
@@ -281,7 +281,7 @@ inferencia siempre se renderizan de forma diferenciada para que el lector
 distinga un hecho de una suposición:
 
 | Estado | Significado | Renderizado |
-|---|---|---|
+| --- | --- | --- |
 | `confirmed` | inferencia de alta confianza y corroborada | `email` |
 | `inferred` | suposición plausible pero no verificada | `email (inferred, 78%)` |
 | `unknown` | no inferible de forma fiable | `unknown` |
@@ -326,7 +326,7 @@ canalización.
 ## Referencia de comandos
 
 | Comando | Descripción |
-|---|---|
+| --- | --- |
 | `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Requiere `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`); un `--user` faltante sale con 2, y los valores placeholder (`YOUR_USER`) o inseguros salen con 1 antes de cualquier escritura — la línea de éxito imprime el `config_path` absoluto. |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto contenido), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
@@ -347,7 +347,7 @@ canalización.
 ### Banderas rápidas
 
 | Flag | Comandos | Qué hace |
-|---|---|---|
+| --- | --- | --- |
 | `--keep-csv` | `publish` (solo target HF) | También sube el CSV original junto al Parquet convertido; sin efecto con `--target local`. |
 | `--no-checks` | `prepare` | Omite los validadores estructurales y de calidad — genera el paquete sin ejecutar los controles. |
 | `--force` | `prepare`, `publish`, `scan` | Sobrescribe artefactos o archivos de destino existentes y omite la confirmación interactiva. |
@@ -366,7 +366,7 @@ canalización.
 ## Formatos de datos soportados
 
 | Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 | TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 | Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -383,7 +383,7 @@ de columna inesperados (o una conversión fallida, en cuyo caso `prepare` imprim
 una advertencia e incorpora el CSV original tal cual):
 
 | Patrón de CSV | Qué puede fallar | Solución |
-|---|---|---|
+| --- | --- | --- |
 | Coma como separador decimal (`3,14`) | pyarrow lee la coma como delimitador de campo, no como marca decimal | Usa un `csv_delimiter` distinto de la coma en el TOML |
 | Columna de tipos mixtos, >50 % con aspecto numérico y algo de texto | pyarrow puede promover toda la columna a `string` o fallar | Limpia la columna o acepta el tipo `string` |
 | Campos de texto extremadamente largos (>2 GB) | `large_string` los maneja, pero el analizador de CSV puede alcanzar límites de memoria | Divide el archivo o recorta el campo |
@@ -426,7 +426,7 @@ Cada conjunto de datos se comprueba antes de publicar:
 ### Controles de integridad
 
 | Comprobación | Qué hace | ¿Bloquea la publicación? |
-|---|---|---|
+| --- | --- | --- |
 | File existence | Cada ruta declarada debe existir en disco | Sí |
 | Min file count | Configurable mediante `[[check]] min_files` | Sí |
 | Min total size | Configurable mediante `[[check]] min_total_size_mb` | No (aviso) |
@@ -436,7 +436,7 @@ Cada conjunto de datos se comprueba antes de publicar:
 ### Controles de calidad
 
 | Comprobación | Qué detecta |
-|---|---|
+| --- | --- |
 | Duplicates | Filas duplicadas en datos tabulares |
 | Empty rows | Filas sin valores |
 | Empty columns | Columnas sin valores |
@@ -571,7 +571,7 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 - `sofer_auth_status` es el preflight: verifica `token`/`confidential`/`approval_phrase` sin red.
 
 | Paso | Herramienta | Args clave | Cuándo usar |
-|------|-------------|------------|-------------|
+| ------ | ------------- | ------------ | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Bootstrap greenfield; crea TOML + `raw/` (Windows: `cwd` debe permanecer bajo la raíz vía `_contained_path`; `raw/example.csv` es NTFS-safe). |
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Fase 0 preview/apply tras `init`. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
@@ -632,7 +632,7 @@ sofer mcp remove --agent all              # eliminar de los tres
 Ubicaciones y formas por agente:
 
 | Agent | Scope | File | Entry |
-|-------|-------|------|-------|
+| ------- | ------- | ------ | ------- |
 | opencode | `--scope project` | `./opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
 | opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
 | codex | `--scope user` | `~/.codex/config.toml` | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
@@ -651,7 +651,10 @@ Ubicaciones y formas por agente:
   contrario el comando sale con código 1 indicando la ruta infractora.
 - **Env:** `HF_TOKEN` y `SOFER_MCP_APPROVAL_PHRASE` del shell se reenvían — codex
   como lista `env_vars`, gemini como dict `env` explícito (sin herencia del
-  shell). Opencode no recibe env.
+  shell). Opencode no recibe env. Cuando `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE`
+  están definidas y se elige `--agent opencode` (o `all`), `sofer mcp add`
+  muestra una advertencia en stderr con los nombres de las variables descartadas
+  y deja el código de salida sin cambios.
 - **Delegación:** cuando hay un binario nativo disponible (`codex`/`gemini`), se
   prueba primero su `mcp add`/`remove` (sondeo vía `shutil.which` + `mcp --help`
   con timeout de 3 s); si falla o expira se recurre a la edición directa del
