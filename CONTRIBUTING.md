@@ -17,7 +17,7 @@ pre-commit install
 cp .env.template .env   # then edit .env with your HF token
 ```
 
-> Get your token at: https://huggingface.co/settings/tokens
+> Get your token at: <https://huggingface.co/settings/tokens>
 
 ## Development commands
 
@@ -27,6 +27,8 @@ Run these from the repository root:
 uv run pytest
 uv run mypy src/
 uv run ruff check src/ tests/
+uv run coverage run -m pytest   # complete suite under coverage (gate: 90%)
+uv run coverage report -m       # totals + per-file missed lines; fails below 90%
 ```
 
 ## Architecture
@@ -101,11 +103,15 @@ Prefixes: `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `refactor`.
 
 - Run `uv run pytest` for the full suite.
 - Add tests for new behaviour in the appropriate `tests/` file.
-- Target: no drop in coverage.
+- Total coverage is gated at **90%** (`fail_under = 90` in `pyproject.toml`):
+  CI and the release workflow fail below the floor, and `uv run coverage report
+  -m` lists the missed lines. Raising the floor is a spec change
+  (`openspec/specs/ci/spec.md` CI-01), never an ad-hoc workflow tweak.
 
 ## Reporting bugs
 
 Use the issue template and include:
+
 - Steps to reproduce
 - Expected vs actual behaviour
 - `sofer --version` output

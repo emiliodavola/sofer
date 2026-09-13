@@ -35,6 +35,7 @@ Hugging Face Hub o en cualquier directorio local.**
 - [IA y servidor MCP](#ia-y-servidor-mcp)
 - [Configuración](#configuracion)
 - [Resumen de arquitectura](#resumen-de-arquitectura)
+- [Controles de calidad y escaneo de seguridad](#controles-de-calidad-y-escaneo-de-seguridad)
 - [Referencias](#referencias)
 
 ## Instalación
@@ -784,6 +785,19 @@ mcp_registration). El árbol de módulos anotado está en
 [CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
 ¿Quieres contribuir? Consulta [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Controles de calidad y escaneo de seguridad
+
+- **Coverage gate**: la cobertura total de tests está limitada al **90%** — el
+  valor mínimo vive en `pyproject.toml` (`[tool.coverage.report] fail_under = 90`)
+  y lo aplica coverage.py en cada PR (`ci.yml`) y antes de cada release
+  (`release.yml`). La evidencia es autogestionada: un artefacto `htmlcov`
+  (`coverage-html`) además de un informe de líneas no cubiertas en el log del job
+  (`uv run coverage report -m`). No se usa ningún servicio de cobertura externo.
+- **CodeQL scanning**: el código Python se analiza en cada push y pull request a
+  `main`/`dev`, y semanalmente (`.github/workflows/codeql.yml`, Advanced Setup
+  con `.github/codeql/config.yml`). Los resultados SARIF aparecen en la pestaña
+  **Security**; las alertas son informativas y nunca bloquean merges.
 
 ## Referencias
 
