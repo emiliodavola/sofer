@@ -77,6 +77,13 @@ jobs:
       - name: Report coverage with missing lines (the gate)
         run: uv run coverage report -m
 
+      # ── CLI-core 100% gates (COV-06, AGENTS.md rule 14) ─────────────
+      # Four scoped per-file invocations in scripts/check_core_coverage.sh:
+      # each core module must measure 100.00% with zero `# pragma: no cover`.
+      # Additive and scoped per file; the TOTAL gate stays config-owned.
+      - name: Gate core module coverage (COV-06)
+        run: bash scripts/check_core_coverage.sh
+
       - name: Generate HTML coverage report
         run: uv run coverage html
 

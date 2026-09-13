@@ -744,3 +744,286 @@ class TestRemove:
         path = proj / ".codex" / "config.toml"
         # No write when absent
         assert not path.exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Unit G: mcp_registration.py floor → ≥91 (COV-01)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestResolveConfigPathNext:
+    def test_unknown_agent_raises_both_scopes(self, tmp_path, monkeypatch) -> None:
+        """resolve_config_path rejects unknown agents in user AND project scope."""
+        from typing import cast as _cast
+
+        bad: mcp_registration.AgentName = _cast(mcp_registration.AgentName, _cast(object, "nope"))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="unknown agent"):
+            mcp_registration.resolve_config_path(bad, "user", None)
+        with pytest.raises(ValueError, match="unknown agent"):
+            mcp_registration.resolve_config_path(bad, "project", tmp_path)
+
+
+class TestBuildEntryNext:
+    def test_unknown_agent_raises(self, tmp_path) -> None:
+        from typing import cast as _cast
+
+        bad: mcp_registration.AgentName = _cast(mcp_registration.AgentName, _cast(object, "nope"))
+        with pytest.raises(ValueError, match="unknown agent"):
+            mcp_registration.build_entry(bad, tmp_path, {})
+
+
+class TestReadConfigMalformed:
+    def test_rejects_non_object_json_and_non_table_toml(self, tmp_path, monkeypatch) -> None:
+        """read_config raises on a non-object JSON and a scalar-root TOML."""
+        json_path = tmp_path / "opencode.json"
+        json_path.write_text("[1, 2]", encoding="utf-8")
+        with pytest.raises(ValueError, match="not a JSON object"):
+            mcp_registration.read_config(json_path)
+
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('hello = "scalar"', encoding="utf-8")
+        # Valid TOML always yields a table, so the non-table defensive branch is
+        # driven through the parser seam (a degenerate load result).
+        try:
+            import tomli as _tomllib
+        except ImportError:  # pragma: no cover - Python 3.11+
+            import tomllib as _tomllib
+
+        monkeypatch.setattr(_tomllib, "load", lambda _fh: ["not", "a", "table"])
+        with pytest.raises(ValueError, match="not a TOML table"):
+            mcp_registration.read_config(toml_path)
+
+
+class TestIdempotencyNext:
+    def test_normalize_codex_command_non_string_returns_empty(self) -> None:
+        assert mcp_registration._normalize_codex_command(42) == []
+        assert mcp_registration._normalize_codex_command(None) == []
+
+    @pytest.mark.parametrize(
+        "agent",
+        ["codex", "gemini", "opencode"],
+    )
+    def test_entries_equal_per_agent_matrix(self, agent: str) -> None:
+        base = {"command": "sofer-mcp", "cwd": "/proj", "env_vars": ["HF_TOKEN"]}
+        if agent == "codex":
+            a = {**base, "cwd": "/proj"}
+            b = {**base, "cwd": "/other"}
+            assert mcp_registration._entries_equal("codex", a, b) is False  # cwd mismatch
+            a2 = {**base, "env_vars": ["HF_TOKEN"]}
+            b2 = {**base, "env_vars": []}
+            assert mcp_registration._entries_equal("codex", a2, b2) is False  # env mismatch
+            assert mcp_registration._entries_equal("codex", a2, {**a2}) is True
+        elif agent == "gemini":
+            a = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "$HF_TOKEN"}}
+            b = {"command": "other", "cwd": "/proj", "env": a["env"]}
+            assert mcp_registration._entries_equal("gemini", a, b) is False  # command
+            c = {**a, "cwd": "/other"}
+            assert mcp_registration._entries_equal("gemini", a, c) is False  # cwd
+            d = {**a, "env": {}}
+            assert mcp_registration._entries_equal("gemini", a, d) is False  # env
+            assert mcp_registration._entries_equal("gemini", a, {**a}) is True
+        else:
+            a = {"type": "local", "command": ["sofer-mcp"], "cwd": "/proj"}
+            assert mcp_registration._entries_equal("opencode", a, {**a}) is True
+            assert (
+                mcp_registration._entries_equal("opencode", a, {**a, "cwd": "/x"}) is False
+            )
+
+    def test_atomic_write_toml_roundtrip(self, tmp_path) -> None:
+        """atomic_write("toml") round-trips through tomllib."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        path = tmp_path / "config.toml"
+        doc = {"mcp_servers": {"sofer": {"command": "sofer-mcp", "cwd": "/proj"}}}
+        mcp_registration.atomic_write(path, doc, "toml")
+        with open(path, "rb") as fh:
+            parsed = _tomli.load(fh)
+        assert parsed == doc
+        assert not (path.with_name(path.name + ".tmp")).exists()
+
+
+class TestMergeNext:
+    def test_gemini_idempotent_no_change(self) -> None:
+        """An equal existing gemini entry is idempotent (no write)."""
+        desired = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "$HF_TOKEN"}}
+        existing = {"mcpServers": {"sofer": desired}}
+        new_doc, changed = mcp_registration.merge("gemini", existing, desired)
+        assert changed is False
+        assert new_doc is existing or new_doc == existing
+
+    def test_merge_unknown_agent_raises(self) -> None:
+        from typing import cast as _cast
+
+        bad: mcp_registration.AgentName = _cast(mcp_registration.AgentName, _cast(object, "nope"))
+        with pytest.raises(ValueError, match="unknown agent"):
+            mcp_registration.merge(bad, {}, {})
+
+
+class TestRemoveNext:
+    def test_remove_codex_pops_empty_table(self) -> None:
+        """Removing the only codex server pops the mcp_servers table."""
+        existing = {"mcp_servers": {"sofer": {"command": "sofer-mcp"}}}
+        new_doc, changed = mcp_registration.remove_entry("codex", existing)
+        assert changed is True
+        assert "mcp_servers" not in new_doc
+
+    def test_remove_codex_keeps_other_servers(self) -> None:
+        existing = {
+            "mcp_servers": {
+                "sofer": {"command": "sofer-mcp"},
+                "other": {"command": "other"},
+            }
+        }
+        new_doc, changed = mcp_registration.remove_entry("codex", existing)
+        assert changed is True
+        assert new_doc["mcp_servers"] == {"other": {"command": "other"}}
+
+    def test_remove_gemini_pops_empty_table(self) -> None:
+        existing = {"mcpServers": {"sofer": {"command": "sofer-mcp"}}}
+        new_doc, changed = mcp_registration.remove_entry("gemini", existing)
+        assert changed is True
+        assert "mcpServers" not in new_doc
+
+    def test_remove_gemini_absent_returns_idempotent(self) -> None:
+        existing = {"mcpServers": {"other": {"command": "other"}}}
+        new_doc, changed = mcp_registration.remove_entry("gemini", existing)
+        assert changed is False
+        assert new_doc == existing
+
+    def test_remove_gemini_keeps_other_servers(self) -> None:
+        existing = {
+            "mcpServers": {
+                "sofer": {"command": "sofer-mcp"},
+                "other": {"command": "other"},
+            }
+        }
+        new_doc, changed = mcp_registration.remove_entry("gemini", existing)
+        assert changed is True
+        assert new_doc["mcpServers"] == {"other": {"command": "other"}}
+
+
+class TestDelegationNext:
+    @pytest.mark.parametrize(
+        "rc,raises",
+        [
+            (0, False),
+            (1, False),
+            (None, "timeout"),
+        ],
+    )
+    def test_delegate_add_success_and_failure_variants(self, monkeypatch, rc, raises) -> None:
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/codex" if x == "codex" else None)
+
+        def _run(*_a, **_k):
+            if raises == "timeout":
+                raise subprocess.TimeoutExpired(cmd=_a[0], timeout=3)
+            return MagicMock(returncode=rc)
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        result = mcp_registration.delegate_add("codex", Path("/tmp"), [])
+        assert result is (rc == 0 and raises is False)
+
+    def test_delegate_add_bare_exception_propagates(self, monkeypatch) -> None:
+        """delegate_add only catches TimeoutExpired/OSError — other errors raise."""
+        import pytest as _pytest
+
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/codex" if x == "codex" else None)
+
+        def _run(*_a, **_k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        with _pytest.raises(ValueError, match="boom"):
+            mcp_registration.delegate_add("codex", Path("/tmp"), [])
+
+    def test_delegate_add_absent_exe(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: None)
+        assert mcp_registration.delegate_add("codex", Path("/tmp"), []) is False
+        assert mcp_registration.delegate_remove("gemini") is False
+
+    @pytest.mark.parametrize(
+        "rc,raises",
+        [
+            (0, False),
+            (1, False),
+            (None, "timeout"),
+            (None, "bare"),
+        ],
+    )
+    def test_delegate_remove_variants(self, monkeypatch, rc, raises) -> None:
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/gemini")
+
+        def _run(*_a, **_k):
+            if raises == "timeout":
+                raise subprocess.TimeoutExpired(cmd=_a[0], timeout=3)
+            if raises == "bare":
+                raise RuntimeError("boom")
+            return MagicMock(returncode=rc)
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        assert mcp_registration.delegate_remove("gemini") is (rc == 0 and raises is False)
+
+    def test_probe_native_bare_exception_returns_false(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/codex" if x == "codex" else None)
+
+        def _run(*_a, **_k):
+            raise ValueError("unexpected")
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        assert mcp_registration.probe_native("codex") is False
+
+
+class TestCwdContainmentNext:
+    def test_validate_cwd_project_scope_and_resolve_failure(self, tmp_path, monkeypatch) -> None:
+        """Project-scope containment excludes foreign paths; resolve failure → False."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        (tmp_path / "proj").mkdir()
+        monkeypatch.chdir(tmp_path / "proj")
+        foreign = tmp_path / "elsewhere"
+        foreign.mkdir()
+        # project scope: foreign is under neither project_root (proj) nor home
+        assert mcp_registration.validate_cwd(foreign, "project") is False
+        assert mcp_registration.validate_cwd(tmp_path / "proj", "project") is True
+
+        def _boom_resolve(self):
+            raise OSError("unresolvable")
+
+        monkeypatch.setattr(Path, "resolve", _boom_resolve)
+        assert mcp_registration.validate_cwd(foreign, "project") is False
+        assert mcp_registration.validate_cwd(tmp_path / "proj", "user") is False
+
+
+class TestIdempotencyMatrixGaps:
+    def test_codex_command_mismatch_returns_false(self) -> None:
+        """A genuinely different codex command (after normalization) → False."""
+        a = {"command": ["sofer-mcp"], "cwd": "/proj", "env_vars": ["HF_TOKEN"]}
+        b = {"command": ["other"], "cwd": "/proj", "env_vars": ["HF_TOKEN"]}
+        assert mcp_registration._entries_equal("codex", a, b) is False
+
+
+class TestRemoveKeepOthers:
+    def test_remove_opencode_keeps_other_servers(self) -> None:
+        existing = {"mcp": {"sofer": {"type": "local"}, "other": {"type": "local"}}}
+        new_doc, changed = mcp_registration.remove_entry("opencode", existing)
+        assert changed is True
+        assert new_doc["mcp"] == {"other": {"type": "local"}}
+
+
+class TestRemoveUnknownAgent:
+    def test_remove_entry_unknown_agent_raises(self) -> None:
+        from typing import cast as _cast
+
+        bad: mcp_registration.AgentName = _cast(mcp_registration.AgentName, _cast(object, "nope"))
+        with pytest.raises(ValueError, match="unknown agent"):
+            mcp_registration.remove_entry(bad, {})

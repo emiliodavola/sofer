@@ -27,6 +27,11 @@ to this requirement, never an ad-hoc workflow tweak. The coverage run SHALL
 execute the complete suite (`coverage run -m pytest`), consistent with PB-05's
 complete-run gate, never a focused subset.
 
+> COV-06 (spec `coverage`) is the documented, additive exception: per-file
+> scoped `--fail-under=100` gates exist only as the four invocations in
+> `scripts/check_core_coverage.sh` referenced by the `ci.yml` coverage job, and
+> SHALL NOT weaken or re-declare the config-owned TOTAL floor.
+
 #### Scenario: Config declares the 90% floor
 
 - GIVEN `pyproject.toml` parsed with `tomllib`

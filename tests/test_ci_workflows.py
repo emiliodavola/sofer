@@ -199,13 +199,62 @@ def test_pyproject_declares_coverage_fail_under_90() -> None:
     assert coverage_report["fail_under"] == 90
 
 
-def test_coverage_gate_is_config_driven_without_cli_floor() -> None:
-    """CI-01 S2: no floor literal or flag in the workflows; gate is config-driven.
+def test_coverage_job_gates_core_modules_at_100() -> None:
+    """COV-06: the four core modules are gated at 100 via the gate script.
 
-    The raw text of ci.yml and release.yml must not contain ``fail_under``,
-    ``--fail-under``, or ``fail-under``: the floor lives only in
-    ``pyproject.toml`` and is read by coverage.py itself. Each coverage job's
-    report step must invoke the flag-free ``uv run coverage report -m``.
+    Reads ``scripts/check_core_coverage.sh`` and the ``ci.yml`` coverage job:
+    (a) each of the four ``src/sofer/<file>.py`` paths is paired with
+    ``--fail-under=100 -m`` in the script, and the script is referenced by a
+    coverage-job step; (b) no ``--fail-under`` value other than 100 appears in
+    the script or either workflow; (c) the config-key spelling ``fail_under``
+    (underscore) appears in neither. The TOTAL floor stays config-owned
+    (``test_pyproject_declares_coverage_fail_under_90``).
+    """
+    script = _read_text("scripts/check_core_coverage.sh")
+    # The script drives the four modules through a single loop; assert the loop
+    # roster and the scoped invocation shape (one home for the four 100 gates).
+    assert "for f in cli scanner prepare publish" in script
+    assert '--include="src/sofer/${f}.py" --fail-under=100 -m' in script
+    for module in ("cli", "scanner", "prepare", "publish"):
+        assert module in script
+    assert "bash scripts/check_core_coverage.sh" in _read_text(
+        f"{_WORKFLOW_DIR}/ci.yml"
+    )
+    for raw in (
+        script,
+        _read_text(f"{_WORKFLOW_DIR}/ci.yml"),
+        _read_text(f"{_WORKFLOW_DIR}/release.yml"),
+    ):
+        assert "fail_under" not in raw
+        for match in re.findall(r"--fail-under=[0-9]+", raw):
+            assert match == "--fail-under=100", f"non-100 floor literal {match}"
+
+
+def test_agents_md_declares_core_100_mandate() -> None:
+    """COV-06: AGENTS.md rule 14 names the modules, the 100% mandate, and the
+    pragma ban."""
+    rule14 = re.search(
+        r"### 14\..*?(?=\n### 15\.|\Z)", _read_text("AGENTS.md"), re.DOTALL
+    )
+    assert rule14 is not None, "AGENTS.md rule 14 not found"
+    text = rule14.group(0)
+    for module in ("cli.py", "scanner.py", "prepare.py", "publish.py"):
+        assert module in text
+    assert "100.00%" in text
+    assert re.search(r"#\s*pragma:\s*no\s*cover", text, re.IGNORECASE) is not None
+
+
+def test_coverage_gate_is_config_driven_without_cli_floor() -> None:
+    """CI-01 S2 (TOTAL gate only): no floor literal or flag in the workflows.
+
+    The *TOTAL* gate is config-driven: the raw text of ci.yml and release.yml
+    must not contain ``fail_under``, ``--fail-under``, or ``fail-under`` — the
+    TOTAL floor lives only in ``pyproject.toml`` and is read by coverage.py
+    itself. The documented exception is the COV-06 per-file 100% machinery:
+    the four scoped invocations live in ``scripts/check_core_coverage.sh``
+    (asserted by ``test_coverage_job_gates_core_modules_at_100``), never as
+    flags or config keys in the workflows. The TOTAL report step stays the
+    flag-free ``uv run coverage report -m``.
     """
     for name in ("ci.yml", "release.yml"):
         raw = _read_text(f"{_WORKFLOW_DIR}/{name}")
@@ -214,6 +263,17 @@ def test_coverage_gate_is_config_driven_without_cli_floor() -> None:
         assert "fail-under" not in raw
     for job in _coverage_jobs():
         assert _find_step(job, run="uv run coverage report -m") is not None
+    # Pinned added assertion: the TOTAL report step in every coverage job is
+    # exactly the flag-free invocation (COV-06 gate script stays out of the
+    # workflow text and never replaces this step).
+    for job in _coverage_jobs():
+        steps = job.get("steps", [])
+        assert any(
+s.get("run") == "uv run coverage report -m"
+and "--fail-under" not in str(s.get("run", ""))
+and "bash scripts/check_core_coverage.sh" not in str(s.get("run", ""))
+for s in steps
+        )
 
 
 def test_coverage_report_honors_show_missing() -> None:

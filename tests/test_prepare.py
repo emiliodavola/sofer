@@ -1175,3 +1175,634 @@ class TestPreparePruneOrphans:
         assert not (out / "stale_single.parquet").exists()
         assert (out / "data_got_all_aristas.parquet").exists()
         assert (out / "data_got_all_nodos.parquet").exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Unit D: drive prepare.py to 100.00% (COV-06)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPrepareParity:
+    """Direct unit coverage of the CSV↔Parquet parity helpers."""
+
+    def test_raw_values_empty_file_returns_empty(self, tmp_path: Path) -> None:
+        """An empty CSV yields ([], []) from the csv-module read (StopIteration)."""
+        import pyarrow.csv as pcs
+
+        from sofer.prepare import _read_csv_raw_values
+
+        csv = tmp_path / "empty.csv"
+        csv.write_text("", encoding="utf-8")
+        assert _read_csv_raw_values(csv, ";") == ([], [])
+        assert pcs is not None
+
+    def test_parity_unreadable_csv_reports_cannot_read(self, tmp_path: Path) -> None:
+        """An unreadable CSV path yields None and a parity failure."""
+        from sofer.prepare import _check_conversion_parity, _read_csv_raw_values
+
+        assert _read_csv_raw_values(tmp_path, ";") is None  # directory → open fails
+        table = pa.table({"a": [1]})
+        ok, warnings = _check_conversion_parity(tmp_path, ";", table)
+        assert ok is False
+        assert warnings == ["Cannot read CSV for parity check"]
+
+    def test_parity_row_count_mismatch_returns_false(self, tmp_path: Path) -> None:
+        """Blank lines inflate the csv-module row count vs pyarrow → hard fail."""
+        import pyarrow.csv as pcs
+
+        from sofer.prepare import _check_conversion_parity
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n\n\n", encoding="utf-8")
+        table = pcs.read_csv(csv, parse_options=pcs.ParseOptions(delimiter=";"))
+        ok, warnings = _check_conversion_parity(csv, ";", table)
+        assert ok is False
+        assert warnings == []
+
+    def test_parity_column_count_mismatch_returns_false(self, tmp_path: Path) -> None:
+        """A table with an extra column diverges from the CSV header width."""
+        import pyarrow.csv as pcs
+
+        from sofer.prepare import _check_conversion_parity
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8")
+        table = pcs.read_csv(csv, parse_options=pcs.ParseOptions(delimiter=";"))
+        table = table.append_column(pa.field("c", pa.int64()), pa.array([3]))
+        ok, _warnings = _check_conversion_parity(csv, ";", table)
+        assert ok is False
+
+    def test_parity_header_divergence_returns_false(self, tmp_path: Path) -> None:
+        """Renamed table columns diverge from the CSV header."""
+        import pyarrow.csv as pcs
+
+        from sofer.prepare import _check_conversion_parity
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8")
+        table = pcs.read_csv(csv, parse_options=pcs.ParseOptions(delimiter=";"))
+        table = table.rename_columns(["x", "y"])
+        ok, _warnings = _check_conversion_parity(csv, ";", table)
+        assert ok is False
+
+    def test_parity_ragged_row_handled(self, tmp_path: Path) -> None:
+        """A CSV row shorter than the header is skipped by the soft value check."""
+        import pyarrow.csv as pcs
+
+        from sofer.prepare import _check_conversion_parity
+
+        ragged = tmp_path / "ragged.csv"
+        ragged.write_text("a;b;c\n1;2\n", encoding="utf-8")
+        valid = tmp_path / "valid.csv"
+        valid.write_text("a;b;c\n1;2;3\n", encoding="utf-8")
+        table = pcs.read_csv(valid, parse_options=pcs.ParseOptions(delimiter=";"))
+        ok, warnings = _check_conversion_parity(ragged, ";", table)
+        assert ok is True
+        assert warnings == []
+
+
+class TestPrepareConversionEdges:
+    def test_parity_failure_falls_back_to_csv(self, tmp_path: Path, capsys) -> None:
+        """A parity failure (blank-line row inflation) aborts conversion and
+        stages the ORIGINAL CSV (rc stays 0)."""
+        csv = tmp_path / "parity.csv"
+        csv.write_text("a;b\n1;2\n\n\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="parity.csv")])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        captured = capsys.readouterr().out
+        assert rc == 0
+        assert "conversion failed" in captured.lower()
+        assert "staging original" in captured.lower()
+        assert (out / "parity.csv").is_file()
+        assert not (out / "parity.parquet").exists()
+
+    def test_oversized_shard_warns(
+        self, tmp_path, monkeypatch, capsys, restore_tool_config
+    ) -> None:
+        """A converted shard above PARQUET_SHARD_WARNING_MB prints the ⚠ line."""
+        import sofer.config as cfg_mod
+
+        csv = tmp_path / "big.csv"
+        csv.write_text("a;b\n" + "1;2\n" * 2000, encoding="utf-8")
+        monkeypatch.setattr(cfg_mod, "PARQUET_SHARD_WARNING_MB", 0.000001)
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="big.csv")])
+
+        rc = prepare(cfg, tmp_path / "build")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Consider sharding into" in out
+
+    def test_opt_out_csv_staged_at_remote(self, tmp_path: Path) -> None:
+        """convert_to_parquet=False stages the original CSV at its remote path."""
+        csv = tmp_path / "raw.csv"
+        csv.write_text("x\n1\n", encoding="utf-8")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="sub/raw.csv", convert_to_parquet=False)],
+        )
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        assert rc == 0
+        assert (out / "sub" / "raw.csv").is_file()
+        assert not (out / "sub" / "raw.parquet").exists()
+
+
+class TestAssertCrossFileSchemaNext:
+    def test_skip_cross_file_schema_short_circuits(self, tmp_path, capsys) -> None:
+        """skip_cross_file_schema=true prints the skip note and returns clean."""
+        import sofer.prepare as prep
+
+        cfg = _cfg(tmp_path, [], skip_cross_file_schema=True)
+        errors = prep._assert_cross_file_schema({}, cfg)
+        assert errors == []
+        assert "Skipping cross-file schema check" in capsys.readouterr().out
+
+    def test_xlsx_sheet_keys_match_grouping(self, tmp_path: Path) -> None:
+        """Multi-sheet xlsx normalized keys match the entry stem (no mismatch)."""
+        import sofer.prepare as prep
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        pq.write_table(pa.table({"a": [1]}), staging / "data__Sheet1.parquet")
+        pq.write_table(pa.table({"a": [2]}), staging / "data__Sheet2.parquet")
+        pq.write_table(pa.table({"z": [9]}), staging / "unrelated.parquet")
+        converted = {
+            "data__Sheet1.parquet": (staging / "data__Sheet1.parquet", Path(), "data.xlsx"),
+            "data__Sheet2.parquet": (staging / "data__Sheet2.parquet", Path(), "data.xlsx"),
+            "unrelated.parquet": (staging / "unrelated.parquet", Path(), ""),
+        }
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=Path("data.xlsx"), remote="data.xlsx"),
+                FileEntry(local=Path("data.xlsx"), remote="data.xlsx"),
+            ],
+        )
+        errors = prep._assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_no_detected_splits_returns_clean(self, tmp_path: Path, monkeypatch) -> None:
+        """Remotes without split keywords short-circuit the schema comparison."""
+        import sofer.prepare as prep
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        pq.write_table(pa.table({"a": [1]}), staging / "plain1.parquet")
+        pq.write_table(pa.table({"a": [2]}), staging / "plain2.parquet")
+        converted = {
+            "plain1.parquet": (staging / "plain1.parquet", Path(), ""),
+            "plain2.parquet": (staging / "plain2.parquet", Path(), ""),
+        }
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=Path("plain1.parquet"), remote="plain1.parquet"),
+                FileEntry(local=Path("plain2.parquet"), remote="plain2.parquet"),
+            ],
+        )
+        # detect_splits never returns an empty split list for non-empty files
+        # (single-train fallback), so the no-splits early return is driven
+        # through the detection seam (defensive branch).
+        from sofer.splits import SplitReport
+
+        monkeypatch.setattr(prep, "detect_splits", lambda _remotes: SplitReport())
+        errors = prep._assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_split_membership_break(self, tmp_path: Path) -> None:
+        """A remote matching the first split takes the membership break."""
+        import sofer.prepare as prep
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        pq.write_table(pa.table({"a": [1]}), staging / "train-1.parquet")
+        pq.write_table(pa.table({"a": [2]}), staging / "train-2.parquet")
+        pq.write_table(pa.table({"a": [3]}), staging / "test-1.parquet")
+        converted = {
+            "train-1.parquet": (staging / "train-1.parquet", Path(), ""),
+            "train-2.parquet": (staging / "train-2.parquet", Path(), ""),
+            "test-1.parquet": (staging / "test-1.parquet", Path(), ""),
+        }
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+                FileEntry(local=Path("test-1.parquet"), remote="test-1.parquet"),
+            ],
+        )
+        errors = prep._assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_no_split_files_returns_clean(self, tmp_path: Path, monkeypatch) -> None:
+        """A split report whose members match no remote returns clean (defensive)."""
+        import sofer.prepare as prep
+        from sofer.splits import SplitInfo, SplitReport
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        pq.write_table(pa.table({"a": [1]}), staging / "train-1.parquet")
+        pq.write_table(pa.table({"a": [2]}), staging / "train-2.parquet")
+        converted = {
+            "train-1.parquet": (staging / "train-1.parquet", Path(), ""),
+            "train-2.parquet": (staging / "train-2.parquet", Path(), ""),
+        }
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+        # Split detection cannot produce a split whose files exclude every
+        # remote it detected them from, so the defensive early return is driven
+        # through the detection seam.
+        ghost = SplitReport(splits=[SplitInfo(name="train", files=["ghost.parquet"])])
+        monkeypatch.setattr(prep, "detect_splits", lambda _remotes: ghost)
+        errors = prep._assert_cross_file_schema(converted, cfg)
+        assert errors == []
+
+    def test_unreadable_schema_reports_error(self, tmp_path: Path, monkeypatch) -> None:
+        """pq.read_schema raising appends a schema-error and fails the run."""
+        import sofer.prepare as prep
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        pq.write_table(pa.table({"a": [1]}), staging / "train-1.parquet")
+        pq.write_table(pa.table({"a": [2]}), staging / "train-2.parquet")
+        converted = {
+            "train-1.parquet": (staging / "train-1.parquet", Path(), ""),
+            "train-2.parquet": (staging / "train-2.parquet", Path(), ""),
+        }
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=Path("train-1.parquet"), remote="train-1.parquet"),
+                FileEntry(local=Path("train-2.parquet"), remote="train-2.parquet"),
+            ],
+        )
+
+        def _boom(_path):
+            raise OSError("corrupt header")
+
+        monkeypatch.setattr(prep.pq, "read_schema", _boom)
+        errors = prep._assert_cross_file_schema(converted, cfg)
+        assert errors and any("Failed to read schema" in e for e in errors)
+
+
+class TestCheckLargeValues:
+    def test_unreadable_parquet_skips_silently(self, tmp_path: Path) -> None:
+        """pq.read_table raising on a bad path returns no warnings."""
+        from sofer.prepare import _check_large_values
+
+        assert _check_large_values(tmp_path / "nope.parquet") == []
+
+    def test_warns_when_first_row_value_exceeds_threshold(self, tmp_path: Path) -> None:
+        """A null first value is skipped; the next oversized value warns."""
+        from sofer.prepare import _check_large_values
+
+        big = "x" * 20_000
+        table = pa.table({"text": [None, big]})
+        p = tmp_path / "big.parquet"
+        pq.write_table(table, p)
+        warnings = _check_large_values(p, max_bytes=10_240)
+        assert any("row 1 is 20000 bytes" in w for w in warnings)
+
+    def test_large_value_warnings_surfaced_in_prepare(self, tmp_path: Path, capsys) -> None:
+        """prepare prints oversized-value warnings from the converted parquet."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("text\n" + "x" * 20_000 + "\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        rc = prepare(cfg, tmp_path / "build")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "20000 bytes" in out
+        assert "TooBigContentError" in out
+
+
+class TestPrepareCardLicenseDtype:
+    def test_card_float64_vs_parquet_integral_flagged(self, tmp_path: Path, capsys) -> None:
+        """A float64 card dtype against an int64 parquet column is flagged."""
+        from sofer.prepare import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
+
+        p = tmp_path / "x.parquet"
+        pq.write_table(pa.table({"id": [1.5, 2.5]}), p)  # float64: not integral
+        pq.write_table(pa.table({"id": [1, 2]}), tmp_path / "y.parquet")  # int64
+        schema = [
+            ColumnSchema(
+                name="id",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=2,
+                missing=0.0,
+                hf_dtype="float64",
+            )
+        ]
+        converted = {
+            "x.parquet": (p, Path(), ""),
+            "y.parquet": (tmp_path / "y.parquet", Path(), ""),
+        }
+        _assert_card_dtypes_match_parquet(schema, converted)
+        assert "SCHEMA ASSERTION" in capsys.readouterr().out
+
+    def test_card_dtype_check_unreadable_parquet(self, tmp_path: Path, capsys) -> None:
+        """An unreadable parquet in the dtype sanity check is skipped silently."""
+        from sofer.prepare import _assert_card_dtypes_match_parquet
+        from sofer.repo_compliance import ColumnSchema
+
+        schema = [
+            ColumnSchema(
+                name="id",
+                dtype="numeric",
+                nullable=False,
+                example="1",
+                unique=2,
+                missing=0.0,
+                hf_dtype="float64",
+            )
+        ]
+        missing = tmp_path / "missing.parquet"
+        converted = {"x.parquet": (missing, Path(), "")}
+        _assert_card_dtypes_match_parquet(schema, converted)  # no raise, no output
+        assert capsys.readouterr().out == ""
+
+
+class TestPrepareOverwriteMatrix:
+    """Direct unit coverage of the _check_local_overwrite artifact shapes."""
+
+    def test_overwrite_detects_xlsx_multisheet_and_alt_layout(self, tmp_path: Path) -> None:
+        from sofer.prepare import _check_local_overwrite
+
+        out = tmp_path / "build"
+        (out / "data").mkdir(parents=True)
+        (out / "data" / "a__Sheet1.parquet").write_bytes(b"x")
+        cfg = _cfg(tmp_path, [FileEntry(local=Path("a.xlsx"), remote="data/a.xlsx")])
+        existing = _check_local_overwrite(cfg, out, all_files=False)
+        assert any("a__Sheet1.parquet" in e for e in existing)
+
+    def test_overwrite_detects_xlsx_alt_single_underscore(self, tmp_path: Path) -> None:
+        """The single-underscore fallback fires when no ``stem__*`` sheet exists."""
+        from sofer.prepare import _check_local_overwrite
+
+        out = tmp_path / "build"
+        (out / "data").mkdir(parents=True)
+        (out / "data" / "a_sheet.parquet").write_bytes(b"x")
+        (out / "data" / "a_dir.parquet").mkdir()  # non-file -> filter loop-back arc
+        cfg = _cfg(tmp_path, [FileEntry(local=Path("a.xlsx"), remote="data/a.xlsx")])
+        existing = _check_local_overwrite(cfg, out, all_files=False)
+        assert any("a_sheet.parquet" in e for e in existing)
+        assert "a_dir.parquet" not in existing  # directory entries are skipped
+
+    def test_overwrite_detects_single_sheet_xlsx_candidate(self, tmp_path: Path) -> None:
+        from sofer.prepare import _check_local_overwrite
+
+        out = tmp_path / "build"
+        (out / "data").mkdir(parents=True)
+        (out / "data" / "a.parquet").write_bytes(b"x")
+        cfg = _cfg(tmp_path, [FileEntry(local=Path("a.xlsx"), remote="data/a.xlsx")])
+        existing = _check_local_overwrite(cfg, out, all_files=False)
+        posix = [e.replace("\\", "/") for e in existing]
+        assert any("data/a.parquet" in e for e in posix)
+
+    def test_overwrite_detects_passthrough_and_codebooks_dir(self, tmp_path: Path) -> None:
+        from sofer.prepare import _check_local_overwrite
+
+        out = tmp_path / "build"
+        (out / "data").mkdir(parents=True)
+        (out / "README.md").write_text("card", encoding="utf-8")
+        (out / "data" / "b.csv").write_text("raw", encoding="utf-8")
+        (out / "codebooks").mkdir()
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=Path("b.csv"), remote="data/b.csv", convert_to_parquet=False)],
+        )
+        existing = _check_local_overwrite(cfg, out, all_files=True)
+        posix = [e.replace("\\", "/") for e in existing]
+        assert any("data/b.csv" in e for e in posix)
+        assert any("README.md" in e for e in existing)
+        assert any("codebooks" in e for e in existing)
+
+
+class TestPrepareCaseFoldCollision:
+    def test_case_fold_collision_aborts(self, tmp_path: Path, capsys) -> None:
+        """case-fold-colliding normalized remotes abort prepare before writes."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=tmp_path / "a.csv", remote="Data/a.csv"),
+                FileEntry(local=tmp_path / "a.csv", remote="data/a.csv"),
+            ],
+        )
+        out = tmp_path / "build"
+        rc = prepare(cfg, out)
+        assert rc == 1
+        assert "Case-fold collision" in capsys.readouterr().out
+        assert not out.exists() or not any(out.rglob("*.parquet"))
+
+
+class TestPrepareRecursiveStagingNext:
+    def test_xlsx_single_underscore_not_re_staged(self, tmp_path: Path) -> None:
+        """Multi-sheet xlsx keys (single-underscore after normalization) are
+        staged exactly once — step 7 must not re-stage converted sheets."""
+        xlsx = tmp_path / "a_b.xlsx"
+        _make_xlsx(xlsx, {"ventas": [["v"], [1]], "datos": [["v"], [2]]})
+        cfg = _cfg(tmp_path, [FileEntry(local=xlsx, remote="a_b.xlsx")])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+        assert rc == 0
+        staged = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.parquet"))
+        assert staged == ["a_b_datos.parquet", "a_b_ventas.parquet"]
+
+
+class TestPrepareOfflineWin32AndManifest:
+    def test_full_run_parses_manifest_and_win32_reconfigure(self, tmp_path, monkeypatch) -> None:
+        """The manifest payload parses, and the win32 stdout reconfigure guard
+        executes on a patched sys.platform (CI is ubuntu — the module row needs
+        real execution of the Windows-only branch)."""
+        import json
+        import sys as _sys
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+
+        class _FakeStdout:
+            def __init__(self) -> None:
+                self.reconfigured = False
+
+            def reconfigure(self, **_kw: object) -> None:
+                self.reconfigured = True
+
+            def write(self, _s: str) -> int:
+                return 0
+
+            def flush(self) -> None:
+                return None
+
+        fake = _FakeStdout()
+        monkeypatch.setattr(_sys, "stdout", fake)
+        monkeypatch.setattr(_sys, "platform", "win32")
+
+        rc = prepare(cfg, out)
+        assert rc == 0
+        assert fake.reconfigured is True
+        manifest = out / "manifest.json"
+        assert manifest.is_file()
+        payload = json.loads(manifest.read_bytes())
+        assert isinstance(payload, dict)
+        assert "artifacts" in payload
+
+
+class TestConvertToParquetDirect:
+    """Direct unit coverage of prepare._convert_to_parquet (299/317 arms)."""
+
+    def test_convert_parity_failure_returns_none(self, tmp_path: Path) -> None:
+        """A parity failure aborts the direct converter with None (line 299)."""
+        from sofer.prepare import _convert_to_parquet
+
+        csv = tmp_path / "parity.csv"
+        csv.write_text("a;b\n1;2\n\n\n", encoding="utf-8")
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        assert _convert_to_parquet(csv, staging) is None
+
+    def test_convert_oversized_shard_warns(
+        self, tmp_path, monkeypatch, capsys, restore_tool_config
+    ) -> None:
+        """A converted shard above the threshold prints the sharding hint."""
+        import sofer.config as cfg_mod
+        from sofer.prepare import _convert_to_parquet
+
+        csv = tmp_path / "big.csv"
+        csv.write_text("a;b\n" + "1;2\n" * 2000, encoding="utf-8")
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        monkeypatch.setattr(cfg_mod, "PARQUET_SHARD_WARNING_MB", 0.000001)
+        result = _convert_to_parquet(csv, staging)
+        assert result is not None
+        assert "Consider sharding into" in capsys.readouterr().out
+
+
+class TestPrepareSchemaFailurePath:
+    def test_prepare_cross_file_schema_failure(self, tmp_path: Path, capsys) -> None:
+        """A same-split dtype mismatch fails prepare with the assertion block."""
+        (tmp_path / "train").mkdir()
+        (tmp_path / "train" / "a.csv").write_text("v\n1\n2\n", encoding="utf-8")
+        (tmp_path / "train" / "b.csv").write_text("v\nx\ny\n", encoding="utf-8")
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=tmp_path / "train" / "a.csv", remote="train/a.csv"),
+                FileEntry(local=tmp_path / "train" / "b.csv", remote="train/b.csv"),
+            ],
+        )
+
+        rc = prepare(cfg, tmp_path / "build")
+        assert rc == 1
+        assert "Cross-file schema assertion FAILED" in capsys.readouterr().out
+
+
+class TestPrepareStudyDesignWarn:
+    def test_study_design_declared_not_found_warns(self, tmp_path: Path, capsys) -> None:
+        """A declared-but-missing study_design prints the ⚠ advisory (non-blocking)."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")], study_design="missing.md")
+
+        rc = prepare(cfg, tmp_path / "build")
+        assert rc == 0
+        assert "study_design declared but not found" in capsys.readouterr().out
+
+    def test_recipe_declared_not_found_skips_read(self, tmp_path: Path) -> None:
+        """A declared-but-missing recipe skips the card read (non-blocking)."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")], recipe="missing.R")
+
+        rc = prepare(cfg, tmp_path / "build")
+        assert rc == 0
+        assert (tmp_path / "build" / "README.md").is_file()
+
+
+class TestPrepareCodebookFailure:
+    def test_all_files_codebook_failure_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """A codebook generator ValueError aborts prepare with rc 1."""
+        import sofer.prepare as prep
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        monkeypatch.setattr(
+            prep,
+            "generate_all_codebooks",
+            lambda *a, **k: (_ for _ in ()).throw(ValueError("cb boom")),
+        )
+        rc = prepare(cfg, tmp_path / "build", all_files=True)
+        assert rc == 1
+        assert "Codebook generation failed" in capsys.readouterr().err
+
+
+class TestOverwriteSearchDirMissing:
+    def test_overwrite_search_dir_missing_fallback_appends(self, tmp_path, monkeypatch) -> None:
+        """The search-dir-missing else arm appends the candidate (defensive)."""
+        from pathlib import Path as _Path
+
+        from sofer.prepare import _check_local_overwrite
+
+        out = tmp_path / "build"
+        cfg = _cfg(tmp_path, [FileEntry(local=Path("a.xlsx"), remote="data/a.xlsx")])
+        # out/data does not exist → the else branch evaluates the candidate;
+        # exists() is forced True to drive the defensive append arm.
+        monkeypatch.setattr(_Path, "exists", lambda self: True)
+        existing = _check_local_overwrite(cfg, out, all_files=False)
+        assert any("data/a.parquet" in e.replace("\\", "/") for e in existing)
+
+
+class TestPrepareVerifyNext:
+    def _dataset(self, tmp_path: Path) -> tuple[DatasetConfig, Path]:
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        return cfg, tmp_path / "build"
+
+    def test_prepare_verify_skipped_when_datasets_absent(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """prepare(verify=True) with datasets absent prints the SKIPPED block."""
+        import sys as _sys
+        from unittest.mock import patch
+
+        cfg, out = self._dataset(tmp_path)
+        with patch.dict(_sys.modules, {"datasets": None}):
+            rc = prepare(cfg, out, verify=True)
+        assert rc == 0
+        assert "SKIPPED" in capsys.readouterr().out
+
+    def test_prepare_verify_passed_shape_when_datasets_present(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """prepare(verify=True) with datasets present prints the PASSED shape."""
+        import sys as _sys
+        from unittest.mock import MagicMock, patch
+
+        cfg, out = self._dataset(tmp_path)
+        mock_ds = {"train": MagicMock()}
+        mock_ds["train"].__len__ = lambda self: 2
+        mock_datasets = MagicMock()
+        mock_datasets.load_dataset.return_value = mock_ds
+
+        with patch.dict(_sys.modules, {"datasets": mock_datasets}):
+            rc = prepare(cfg, out, verify=True)
+        assert rc == 0
+        captured = capsys.readouterr().out
+        assert "PASSED" in captured
+        assert "train" in captured
