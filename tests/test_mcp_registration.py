@@ -786,7 +786,10 @@ class TestReadConfigMalformed:
         toml_path.write_text('hello = "scalar"', encoding="utf-8")
         # Valid TOML always yields a table, so the non-table defensive branch is
         # driven through the parser seam (a degenerate load result).
-        import tomllib as _tomllib
+        try:
+            import tomli as _tomllib
+        except ImportError:  # pragma: no cover - Python 3.11+
+            import tomllib as _tomllib
 
         monkeypatch.setattr(_tomllib, "load", lambda _fh: ["not", "a", "table"])
         with pytest.raises(ValueError, match="not a TOML table"):

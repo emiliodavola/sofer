@@ -407,6 +407,32 @@ class TestDiscoverFiles:
         )
         assert {p.name for p in result} == {"real.csv"}
 
+    def test_linked_ancestor_entry_rejected_via_rglob_seam(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An entry under a linked directory is rejected by the ancestor guard.
+
+        Python 3.13 stopped following directory links in ``Path.rglob``, so
+        scanner.py's ancestor guard became unreachable naturally on 3.13+;
+        this drives it through the walk's own seams.
+        """
+        # ``Path.rglob`` yields an entry nested under a directory that
+        # ``_is_link`` reports as a link (the shape 3.10-3.12 produce for a
+        # linked directory).
+        entry = tmp_path / "linked" / "leak.csv"
+        real_rglob = Path.rglob
+
+        def fake_rglob(self: Path, pattern: str):
+            if self == tmp_path:
+                return iter([entry])
+            return real_rglob(self, pattern)
+
+        monkeypatch.setattr(Path, "rglob", fake_rglob)
+        monkeypatch.setattr(
+            "sofer.scanner._is_link", lambda candidate: candidate == tmp_path / "linked"
+        )
+        assert discover_files(tmp_path) == []
+
     def test_regular_file_still_discovered_alongside_links(
         self, tmp_path, tmp_path_factory
     ) -> None:
