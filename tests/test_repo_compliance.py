@@ -2036,6 +2036,38 @@ class TestColumnOriginAttribution:
         assert {s.origin for s in schema} == {"data/x/value.csv", "other/y/count.csv"}
 
 
+def _stage_parquet(stage: Path, remote_key: str, table: object) -> None:
+    """Write a pyarrow *table* into *stage* at its remote-relative key.
+
+    Module-level so every staged-parquet test class (incl. the XLSX per-sheet
+    tests below) reuses one pyarrow-direct staging helper (AGENTS.md rule 4).
+    """
+    import pyarrow.parquet as pq
+
+    dest = stage.joinpath(*PurePosixPath(remote_key).parts)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, dest)
+
+
+def _make_xlsx(path: Path, sheets: dict[str, list[list[object]]]) -> None:
+    """Create an XLSX at *path* with *sheets* mapping sheet->rows (header first)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    first = True
+    for name, rows in sheets.items():
+        if first:
+            ws = wb.active
+            assert ws is not None
+            ws.title = name
+            first = False
+        else:
+            ws = wb.create_sheet(title=name)
+        for row in rows:
+            ws.append(row)
+    wb.save(path)
+
+
 class TestStagedParquetRemoteRelativeLookup:
     """RC-R13 / RC-R14 / RC-R05 — staged Parquets resolve by remote-relative
     POSIX key (S1, S2, S4, S5, S10)."""
@@ -2047,11 +2079,7 @@ class TestStagedParquetRemoteRelativeLookup:
         table: object,
     ) -> None:
         """Write a pyarrow *table* into *stage* at its remote-relative key."""
-        import pyarrow.parquet as pq
-
-        dest = stage.joinpath(*PurePosixPath(remote_key).parts)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, dest)
+        _stage_parquet(stage, remote_key, table)
 
     def test_nested_remote_reads_own_parquet(self, tmp_path):
         """S1 (RC-R13): a nested remote reads ITS staged Parquet — dtypes,
@@ -2208,6 +2236,153 @@ class TestStagedParquetRemoteRelativeLookup:
         by_name = {c.name: c for c in columns}
         assert by_name["root_col"].origin == "survey.parquet"
         assert by_name["nested_col"].origin == "data/survey.parquet"
+
+
+class TestBuildSchemaReportXlsxStaged:
+    """RC-R22 — dual-layout staged per-sheet Parquet lookup for XLSX (fix #150)."""
+
+    def test_multi_sheet_collapsed_staged_parquets_stay_silent(self, tmp_path, capsys):
+        """RC-R22 s1: collapsed single-underscore per-sheet parquets (what
+        ``prepare`` actually stages) are found — no [!] on the base key, all
+        sheet columns and ``::`` row counts present."""
+        import pyarrow as pa
+
+        xlsx = tmp_path / "DATA_GOT_ALL.xlsx"
+        _make_xlsx(
+            xlsx,
+            {
+                "aristas": [["id", "src"], [1, "a"]],
+                "nodos": [["id", "label"], [1, "n"]],
+            },
+        )
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        _stage_parquet(
+            stage,
+            "data_got_all_aristas.parquet",
+            pa.table({"src": pa.array([1], type=pa.int64())}),
+        )
+        _stage_parquet(
+            stage,
+            "data_got_all_nodos.parquet",
+            pa.table({"label": pa.array([1], type=pa.int64())}),
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=xlsx, remote="DATA_GOT_ALL.xlsx")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        assert "[!]" not in out
+        by_name = {c.name: c for c in columns}
+        assert {"src", "label"}.issubset(by_name)
+        assert {s.origin for s in columns} == {
+            "data_got_all_aristas.parquet",
+            "data_got_all_nodos.parquet",
+        }
+        assert by_name["src"].hf_dtype == "int64"
+        assert by_name["label"].hf_dtype == "int64"
+        assert row_counts == {
+            "DATA_GOT_ALL.xlsx::data_got_all_aristas.parquet": 1,
+            "DATA_GOT_ALL.xlsx::data_got_all_nodos.parquet": 1,
+        }
+
+    def test_multi_sheet_spec_layout_double_underscore_stays_silent(self, tmp_path, capsys):
+        """RC-R22 s2: spec double-underscore layout still resolves (primary wins)."""
+        import pyarrow as pa
+
+        xlsx = tmp_path / "report.xlsx"
+        _make_xlsx(
+            xlsx,
+            {"ventas": [["monto"], [1]], "costos": [["gasto"], [2]]},
+        )
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        _stage_parquet(
+            stage,
+            "report__ventas.parquet",
+            pa.table({"monto": pa.array([1], type=pa.int64())}),
+        )
+        _stage_parquet(
+            stage,
+            "report__costos.parquet",
+            pa.table({"gasto": pa.array([2], type=pa.int64())}),
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=xlsx, remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        assert "[!]" not in out
+        assert {s.origin for s in columns} == {
+            "report__ventas.parquet",
+            "report__costos.parquet",
+        }
+        assert row_counts == {
+            "report.xlsx::report__ventas.parquet": 1,
+            "report.xlsx::report__costos.parquet": 1,
+        }
+
+    def test_single_sheet_staged_parquet_stays_silent(self, tmp_path, capsys):
+        """RC-R22 s3: a single-sheet XLSX whose staged artifact == base key is
+        read without warning; row counts keyed ``entry.remote::stem.parquet``
+        (the bare file flows through the single-item per-sheet loop)."""
+        import pyarrow as pa
+
+        xlsx = tmp_path / "report.xlsx"
+        _make_xlsx(xlsx, {"hoja": [["v"], [1], [2], [3]]})
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        _stage_parquet(stage, "report.parquet", pa.table({"v": [1, 2, 3]}))
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=xlsx, remote="report.xlsx")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        assert "[!]" not in out
+        assert {s.origin for s in columns} == {"report.parquet"}
+        assert row_counts == {"report.xlsx::report.parquet": 3}
+
+    def test_multi_sheet_missing_staged_parquet_still_warns_once(self, tmp_path, capsys):
+        """RC-R22 s5: a genuinely missing staged parquet for a multi-sheet
+        XLSX warns exactly once with the corrected format-generic tail, then
+        falls back to a first-sheet-only source read (documented unchanged)."""
+        xlsx = tmp_path / "DATA_GOT_ALL.xlsx"
+        _make_xlsx(
+            xlsx,
+            {
+                "aristas": [["id", "src"], [1, "a"]],
+                "nodos": [["id", "label"], [1, "n"]],
+            },
+        )
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=[FileEntry(local=xlsx, remote="DATA_GOT_ALL.xlsx")],
+            _base_dir=tmp_path,
+        )
+        columns, row_counts = build_schema_report_with_rows(cfg, staging_dir=stage)
+        out = capsys.readouterr().out
+        warnings = [ln for ln in out.splitlines() if "[!]" in ln and "Staged Parquet" in ln]
+        assert len(warnings) == 1
+        assert "data_got_all.parquet" in warnings[0]
+        assert "original-file inference" in warnings[0]
+        assert "CSV" not in warnings[0]
+        assert row_counts == {"DATA_GOT_ALL.xlsx": 1}
+        by_name = {c.name: c for c in columns}
+        assert {s.origin for s in columns} == {"DATA_GOT_ALL.xlsx"}
+        assert "src" in by_name
+        assert "label" not in by_name  # first-sheet-only fallback (documented)
 
 
 class TestDataFieldsFileColumn:
