@@ -87,6 +87,15 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 pythonpath = ["scripts"]
 
+# ── coverage.py ──────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+branch = true
+source = ["src/sofer"]
+
+[tool.coverage.report]
+show_missing = true
+
 # ── sofer tool-wide defaults ──────────────────────────────────────
 
 [tool.sofer]
