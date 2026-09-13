@@ -1215,6 +1215,23 @@ class TestMcpCliHelp:
         out = capsys.readouterr().out
         assert "--cwd" not in out
 
+    def test_mcp_add_help_env_forwarding(self, capsys):
+        """sofer mcp add --help documents env forwarding and the opencode warning."""
+        import re
+
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "add", "--help"])
+        out = capsys.readouterr().out
+        # argparse reflows the description at the terminal width; normalize
+        # whitespace so the pinned substrings survive the wrap. The pinned
+        # help sentence renders "(names only, values never written)", so the
+        # stable substring is the prefix ending at "(names only".
+        flat = re.sub(r"\s+", " ", out)
+        assert "codex and gemini receive env forwarding (names only" in flat
+        assert "opencode entries carry no environment" in flat
+
 
 # ── subprocess boundary: user-visible output via executable CLI (PB-02) ───────
 
