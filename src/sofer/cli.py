@@ -201,7 +201,11 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
                 print(f"Error: {err}", file=sys.stderr)
             return 1
         try:
-            generate_all_codebooks(cfg, output_dir=resolve_output_dir(cfg, args.output))
+            generate_all_codebooks(
+                cfg,
+                output_dir=resolve_output_dir(cfg, args.output),
+                max_sample=args.max_sample,
+            )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -608,23 +612,29 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
            absolute path via ``Path.resolve()`` and validate containment with
            ``mcp_registration.validate_cwd`` (``is_relative_to`` user/project
            root) — fail with exit 1 and a path message when outside.
-        3. For each agent: probe native delegation via
+        3. For each agent: when opencode is selected and known env keys are
+           present, print an informational stderr warning naming the dropped
+           env NAMES (never values) and pointing at the README alternative.
+           Informational only — it never changes the exit code or stdout.
+        4. For each agent: probe native delegation via
            ``mcp_registration.probe_native`` (``which`` + ``mcp --help``
            timeout 3s); when available, try ``delegate_add`` first — on
            success skip file-edit, on failure fall back.
-        4. File-edit path: ``resolve_config_path`` → ``read_config``
+        5. File-edit path: ``resolve_config_path`` → ``read_config``
            (unreadable/malformed → print to stderr, return 1, no backup/write)
            → ``build_entry`` (absolute cwd, env forwarding per agent) →
            ``merge`` (normalize Codex command string/array, preserve other
            servers, no write when unchanged) → ``--dry-run`` guard (no
            mutation) → ``backup`` (single ``.bak`` copy2 overwrite) →
            ``atomic_write`` (tmp in same dir + ``os.replace``).
-        5. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
+        6. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
 
-    Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
-    from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
-    receives an ``env`` name list (NAMES only — values are never persisted),
-    opencode receives no env.
+        Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
+        from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
+        receives an ``env`` name list (NAMES only — values are never persisted),
+        opencode receives no env. When opencode (or the opencode member of
+        ``all``) is chosen with known env keys present, the step-3 warning is
+        printed once per run and names the variables that cannot be forwarded.
     """
     from . import mcp_registration
 
@@ -655,6 +665,15 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     for agent in agents:
         _agent = cast(_AgentName, agent)
+        # Informational opencode env-drop warning (names only, never values)
+        dropped = mcp_registration.dropped_env_keys(_agent, env)
+        if dropped:
+            print(
+                f"  !  opencode registration receives no env: {', '.join(dropped)} "
+                "not forwarded. See README for the launcher environment or an explicit "
+                "'environment' literal in opencode.json.",
+                file=sys.stderr,
+            )
         # Prefer native delegation for codex/gemini
         if mcp_registration.probe_native(_agent, timeout=3.0):
             try:
@@ -1473,7 +1492,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "other servers, backs up the original to ``.bak`` (single file, "
             "overwrites), and writes atomically via tmp+os.replace. "
             "``--cwd`` sets the server's working directory (absolute, "
-            "contained under the scope root). TOML edits may strip comments."
+            "contained under the scope root). TOML edits may strip comments. "
+            "Env: codex and gemini receive env forwarding (names only, values never "
+            "written); opencode entries carry no environment, and a warning is printed "
+            "on stderr when HF_TOKEN or SOFER_MCP_APPROVAL_PHRASE are set with "
+            "--agent opencode (or all)."
         ),
     )
     mcp_add.add_argument(

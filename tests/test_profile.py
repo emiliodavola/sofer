@@ -266,7 +266,7 @@ def _write_dataset_toml(base: object, entries: list[str]):
     """Write a minimal dataset.toml under *base* with given [[file]] locals."""
     from pathlib import Path as _Path
 
-    base_p = _Path(base)
+    base_p = _Path(str(base))
     lines = [
         "[dataset]",
         'name = "test-ds"',
@@ -738,3 +738,295 @@ class TestProfileMultisheetPrf05:
             _normalize_profile_collision_key(Path("a_ventas.metadata.yaml"))
             == "a_ventas.metadata.yaml"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Unit F: profile.py floor → ≥91 (COV-01)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_xlsx_file(path, sheets: dict[str, list[list[object]]]) -> None:
+    """Write an xlsx workbook with the named sheet → rows mapping."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    first = wb.active
+    if first is not None:
+        wb.remove(first)
+    for name, rows in sheets.items():
+        ws = wb.create_sheet(title=name)
+        for row in rows:
+            ws.append(row)
+    wb.save(path)
+
+
+class TestProfileMultisheetPrf05Next:
+    def test_profile_output_for_rel_multisuffix(self, tmp_path) -> None:
+        """A multi-suffix stem (.tar.csv → .tar.metadata.yaml) keeps the mid suffix."""
+        from pathlib import Path as _Path
+
+        from sofer.profile import _profile_output_for_rel
+
+        out = _profile_output_for_rel(_Path("profiles"), _Path("data/a.tar.csv"), sheet=None)
+        assert out.as_posix() == "profiles/data/a.tar.tar.metadata.yaml"
+
+    def test_profile_output_for_rel_single_suffix(self, tmp_path) -> None:
+        """A single-suffix stem replaces only the extension."""
+        from pathlib import Path as _Path
+
+        from sofer.profile import _profile_output_for_rel
+
+        out = _profile_output_for_rel(_Path("profiles"), _Path("data/a.csv"), sheet=None)
+        assert out.as_posix() == "profiles/data/a.metadata.yaml"
+
+    def test_profile_output_for_sheet_suffix(self, tmp_path) -> None:
+        """A sheet suffix appends after the base metadata name."""
+        from pathlib import Path as _Path
+
+        from sofer.profile import _profile_output_for_rel
+
+        out = _profile_output_for_rel(_Path("profiles"), _Path("data/a.csv"), sheet="ventas")
+        assert out.as_posix() == "profiles/data/a__ventas.metadata.yaml"
+
+
+class TestProfileSingleFileEdges:
+    def test_missing_dataset_file_returns_1(self, tmp_path, capsys) -> None:
+        """profile() on a missing path prints a clean error and exits 1."""
+        rc = profile(tmp_path / "nope.csv")
+        assert rc == 1
+        assert "Dataset not found" in capsys.readouterr().err
+
+    def test_tsv_writes_metadata_with_tab_delimiter(self, tmp_path) -> None:
+        """A TSV profile records the tab delimiter in metadata.yaml."""
+        import yaml as _yaml
+
+        tsv = tmp_path / "data.tsv"
+        tsv.write_text("a\tb\n1\t2\n", encoding="utf-8")
+        assert profile(tsv) == 0
+        meta_path = tmp_path / "metadata.yaml"
+        assert meta_path.is_file()
+        payload = _yaml.safe_load(meta_path.read_text(encoding="utf-8"))
+        assert payload["file"]["delimiter"] == "\t"
+        assert payload["file"]["format"] == "tsv"
+
+    def test_profile_parquet_writes_metadata(self, tmp_path) -> None:
+        """Parquet is profiled through the non-streamed _read_file branch."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        import yaml as _yaml
+
+        p = tmp_path / "data.parquet"
+        pq.write_table(pa.table({"a": [1, 2], "b": ["x", "y"]}), p)
+        rc = profile(p)
+        assert rc == 0
+        payload = _yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert payload["file"]["format"] == "parquet"
+        assert payload["file"]["rows"] == 2
+        assert payload["file"]["delimiter"] == ""
+
+    def test_profile_jsonl_writes_metadata(self, tmp_path) -> None:
+        """JSON Lines is profiled through the non-streamed _read_file branch."""
+        import json as _json
+
+        import yaml as _yaml
+
+        p = tmp_path / "data.jsonl"
+        p.write_text(
+            "\n".join(_json.dumps(r) for r in [{"a": 1}, {"a": 2}]) + "\n", encoding="utf-8"
+        )
+        rc = profile(p)
+        assert rc == 0
+        payload = _yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert payload["file"]["format"] == "jsonl"
+        assert payload["file"]["delimiter"] == ""
+
+    def test_profile_ragged_longer_row_truncated(self, tmp_path) -> None:
+        """A CSV row longer than the header is truncated by _stream_columns."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2;3\n", encoding="utf-8")
+        rc = profile(csv)
+        assert rc == 0
+        assert (tmp_path / "metadata.yaml").is_file()
+
+
+class TestProfileBatchSkipPaths:
+    def test_batch_skips_dir_missing_unsupported_and_empty(
+        self, tmp_path, restore_tool_config, capsys
+    ) -> None:
+        """Batch skip paths: directory, missing file, unsupported format."""
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "ok.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (tmp_path / "cache" / "subdir").mkdir()
+        (tmp_path / "cache" / "notes.txt").write_text("x", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/ok.csv"\nremote = "ok.csv"\n'
+            '[[file]]\nlocal = "cache/subdir"\nremote = "subdir/"\nrecursive = true\n'
+            '[[file]]\nlocal = "cache/missing.csv"\nremote = "missing.csv"\n'
+            '[[file]]\nlocal = "cache/notes.txt"\nremote = "notes.txt"\n',
+            encoding="utf-8",
+        )
+        results = generate_all_profiles(DatasetConfig.from_toml(str(toml)))
+        err = capsys.readouterr().err
+        assert "Skipping directory" in err
+        assert "Skipping missing file" in err
+        assert "Unsupported format, skipping" in err
+        assert len(results) == 1
+        assert results[0].replace("\\", "/").endswith("cache/profiles/ok.metadata.yaml")
+
+    def test_batch_all_entries_skipped_returns_empty(
+        self, tmp_path, restore_tool_config
+    ) -> None:
+        """A config whose entries all fail collection returns [] (no profiles)."""
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/nope.csv"\nremote = "nope.csv"\n',
+            encoding="utf-8",
+        )
+        assert generate_all_profiles(DatasetConfig.from_toml(str(toml))) == []
+
+    def test_batch_xlsx_read_error_skips(
+        self, tmp_path, restore_tool_config, capsys, monkeypatch
+    ) -> None:
+        """An unreadable xlsx is skipped with a stderr note (expanded empty → [])."""
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "b.xlsx").write_bytes(b"not an xlsx")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/b.xlsx"\nremote = "b.xlsx"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "sofer.profile._read_xlsx_sheets",
+            lambda _p: (_ for _ in ()).throw(ValueError("corrupt")),
+        )
+        results = generate_all_profiles(DatasetConfig.from_toml(str(toml)))
+        assert "Error reading" in capsys.readouterr().err
+        assert results == []
+
+    def test_batch_profile_read_error_skips(
+        self, tmp_path, restore_tool_config, capsys, monkeypatch
+    ) -> None:
+        """A per-file read failure is skipped with a stderr note."""
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (tmp_path / "cache" / "b.csv").write_text("a;b\n3;4\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n'
+            '[[file]]\nlocal = "cache/b.csv"\nremote = "b.csv"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "sofer.profile._read_dataset_for_profile",
+            lambda _p, _s: (_ for _ in ()).throw(ValueError("boom")),
+        )
+        results = generate_all_profiles(DatasetConfig.from_toml(str(toml)))
+        assert "Error reading" in capsys.readouterr().err
+        assert results == []
+
+
+class TestProfileXlsxEdges:
+    def test_xlsx_zero_sheets_writes_empty_metadata(
+        self, tmp_path, restore_tool_config, capsys, monkeypatch
+    ) -> None:
+        """A workbook reported as sheet-less still emits the empty stub metadata."""
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        _make_xlsx_file(tmp_path / "cache" / "z.xlsx", {"ventas": [["v"], [1]]})
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/z.xlsx"\nremote = "z.xlsx"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("sofer.profile._read_xlsx_sheets", lambda _p: {})
+        results = generate_all_profiles(DatasetConfig.from_toml(str(toml)))
+        assert results, "an empty stub metadata must be written"
+        assert results[0].replace("\\", "/").endswith("cache/profiles/z.metadata.yaml")
+
+
+class TestProfileBatchPrf05Next:
+    def test_batch_reads_parquet_and_xlsx(self, tmp_path, restore_tool_config) -> None:
+        """Batch profiler reads parquet through _read_dataset_for_profile."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        pq.write_table(pa.table({"a": [1, 2]}), tmp_path / "cache" / "p.parquet")
+        _make_xlsx_file(tmp_path / "cache" / "x.xlsx", {"hoja": [["v"], [1]]})
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/p.parquet"\nremote = "p.parquet"\n'
+            '[[file]]\nlocal = "cache/x.xlsx"\nremote = "x.xlsx"\n',
+            encoding="utf-8",
+        )
+        results = generate_all_profiles(DatasetConfig.from_toml(str(toml)))
+        assert len(results) == 2
+        assert any(r.replace("\\", "/").endswith("cache/profiles/p.metadata.yaml") for r in results)
+        assert any(
+            r.replace("\\", "/").endswith("cache/profiles/x.metadata.yaml") for r in results
+        )
+
+    def test_collision_names_sources_outside_base(
+        self, tmp_path, restore_tool_config, capsys
+    ) -> None:
+        """A collision with the write root OUTSIDE base falls back to absolute paths."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg_mod.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "x.csv").write_text("col\n1\n", encoding="utf-8")
+        pq.write_table(pa.table({"col": [1]}), tmp_path / "cache" / "x.parquet")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/x.csv"\nremote = "x.csv"\n'
+            '[[file]]\nlocal = "cache/x.parquet"\nremote = "x.parquet"\n',
+            encoding="utf-8",
+        )
+        outside = tmp_path.parent / f"outside-{tmp_path.name}"  # sibling, NOT under base
+        with pytest.raises(ValueError, match="Collision"):
+            generate_all_profiles(DatasetConfig.from_toml(str(toml)), output_dir=outside)
+        err = capsys.readouterr().err
+        assert "Collision:" in err
+        assert "x.csv" in err and "x.parquet" in err

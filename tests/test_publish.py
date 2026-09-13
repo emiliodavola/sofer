@@ -15,6 +15,7 @@ import shutil as _shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+from typing import cast as _cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -1692,3 +1693,406 @@ class TestPublishClean:
         assert cache.exists()
         # default build was not the publish output, so it stays (ancillary)
         assert default_build.exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Unit E: drive publish.py to 100.00% (COV-06)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRemoteFailClosedNext:
+    def test_ensure_repo_prints_already_exists(self, tmp_path, monkeypatch, capsys) -> None:
+        """create_repo failing with 'already exists' prints and continues."""
+        monkeypatch.setattr(
+            publish_mod._api,
+            "create_repo",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("Repository already exists")),
+        )
+        cfg = _cfg(tmp_path, [])
+        _ensure_repo(cfg)  # must NOT raise
+        assert "Repository already exists" in capsys.readouterr().out
+
+
+class TestHfUpload:
+    @pytest.mark.parametrize("raises", [False, True])
+    def test_hf_upload_success_and_failure(self, tmp_path: Path, raises: bool) -> None:
+        """_hf_upload returns True on success, False on an exception."""
+        from sofer.publish import _hf_upload
+
+        local = tmp_path / "x.parquet"
+        local.write_bytes(b"data")
+
+        class _FakeApi:
+            def __init__(self, raise_it: bool) -> None:
+                self.raise_it = raise_it
+
+            def upload_file(self, **_kw: Any) -> None:
+                if self.raise_it:
+                    raise RuntimeError("upload boom")
+
+        api = _FakeApi(raises)
+        result = _hf_upload("u/r", local, "x.parquet", "dataset", api=_cast(Any, api))
+        assert result is (not raises)
+
+
+class TestRepoDiffSummaryNext:
+    def _many_cfg(self, tmp_path: Path, count: int = 12) -> DatasetConfig:
+        files = [
+            FileEntry(local=tmp_path / f"f{i}.csv", remote=f"data/f{i}.csv")
+            for i in range(count)
+        ]
+        return _cfg(tmp_path, files)
+
+    def test_diff_truncates_long_added_list(self, tmp_path) -> None:
+        """More than REPORT_MAX_ITEMS adds render '… and N more'."""
+        cfg = self._many_cfg(tmp_path)
+        summary = _repo_diff_summary(cfg, existing_files=[], keep_csv=False)
+        assert "… and 4 more" in summary  # 12 remotes + README + LICENSE = 14 new
+
+    def test_diff_truncates_long_modified_list(self, tmp_path) -> None:
+        """More than REPORT_MAX_MODIFIED overwrites render '… and N more'."""
+        cfg = self._many_cfg(tmp_path, count=8)
+        existing = [f"data/f{i}.parquet" for i in range(8)] + ["README.md", "LICENSE"]
+        summary = _repo_diff_summary(cfg, existing_files=existing, keep_csv=False)
+        assert "… and 5 more" in summary  # 10 modified, 5 shown
+
+    def test_diff_lists_manifest_missing_lines(self, tmp_path) -> None:
+        """A manifest with required-missing artifacts lists '! MISSING' rows."""
+        from sofer.manifest import ArtifactStatus, ManifestEntry, PackageManifest
+
+        cfg = _cfg(tmp_path, [FileEntry(local=tmp_path / "data.csv", remote="data.csv")])
+        manifest = PackageManifest(
+            source=str(tmp_path / "dataset.toml"),
+            entries=(
+                ManifestEntry(
+                    source=str(tmp_path / "dataset.toml"),
+                    artifact_type="parquet",
+                    path="data.parquet",
+                    status=ArtifactStatus.MISSING,
+                ),
+            ),
+        )
+        summary = _repo_diff_summary(
+            cfg,
+            existing_files=["data.parquet", "README.md", "LICENSE"],
+            keep_csv=False,
+            manifest=manifest,
+        )
+        assert "! MISSING parquet: data.parquet" in summary
+
+
+class TestOverwriteProtectionNext:
+    @pytest.mark.parametrize("answer", ["n", "no", "EOFError", "KeyboardInterrupt"])
+    def test_interactive_skip_variants(self, monkeypatch, capsys, answer: str) -> None:
+        """Interactive 'no', 'n', EOFError and KeyboardInterrupt all skip."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        def _input(_prompt: str = "") -> str:
+            if answer == "EOFError":
+                raise EOFError
+            if answer == "KeyboardInterrupt":
+                raise KeyboardInterrupt
+            return answer
+
+        monkeypatch.setattr("builtins.input", _input)
+        protected = _check_overwrite_protection(
+            existing_files=["data.parquet"],
+            force=False,
+            planned_files=["data.parquet"],
+        )
+        assert protected == {"data.parquet"}
+        out = capsys.readouterr().out
+        assert "skipped" in out
+
+
+class TestSplitReportPrinting:
+    """_print_split_report arms: foreign object, empty, truncation, layout."""
+
+    def test_print_split_report_ignores_foreign_object(self, capsys) -> None:
+        from sofer.publish import _print_split_report
+
+        _print_split_report(None)
+        _print_split_report({"not": "a report"})
+        assert capsys.readouterr().out == ""
+
+    def test_print_split_report_empty_splits(self, capsys) -> None:
+        from sofer.publish import _print_split_report
+        from sofer.splits import SplitReport
+
+        _print_split_report(SplitReport())
+        assert capsys.readouterr().out == ""
+
+    def test_print_split_report_truncates_long_split(self, tmp_path, capsys) -> None:
+        from sofer.publish import _print_split_report
+        from sofer.splits import SplitInfo, SplitReport
+
+        report = SplitReport(
+            splits=[SplitInfo(name="train", files=[f"train-{i}.parquet" for i in range(7)])]
+        )
+        _print_split_report(report)
+        out = capsys.readouterr().out
+        assert "… and 2 more" in out
+
+    def test_print_split_report_unclassified_count(self, capsys) -> None:
+        from sofer.publish import _print_split_report
+        from sofer.splits import SplitInfo, SplitReport
+
+        report = SplitReport(
+            splits=[SplitInfo(name="train", files=["train-1.parquet"])],
+            unclassified=["odd.csv"],
+        )
+        _print_split_report(report)
+        assert "[?] 1 file(s) unclassified" in capsys.readouterr().out
+
+    def test_print_split_report_layout_warnings(self, capsys) -> None:
+        from sofer.publish import _print_split_report
+        from sofer.splits import SplitInfo, SplitReport
+
+        # No train split → validate_layout warns (viewer requires train).
+        report = SplitReport(splits=[SplitInfo(name="test", files=["test-1.parquet"])])
+        _print_split_report(report)
+        out = capsys.readouterr().out
+        assert "No 'train' split detected" in out
+
+
+class TestSplitMappingValidationNext:
+    def test_print_mapping_validation_warns(self, capsys) -> None:
+        """Multiple files without split keywords trigger the default-load warning."""
+        from sofer.publish import _print_split_mapping_validation
+
+        _print_split_mapping_validation(["data/a.parquet", "data/b.parquet"])
+        out = capsys.readouterr().out
+        assert "Split mapping validation:" in out
+        assert "Default-load warning" in out
+
+
+class TestCopyPackageProtectionNext:
+    """_copy_package arcs: local-CSV fallback, protected README/LICENSE, non-dir."""
+
+    def test_copy_package_local_csv_fallback(self, tmp_path: Path) -> None:
+        """keep_csv CSV missing from the mirror is copied from the LOCAL source."""
+        from sofer.publish import _copy_package
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        source = tmp_path / "build"
+        source.mkdir()
+        pq.write_table(pa.table({"a": [1], "b": [2]}), source / "data.parquet")
+        dest = tmp_path / "dest"
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=csv, remote="data.csv"),
+                FileEntry(local=tmp_path / "other.csv", remote="other.csv"),  # non-matching
+            ],
+        )
+        _copy_package(cfg, source, dest, keep_csv=True)
+        assert (dest / "data.csv").read_text(encoding="utf-8-sig") == "a;b\n1;2\n"
+        assert (dest / "data.parquet").is_file()
+
+    @pytest.mark.parametrize("with_readme", [True, False])
+    def test_copy_package_readme_license_skip_and_absent(
+        self, tmp_path: Path, with_readme: bool
+    ) -> None:
+        """Protected README/LICENSE skip; absent sources are skipped silently."""
+        from sofer.publish import _copy_package
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        source = tmp_path / "build"
+        source.mkdir()
+        pq.write_table(pa.table({"a": [1]}), source / "data.parquet")
+        if with_readme:
+            (source / "README.md").write_text("# CARD\n", encoding="utf-8")
+        (source / "LICENSE").write_text("MIT\n", encoding="utf-8")
+        dest = tmp_path / "dest"
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        _copy_package(cfg, source, dest, keep_csv=False, protected={"readme.md", "license"})
+        assert (dest / "data.parquet").is_file()
+        assert not (dest / "README.md").exists(), "protected README must not be copied"
+        assert not (dest / "LICENSE").exists(), "protected LICENSE must not be copied"
+
+    def test_copy_package_non_dir_source(self, tmp_path: Path) -> None:
+        """A non-directory source falls back to the logical planned remotes."""
+        from sofer.publish import _copy_package
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        source_file = tmp_path / "package.parquet"
+        source_file.write_bytes(b"x")
+        dest = tmp_path / "dest"
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        _copy_package(cfg, source_file, dest, keep_csv=False)  # no raise
+        assert not (dest / "data.parquet").exists()  # nothing staged from a file root
+
+
+class TestAutoPrepareNext:
+    def test_autoprepare_failure_returns_rc(self, tmp_path, monkeypatch) -> None:
+        """A failing auto-prepare propagates its return code."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        monkeypatch.setattr(publish_mod, "prepare", lambda *a, **k: 1)
+        rc = publish(cfg, target="hf")
+        assert rc == 1
+
+
+class TestBatchStagingNext:
+    def test_publish_reports_not_found_sources(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """A declared source missing on disk is reported as NOT FOUND (rc 0)."""
+        from sofer.checks import ValidationReport
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        prepare(cfg, tmp_path / "build")  # stage the parquet first
+        csv.unlink()  # the declared source is now missing on disk
+
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        report = ValidationReport("test")
+        rc = publish(cfg, target="hf", quality_report=report)
+        assert rc == 0
+        assert "NOT FOUND" in capsys.readouterr().out
+
+
+class TestHfPublishNext:
+    def test_protected_out_populated(self, tmp_path: Path, monkeypatch) -> None:
+        """The protected_out side-channel is populated by overwrite protection."""
+        from sofer.checks import ValidationReport
+        from sofer.publish import publish as publish_fn
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            publish_mod._api,
+            "list_repo_files",
+            lambda *a, **kw: ["data.parquet", "README.md", "LICENSE"],
+        )
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        protected_out: set[str] = set()
+        report = ValidationReport("test")
+        rc = publish_fn(cfg, target="hf", quality_report=report, protected_out=protected_out)
+        assert rc == 0
+        assert "data.parquet" in protected_out
+
+    def test_post_upload_inspection_failure_warns_and_skips_report(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A post-upload inspection failure warns and skips the split report
+        without failing the completed upload (rc 0)."""
+        from sofer.checks import ValidationReport
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        calls: dict[str, int] = {"n": 0}
+
+        def _list(*a: Any, **kw: Any) -> list[str]:
+            calls["n"] += 1
+            if calls["n"] == 2:  # post-upload inspection
+                raise RuntimeError("hub flaked")
+            return []
+
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", _list)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        report = ValidationReport("test")
+
+        rc = publish(cfg, target="hf", quality_report=report)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Post-upload inspection failed" in out
+        assert "Split detection" not in out
+
+    def test_full_publish_win32_reconfigure(self, tmp_path: Path, monkeypatch) -> None:
+        """The win32 stdout.reconfigure guard executes on a patched platform
+        (ubuntu CI would never execute it otherwise — required for the row)."""
+        import sys as _sys
+
+        from sofer.checks import ValidationReport
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        class _FakeStdout:
+            def __init__(self) -> None:
+                self.reconfigured = False
+
+            def reconfigure(self, **_kw: object) -> None:
+                self.reconfigured = True
+
+            def write(self, _s: str) -> int:
+                return 0
+
+            def flush(self) -> None:
+                return None
+
+        fake = _FakeStdout()
+        monkeypatch.setattr(_sys, "stdout", fake)
+        monkeypatch.setattr(_sys, "platform", "win32")
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        report = ValidationReport("test")
+
+        rc = publish(cfg, target="hf", quality_report=report)
+        assert rc == 0
+        assert fake.reconfigured is True
+
+
+class TestOverwriteProtectionYes:
+    def test_interactive_yes_overwrites(self, monkeypatch, capsys) -> None:
+        """Answering y at the interactive prompt allows the overwrite (no skip)."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        protected = _check_overwrite_protection(
+            existing_files=["data.parquet"],
+            force=False,
+            planned_files=["data.parquet", "README.md"],
+        )
+        assert protected == set()  # y answer → not protected
+        assert "skipped" not in capsys.readouterr().out
+
+
+class TestSplitMappingClean:
+    def test_print_mapping_validation_clean_no_warnings(self, capsys) -> None:
+        """Remotes with a split keyword produce no mapping warnings (exit arc)."""
+        from sofer.publish import _print_split_mapping_validation
+
+        _print_split_mapping_validation(["train/a.parquet"])
+        assert capsys.readouterr().out == ""
+
+
+class TestHfLegacyPackageAdvisory:
+    def test_no_codebooks_advisory_without_manifest(self, tmp_path, monkeypatch, capsys) -> None:
+        """A non-directory package source prints the legacy no-codebooks note."""
+        from sofer.checks import ValidationReport
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+
+        monkeypatch.setattr(publish_mod, "_needs_prepare", lambda *a, **k: False)
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        report = ValidationReport("test")
+
+        rc = publish(cfg, target="hf", output_dir="", quality_report=report)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "No codebooks found in this package" in out

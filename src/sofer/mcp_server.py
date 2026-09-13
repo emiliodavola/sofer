@@ -45,7 +45,12 @@ Security model (REVISION-2 design, findings CF-1/CF-2):
 
 Every tool docstring states its side effects and network usage verbatim.
 The token and approval phrase are never logged, returned, or placed in
-docstrings or resources.
+docstrings or resources; the unconfigured-approval preflight guidance carries
+the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only. The four
+``sofer_auth_status`` posture fields (``phrase_source``, ``server_process_id``,
+``server_started_at``, ``server_version``) are non-secret process-lifecycle
+metadata: ``phrase_source`` describes the configuration path only — the phrase,
+any phrase-derived value, and the configured env value never appear in them.
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ import re
 import sys
 import threading
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -78,6 +84,8 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
 
 from . import config as sofer_config
 from . import workflow
+from ._formats import SUPPORTED_FORMATS
+from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
@@ -100,6 +108,7 @@ from .render import render as run_render
 from .scanner import (
     EXCLUSIONS,
     check_flatten_collisions,
+    check_raw_collisions,
     collect_init_moves,
     copy_files,
     discover_files,
@@ -171,6 +180,73 @@ _PHASED_INSTRUCTIONS: str = (
     "Next hint: start with sofer_validate for existing datasets, or sofer_init + sofer_scan_apply for greenfield. sofer_auth_status is the preflight tool."
 )
 
+# ---------------------------------------------------------------------------
+#  Approval-phrase process-start facts (issue #144)
+# ---------------------------------------------------------------------------
+# Single fact source for the two surfaces that report the unconfigured
+# approval-phrase state: the ``sofer_auth_status`` flat ``hints`` payload and
+# the ``PUBLISH_APPROVAL_NOT_CONFIGURED`` refusal message. Every carrier value
+# is composed from these constants (never re-typed), so a drift-guard test can
+# assert each fact is a substring of both surfaces.
+#
+# Constraints: ASCII only; only the variable NAME is ever interpolated (never a
+# value, never a phrase-derived signal, never an on-disk config file or
+# directory path - AGENTS.md 1/3); the fail-closed gate wording is deliberately
+# NOT user-tunable, so there is no ``[tool.sofer]`` key and no
+# ``pyproject.toml`` entry for it.
+_APPROVAL_PHRASE_ENV_VAR: str = "SOFER_MCP_APPROVAL_PHRASE"
+_APPROVAL_PHRASE_ACTION: str = "configure_approval_phrase"
+_PHRASE_READ_ONCE_FACT: str = (
+    "the approval phrase is read exactly once, when the MCP server process starts "
+    "(build_server), from the approval_phrase argument or the environment"
+)
+_PHRASE_LAUNCH_ENV_FACT: str = (
+    f"{_APPROVAL_PHRASE_ENV_VAR} must be in the environment of the process that "
+    "launches sofer-mcp - a value set in a separate shell or terminal does not "
+    "reach the server"
+)
+_PHRASE_RESTART_FACT: str = (
+    "a full restart of the agent/server host process is required for a new value to take effect"
+)
+_PHRASE_VERIFY_FACT: str = "after the restart sofer_auth_status reports approval_configured:true"
+
+# Per-agent registration shapes the setup guidance is composed from, verified
+# against ``mcp_registration.build_entry``: opencode's ``mcp.sofer`` entry
+# carries only ``type``/``command``/``cwd`` (NO environment forwarding), codex
+# persists an ``env_vars`` allow-list of NAMES, gemini persists an ``env``
+# mapping of NAME -> ``$NAME`` references. Secret VALUES are never on disk.
+_APPROVAL_PHRASE_AGENT_ENTRY_KEYS: dict[str, tuple[str, ...]] = {
+    "opencode": ("type", "command", "cwd"),
+    "codex": ("env_vars",),
+    "gemini": ("env",),
+}
+_OPENCODE_SETUP_FACT: str = (
+    "opencode (sofer mcp add --agent opencode): the entry carries only type, "
+    "command and cwd - no environment is forwarded, so set the variable in the "
+    "terminal that launches opencode itself"
+)
+_CODEX_SETUP_FACT: str = (
+    "codex (sofer mcp add --agent codex): the entry persists an env_vars "
+    "allow-list of variable NAMES - set the variable before launching codex, and "
+    "values are never written to disk"
+)
+_GEMINI_SETUP_FACT: str = (
+    "gemini (sofer mcp add --agent gemini): the entry persists an env mapping of "
+    "NAME to $NAME references expanded at launch - values are never written to disk"
+)
+
+# Composed fail-closed refusal message: verbatim "publish is disabled" prefix,
+# each process-start fact exactly once, ASCII ``-`` separators only, no phrase
+# material, and no repetition of the per-agent setup (that rides in the
+# preflight ``hints``; the error envelope stays minimal - MSP-R13).
+_APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE: str = (
+    "publish is disabled: no approval phrase is configured on this server - "
+    f"{_PHRASE_READ_ONCE_FACT} "
+    f"(build_server(approval_phrase=...) or {_APPROVAL_PHRASE_ENV_VAR}); "
+    f"{_PHRASE_LAUNCH_ENV_FACT}; {_PHRASE_RESTART_FACT} - "
+    "a human approval phrase is required for any Hugging Face publish"
+)
+
 
 def _with_untrusted_note(text: str) -> str:
     """Append the standard untrusted-content note to *text* (adv10).
@@ -216,6 +292,66 @@ class HFTokenError(MCPToolError):
 _SERVER_ROOT: Path | None = None
 _APPROVAL_PHRASE: str | None = None
 _EXEC_LOCK = threading.Lock()
+
+# Monotonic stamp state (issue #145): the previous server_started_at, kept so
+# back-to-back captures within one process strictly increase even when the
+# wall clock (Windows/CPython 3.10 granularity) does not advance.
+_last_started_at: str | None = None
+
+
+def _next_started_at() -> str:
+    """Return an ISO-8601 UTC microsecond timestamp, strictly increasing across calls.
+
+    ``datetime.now(timezone.utc)`` can return the same instant for back-to-back
+    calls (Windows/CPython 3.10 clock granularity); ``server_started_at`` is the
+    restart-proof signal, so a 1 microsecond monotonic bump is applied against
+    the previous stamp when the wall clock did not advance. Fixed-width
+    ``timespec="microseconds"`` plus the constant ``+00:00`` offset keep the
+    lexicographic ordering equal to the chronological ordering, so callers can
+    compare stamps with plain string comparison.
+    """
+    global _last_started_at
+    stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    if _last_started_at is not None and stamp <= _last_started_at:
+        stamp = (datetime.fromisoformat(_last_started_at) + timedelta(microseconds=1)).isoformat(
+            timespec="microseconds"
+        )
+    _last_started_at = stamp
+    return stamp
+
+
+_PhraseSource = Literal["env", "explicit", "none"]
+
+
+def _resolve_approval_phrase(explicit: str | None) -> tuple[str | None, _PhraseSource]:
+    """Resolve the approval phrase exactly once, mirroring build_server's single read.
+
+    Precedence: explicit argument > ``SOFER_MCP_APPROVAL_PHRASE`` > none. A blank
+    or whitespace-only value (explicit or env) is treated as unconfigured and
+    maps to ``(None, "none")``; a blank explicit argument SHALL NOT fall back to
+    the environment. Performs exactly one environment read.
+
+    Returns:
+        ``(normalized_phrase, source)`` — the fail-closed phrase (None when
+        unconfigured) and the configuration path that produced it.
+    """
+    if explicit is not None:
+        if explicit.strip():
+            return explicit, "explicit"
+        return None, "none"
+    env_value = os.environ.get(_APPROVAL_PHRASE_ENV_VAR)
+    if env_value and env_value.strip():
+        return env_value, "env"
+    return None, "none"
+
+
+# Posture state (issue #145): process-lifecycle metadata captured at build_server
+# and reported by sofer_auth_status. Defaults are never None so a directly-called
+# sofer_auth_status without build_server still returns a well-typed envelope.
+_PHRASE_SOURCE: _PhraseSource = "none"
+_SERVER_PROCESS_ID: int = os.getpid()
+_SERVER_STARTED_AT: str = _next_started_at()
+_SERVER_VERSION: str = get_version()
 
 
 def _get_root() -> Path:
@@ -750,6 +886,45 @@ def _workflow_description(fn: Callable[..., Any]) -> str:
     return f"{doc}\n\n{line}" if line else doc
 
 
+def _approval_phrase_guidance_hints() -> dict[str, Any]:
+    """Return the flat unconfigured-approval guidance hints (issue #144).
+
+    Single source for the ``sofer_auth_status`` unconfigured ``hints`` payload:
+    the caller merges this dict, so :data:`_APPROVAL_PHRASE_ACTION` is owned
+    here too and the stable machine-readable ``action`` value is never re-typed
+    at the call site. The same four process-start facts also compose
+    :data:`_APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE`, so both reporting surfaces
+    share one fact source.
+
+    Contract:
+        - returns a FRESH flat dict on every call (no shared mutable module
+          state, no in-place mutation of a global);
+        - every value is a flat scalar (``str`` or ``True``) - no nested dict
+          or list anywhere, i.e. the MSP-R13 flatness invariant asserted by
+          ``tests/test_mcp_server.py::TestNextHintContract._is_flat_hint_dict``;
+        - only the approval-phrase variable NAME is ever exposed: never the
+          phrase, a phrase-derived signal, or an on-disk agent config file or
+          directory path.
+
+    Returns:
+        Flat ``approval_phrase_*``-namespaced guidance plus the stable
+        ``action`` key (the bare ``approval_phrase`` key stays out of the
+        unconfigured payload).
+    """
+    return {
+        "action": _APPROVAL_PHRASE_ACTION,
+        "approval_phrase_env_var": _APPROVAL_PHRASE_ENV_VAR,
+        "approval_phrase_when": _PHRASE_READ_ONCE_FACT,
+        "approval_phrase_where": _PHRASE_LAUNCH_ENV_FACT,
+        "approval_phrase_restart": _PHRASE_RESTART_FACT,
+        "approval_phrase_restart_required": True,
+        "approval_phrase_setup_opencode": _OPENCODE_SETUP_FACT,
+        "approval_phrase_setup_codex": _CODEX_SETUP_FACT,
+        "approval_phrase_setup_gemini": _GEMINI_SETUP_FACT,
+        "approval_phrase_verify": _PHRASE_VERIFY_FACT,
+    }
+
+
 def _error_envelope(
     error_code: str,
     message: str,
@@ -982,6 +1157,24 @@ def sofer_publish(
             description="When true (default), only print a diff plan without copying or uploading."
         ),
     ] = True,
+    clean: Annotated[
+        bool,
+        Field(
+            description=(
+                "Delete the build dir after a successful delivery (PUB-11). "
+                "No effect on dry-run, quality-gate block, or failure."
+            )
+        ),
+    ] = False,
+    clean_cache: Annotated[
+        bool,
+        Field(
+            description=(
+                "Also delete cache/ (tool-wide, sibling-shared) when clean=True. "
+                "Requires clean=True; refused otherwise (explicit opt-in)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Plan or perform a local delivery of a prepared dataset package.
 
@@ -1007,6 +1200,13 @@ def sofer_publish(
             if output_dir is not None
             else None
         )
+        if clean_cache and not clean:
+            return _error_envelope(
+                "CLEAN_CACHE_WITHOUT_CLEAN",
+                "clean_cache=True requires clean=True (explicit opt-in, PUB-11)",
+                next_hint={"clean": True},
+                config_errors=config_errors,
+            )
         rc = run_publish(
             cfg,
             target=target,
@@ -1015,6 +1215,8 @@ def sofer_publish(
             keep_csv=keep_csv,
             dry_run=dry_run,
             quality_report=report,
+            clean=clean,
+            clean_cache=clean_cache,
         )
         return {
             "ok": rc == 0,
@@ -1063,6 +1265,24 @@ def sofer_publish_confirm(
             description="Human approval phrase (env SOFER_MCP_APPROVAL_PHRASE). ALWAYS required for publish — the server refuses with PUBLISH_APPROVAL_NOT_CONFIGURED when no phrase is configured, and PUBLISH_APPROVAL_REQUIRED on a missing/mismatched phrase."
         ),
     ] = None,
+    clean: Annotated[
+        bool,
+        Field(
+            description=(
+                "Delete the build dir after a successful HF upload (PUB-11). "
+                "No effect on dry-run, quality-gate block, or failure."
+            )
+        ),
+    ] = False,
+    clean_cache: Annotated[
+        bool,
+        Field(
+            description=(
+                "Also delete cache/ (tool-wide, sibling-shared) when clean=True. "
+                "Requires clean=True; refused otherwise (explicit opt-in)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Upload a prepared dataset package to Hugging Face Hub.
 
@@ -1152,8 +1372,8 @@ def sofer_publish_confirm(
             # gates, never sufficient on their own.
             return _error_envelope(
                 "PUBLISH_APPROVAL_NOT_CONFIGURED",
-                "publish is disabled: no approval phrase is configured on this server (set SOFER_MCP_APPROVAL_PHRASE and restart) — a human approval phrase is required for any Hugging Face publish",
-                next_hint={"action": "configure_approval_phrase"},
+                _APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE,
+                next_hint={"action": _APPROVAL_PHRASE_ACTION},
                 config_errors=config_errors,
                 extra={
                     "confidential": cfg.confidential,
@@ -1184,6 +1404,13 @@ def sofer_publish_confirm(
             else None
         )
         protected: set[str] = set()
+        if clean_cache and not clean:
+            return _error_envelope(
+                "CLEAN_CACHE_WITHOUT_CLEAN",
+                "clean_cache=True requires clean=True (explicit opt-in, PUB-11)",
+                next_hint={"clean": True},
+                config_errors=config_errors,
+            )
         rc = run_publish(
             cfg,
             target=target,
@@ -1194,6 +1421,8 @@ def sofer_publish_confirm(
             quality_report=report,
             protected_out=protected,
             token=token,
+            clean=clean,
+            clean_cache=clean_cache,
         )
         return {
             "ok": rc == 0,
@@ -1274,6 +1503,15 @@ def sofer_codebook_all(
             description="Override directory for per-file codebooks (default: the package build_dir, where publish collects codebooks). Must stay under server root."
         ),
     ] = None,
+    max_sample: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Maximum rows to sample for codebook inference; defaults to "
+                "config codebook_max_sample. Omitted = config default."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Generate one codebook per [[file]] entry in a dataset config.
 
@@ -1304,6 +1542,7 @@ def sofer_codebook_all(
                 output_dir=output_path,
                 delimiter=cfg.csv_delimiter,
                 encoding=cfg.csv_encoding,
+                max_sample=max_sample,
             )
         except ValueError as exc:
             return _error_envelope(
@@ -1627,9 +1866,31 @@ def sofer_auth_status(
     (``SOFER_MCP_APPROVAL_PHRASE`` / ``build_server(approval_phrase=...)``);
     and ``requires_approval_phrase`` — always ``True``, because the publish
     ladder now treats a human approval phrase as mandatory (fail-closed). When
-    ``approval_configured`` is ``False`` the ``next`` hint carries
-    ``{"action": "configure_approval_phrase"}``; when ``True`` it carries
-    ``{"approval_phrase": "<from human>"}`` instead.
+    ``approval_configured`` is ``False`` the flat ``hints`` object carries
+    ``action: "configure_approval_phrase"`` plus flat
+    ``approval_phrase_*`` guidance — the variable NAME only, read once at
+    server start, in the environment of the process that launches
+    ``sofer-mcp``, requiring a full host-process restart
+    (``approval_phrase_restart_required: true``), the per-agent setup keys,
+    the verify step, and never the phrase, a phrase-derived value, or an
+    on-disk agent config file path); when configured the hints carry
+    ``{"approval_phrase": "<from human>"}`` and no ``approval_phrase_*``
+    key
+
+    The envelope carries four posture fields — non-secret
+    process-lifecycle metadata captured once at ``build_server`` and never
+    re-derived: ``phrase_source`` (``"env" | "explicit" | "none"``; explicit
+    argument > ``SOFER_MCP_APPROVAL_PHRASE`` > none; blank maps to
+    ``"none"``, and a blank explicit argument never falls back to the
+    environment), ``server_process_id`` (the hosting process id),
+    ``server_started_at`` (an ISO-8601 UTC microsecond stamp that strictly
+    increases across builds — the restart-proof signal), and
+    ``server_version`` (the package version from installed metadata,
+    non-empty, never raises). The phrase, any phrase-derived value, and the
+    configured env value never appear in any posture field —
+    ``phrase_source`` describes the configuration path only, and the
+    unconfigured guidance keeps the variable NAME and the read-once/restart
+    facts (APX-01).
 
     When to use: preflight before sofer_publish_confirm to learn required acknowledgments without triggering a publish.
     Example: sofer_auth_status(config="dataset.toml")
@@ -1669,7 +1930,9 @@ def sofer_auth_status(
         if approval_configured:
             next_hint["approval_phrase"] = "<from human>"
         else:
-            next_hint["action"] = "configure_approval_phrase"
+            # The whole unconfigured payload (including the stable ``action``)
+            # comes from one pure source so both reporting surfaces cannot drift.
+            next_hint.update(_approval_phrase_guidance_hints())
         next_hint["acknowledge_risk"] = True
         # ok reflects publish readiness, not merely config validity: a valid
         # config still cannot publish without a token or (when required) a
@@ -1690,10 +1953,45 @@ def sofer_auth_status(
             "requires_ack_confidential": requires_ack_confidential,
             "approval_configured": approval_configured,
             "requires_approval_phrase": requires_approval_phrase,
+            "phrase_source": _PHRASE_SOURCE,
+            "server_process_id": _SERVER_PROCESS_ID,
+            "server_started_at": _SERVER_STARTED_AT,
+            "server_version": _SERVER_VERSION,
             "next": _workflow_next("sofer_auth_status", config),
             "hints": next_hint,
             "config_errors": config_errors,
         }
+
+
+def _normalize_scan_extensions(extensions: list[str] | None) -> frozenset[str] | None:
+    """Validate/normalize the MCP ``extensions`` argument against SUPPORTED_FORMATS.
+
+    Accepts suffixes with or without a leading dot (``"csv"`` / ``".csv"``),
+    case-insensitively, mirroring CLI ``--ext`` choices as a set passed to
+    :func:`scanner.discover_files`. Raises :class:`ValueError` naming every
+    unsupported value — the caller converts it to a refusal envelope.
+
+    Args:
+        extensions: Raw suffix list from the MCP argument (``None`` = all
+            supported formats, current behavior).
+
+    Returns:
+        Normalized extension set (leading dot, lowercase) or ``None``.
+
+    Raises:
+        ValueError: When any suffix is not a supported format.
+    """
+    if extensions is None:
+        return None
+    normalized: set[str] = set()
+    for raw in extensions:
+        ext = raw.lower() if raw.startswith(".") else f".{raw.lower()}"
+        if ext not in SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Unsupported extension {raw!r} — supported: {', '.join(sorted(SUPPORTED_FORMATS))}"
+            )
+        normalized.add(ext)
+    return frozenset(normalized)
 
 
 def _scan_prologue(
@@ -1729,6 +2027,28 @@ def sofer_scan_dry_run(
             description="Path to the dataset TOML file under the server root to preview scan for"
         ),
     ],
+    extensions: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional suffix filter (e.g. ['csv']): only files with these "
+                "extensions are considered. Accepts 'csv' or '.csv' (case-"
+                "insensitive); unsupported suffixes are refused. Omitted = all "
+                "supported formats."
+            )
+        ),
+    ] = None,
+    move_loose: Annotated[
+        bool,
+        Field(
+            description=(
+                "Preview the Phase-1 move of loose files (outside raw//cache/) "
+                "into raw/ preserving the relative tree. Read-only: nothing is "
+                "moved in dry-run. When False, loose files are reported with a "
+                "move_loose=True hint instead of a preview."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Discover unregistered data files in a dataset tree (read-only).
 
@@ -1746,9 +2066,48 @@ def sofer_scan_dry_run(
         errors = _validate_output_targets(None, root=_get_root(), base=base_dir)
         if errors:
             return _refusal(errors, tool_name="sofer_scan_dry_run", config_path=config)
+        try:
+            ext_set = _normalize_scan_extensions(extensions)
+        except ValueError as exc:
+            return _refusal([str(exc)], tool_name="sofer_scan_dry_run", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
+        lines: list[str] = []
+
+        # Phase 1 - loose files to raw/ (preview only, never mutating).
+        exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
+        loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
+        if move_loose:
+            raw_dir = base_dir / sofer_config.RAW_DIR
+            try:
+                check_raw_collisions(loose, raw_dir, base_dir)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "exit_code": 1,
+                    "output": _captured_text(out, err),
+                    "discovered": len(loose),
+                    "registered": 0,
+                    "config_errors": [str(exc)],
+                    "error_code": "CONFIG_ERROR",
+                    "message": str(exc),
+                    "next": {},
+                }
+            plan = move_to_raw(loose, base_dir, raw_dir, dry_run=True)
+            if plan:
+                lines.append("Phase 1 - would MOVE to raw/ (move_loose):")
+                for _src, dest in plan:
+                    rel = dest.relative_to(base_dir).relative_to(sofer_config.RAW_DIR)
+                    lines.append(f"  -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
+            else:
+                lines.append("Phase 1 - no loose files to move (move_loose).")
+        elif loose:
+            lines.append(
+                f"Phase 1 - {len(loose)} loose file(s) outside raw//cache/ would be "
+                "moved into raw/ on apply with move_loose=True."
+            )
+
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
-        discovered = discover_files(base_dir, None, exclude_dirs=exclude)
+        discovered = discover_files(base_dir, ext_set, exclude_dirs=exclude)
         try:
             check_flatten_collisions(discovered, base_dir)
         except ValueError as exc:
@@ -1784,7 +2143,8 @@ def sofer_scan_dry_run(
                 "next": {"force": True},
             }
 
-        lines = [f"Discovered {len(discovered)} supported file(s)."]
+        if not lines:
+            lines.append(f"Discovered {len(discovered)} supported file(s).")
         if registered:
             lines.append(f"Registered {registered} new [[file]] entry(s).")
         else:
@@ -1818,6 +2178,29 @@ def sofer_scan_apply(
     force: Annotated[
         bool, Field(description="Overwrite existing destination files when true.")
     ] = False,
+    extensions: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional suffix filter (e.g. ['csv']): only files with these "
+                "extensions are considered. Accepts 'csv' or '.csv' (case-"
+                "insensitive); unsupported suffixes are refused. Omitted = all "
+                "supported formats."
+            )
+        ),
+    ] = None,
+    move_loose: Annotated[
+        bool,
+        Field(
+            description=(
+                "Explicit opt-in (never silent): MOVE loose files (outside raw//"
+                "cache/) into raw/ preserving the relative tree BEFORE the "
+                "cache/ copy, matching the CLI scan Phase 1. Collisions in raw/ "
+                "abort before any move. False = current behavior (only the "
+                "cache/ copy)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Register discovered data files and copy them into the artifact cache.
 
@@ -1841,9 +2224,39 @@ def sofer_scan_apply(
         errors = _validate_output_targets(None, root=_get_root(), base=base_dir)
         if errors:
             return _refusal(errors, tool_name="sofer_scan_apply", config_path=config)
+        try:
+            ext_set = _normalize_scan_extensions(extensions)
+        except ValueError as exc:
+            return _refusal([str(exc)], tool_name="sofer_scan_apply", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
+
+        # Phase 1 - loose files to raw/ (explicit move_loose opt-in only).
+        moved: list[tuple[Path, Path]] = []
+        if move_loose:
+            exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
+            loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
+            raw_dir = base_dir / sofer_config.RAW_DIR
+            try:
+                check_raw_collisions(loose, raw_dir, base_dir)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "exit_code": 1,
+                    "output": _captured_text(out, err),
+                    "discovered": len(loose),
+                    "registered": 0,
+                    "config_errors": [str(exc)],
+                    "error_code": "CONFIG_ERROR",
+                    "message": str(exc),
+                    "next": {},
+                }
+            moved = move_to_raw(loose, base_dir, raw_dir, dry_run=False)
+            for src, dest in moved:
+                rel = dest.relative_to(base_dir).relative_to(sofer_config.RAW_DIR)
+                print(f"     {src.name} -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
+
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
-        discovered = discover_files(base_dir, None, exclude_dirs=exclude)
+        discovered = discover_files(base_dir, ext_set, exclude_dirs=exclude)
         try:
             check_flatten_collisions(discovered, base_dir)
         except ValueError as exc:
@@ -1896,6 +2309,7 @@ def sofer_scan_apply(
             "discovered": len(discovered),
             "registered": registered,
             "copied": len(copied),
+            "moved": len(moved),
             "config_errors": [],
             "next": _workflow_next("sofer_scan_apply", config),
         }
@@ -2350,6 +2764,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "discovered": {"type": "integer"},
                 "registered": {"type": "integer"},
                 "copied": {"type": "integer"},
+                "moved": {"type": "integer"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
@@ -2399,6 +2814,22 @@ def _register_tools(server: _FastMCP) -> None:
                 "requires_ack_confidential": {"type": "boolean"},
                 "approval_configured": {"type": "boolean"},
                 "requires_approval_phrase": {"type": "boolean"},
+                "phrase_source": {
+                    "type": "string",
+                    "description": '"env" | "explicit" | "none" — the configuration path that produced approval_configured (explicit approval_phrase argument > SOFER_MCP_APPROVAL_PHRASE > none), captured once at build_server; never the phrase itself or any derived value.',
+                },
+                "server_process_id": {
+                    "type": "integer",
+                    "description": "os.getpid() of the hosting process at build_server — process-scoped, never a cross-restart signal.",
+                },
+                "server_started_at": {
+                    "type": "string",
+                    "description": "ISO-8601 UTC timestamp (microsecond precision) captured at build_server — differs and strictly increases across builds; the restart-proof signal.",
+                },
+                "server_version": {
+                    "type": "string",
+                    "description": "Package version from installed metadata (_version.get_version()), non-empty, never raises.",
+                },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
@@ -2477,10 +2908,33 @@ def _resource_metadata(data_file: str) -> str:
         return path.read_text(encoding="utf-8")
 
 
-def _register_resources(server: _FastMCP) -> None:
-    """Register the 3 resource templates on *server* (MSP-R07).
+def _resource_status() -> dict[str, Any]:
+    """Static posture snapshot for agents (issue #146) — non-secret
+    process-lifecycle metadata; no path variables, no file reads.
 
-    Templates use fastmcp's rest-pattern syntax (``{name*}``, RFC 6570
+    Mirrors the ``sofer_auth_status`` envelope diagnostics: ``approval_configured``
+    reflects whether the server has a non-blank approval phrase set;
+    ``phrase_source`` is the configuration path that produced it ("env" |
+    "explicit" | "none"); ``root`` is the resolved containment root; ``version``
+    and ``started_at`` are the #145 build-time posture globals; ``tool_count`` is
+    the size of the workflow registry (MSP-R13). No secrets: the phrase, any
+    phrase-derived value, and the configured env value never appear. Side
+    effects: none. Network usage: none.
+    """
+    return {
+        "approval_configured": _APPROVAL_PHRASE is not None,
+        "phrase_source": _PHRASE_SOURCE,
+        "root": str(_get_root()),
+        "version": _SERVER_VERSION,
+        "started_at": _SERVER_STARTED_AT,
+        "tool_count": len(workflow.WORKFLOW_METADATA),
+    }
+
+
+def _register_resources(server: _FastMCP) -> None:
+    """Register the 3 resource templates + 1 static status resource (MSP-R07) on *server*.
+
+    The 3 URI templates use fastmcp's rest-pattern syntax (``{name*}``, RFC 6570
     wildcard -> ``(?P<name>.+)``) so a URI path containing ``/`` matches:
     absolute POSIX paths arrive with a leading ``/`` and inner separators
     (e.g. ``sofer://dataset//tmp/root/dataset.toml``), and a plain
@@ -2490,10 +2944,30 @@ def _register_resources(server: _FastMCP) -> None:
     relative-to-root and absolute-inside-root paths and rejects anything
     outside the root, so no leading-slash stripping is needed (lstripping
     would corrupt the absolute-inside-root case, whose parent *is* the root).
+
+    The static ``sofer://status`` resource is registered AFTER the templates
+    for one structural reason: its URI has no ``{name}``/``{name*}`` path
+    variables and its handler takes no arguments, so fastmcp classifies it as
+    a static :class:`Resource` listed under ``resources/list`` — never under
+    ``resources/templates/list``, which is where the three templates appear.
+    Before it, every registered resource was a template and ``resources/list``
+    was empty by design (issue #146).
     """
     server.resource("sofer://dataset/{config_path*}")(_resource_dataset)
     server.resource("sofer://codebook/{data_file*}")(_resource_codebook)
     server.resource("sofer://metadata/{data_file*}")(_resource_metadata)
+    # Static (no path variables): fastmcp lists ``sofer://status`` under
+    # resources/list, NOT resources/templates/list — the three templates above
+    # live under templates; the issue's empty-list surprise is exactly that gap.
+    # No wrapping: the handler is applied directly.
+    server.resource(
+        "sofer://status",
+        description=(
+            "Server posture snapshot — approval_configured, phrase_source, root, "
+            "version, started_at, tool_count. Non-secret process-lifecycle "
+            "metadata only; no secrets, no side effects, no network."
+        ),
+    )(_resource_status)
 
 
 # ---------------------------------------------------------------------------
@@ -2510,7 +2984,7 @@ def _prompt_prepare_dataset(config: str, output: str | None = None) -> str:
     """
     output_repr = repr(output) if output is not None else "None"
     return _with_untrusted_note(
-        f"You are preparing the dataset configured at {config} for publication.\n"
+        f"You are preparing the dataset configured at {config!r} for publication.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run) -> sofer_publish_confirm.\n"
         f"1. sofer_validate(config={config!r}) — validate config/data/quality; if it fails, stop and fix.\n"
@@ -2540,8 +3014,8 @@ def _prompt_assess_dataset(config: str, dataset: str) -> str:
     plus the full canonical note.
     """
     return _with_untrusted_note(
-        f"You are assessing the dataset at {dataset} using its configuration "
-        f"at {config}.\n"
+        f"You are assessing the dataset at {dataset!r} using its configuration "
+        f"at {config!r}.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run) -> sofer_publish_confirm.\n"
         f"1. sofer_validate(config={config!r}) — validate config/data/quality; wait for report.\n"
@@ -2565,7 +3039,7 @@ def _prompt_finalize_and_publish(config: str, output: str | None = None) -> str:
     """
     output_repr = repr(output) if output is not None else "None"
     return _with_untrusted_note(
-        f"You are finalizing the dataset configured at {config} for publication "
+        f"You are finalizing the dataset configured at {config!r} for publication "
         "on Hugging Face Hub.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run=True) -> STOP -> sofer_publish_confirm.\n"
@@ -2607,13 +3081,20 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     """Build and return the sofer MCP server.
 
     .. warning::
-        One-server-per-process. The containment root and approval phrase are
-        process-module globals (:data:`_SERVER_ROOT`, :data:`_APPROVAL_PHRASE`);
-        embedding two servers with DIFFERENT roots or phrases in one process
-        inherits the LAST-built posture for every tool call. Each stdio
-        launch is its own process, so ``sofer-mcp`` is safe — but never
-        construct two servers in one test/process and expect them to stay
-        isolated.
+        One-server-per-process. The containment root, approval phrase, and
+        posture globals are process-module globals (:data:`_SERVER_ROOT`,
+        :data:`_APPROVAL_PHRASE`, :data:`_PHRASE_SOURCE`,
+        :data:`_SERVER_PROCESS_ID`, :data:`_SERVER_STARTED_AT`,
+        :data:`_SERVER_VERSION`); embedding two servers with DIFFERENT roots
+        or phrases in one process inherits the LAST-built posture for every
+        tool call. Each stdio launch is its own process, so ``sofer-mcp`` is
+        safe — but never construct two servers in one test/process and expect
+        them to stay isolated. The approval phrase and the four posture fields
+        are captured exactly once, here at build time (phrase via the argument
+        or ``SOFER_MCP_APPROVAL_PHRASE``; pid via ``os.getpid()``; started-at
+        via the monotonic ISO-8601 UTC stamp; version via the installed
+        metadata); the running server never re-reads the environment, so any
+        later change requires a full restart of the host process.
 
     Args:
         root: Containment root for every path-bearing tool argument and
@@ -2623,7 +3104,8 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
         approval_phrase: Host-supplied phrase required by
             ``sofer_publish_confirm`` (compared with ``hmac.compare_digest``).
             Defaults to the ``SOFER_MCP_APPROVAL_PHRASE`` environment
-            variable at build time. REQUIRED for any HF publish (fail-closed):
+            variable at build time, resolved exactly once here. REQUIRED for
+            any HF publish (fail-closed):
             when unset the publish is DISABLED and
             ``sofer_publish_confirm`` refuses with
             ``PUBLISH_APPROVAL_NOT_CONFIGURED`` — the acknowledgment booleans
@@ -2634,18 +3116,16 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
         prompts registered. Serve it with ``server.run("stdio")`` or via
         :func:`main`.
     """
-    global _SERVER_ROOT, _APPROVAL_PHRASE
+    global _SERVER_ROOT, _APPROVAL_PHRASE, _PHRASE_SOURCE, _SERVER_PROCESS_ID
+    global _SERVER_STARTED_AT, _SERVER_VERSION
     _SERVER_ROOT = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
-    raw_phrase = (
-        approval_phrase
-        if approval_phrase is not None
-        else os.environ.get("SOFER_MCP_APPROVAL_PHRASE")
-    )
-    # Fail-closed: an empty or whitespace-only phrase is treated as
-    # unconfigured (None), so it can never become a trivially-guessable
-    # ""-matching gate. A blank env var (e.g. ``SOFER_MCP_APPROVAL_PHRASE=``)
-    # must not silently enable the acknowledgment-only posture.
-    _APPROVAL_PHRASE = raw_phrase if raw_phrase and raw_phrase.strip() else None
+    # Resolve the approval phrase exactly once: explicit argument >
+    # SOFER_MCP_APPROVAL_PHRASE > none (fail-closed). A blank/whitespace value
+    # maps to None; a blank explicit argument never falls back to the env.
+    _APPROVAL_PHRASE, _PHRASE_SOURCE = _resolve_approval_phrase(approval_phrase)
+    _SERVER_PROCESS_ID = os.getpid()
+    _SERVER_STARTED_AT = _next_started_at()
+    _SERVER_VERSION = get_version()
     server = _FastMCP(
         "sofer",
         instructions=_PHASED_INSTRUCTIONS,

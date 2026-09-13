@@ -33,6 +33,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [AI and MCP server](#ai-and-mcp-server)
 - [Configuration](#configuration)
 - [Architecture summary](#architecture-summary)
+- [Quality gates and security scanning](#quality-gates-and-security-scanning)
 - [Related](#related)
 
 ## Install
@@ -134,7 +135,7 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 ### Windows notes — CWD, placeholders, and separators
 
 | Topic | What to do | Why / detail |
-|-------|------------|--------------|
+| ------- | ------------ | -------------- |
 | **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
 | **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/elaze/Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
 | **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `flatten_first_level`. |
@@ -272,7 +273,7 @@ projection of it — it never recomputes inference. Inference states are always
 rendered distinctly so a reader can tell a fact from a guess:
 
 | Status | Meaning | Rendered |
-|---|---|---|
+| --- | --- | --- |
 | `confirmed` | high-confidence, corroborated inference | `email` |
 | `inferred` | plausible but unverified guess | `email (inferred, 78%)` |
 | `unknown` | not reliably inferable | `unknown` |
@@ -314,7 +315,7 @@ detector class, no changes to the pipeline.
 ## Command reference
 
 | Command | Description |
-|---|---|
+| --- | --- |
 | `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
 | `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
@@ -335,7 +336,7 @@ detector class, no changes to the pipeline.
 ### Flags at a glance
 
 | Flag | Commands | What it does |
-|---|---|---|
+| --- | --- | --- |
 | `--keep-csv` | `publish` (HF target only) | Also upload the original CSV alongside the converted Parquet; no effect with `--target local`. |
 | `--no-checks` | `prepare` | Skip the structural and quality validators — generate the package without running checks. |
 | `--force` | `prepare`, `publish`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
@@ -354,7 +355,7 @@ detector class, no changes to the pipeline.
 ## Data format support
 
 | Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 | TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
 | Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -368,7 +369,7 @@ detector class, no changes to the pipeline.
 `prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead):
 
 | CSV pattern | What can go wrong | Workaround |
-|---|---|---|
+| --- | --- | --- |
 | Comma as decimal separator (`3,14`) | pyarrow reads the comma as a field delimiter, not a decimal mark | Use a non-comma `csv_delimiter` in the TOML |
 | Mixed-type column, >50 % numeric-looking with some text | pyarrow may promote the whole column to `string` or fail | Clean the column or accept the `string` type |
 | Extremely long string fields (>2 GB) | `large_string` handles them, but the CSV parser can hit memory limits | Split the file or trim the field |
@@ -395,7 +396,7 @@ Every dataset is checked before publish:
 ### Integrity checks
 
 | Check | What it does | Blocks publish? |
-|---|---|---|
+| --- | --- | --- |
 | File existence | Every declared path must exist on disk | Yes |
 | Min file count | Configurable via `[[check]] min_files` | Yes |
 | Min total size | Configurable via `[[check]] min_total_size_mb` | No (warning) |
@@ -405,7 +406,7 @@ Every dataset is checked before publish:
 ### Quality checks
 
 | Check | What it detects |
-|---|---|
+| --- | --- |
 | Duplicates | Duplicate rows in tabular data |
 | Empty rows | Rows with no values |
 | Empty columns | Columns with no values |
@@ -536,7 +537,7 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 - `sofer_auth_status` is the preflight: checks `token`/`confidential`/`approval_phrase` without network.
 
 | Step | Tool | Key args | When to use |
-|------|------|----------|-------------|
+| ------ | ------ | ---------- | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Greenfield bootstrap; creates TOML + `raw/` (Windows: `cwd` must stay under server root via `_contained_path`; `raw/example.csv` is NTFS-safe). |
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Phase 0 preview/apply after `init`. |
 | 1 | `sofer_validate` | `config` | Quick check; always first for existing datasets. |
@@ -599,7 +600,7 @@ sofer mcp remove --agent all              # remove from all three
 Per-agent locations and shapes:
 
 | Agent | Scope | File | Entry |
-|-------|-------|------|-------|
+| ------- | ------- | ------ | ------- |
 | opencode | `--scope project` | `./opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
 | opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
 | codex | `--scope user` | `~/.codex/config.toml` | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
@@ -618,7 +619,10 @@ Per-agent locations and shapes:
   otherwise the command exits 1 with the offending path.
 - **Env:** `HF_TOKEN` and `SOFER_MCP_APPROVAL_PHRASE` from the shell are
   forwarded — codex as an `env_vars` allow-list, gemini as an explicit
-  `env` dict (no shell inheritance). Opencode receives no env.
+  `env` dict (no shell inheritance). Opencode receives no env. When
+  `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode`
+  (or `all`) is chosen, `sofer mcp add` prints a warning on stderr naming
+  the dropped variables and leaves the exit code unchanged.
 - **Delegation:** when a native binary is available (`codex`/`gemini`), its
   `mcp add`/`remove` is tried first (probe via `shutil.which` + `mcp --help`
   with a 3 s timeout); on failure or timeout the command falls back to
@@ -643,8 +647,10 @@ Per-agent locations and shapes:
 - **Fail-closed publish authorization.** `sofer_publish_confirm` is the only
   callable that writes to Hugging Face Hub. It requires
   `acknowledge_risk=True`, requires `acknowledge_confidential=True` for
-  configs marked `[meta] confidential`, and — when configured — an approval
-  phrase compared with `hmac.compare_digest`. Token is resolved via
+  configs marked `[meta] confidential`, and always requires a server
+  approval phrase compared with `hmac.compare_digest` — with no phrase
+  configured the call is refused with `PUBLISH_APPROVAL_NOT_CONFIGURED` and
+  the publish is disabled. Token is resolved via
   `HF_TOKEN` → `HF_HUB_TOKEN` (sofer compat alias) →
   `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (`hf auth login`
   cache via `HF_TOKEN_PATH` + OIDC via `HF_OIDC_RESOURCE` + Colab) with
@@ -661,16 +667,59 @@ Per-agent locations and shapes:
 
 ### Hardening for sensitive hosts
 
-Hosts handling sensitive data SHOULD configure an approval phrase so an
-agent can only publish after a human reveals it:
+Do not rely on the two `acknowledge_*` flags alone — the approval phrase is
+**mandatory for every Hugging Face publish** made through
+`sofer_publish_confirm`. Without one, the call is refused with
+`PUBLISH_APPROVAL_NOT_CONFIGURED` and the upload is disabled entirely; an empty
+or whitespace-only value counts as unconfigured. An agent can publish only
+after a human reveals the phrase:
 
 ```bash
 export SOFER_MCP_APPROVAL_PHRASE="$(openssl rand -hex 16)"
 sofer-mcp
 ```
 
-When no phrase is configured, only the two acknowledgment booleans gate the
-HF publish — a weaker posture suited to trusted single-user stdio setups.
+It is read **once at process start** (`build_server(root, approval_phrase=...)`
+or `SOFER_MCP_APPROVAL_PHRASE`) and stays immutable for that process — change
+the value in the launcher, then fully restart the agent host. Configure it the
+way each agent persists MCP env (see
+[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini)):
+codex `env_vars` and gemini `env` persist the env **name** only, never the
+secret; opencode receives no env from `sofer mcp add`, so use the launcher
+environment or an explicit `environment` literal (plaintext on disk).
+
+On Windows, generate the same 32-hex-char phrase without `openssl`, using the
+.NET crypto RNG, and set it for the current session only:
+
+```powershell
+# Portable on Windows PowerShell 5.1 (the default) and PowerShell 7+:
+# the legacy RNG constructor is deprecated, and the static .NET 5+ hex
+# helpers do not exist on 5.1, so use the instance API below.
+$bytes = New-Object byte[] 16
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:SOFER_MCP_APPROVAL_PHRASE = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+```
+
+`$env:` (PowerShell) and `set` (cmd) affect only the current session — a process
+inherits the value only when it is launched from that session. For the agent
+host to see it, the value must be in the environment that launches the MCP
+server, or be persisted with `setx` and followed by a full host restart:
+`setx SOFER_MCP_APPROVAL_PHRASE <value>` writes to the user environment
+(`HKCU\Environment`) for **newly created** processes only — it does not change
+the current shell, the value is stored unencrypted, and `setx` truncates
+values longer than 1024 characters. A server that is already running never
+re-reads the environment, so after `setx` you must fully restart the host.
+Confirm with `sofer_auth_status` → `approval_configured` (see **Verify** below).
+
+**Windows:** the variable must be in the launcher's environment — the process
+that starts `sofer-mcp` — not merely in the shell you typed in, and the host
+must be fully restarted for the change to take effect.
+
+**Verify:** `sofer_auth_status(config)` → `approval_configured` (`true` when the
+server has a non-blank phrase; `requires_approval_phrase` is always `true`).
+`PUBLISH_APPROVAL_NOT_CONFIGURED` = no phrase on the server;
+`PUBLISH_APPROVAL_REQUIRED` = the phrase passed to the call is missing or does
+not match.
 
 ## Configuration
 
@@ -697,6 +746,19 @@ mcp_registration). The annotated module tree lives in
 [CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
 
 Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Quality gates and security scanning
+
+- **Coverage gate**: total test coverage is gated at **90%** — the floor lives
+  in `pyproject.toml` (`[tool.coverage.report] fail_under = 90`) and is enforced
+  by coverage.py on every PR (`ci.yml`) and before every release
+  (`release.yml`). Evidence is self-hosted: an `htmlcov` artifact
+  (`coverage-html`) plus a missing-lines report in the job log
+  (`uv run coverage report -m`). No third-party coverage service is used.
+- **CodeQL scanning**: the Python codebase is scanned on every push and pull
+  request to `main`/`dev`, and weekly (`.github/workflows/codeql.yml`,
+  Advanced Setup with `.github/codeql/config.yml`). SARIF results appear in the
+  **Security** tab; alerts are informational and never block merges.
 
 ## Related
 

@@ -1,0 +1,14 @@
+# CodeQL Advanced-Setup config (CI-05). Default Python queries — no `queries:`
+# block, so the scan stays low-volume on a Python-only repo and remains the
+# GitHub default suite.
+#
+# paths-ignore covers non-code trees and gitignored generated artifacts.
+# src/sofer/ (the code tree) SHALL remain scanned — never add it here.
+name: "sofer CodeQL config"
+
+paths-ignore:
+  - docs/
+  - .github/
+  - openspec/
+  - cache/
+  - tmp/

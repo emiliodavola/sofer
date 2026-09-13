@@ -11,9 +11,10 @@ import csv
 import sys
 from argparse import Namespace
 
+import pytest as _pytest
 from conftest import run_cli
 
-from sofer import cli
+from sofer import cli, mcp_registration
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -436,7 +437,9 @@ class TestCodebookPlaceholderValidation:
             encoding="utf-8",
         )
 
-        rc = cli._cmd_codebook(Namespace(all_files=True, config=str(toml_path), csv=None))
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml_path), csv=None, max_sample=None)
+        )
         assert rc == 1
         captured = capsys.readouterr()
         assert "placeholder" in captured.err.lower()
@@ -457,7 +460,7 @@ class TestCodebookPlaceholderValidation:
         )
 
         rc = cli._cmd_codebook(
-            Namespace(all_files=True, config=str(toml_path), csv=None, output=None)
+            Namespace(all_files=True, config=str(toml_path), csv=None, output=None, max_sample=None)
         )
         assert rc == 0
         # CLI parity with MCP sofer_codebook_all: codebooks land in the package
@@ -483,7 +486,9 @@ class TestCodebookPlaceholderValidation:
         )
 
         rc = cli._cmd_codebook(
-            Namespace(all_files=True, config=str(toml_path), csv=None, output="out")
+            Namespace(
+                all_files=True, config=str(toml_path), csv=None, output="out", max_sample=None
+            )
         )
         assert rc == 0
         assert (tmp_path / "out" / "codebook.md").exists()
@@ -1211,6 +1216,23 @@ class TestMcpCliHelp:
         out = capsys.readouterr().out
         assert "--cwd" not in out
 
+    def test_mcp_add_help_env_forwarding(self, capsys):
+        """sofer mcp add --help documents env forwarding and the opencode warning."""
+        import re
+
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "add", "--help"])
+        out = capsys.readouterr().out
+        # argparse reflows the description at the terminal width; normalize
+        # whitespace so the pinned substrings survive the wrap. The pinned
+        # help sentence renders "(names only, values never written)", so the
+        # stable substring is the prefix ending at "(names only".
+        flat = re.sub(r"\s+", " ", out)
+        assert "codex and gemini receive env forwarding (names only" in flat
+        assert "opencode entries carry no environment" in flat
+
 
 # ── subprocess boundary: user-visible output via executable CLI (PB-02) ───────
 
@@ -1397,3 +1419,755 @@ class TestSubprocessBoundary:
         result = run_cli(["prepare", "proj/dataset.toml"], cwd=tmp_path)
         assert result.returncode == 0, result.stderr
         assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"
+
+
+def test_codebook_all_files_max_sample_parity(tmp_path):
+    """#155: CLI codebook --all-files forwards --max-sample (CLI/MCP parity)."""
+    (tmp_path / "data.csv").write_text("col_a;col_b\n1;x\n2;y\n3;z\n", encoding="utf-8-sig")
+    (tmp_path / "dataset.toml").write_text(
+        "[dataset]\nname='ds'\nrepo_id='u/ds'\n\n[[file]]\nlocal='data.csv'\nremote='data.csv'\n",
+        encoding="utf-8",
+    )
+    result = run_cli(
+        ["codebook", "--all-files", "--config", "dataset.toml", "--max-sample", "1"],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    cb = tmp_path / "build" / "codebooks" / "data.md"
+    assert "Analysed rows:** 1 (sample)" in cb.read_text(encoding="utf-8")
+
+
+# ── kept __main__ guard executed in-process (COV-06, Resolution A) ────────────
+
+
+def test_cli_main_guard_executed_via_runpy(monkeypatch) -> None:
+    """The kept ``if __name__ == "__main__": main()`` guard executes in-process
+    via ``runpy.run_module(..., run_name="__main__")`` under the coverage tracer
+    (COV-06 scenario d). The body runs ``main()`` through the guard with argv at
+    a harmless subcommand (``--help``), which exits 0 after printing usage — the
+    guard lines count as covered, mandatory for the cli.py 100.00 row (Resolution
+    A: zero ``src/sofer/`` edits; the guard is covered, never removed).
+    """
+    import runpy
+
+    import pytest
+
+    monkeypatch.setattr(sys, "argv", ["sofer", "--help"])
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_module("sofer.cli", run_name="__main__")
+    assert excinfo.value.code == 0
+
+
+# ── Unit B: drive cli.py to 100.00% line coverage (COV-06) ────────────────────
+
+
+class TestNoChecksPath:
+    def test_prepare_no_checks_runs_happy_path(self, tmp_path) -> None:
+        """--no-checks short-circuits the validators (cli.py:83) and the
+        ``_cmd_prepare`` happy tail (output resolve + real run_prepare)."""
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\nbuild_dir = "build"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        rc = cli._cmd_prepare(
+            Namespace(
+                config=str(toml),
+                output=None,
+                all_files=False,
+                no_checks=True,
+                force=False,
+                verify=False,
+            )
+        )
+        assert rc == 0
+        assert (tmp_path / "build" / "data.parquet").is_file()
+        assert (tmp_path / "build" / "README.md").is_file()
+
+
+class TestCodebookAllFilesErrors:
+    def test_all_files_valueerror_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """generate_all_codebooks raising ValueError surfaces on stderr with rc 1."""
+        (tmp_path / "data.csv").write_text("col\n1\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "alice/test"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+
+        def _boom(*_a, **_k):
+            raise ValueError("boom: no codebook")
+
+        monkeypatch.setattr(cli, "generate_all_codebooks", _boom)
+        rc = cli._cmd_codebook(
+            Namespace(all_files=True, config=str(toml), csv=None, output=None, max_sample=None)
+        )
+        assert rc == 1
+        assert "boom: no codebook" in capsys.readouterr().err
+
+    def test_codebook_requires_file_or_all_files(self, capsys) -> None:
+        """No FILE positional and no --all-files exits 1 with the guidance."""
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="ignored.toml",
+                csv=None,
+                output=None,
+                max_sample=None,
+            )
+        )
+        assert rc == 1
+        assert "Must specify a FILE" in capsys.readouterr().err
+
+    def test_codebook_relative_output_anchors_to_input_parent(self, tmp_path) -> None:
+        """A relative single-file -o anchors to the INPUT's parent, not cwd
+        (MSP-R10; the subprocess twin lives in TestSubprocessBoundary)."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                csv=str(tmp_path / "data" / "sample.csv"),
+                output="out.md",
+                config="d.toml",
+                max_sample=None,
+            )
+        )
+        assert rc == 0
+        assert (tmp_path / "data" / "out.md").is_file()
+        assert not (tmp_path / "out.md").exists()
+
+
+class TestProfileRenderFlagCoverage:
+    @staticmethod
+    def _batch_toml(tmp_path) -> str:
+        (tmp_path / "cache").mkdir(exist_ok=True)
+        (tmp_path / "cache" / "a.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        toml = tmp_path / "custom.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        return str(toml)
+
+    @_pytest.mark.parametrize(
+        "config_arg,dataset_arg,chdir",
+        [
+            ("CUSTOM", None, False),
+            ("DEFAULT", "CUSTOM", False),
+            ("DEFAULT", None, True),
+        ],
+    )
+    def test_profile_all_files_toml_selection_variants(
+        self, tmp_path, monkeypatch, restore_tool_config, config_arg, dataset_arg, chdir
+    ) -> None:
+        """All three effective-TOML selection branches of ``_cmd_profile``."""
+        import sofer.config as cfg_mod
+
+        custom = self._batch_toml(tmp_path)
+        if chdir:
+            monkeypatch.chdir(tmp_path)
+            (tmp_path / "dataset.toml").write_text(
+                '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+                '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+                encoding="utf-8",
+            )
+        cfg_mod.reload(tmp_path)
+        config_val = custom if config_arg == "CUSTOM" else cfg_mod.DEFAULT_CONFIG_NAME
+        dataset_val = custom if dataset_arg == "CUSTOM" else None
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=dataset_val,
+                output=None,
+                all_files=True,
+                force=False,
+                config=config_val,
+            )
+        )
+        assert rc == 0
+        assert (tmp_path / "cache" / "profiles" / "a.metadata.yaml").is_file()
+
+    def test_profile_all_files_no_file_entries_returns_1(
+        self, tmp_path, capsys, monkeypatch
+    ) -> None:
+        """Defensive branch: an empty-but-valid config prints the [[file]]
+        guidance and exits 1. DatasetConfig.validate() itself rejects empty
+        files, so the CLI's own defense-in-depth check is exercised with the
+        validator seam returning [] (simulating that degenerate valid state)."""
+        toml = tmp_path / "empty.toml"
+        toml.write_text('[dataset]\nname = "x"\nrepo_id = "u/x"\n', encoding="utf-8")
+        monkeypatch.setattr(cli.DatasetConfig, "validate", lambda self: [])
+        rc = cli._cmd_profile(
+            Namespace(dataset=None, output=None, all_files=True, force=False, config=str(toml))
+        )
+        assert rc == 1
+        assert "No [[file]] entries found" in capsys.readouterr().err
+
+    def test_profile_all_files_generator_valueerror_returns_1(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """A batch profile ValueError (e.g. output collision) surfaces on stderr
+        with rc 1 via the _gen_all guard."""
+        import sofer.profile as profile_mod
+
+        custom = self._batch_toml(tmp_path)
+
+        def _boom(*_a, **_k):
+            raise ValueError("collision detected")
+
+        monkeypatch.setattr(profile_mod, "generate_all_profiles", _boom)
+        rc = cli._cmd_profile(
+            Namespace(dataset=None, output=None, all_files=True, force=False, config=custom)
+        )
+        assert rc == 1
+        assert "collision detected" in capsys.readouterr().err
+
+    def test_profile_all_files_unreadable_toml_returns_1(self, tmp_path, capsys) -> None:
+        """A non-existent --config path surfaces from_toml failure with rc 1."""
+        rc = cli._cmd_profile(
+            Namespace(dataset=None, output=None, all_files=True, force=False, config="nope.toml")
+        )
+        assert rc == 1
+        assert "Failed to read TOML" in capsys.readouterr().err
+
+    def test_profile_requires_dataset_or_all_files(self, capsys) -> None:
+        """Single-file profile without a dataset positional exits 1."""
+        rc = cli._cmd_profile(
+            Namespace(dataset=None, output=None, all_files=False, force=False, config="d.toml")
+        )
+        assert rc == 1
+        assert "Must specify a dataset file" in capsys.readouterr().err
+
+    def test_profile_relative_output_anchors_to_dataset_parent(self, tmp_path) -> None:
+        """A relative single-file profile --output anchors next to the dataset."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=str(tmp_path / "data" / "sample.csv"),
+                output="out",
+                all_files=False,
+                force=False,
+                config="d.toml",
+            )
+        )
+        assert rc == 0
+        assert (tmp_path / "data" / "out" / "metadata.yaml").is_file()
+        assert not (tmp_path / "out" / "metadata.yaml").exists()
+
+    @_pytest.mark.parametrize("variant", ["config", "package", "defaults"])
+    def test_render_all_files_selection_and_error_variants(
+        self, tmp_path, monkeypatch, restore_tool_config, variant
+    ) -> None:
+        """Render --all-files effective-TOML selection mirrors the profile set:
+        explicit --config, package positional, and the all-default fallback."""
+        import sofer.config as cfg_mod
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        custom = self._batch_toml(tmp_path)
+        generate_all_profiles(DatasetConfig.from_toml(custom))
+        cfg_mod.reload(tmp_path)
+        if variant == "config":
+            rc = cli._cmd_render(
+                Namespace(
+                    package=None,
+                    output=None,
+                    all_files=True,
+                    force=False,
+                    config=custom,
+                )
+            )
+        elif variant == "package":
+            monkeypatch.chdir(tmp_path)
+            rc = cli._cmd_render(
+                Namespace(
+                    package=custom,
+                    output=None,
+                    all_files=True,
+                    force=False,
+                    config=cfg_mod.DEFAULT_CONFIG_NAME,
+                )
+            )
+        else:
+            monkeypatch.chdir(tmp_path)
+            (tmp_path / "dataset.toml").write_text(
+                '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+                '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+                encoding="utf-8",
+            )
+            rc = cli._cmd_render(
+                Namespace(
+                    package=None,
+                    output=None,
+                    all_files=True,
+                    force=False,
+                    config=cfg_mod.DEFAULT_CONFIG_NAME,
+                )
+            )
+        assert rc == 0
+        assert (tmp_path / "cache" / "renders" / "a.README.md").is_file()
+
+    def test_render_no_entries_returns_1(self, tmp_path, capsys, monkeypatch) -> None:
+        """Defensive branch: an empty-but-valid config prints the [[file]]
+        guidance and exits 1 (validator seam simulates the degenerate state)."""
+        toml = tmp_path / "empty.toml"
+        toml.write_text('[dataset]\nname = "x"\nrepo_id = "u/x"\n', encoding="utf-8")
+        monkeypatch.setattr(cli.DatasetConfig, "validate", lambda self: [])
+        rc = cli._cmd_render(
+            Namespace(package=None, output=None, all_files=True, force=False, config=str(toml))
+        )
+        assert rc == 1
+        assert "No [[file]] entries found" in capsys.readouterr().err
+
+    def test_render_all_files_generator_valueerror_returns_1(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """A batch render ValueError (e.g. output collision) surfaces on stderr
+        with rc 1 via the _gen_all_renders guard."""
+        import sofer.render as render_mod
+
+        custom = self._batch_toml(tmp_path)
+
+        def _boom(*_a, **_k):
+            raise ValueError("render collision detected")
+
+        monkeypatch.setattr(render_mod, "generate_all_renders", _boom)
+        rc = cli._cmd_render(
+            Namespace(package=None, output=None, all_files=True, force=False, config=custom)
+        )
+        assert rc == 1
+        assert "render collision detected" in capsys.readouterr().err
+
+    def test_render_unreadable_toml_returns_1(self, tmp_path, capsys) -> None:
+        """Render --all-files with a missing config path exits 1."""
+        rc = cli._cmd_render(
+            Namespace(package=None, output=None, all_files=True, force=False, config="nope.toml")
+        )
+        assert rc == 1
+        assert "Failed to read TOML" in capsys.readouterr().err
+
+    def test_render_requires_package_and_reports_toml_errors(self, tmp_path, capsys) -> None:
+        """Single-file render without a package exits 1; render errors surface rc 1."""
+        rc = cli._cmd_render(
+            Namespace(package=None, output=None, all_files=False, force=False, config="d.toml")
+        )
+        assert rc == 1
+        assert "Must specify a package path" in capsys.readouterr().err
+        (tmp_path / "pkg").mkdir()
+        rc2 = cli._cmd_render(
+            Namespace(
+                package=str(tmp_path / "pkg"),
+                output=None,
+                all_files=False,
+                force=False,
+                config="d.toml",
+            )
+        )
+        assert rc2 == 1
+
+    def test_render_relative_output_and_existing_readme_hint(self, tmp_path) -> None:
+        """Relative single-file render --output anchors next to the package and
+        an existing destination without --force raises the overwrite hint."""
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sample.csv").write_text("col;val\n1;2\n", encoding="utf-8")
+        from sofer.profile import profile as run_profile
+
+        assert run_profile(tmp_path / "data" / "sample.csv") == 0
+        rc = cli._cmd_render(
+            Namespace(
+                package=str(tmp_path / "data" / "metadata.yaml"),
+                output="out",
+                all_files=False,
+                force=False,
+                config="d.toml",
+            )
+        )
+        assert rc == 0
+        assert (tmp_path / "data" / "out" / "README.md").is_file()
+        rc2 = cli._cmd_render(
+            Namespace(
+                package=str(tmp_path / "data" / "metadata.yaml"),
+                output="out",
+                all_files=False,
+                force=False,
+                config="d.toml",
+            )
+        )
+        assert rc2 == 1
+
+
+class TestScanPromptGate:
+    def test_scan_phase1_prompt_preview_and_yes(self, tmp_path, monkeypatch, capsys) -> None:
+        """Phase-1 prompt previews the move target; answering y proceeds."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "The following files will be moved to raw/:" in out
+        assert (tmp_path / "raw" / "a.csv").exists()
+        assert (tmp_path / "cache" / "a.csv").exists()
+
+    def test_scan_phase1_eof_aborts_atomically(self, tmp_path, monkeypatch, capsys) -> None:
+        """Phase-1 gate EOFError aborts before any move (TOML untouched)."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        original = cfg.read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def _eof(_p=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "OK  Aborted." in out
+        assert (tmp_path / "a.csv").exists()  # never moved
+        assert not (tmp_path / "raw" / "a.csv").exists()
+        assert cfg.read_text(encoding="utf-8") == original
+
+    def test_scan_phase2_eof_aborts_atomically(self, tmp_path, monkeypatch, capsys) -> None:
+        """Phase-2 gate EOFError aborts atomically: TOML untouched, no cache copy."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        original = cfg.read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def _eof(_p=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "OK  Aborted." in out
+        assert cfg.read_text(encoding="utf-8") == original
+        assert not (tmp_path / "cache").exists()
+
+
+class TestScanCliFailurePaths:
+    def test_scan_move_failure_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """move_to_raw raising surfaces on stderr with rc 1 (no TOML write)."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def _boom(*_a, **_k):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(cli, "move_to_raw", _boom)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        assert "Failed to move to raw/" in capsys.readouterr().err
+
+    def test_scan_flatten_collision_aborts_before_copy(self, tmp_path, monkeypatch, capsys) -> None:
+        """A flatten collision in Phase 2 aborts before any copy (TOML untouched)."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("1\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        original = cfg.read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        def _raise(*_a, **_k):
+            raise ValueError("Collision in cache/: two files flatten to a.csv")
+
+        monkeypatch.setattr(cli, "check_flatten_collisions", _raise)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+        assert rc == 1
+        assert "Collision in cache/" in capsys.readouterr().err
+        assert cfg.read_text(encoding="utf-8") == original
+        assert not (tmp_path / "cache").exists()
+
+    def test_scan_copy_collision_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """A differing pre-existing cache/ dest (without --force) exits 1."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("src\n", encoding="utf-8")
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("different-dest\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _p="": "y")
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=False, force=False, ext=None))
+        assert rc == 1
+        assert "already exists and differs" in capsys.readouterr().err
+
+
+class TestScanDryRun:
+    def test_scan_dry_run_idempotent_cache(self, tmp_path, monkeypatch, capsys) -> None:
+        """dry-run with an already-identical cache/ dest reports 'Nothing to copy'."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("same\n", encoding="utf-8")
+        (tmp_path / "cache" / "a.csv").write_text("same\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text('[dataset]\nname = "test"\nrepo_id = "u/t"\n', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=True, force=False, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN  Nothing to copy" in out
+        assert "all files already present" in out
+
+    def test_scan_dry_run_all_registered(self, tmp_path, monkeypatch, capsys) -> None:
+        """dry-run with every discovered file already registered reports idempotent."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("same\n", encoding="utf-8")
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("same\n", encoding="utf-8")
+        cfg = tmp_path / "dataset.toml"
+        cfg.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_scan(Namespace(config=str(cfg), dry_run=True, force=False, ext=None))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN  All discovered files already registered (idempotent)." in out
+
+
+class TestMcpAddCliCoverage:
+    def test_mcp_add_defaults_to_cwd(self, tmp_path, monkeypatch) -> None:
+        """No --cwd resolves the entry cwd from Path.cwd() (cli.py:652)."""
+        import json as _json
+        from pathlib import Path as _Path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(_Path, "home", lambda: home)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(Namespace(agent="opencode", scope="project", cwd=None, dry_run=False))
+        assert rc == 0
+        path = tmp_path / "opencode.json"
+        assert path.exists()
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        assert data["mcp"]["sofer"]["cwd"] == str(tmp_path.resolve())
+
+    def test_mcp_add_native_delegation_skips_file_edit(self, tmp_path, monkeypatch, capsys) -> None:
+        """probe True + delegate True prints the delegated line and writes none."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "delegate_add", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="codex", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        assert "codex delegated via native mcp add" in capsys.readouterr().out
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_mcp_add_native_failure_falls_back(self, tmp_path, monkeypatch, capsys) -> None:
+        """probe True but delegate raising falls back to the file-edit path."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("native boom")
+
+        monkeypatch.setattr(mcp_registration, "delegate_add", _raise)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="codex", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "native delegation failed, falling back to file edit" in err
+        assert (tmp_path / ".codex" / "config.toml").exists()
+
+    @_pytest.mark.parametrize("with_cwd", [True, False])
+    def test_mcp_add_project_scope_path_anchoring(self, tmp_path, monkeypatch, with_cwd) -> None:
+        """Both project-scope resolve_config_path branches anchor correctly."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        cwd = str(tmp_path) if with_cwd else None
+        rc = cli._cmd_mcp_add(Namespace(agent="opencode", scope="project", cwd=cwd, dry_run=False))
+        assert rc == 0
+        assert (tmp_path / "opencode.json").exists()
+
+    def test_mcp_add_user_scope_anchors_under_home(self, tmp_path, monkeypatch) -> None:
+        """User scope resolves the config under the patched home (else branch)."""
+        from pathlib import Path as _Path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(_Path, "home", lambda: home)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(Namespace(agent="gemini", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        assert (home / ".config" / "gemini" / "settings.json").exists()
+
+
+class TestMcpAddCliFailure:
+    def test_mcp_add_backup_failure_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """backup failure surfaces on stderr with overall rc 1."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+
+        def _boom(_path):
+            raise OSError("backup exploded")
+
+        monkeypatch.setattr(mcp_registration, "backup", _boom)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 1
+        assert "backup failed" in capsys.readouterr().err
+
+    def test_mcp_add_write_failure_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """atomic_write failure surfaces on stderr with overall rc 1."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+
+        def _boom(*_a, **_k):
+            raise OSError("write exploded")
+
+        monkeypatch.setattr(mcp_registration, "atomic_write", _boom)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 1
+        assert "write failed" in capsys.readouterr().err
+
+
+class TestMcpRemoveCliCoverage:
+    def test_mcp_remove_native_success_and_fallback(self, tmp_path, monkeypatch, capsys) -> None:
+        """native remove success skips file edit; a later failure falls back."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+
+        calls: dict[str, int] = {"n": 0}
+
+        def _delegate(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("native remove boom")
+            return calls["n"] == 1  # first succeeds
+
+        monkeypatch.setattr(mcp_registration, "delegate_remove", _delegate)
+        rc = cli._cmd_mcp_remove(Namespace(agent="codex", scope="project", dry_run=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "codex delegated remove via native mcp remove" in out
+        rc2 = cli._cmd_mcp_remove(Namespace(agent="codex", scope="project", dry_run=False))
+        assert rc2 == 0
+        err = capsys.readouterr().err
+        assert "native remove failed, falling back to file edit" in err
+
+    def test_mcp_remove_idempotent_absent(self, tmp_path, monkeypatch, capsys) -> None:
+        """remove_entry returning (doc, False) prints the idempotent line."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(Namespace(agent="gemini", scope="project", dry_run=False))
+        assert rc == 0
+        assert "already absent (idempotent)" in capsys.readouterr().out
+
+    def test_mcp_remove_dry_run_no_mutation(self, tmp_path, monkeypatch) -> None:
+        """dry-run remove previews without mutating the config file."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        path = tmp_path / "opencode.json"
+        before = path.read_bytes()
+        rc = cli._cmd_mcp_remove(Namespace(agent="opencode", scope="project", dry_run=True))
+        assert rc == 0
+        assert path.read_bytes() == before
+
+
+class TestMcpRemoveCliFailure:
+    @_pytest.mark.parametrize("which", ["unreadable", "backup", "write"])
+    def test_mcp_remove_error_paths_return_1(self, tmp_path, monkeypatch, capsys, which) -> None:
+        """Unreadable config, backup failure, and write failure each exit 1."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        cli._cmd_mcp_add(Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False))
+        path = proj / "opencode.json"
+        if which == "unreadable":
+            path.write_text("{ not json", encoding="utf-8")
+            expected = "config unreadable"
+        elif which == "backup":
+            monkeypatch.setattr(
+                mcp_registration,
+                "backup",
+                lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")),
+            )
+            expected = "backup failed"
+        else:
+            monkeypatch.setattr(
+                mcp_registration,
+                "atomic_write",
+                lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")),
+            )
+            expected = "write failed"
+        rc = cli._cmd_mcp_remove(Namespace(agent="opencode", scope="project", dry_run=False))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert expected in err
+
+
+class TestInitMoveExistingCoverage:
+    def test_move_existing_no_candidates_dry_run(self, tmp_path, monkeypatch, capsys) -> None:
+        """No supported files + --move-existing --dry-run prints the no-move line
+        and skips the collision check entirely (branch 957->965)."""
+        (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_init(
+            Namespace(name="ds", user="alice", move_existing=True, dry_run=True, force=False)
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN  No supported files to move." in out
+        assert "Would create ds.toml" in out
+        assert not (tmp_path / "ds.toml").exists()
+        assert not (tmp_path / "raw").exists()
+
+    def test_move_existing_prompt_eof_aborts_but_creates_toml(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """TTY + EOFError at the move prompt aborts the move but still writes the
+        TOML and scaffolds raw/ (exit 0)."""
+        (tmp_path / "a.csv").write_text("x\n1\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+        def _eof(_p=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        rc = cli._cmd_init(
+            Namespace(name="ds", user="alice", move_existing=True, dry_run=False, force=False)
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "OK  Aborted move." in out
+        assert (tmp_path / "ds.toml").exists()
+        assert (tmp_path / "raw").is_dir()
+        assert (tmp_path / "a.csv").exists()  # never moved
+        assert not (tmp_path / "raw" / "a.csv").exists()

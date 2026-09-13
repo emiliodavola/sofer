@@ -433,6 +433,58 @@ def _warn_duplicate_remotes(cfg: DatasetConfig) -> None:
             )
 
 
+_WARN_STAGED_PARQUET_MISSING = (
+    "  [!] Staged Parquet '{key}' not found in staging directory; "
+    "falling back to original-file inference."
+)
+_WARN_STAGED_PARQUET_UNREADABLE = (
+    "  [!] Staged Parquet '{key}' exists but could not be read "
+    "({failure_class}); falling back to original-file inference."
+)
+
+
+def _staged_xlsx_sheet_parquets(staging_dir: Path, parquet_key: str) -> list[Path]:
+    """Return staged per-sheet Parquets for an XLSX entry, dual-layout aware.
+
+    Primary (spec) layout: ``stem__*.parquet`` double-underscore sheet files.
+    Fallback (current prepare staging, backward compat): ``stem_*.parquet``
+    collapsed single-underscore names — ``normalize_parquet_remote`` collapses
+    runs of ``__+`` to ``_`` (``_converters.py``), so ``prepare`` writes
+    ``data_got_all_aristas.parquet``, never ``data_got_all__aristas.parquet``
+    and never a bare base ``data_got_all.parquet`` for multi-sheet sources.
+
+    The fallback EXCLUDES the bare base placeholder (``c.stem != base_stem``)
+    so a single-sheet artifact ``stem.parquet`` is never mistaken for a sheet
+    file.  Mirrors the established precedent in
+    :func:`sofer._mirror.expanded_planned_remotes` (PUB-10) and
+    :func:`sofer.prepare._check_local_overwrite` (PRP-07); base-vs-sheet
+    collisions are therefore no more permissive than ``allowed_output_remotes``.
+
+    Args:
+        staging_dir: Directory containing converted Parquet files.  Callers
+            only invoke this when ``staging_dir is not None``.
+        parquet_key: The normalized remote-relative ``.parquet`` key (lowercase)
+            produced by :func:`normalize_parquet_remote`.
+
+    Returns:
+        Sorted list of matching sheet files; ``[]`` when the search directory is
+        missing or nothing matches.  Never includes the bare base
+        ``stem.parquet`` placeholder — the caller handles that single-file case
+        separately.
+    """
+    base_parent = PurePosixPath(parquet_key).parent
+    base_stem = PurePosixPath(parquet_key).stem
+    search_dir = staging_dir / base_parent if str(base_parent) != "." else staging_dir
+    if not search_dir.is_dir():
+        return []
+    primary = sorted(search_dir.glob(f"{base_stem}__*.parquet"))
+    primary = [p for p in primary if p.is_file()]
+    if primary:
+        return primary
+    alt = sorted(search_dir.glob(f"{base_stem}_*.parquet"))
+    return [p for p in alt if p.is_file() and p.stem != base_stem]
+
+
 def _build_schema_report_impl(
     cfg: DatasetConfig,
     csv_delimiter: str | None,
@@ -504,34 +556,19 @@ def _build_schema_report_impl(
             parquet_key = normalize_parquet_remote(parquet_remote_for(entry.remote))
             # For XLSX, check multi-sheet files first
             if is_xlsx:
-                # Look for stem__*.parquet files
-                base_parent = PurePosixPath(parquet_key).parent
-                base_stem = PurePosixPath(parquet_key).stem
-                search_dir = staging_dir / base_parent if str(base_parent) != "." else staging_dir
-                sheet_paths: list[Path] = []
-                if search_dir.is_dir():
-                    sheet_paths = sorted(search_dir.glob(f"{base_stem}__*.parquet"))
-                    single = staging_dir / PurePosixPath(parquet_key)
-                    if single.is_file():
-                        sheet_paths.append(single)
-                    # Filter to only parquet files that match stem prefix
-                    sheet_paths = [p for p in sheet_paths if p.is_file()]
-                # If any sheet files exist, we will iterate them below
-                # Otherwise fall back to warn
+                sheet_paths = _staged_xlsx_sheet_parquets(staging_dir, parquet_key)
+                single = staging_dir / PurePosixPath(parquet_key)
+                if single.is_file():
+                    sheet_paths.append(single)
                 if sheet_paths:
                     # Mark for multi-sheet handling — we will loop per sheet
-                    # Store list via closure variable for use below
                     parquet_path = sheet_paths[0]  # placeholder for single-path logic
                     # We set a flag to handle multi-sheet separately
                     use_parquet = True  # actual handling is per-sheet below
                     origin_name = parquet_key  # will be overridden per sheet
-                    # Warn path handling already done via existence
                 elif parquet_key not in _warned_missing:
                     _warned_missing.add(parquet_key)
-                    print(
-                        f"  [!] Staged Parquet '{parquet_key}' not found in staging "
-                        f"directory; falling back to CSV inference."
-                    )
+                    print(_WARN_STAGED_PARQUET_MISSING.format(key=parquet_key))
             else:
                 candidate = staging_dir / PurePosixPath(parquet_key)
                 if candidate.exists():
@@ -540,24 +577,15 @@ def _build_schema_report_impl(
                     origin_name = parquet_key
                 elif parquet_key not in _warned_missing:
                     _warned_missing.add(parquet_key)
-                    print(
-                        f"  [!] Staged Parquet '{parquet_key}' not found in staging "
-                        f"directory; falling back to CSV inference."
-                    )
+                    print(_WARN_STAGED_PARQUET_MISSING.format(key=parquet_key))
 
         # For XLSX multi-sheet, collect sheet paths to iterate
         xlsx_sheet_paths: list[Path] = []
         if is_xlsx and staging_dir is not None and bool(entry.convert_to_parquet):
-            base_parent = PurePosixPath(parquet_key).parent
-            base_stem = PurePosixPath(parquet_key).stem
-            search_dir = staging_dir / base_parent if str(base_parent) != "." else staging_dir
-            if search_dir.is_dir():
-                xlsx_sheet_paths = sorted(search_dir.glob(f"{base_stem}__*.parquet"))
-                single = staging_dir / PurePosixPath(parquet_key)
-                if single.is_file():
-                    xlsx_sheet_paths.append(single)
-                xlsx_sheet_paths = [p for p in xlsx_sheet_paths if p.is_file()]
-            # If multi-sheet files exist, they are the parquet source; otherwise fallback
+            xlsx_sheet_paths = _staged_xlsx_sheet_parquets(staging_dir, parquet_key)
+            single = staging_dir / PurePosixPath(parquet_key)
+            if single.is_file():
+                xlsx_sheet_paths.append(single)
 
         parquet_result = None
         if use_parquet and parquet_path is not None and not is_xlsx:
@@ -569,8 +597,9 @@ def _build_schema_report_impl(
                 if parquet_key not in _warned_unreadable:
                     _warned_unreadable.add(parquet_key)
                     print(
-                        f"  [!] Staged Parquet '{parquet_key}' exists but could not be "
-                        f"read ({failure_class}); falling back to CSV inference."
+                        _WARN_STAGED_PARQUET_UNREADABLE.format(
+                            key=parquet_key, failure_class=failure_class
+                        )
                     )
                 use_parquet = False
 
@@ -586,8 +615,9 @@ def _build_schema_report_impl(
                     if sheet_origin not in _warned_unreadable:
                         _warned_unreadable.add(sheet_origin)
                         print(
-                            f"  [!] Staged Parquet '{sheet_origin}' exists but could not be "
-                            f"read ({failure_class}); falling back to CSV inference."
+                            _WARN_STAGED_PARQUET_UNREADABLE.format(
+                                key=sheet_origin, failure_class=failure_class
+                            )
                         )
                     continue
                 sample_s = rows_s[: min(len(rows_s), config.SCHEMA_SAMPLE_SIZE)]

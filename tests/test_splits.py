@@ -490,3 +490,99 @@ class TestVerifyLoadDataset:
             warnings=["Split names differ"],
         )
         assert report.passed is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Unit H: verification.py floor → ≥91 (COV-01)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVerifyLoadDatasetNext:
+    def test_split_row_count_unknown_when_len_raises(self, tmp_path):
+        """A container raising on len() reports its row count as unknown (-1)."""
+        pq.write_table(pa.table({"x": [1]}), tmp_path / "train.parquet")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tmp_path / "train.parquet", remote="train.parquet")],
+            _base_dir=tmp_path,
+        )
+
+        class _NoLen:
+            def __len__(self):
+                raise TypeError("no len")
+
+        mock_ds = {"train": _NoLen()}
+        mock_datasets = MagicMock()
+        mock_datasets.load_dataset.return_value = mock_ds
+
+        with patch.dict(sys.modules, {"datasets": mock_datasets}):
+            report = verify_load_dataset(tmp_path, cfg)
+
+        assert report.split_row_counts["train"] == -1
+        assert report.passed is True
+
+    def test_split_mismatch_warns_and_expected_printed(self, tmp_path):
+        """Actual splits differing from expected produce a warning (line 107)."""
+        pq.write_table(pa.table({"x": [1]}), tmp_path / "train.parquet")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tmp_path / "train.parquet", remote="train.parquet")],
+            _base_dir=tmp_path,
+        )
+
+        mock_ds = {"other": MagicMock()}
+        mock_ds["other"].__len__ = lambda self: 2
+        mock_datasets = MagicMock()
+        mock_datasets.load_dataset.return_value = mock_ds
+
+        with patch.dict(sys.modules, {"datasets": mock_datasets}):
+            report = verify_load_dataset(tmp_path, cfg)
+
+        assert report.passed is False
+        assert any("Split names differ from expected" in w for w in report.warnings)
+
+
+class TestPrintVerificationReport:
+    """_print_verification_report arms: skipped, failed+errors, pass-shape."""
+
+    def test_print_skipped_report(self, capsys):
+        """A skipped report prints SKIPPED plus its warnings."""
+        from sofer.verification import VerificationReport, _print_verification_report
+
+        report = VerificationReport(
+            skipped=True, warnings=["`datasets` package is not installed"]
+        )
+        _print_verification_report(report)
+        out = capsys.readouterr().out
+        assert "SKIPPED" in out
+        assert "not installed" in out
+
+    def test_print_failed_report_status(self, capsys):
+        """A failed report prints FAILED and its errors list."""
+        from sofer.verification import VerificationReport, _print_verification_report
+
+        report = VerificationReport(passed=False, errors=["load_dataset() raised: boom"])
+        _print_verification_report(report)
+        out = capsys.readouterr().out
+        assert "FAILED" in out
+        assert "Error: load_dataset() raised: boom" in out
+
+    def test_print_expected_and_warning_lines(self, capsys):
+        """A report with mismatched expected splits prints Expected + Warning."""
+        from sofer.verification import VerificationReport, _print_verification_report
+
+        report = VerificationReport(
+            passed=False,
+            split_names=["other"],
+            split_row_counts={"other": -1},
+            expected_splits=["train"],
+            warnings=["Split names differ from expected"],
+        )
+        _print_verification_report(report)
+        out = capsys.readouterr().out
+        assert "Splits: other" in out
+        assert "[other] ? rows" in out
+        assert "Expected: train" in out
+        assert "Warning: Split names differ from expected" in out

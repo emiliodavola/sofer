@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -143,7 +144,9 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
     - gemini: ``env`` is a mapping of known key -> ``$KEY`` reference (Gemini
       CLI expands host environment variables at runtime, so the secret values
       are never persisted to settings.json)
-    - opencode: no env forwarding (returns minimal entry)
+    - opencode: no env forwarding (returns minimal entry); the entry stays
+      env-less and the selection-time warning when env would be dropped is
+      the CLI's responsibility
 
     Args:
         agent: Target agent.
@@ -158,11 +161,17 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
     if agent == "opencode":
         return {"type": "local", "command": ["sofer-mcp"], "cwd": cwd_str}
     if agent == "codex":
-        env_vars = [k for k in _ENV_KEYS if env.get(k)]
-        return {"command": "sofer-mcp", "cwd": cwd_str, "env_vars": env_vars}
+        return {
+            "command": "sofer-mcp",
+            "cwd": cwd_str,
+            "env_vars": _present_env_keys(env),
+        }
     if agent == "gemini":
-        env_refs = {k: f"${k}" for k in _ENV_KEYS if env.get(k)}
-        return {"command": "sofer-mcp", "cwd": cwd_str, "env": env_refs}
+        return {
+            "command": "sofer-mcp",
+            "cwd": cwd_str,
+            "env": {k: f"${k}" for k in _present_env_keys(env)},
+        }
     raise ValueError(f"unknown agent: {agent}")
 
 
@@ -450,6 +459,44 @@ def collect_env() -> dict[str, str]:
         if v:
             out[k] = v
     return out
+
+
+def _present_env_keys(env: Mapping[str, str]) -> list[str]:
+    """Known env keys from ``_ENV_KEYS`` present (non-empty) in *env*.
+
+    Single source for which of ``HF_TOKEN`` / ``SOFER_MCP_APPROVAL_PHRASE``
+    are set in the environment. NAMES only — values are never returned.
+
+    Args:
+        env: Environment mapping to query (typically ``collect_env()``
+            output or ``os.environ``). Keys only, never values.
+
+    Returns:
+        Allow-list of known keys present with non-empty values, in
+        ``_ENV_KEYS`` order. Values are never returned.
+    """
+    return [k for k in _ENV_KEYS if env.get(k)]
+
+
+def dropped_env_keys(agent: AgentName, env: Mapping[str, str]) -> list[str]:
+    """Known env NAMES that would be dropped for *agent*.
+
+    opencode entries cannot carry env, so every present known key is dropped;
+    codex/gemini forward names (``env_vars`` allow-list / ``env`` ``$KEY``
+    refs), so nothing is. Reads *env* keys only; returns NAMES never values.
+    Returns ``[]`` (not ``None``) when nothing is dropped.
+
+    Args:
+        agent: Target agent name.
+        env: Environment mapping to query. Keys only, never values.
+
+    Returns:
+        Names of known env keys that would be dropped for *agent*, in
+        ``_ENV_KEYS`` order; ``[]`` (never ``None``) when nothing is dropped.
+    """
+    if agent == "opencode":
+        return _present_env_keys(env)
+    return []
 
 
 def validate_cwd(cwd: Path, scope: Scope) -> bool:

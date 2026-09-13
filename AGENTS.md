@@ -96,3 +96,31 @@ Rules:
   section in the same commit; section additions/removals MUST land in both files.
 - Technical content (commands, flags, TOML/YAML excerpts, CLI output, filenames,
   URLs) stays in English in both files; only prose is translated.
+
+### 14. CLI-core coverage: 100% mandate, zero pragmas
+- `src/sofer/cli.py`, `src/sofer/scanner.py`, `src/sofer/prepare.py`, and
+  `src/sofer/publish.py` MUST each measure **100.00% line coverage** under
+  `uv run coverage report -m` (the `[tool.coverage.run]` configuration:
+  `branch = true`, `source = ["src/sofer"]`), over the complete suite
+  (`coverage run -m pytest`). The per-file scoped gates
+  (`coverage report --include=src/sofer/<file>.py --fail-under=100 -m`, listed in
+  `scripts/check_core_coverage.sh` and run by the CI coverage job) are the
+  enforcement; a drop below 100.00% in any of the four files fails CI.
+- `# pragma: no cover` is **FORBIDDEN** in those four modules — no exception,
+  including "genuinely untestable" lines. Every line must actually execute in
+  tests; a line that cannot be reached from a test is a defect in the test
+  strategy or a design-doc escalation, never a pragma.
+- The TOTAL gate stays config-owned (`[tool.coverage.report] fail_under = 90`,
+  spec `ci` CI-01) and is never weakened, bypassed, or re-declared by the
+  per-file mandate. The per-file 100% gates are additive and scoped per file;
+  they hardcode 100 only because 100 is a fixed policy constant, not a tunable
+  floor.
+- This rule justifies NO `src/sofer/` edit: the dead `if __name__ == "__main__":
+  main()` guard in `cli.py` is kept and exercised in-process
+  (`runpy.run_module("sofer.cli", run_name="__main__")` with argv at a harmless
+  subcommand) as part of the 100.00% row — `python -m sofer.cli` remains a
+  working entry point (`tests/conftest.py::run_cli` drives it as the PB-02
+  subprocess boundary).
+- This rule's 100% mandate covers exactly those four modules. Other modules are
+  governed by their own per-file floors (spec `coverage` COV-01) or have no
+  floor.
