@@ -13,8 +13,8 @@ superseded by explicit parent tasking of this change. `actionContext.mode: repo-
 
 ### Work unit A — coverage gate (pyproject.toml + ci.yml + release.yml)
 
-- **A.1 [x]** — `[tool.coverage.report] fail_under = 85` added beside `show_missing = true`; tomllib parse
-  yields `{'show_missing': True, 'fail_under': 85}`.
+- **A.1 [x]** — `[tool.coverage.report] fail_under = 90` added beside `show_missing = true`; tomllib parse
+  yields `{'show_missing': True, 'fail_under': 90}`.
 - **A.2 [x]** — ci.yml standalone `coverage` job appended after `test` (no `needs`); step order
   `coverage run -m pytest` → `coverage report -m` (gate, before html) → `coverage html` →
   `actions/upload-artifact@v4` (`name: coverage-html`, `path: htmlcov`); comment boxes per D2 with the
