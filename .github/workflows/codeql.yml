@@ -24,15 +24,31 @@ jobs:
     name: Analyze Python
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: python
           config-file: ./.github/codeql/config.yml
 
-      # Uploads SARIF to the Security tab by default because
-      # permissions.security-events = write. No separate upload-sarif step.
+      # While the repository is private, code scanning cannot be enabled: it
+      # requires GitHub Code Security on private repos, so uploading SARIF to
+      # the Security tab is rejected and would fail this job on every run.
+      # `upload: never` keeps the analysis running and writes the SARIF to the
+      # path below, published as a workflow artifact instead.
+      #
+      # WHEN THE REPOSITORY BECOMES PUBLIC: set `upload: always` (or delete the
+      # input) and the Security tab takes over; the artifact step below can stay.
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
+        with:
+          upload: never
+          output: codeql-results
+
+      - name: Upload CodeQL SARIF results
+        uses: actions/upload-artifact@v7
+        with:
+          name: codeql-sarif
+          path: codeql-results/*.sarif
+          if-no-files-found: error
