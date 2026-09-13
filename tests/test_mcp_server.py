@@ -1892,10 +1892,22 @@ def _prompt_block(text):
     That sentence is byte-identical in all three templates and marks the
     repr-protected executable surface (numbered steps, canonical-chain line,
     copy-paste block) that every structural probe asserts on (design §6.2 D4).
-    The intro sentence interpolates caller arguments raw — a known limitation
-    tracked by issue #169 — and is deliberately excluded from strict checks.
+    The intro sentences before it are covered by :func:`_prompt_intro` and the
+    intro-contract probes (issue #169 resolved).
     """
     return text[text.index("Canonical chain:") :]
+
+
+def _prompt_intro(text):
+    """Return *text* up to (not including) the ``Canonical chain:`` sentence.
+
+    The complement of :func:`_prompt_block`: the two helpers partition any
+    rendered prompt exactly at the canonical-chain header, so the intro
+    region (the prose sentences that the intro-contract probes assert on) is
+    the slice before that anchor. The anchor's first occurrence is the unique
+    chain header in all three templates (design §3.2 D2).
+    """
+    return text[: text.index("Canonical chain:")]
 
 
 def _numbered_steps(block):
@@ -2293,16 +2305,16 @@ class TestPrompts:
             assert text.endswith(ms._UNTRUSTED_NOTE)
 
     def test_prepare_dataset_intro_contract_scope(self, tmp_path):
-        """Raw-intro interpolation (#169) does not cascade into the executable block.
+        """The prepare intro repr-contains a hostile config payload (#169 resolved).
 
-        The three intro sentences interpolate caller arguments raw at
-        ``mcp_server.py:2987``, ``3017-3018`` and ``3042`` — a recorded known
-        limitation tracked by issue #169. This probe asserts no prose-purity
-        claim about the intro in either direction; it pins only that (a) the
-        executable block still begins on its own line and (b) the repr-
-        protected containment invariants hold over the block. No server fix is
-        specified or required here, so a future #169 fix cannot break this
-        test (nothing pins the raw rendering).
+        The intro sentence (the text before the ``Canonical chain:`` anchor)
+        interpolates ``config`` — since issue #169 was resolved, it does so in
+        repr form, at parity with the executable positions. This probe keeps
+        the block-containment invariants and asserts over the intro region
+        that the hostile payload appears only as escaped data: ``repr``
+        present, raw ``_INJECT_*`` markers absent, and no extra physical line
+        versus the benign render. ``output`` is never intro-interpolated, so
+        no ``output`` assertion is made here (design §3.3 D1).
         """
         server = build_server(root=tmp_path)
         hostile = _get_prompt_text(server, "prepare_dataset", _INJECT_ARGS_PREPARE)
@@ -2317,6 +2329,97 @@ class TestPrompts:
         for slot in ("config", "output"):
             assert repr(_INJECT_ARGS_PREPARE[slot]) in hostile_block
         assert len(hostile_block.splitlines()) == len(benign_block.splitlines())
+        intro = _prompt_intro(hostile)
+        benign_intro = _prompt_intro(benign)
+        assert repr(_INJECT_ARGS_PREPARE["config"]) in intro
+        for marker in (_INJECT_PROSE, _INJECT_FAKE_STEP, _INJECT_FAKE_TOOL_CALL, _INJECT_ESCAPES):
+            assert marker not in intro
+        assert len(intro.splitlines()) == len(benign_intro.splitlines())
+
+    def test_assess_dataset_intro_contract_scope(self, tmp_path):
+        """The assess intro repr-contains hostile dataset and config payloads.
+
+        The assess intro interpolates BOTH caller-controlled arguments
+        (``dataset`` in its first fragment, ``config`` in its second), and
+        since issue #169 was resolved each is repr-contained at parity with
+        the executable positions. Over the intro region (the text before the
+        ``Canonical chain:`` anchor): both reprs present, raw ``_INJECT_*``
+        markers absent, and intro line count equal to the benign render.
+        """
+        server = build_server(root=tmp_path)
+        hostile = _get_prompt_text(server, "assess_dataset", _INJECT_ARGS_ASSESS)
+        benign = _get_prompt_text(
+            server, "assess_dataset", {"config": _BENIGN_CONFIG, "dataset": _BENIGN_DATASET}
+        )
+        intro = _prompt_intro(hostile)
+        benign_intro = _prompt_intro(benign)
+        assert repr(_INJECT_ARGS_ASSESS["config"]) in intro
+        assert repr(_INJECT_ARGS_ASSESS["dataset"]) in intro
+        for marker in (_INJECT_PROSE, _INJECT_FAKE_STEP, _INJECT_FAKE_TOOL_CALL, _INJECT_ESCAPES):
+            assert marker not in intro
+        assert len(intro.splitlines()) == len(benign_intro.splitlines())
+
+    def test_finalize_payload_intro_contract_scope(self, tmp_path):
+        """The finalize intro repr-contains a hostile config payload.
+
+        The finalize_and_publish intro interpolates only ``config`` (its
+        second fragment is plain text carrying no substitution), so since
+        issue #169 was resolved it is repr-contained at parity with the
+        executable positions. Over the intro region (the text before the
+        ``Canonical chain:`` anchor): ``repr(config)`` present, raw
+        ``_INJECT_*`` markers absent, and intro line count equal to the
+        benign render. ``output`` is never intro-interpolated — its
+        containment stays asserted over the executable block by
+        ``test_finalize_payload_arg_containment``.
+        """
+        server = build_server(root=tmp_path)
+        hostile = _get_prompt_text(server, "finalize_and_publish", _INJECT_ARGS_FINALIZE)
+        benign = _get_prompt_text(
+            server, "finalize_and_publish", {"config": _BENIGN_CONFIG, "output": _BENIGN_OUTPUT}
+        )
+        intro = _prompt_intro(hostile)
+        benign_intro = _prompt_intro(benign)
+        assert repr(_INJECT_ARGS_FINALIZE["config"]) in intro
+        for marker in (_INJECT_PROSE, _INJECT_FAKE_STEP, _INJECT_FAKE_TOOL_CALL, _INJECT_ESCAPES):
+            assert marker not in intro
+        assert len(intro.splitlines()) == len(benign_intro.splitlines())
+
+    def test_prompts_no_raw_marker_across_templates(self, tmp_path):
+        """No raw caller-argument interpolation remains in any rendered prompt.
+
+        Scans the FULL text of every hostile render (intro region and
+        executable block combined): no ``_INJECT_*`` marker appears verbatim
+        and the physical line count equals the benign render — the mechanical
+        form of "no raw payload newline can start a physical line".
+        """
+        server = build_server(root=tmp_path)
+        for name, hostile_args, benign_args in (
+            (
+                "prepare_dataset",
+                _INJECT_ARGS_PREPARE,
+                {"config": _BENIGN_CONFIG, "output": _BENIGN_OUTPUT},
+            ),
+            (
+                "assess_dataset",
+                _INJECT_ARGS_ASSESS,
+                {"config": _BENIGN_CONFIG, "dataset": _BENIGN_DATASET},
+            ),
+            (
+                "finalize_and_publish",
+                _INJECT_ARGS_FINALIZE,
+                {"config": _BENIGN_CONFIG, "output": _BENIGN_OUTPUT},
+            ),
+        ):
+            text = _get_prompt_text(server, name, hostile_args)
+            benign_text = _get_prompt_text(server, name, benign_args)
+            for marker in (
+                _INJECT_PROSE,
+                _INJECT_FAKE_STEP,
+                _INJECT_FAKE_TOOL_CALL,
+                _INJECT_ESCAPES,
+            ):
+                assert marker not in text
+            assert len(text.splitlines()) == len(benign_text.splitlines())
 
 
 # ---------------------------------------------------------------------------
