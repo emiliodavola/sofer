@@ -372,3 +372,35 @@ CLI status output that is machine-readable SHALL be stable JSON, not a Python di
 
 - GIVEN a command that emits status
 - THEN `repr`-style Python literals (e.g. `{'ok': True}`) SHALL NOT appear; only JSON appears
+
+### Requirement: Console output survives an unencodable character (CLI-R11)
+
+> Added by change `2026-09-13-fix-cli-console-encoding` (archived 2026-09-13).
+
+The CLI SHALL NOT abort a command because a character it emits cannot be represented in the active console output encoding. When `sys.stdout` / `sys.stderr` are encoded with a codec that cannot represent an emitted character — cp1252 cannot represent, for example, U+2192, U+2191, U+26A0, U+2713, U+2717, or U+2265 — that character SHALL be substituted in the emitted stream rather than raising `UnicodeEncodeError`, and the command SHALL keep its documented exit code and its remaining output. Substitution SHALL be visible (a placeholder or an escape sequence); silent character loss (an `ignore` error handler) SHALL NOT be used.
+
+The invariant SHALL hold both for characters the CLI authors in its own literals and for characters that reach the console through interpolation: values read from the dataset TOML, resolved dataset/file paths, text from third-party exceptions, dataset-derived content echoed to the console, and argv that argparse echoes back in an error message. Help output (`--help` for every subcommand, including the nested `mcp add` / `mcp remove`) SHALL satisfy the same invariant, because argparse renders its help through the same streams. A stream that cannot be reconfigured in place (an in-memory capture object such as pytest's captured stdout or the MCP capture buffer) SHALL be left untouched rather than raising.
+
+This requirement constrains *emitted* console text only. Text written to files by sofer's own writers (quality report, codebook markdown, Dataset Card) and the CLI's own help/documentation sources SHALL retain their explicit UTF-8 encoding and SHALL NOT be re-encoded by this contract.
+
+#### Scenario: Runtime output with an unencodable character keeps the command's result
+
+- GIVEN a command run with `PYTHONIOENCODING=cp1252` whose ordinary stdout carries a character outside cp1252 (e.g. `validate` reporting configuration errors, or `scan --dry-run` previewing a copy)
+- WHEN the command completes
+- THEN it SHALL keep its documented exit code and stdout SHALL strict-decode as cp1252
+- AND the ASCII substring of the surrounding message SHALL still be present (`Configuration errors`, `DRY RUN`)
+- AND no `UnicodeEncodeError` traceback SHALL appear on stderr
+
+#### Scenario: ASCII literal with an unencodable interpolated value does not abort
+
+- GIVEN a command whose own literal text is ASCII and whose interpolated value carries a character outside cp1252 (e.g. a `repo_id`, or a declared local path, whose name contains such a character), and `PYTHONIOENCODING=cp1252` in the environment
+- WHEN the command reports that value
+- THEN the command SHALL NOT raise `UnicodeEncodeError` and SHALL keep its documented exit code
+- AND stdout SHALL strict-decode as cp1252 with the ASCII literal substring present
+
+#### Scenario: Console warning path carrying a glyph degrades instead of aborting
+
+- GIVEN `sofer codebook --all-files --config <toml>` whose TOML registers a file entry the codebook pass skips (an unsupported format, or a directory — both pass config validation, which only checks that the path exists), and `PYTHONIOENCODING=cp1252` in the environment
+- WHEN the command runs
+- THEN stderr SHALL strict-decode as cp1252 and the ASCII warning substring SHALL be present (`Unsupported format, skipping` or `Skipping directory`)
+- AND the command SHALL exit 0, with the skipped entry's warning neither dropped nor aborted

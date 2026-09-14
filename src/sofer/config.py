@@ -352,6 +352,13 @@ CODEBOOK_NUMERIC_THRESHOLD: float = _DEFAULTS["codebook_numeric_threshold"]
 CODEBOOK_MIXED_THRESHOLD: float = _DEFAULTS["codebook_mixed_threshold"]
 
 OUTPUT_ENCODING: str = _DEFAULTS["output_encoding"]
+# Console error handler for sys.stdout/sys.stderr (CLI-R11, issue #161): an emitted
+# character the active console encoding cannot represent is substituted in the stream
+# instead of aborting the command. Deliberately NOT a _DEFAULTS entry: this is the
+# console guard's implementation policy, not a tool-wide user option. _read_tool_section
+# iterates _DEFAULTS, so adding it there would silently make [tool.sofer] console_errors
+# settable and drift the behaviour away from the CLI-R11 contract.
+CONSOLE_ERRORS: str = "replace"
 PROBE_CHUNK_BYTES: int = _DEFAULTS["probe_chunk_bytes"]
 CSV_DELIMITER: str = _DEFAULTS["csv_delimiter"]
 CSV_ENCODING: str = _DEFAULTS["csv_encoding"]

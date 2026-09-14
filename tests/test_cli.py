@@ -8,13 +8,14 @@ shared ``conftest.run_cli`` helper (PB-09).
 """
 
 import csv
+import io
 import sys
 from argparse import Namespace
 
 import pytest as _pytest
 from conftest import run_cli
 
-from sofer import cli, mcp_registration
+from sofer import cli, config, mcp_registration
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -1266,8 +1267,17 @@ class TestSubprocessBoundary:
         for command in self.SUBCOMMANDS:
             assert command in result.stdout, f"{command!r} missing from --help"
 
-    def test_help_strict_cp1252(self, tmp_path) -> None:
-        """``--help`` under cp1252 exits 0 and has no non-cp1252 glyphs.
+    @_pytest.mark.parametrize(
+        "argv",
+        [
+            ["--help"],
+            *([command, "--help"] for command in SUBCOMMANDS),
+            ["mcp", "add", "--help"],
+            ["mcp", "remove", "--help"],
+        ],
+    )
+    def test_help_strict_cp1252(self, argv: list[str], tmp_path) -> None:
+        """Every help screen under cp1252 exits 0 with no UnicodeEncodeError.
 
         ``PYTHONIOENCODING=cp1252`` forces the child to encode its stdout as
         cp1252; ``run_cli`` decodes it with ``errors="strict"``, so any byte
@@ -1275,17 +1285,167 @@ class TestSubprocessBoundary:
         with ``UnicodeEncodeError`` and a non-zero exit) fails loudly here.
         Re-encoding the decoded text pins the "no non-cp1252 glyphs" contract
         explicitly.
+
+        The parametrization covers every invocation PB-02 names — ``--help``
+        alone, ``<cmd> --help`` for all nine top-level subcommands, and the two
+        nested ``mcp`` help screens — because the single ``--help`` case that
+        this test used to run renders no subparser ``description=`` and
+        therefore passed while ``prepare --help`` / ``scan --help`` crashed
+        (#161). Assertions stay ASCII-substring shaped: the boundary never
+        pins how the CLI keeps its text encodable.
         """
         result = run_cli(
-            ["--help"],
+            argv,
             cwd=tmp_path,
             env={"PYTHONIOENCODING": "cp1252"},
             encoding="cp1252",
         )
-        assert result.returncode == 0
+        assert result.returncode == 0, result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
         # Every glyph must be representable in cp1252 — a glyph outside the
         # codec (e.g. an em dash or arrow) raises UnicodeEncodeError here.
         result.stdout.encode("cp1252")
+
+    def test_runtime_output_strict_cp1252(self, tmp_path) -> None:
+        """A cp1252 runtime console path keeps its result (CLI-R11, PB-02).
+
+        ``validate`` against a TOML carrying configuration errors prints the
+        ``\u2717`` marker before the ASCII ``Configuration errors`` text. On a
+        cp1252 stream that marker used to raise ``UnicodeEncodeError`` and abort
+        ``validate`` with a traceback instead of the report.
+
+        ``rc == 1`` is deliberately *not* the discriminator: a traceback also
+        exits 1. The stable ASCII substring is.
+        """
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "YOUR_USER/test-ds"\n\n'
+            '[[file]]\nlocal = "missing.csv"\nremote = "missing.csv"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["validate", str(toml_path)],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 1
+        assert "Configuration errors" in result.stdout
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stdout.encode("cp1252")
+
+    def test_scan_dry_run_strict_cp1252(self, tmp_path) -> None:
+        """A cp1252 ``scan --dry-run`` copy preview keeps rc 0 (CLI-R11).
+
+        The dry-run copy preview prints a ``U+2192`` arrow per would-be copy;
+        on a cp1252 stream that write used to abort the command with a
+        traceback. ``rc == 0`` is the discriminator: the ASCII ``DRY RUN`` line
+        is printed *before* the arrow, so the substring alone would already
+        pass today.
+        """
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "user/test-ds"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["scan", "dataset.toml", "--dry-run"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "DRY RUN" in result.stdout
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stdout.encode("cp1252")
+
+    def test_interpolated_stdout_value_strict_cp1252(self, tmp_path) -> None:
+        """ASCII literal + unencodable interpolated TOML value, on stdout.
+
+        ``scan --dry-run`` previews the MOVE phase with the ASCII literal
+        ``DRY RUN`` / ``-> raw/`` followed by the declared local path. When
+        that path's name carries ``U+2192``, only the *interpolated* value
+        falls outside cp1252 — the surrounding literal is pure ASCII and the
+        arrow is the ASCII ``->``, not the authored ``U+2192`` glyph. On the
+        pre-fix tree the strict cp1252 stdout raised ``UnicodeEncodeError``
+        inside that f-string write and aborted with ``rc 1``; the guard must
+        degrade the value and keep the documented result instead.
+
+        ``rc == 0`` is the discriminator (the pre-fix traceback exits 1): the
+        ``DRY RUN`` header is printed *before* the offending write, so the
+        substring alone would pass pre-fix. No glyph and no substitution
+        rendering is asserted — the spec leaves ``?`` vs an escape open
+        (CLI-R11 scenario 2, stdout clause).
+        """
+        (tmp_path / "data\u2192.csv").write_text("col_a;col_b\n1;2\n", encoding="utf-8")
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "user/test-ds"\n\n'
+            '[[file]]\nlocal = "data\u2192.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["scan", "dataset.toml", "--dry-run"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "DRY RUN" in result.stdout
+        assert "raw/" in result.stdout
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stdout.encode("cp1252")
+
+    def test_interpolated_unencodable_value_strict_cp1252(self, tmp_path) -> None:
+        """An ASCII literal with an unencodable interpolated value survives.
+
+        ``scan <path>`` with a nonexistent path whose name carries ``U+2192``
+        prints the ASCII literal ``Config file not found`` with the resolved
+        path interpolated. The traceback this used to raise *also* echoes the
+        ASCII literal, so only ``UnicodeEncodeError not in stderr``
+        discriminates (CLI-R11).
+        """
+        missing = tmp_path / "missing\u2192dataset.toml"
+        result = run_cli(
+            ["scan", str(missing)],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 1
+        assert "Config file not found" in result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stderr.encode("cp1252")
+
+    def test_codebook_warning_strict_cp1252(self, tmp_path) -> None:
+        """A cp1252 console warning carrying a glyph degrades, not aborts.
+
+        ``codebook --all-files`` warns on stderr about a registered entry whose
+        format it cannot analyse; the ``\u26a0`` marker used to raise
+        ``UnicodeEncodeError`` and abort the run (rc 1). ``rc == 0`` is the
+        discriminator here (CLI-R11).
+        """
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "user/test-ds"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n\n'
+            '[[file]]\nlocal = "notes.txt"\nremote = "notes.txt"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["codebook", "--all-files", "--config", "dataset.toml"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Unsupported format" in result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stderr.encode("cp1252")
 
     def test_unknown_command_exits_2(self, tmp_path) -> None:
         """``python -m sofer.cli <unknown-command>`` exits 2 via argparse."""
@@ -1419,6 +1579,78 @@ class TestSubprocessBoundary:
         result = run_cli(["prepare", "proj/dataset.toml"], cwd=tmp_path)
         assert result.returncode == 0, result.stderr
         assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"
+
+
+class TestConsoleEncodingGuard:
+    """``cli._configure_console_streams`` pinned directly (CLI-R11).
+
+    The three tests exercise the helper's three outcome shapes — the in-place
+    reconfigure, the non-text-stream skip, and the refuses-to-reconfigure skip
+    — so every line and branch arm of the helper has a deterministic carrier
+    independent of how pytest's own capture object behaves (AGENTS.md rule 14
+    forbids ``# pragma: no cover``).
+    """
+
+    def test_console_streams_reconfigured_in_place(self, monkeypatch) -> None:
+        """A real text stream gets ``errors="replace"``, in place (CLI-R11).
+
+        Asserting both ``stream.errors`` and the substitution bytes proves the
+        guard *substitutes* an unencodable character instead of raising (the
+        stream stays ASCII-encoded, so writing ``U+2192`` can only land as the
+        replacement byte).
+        """
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict")
+        monkeypatch.setattr(sys, "stdout", stream)
+        monkeypatch.setattr(sys, "stderr", stream)
+        # The guard's policy is owned by config.py, never a [tool.sofer] key.
+        assert config.CONSOLE_ERRORS == "replace"
+
+        cli._configure_console_streams()
+
+        assert stream.errors == "replace"
+        assert sys.stdout is stream
+        assert sys.stderr is stream
+        stream.write("\u2192")
+        stream.flush()
+        assert buffer.getvalue() == b"?"
+
+    def test_console_guard_skips_stream_without_reconfigure(self, monkeypatch) -> None:
+        """An ``io.StringIO`` capture object is left untouched (CLI-R11).
+
+        ``io.StringIO`` is exactly the object
+        :func:`sofer.mcp_server._capture_output` installs; the guard must
+        neither raise nor replace it, keeping MSP-R01 stdout framing intact.
+        """
+        out = io.StringIO()
+        err = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", out)
+        monkeypatch.setattr(sys, "stderr", err)
+
+        cli._configure_console_streams()
+
+        assert sys.stdout is out
+        assert sys.stderr is err
+        assert out.getvalue() == ""
+        assert err.getvalue() == ""
+
+    def test_console_guard_survives_unreconfigurable_text_wrapper(self, monkeypatch) -> None:
+        """A closed ``TextIOWrapper`` is skipped, never raised on (CLI-R11).
+
+        A closed buffer still passes the ``isinstance`` gate and makes
+        ``reconfigure`` raise ``ValueError``; the guard must swallow it and
+        leave the stream object in place rather than become a new
+        first-statement crash source for ``main()``.
+        """
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        stream.close()
+        monkeypatch.setattr(sys, "stdout", stream)
+        monkeypatch.setattr(sys, "stderr", stream)
+
+        cli._configure_console_streams()
+
+        assert sys.stdout is stream
+        assert sys.stderr is stream
 
 
 def test_codebook_all_files_max_sample_parity(tmp_path):
