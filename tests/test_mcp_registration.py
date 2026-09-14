@@ -138,8 +138,11 @@ class TestBuildEntry:
         assert rc == 0
         path = mcp_registration.resolve_config_path("opencode", "project", custom)
         assert path.exists()
+        from typing import cast as _cast
+
         data, _ = mcp_registration.read_config(path)
-        assert data["mcp"]["sofer"]["cwd"] == str(custom.resolve())
+        mcp_section = _cast("dict[str, dict[str, object]]", data["mcp"])
+        assert mcp_section["sofer"]["cwd"] == str(custom.resolve())
 
 
 # ── merge preserve & normalize ────────────────────────────────────────
@@ -349,8 +352,9 @@ class TestDryRun:
         proj.mkdir()
         rc = cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=True))
         assert rc == 0
-        for agent in ["opencode", "codex", "gemini"]:
-            path = mcp_registration.resolve_config_path(agent, "project", proj)  # type: ignore[arg-type]
+        agents: list[mcp_registration.AgentName] = ["opencode", "codex", "gemini"]
+        for agent in agents:
+            path = mcp_registration.resolve_config_path(agent, "project", proj)
             assert not path.exists()
             assert not Path(str(path) + ".bak").exists()
 
@@ -720,8 +724,9 @@ class TestRemove:
         cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=False))
         rc = cli._cmd_mcp_remove(Namespace(agent="all", scope="project", dry_run=False))
         assert rc == 0
-        for agent in ["opencode", "codex", "gemini"]:
-            path = mcp_registration.resolve_config_path(agent, "project", proj)  # type: ignore[arg-type]
+        agents: list[mcp_registration.AgentName] = ["opencode", "codex", "gemini"]
+        for agent in agents:
+            path = mcp_registration.resolve_config_path(agent, "project", proj)
             if path.exists():
                 data, _ = mcp_registration.read_config(path)
                 # sofer should be absent
@@ -806,14 +811,14 @@ class TestIdempotencyNext:
             assert mcp_registration._entries_equal("codex", a2, b2) is False  # env mismatch
             assert mcp_registration._entries_equal("codex", a2, {**a2}) is True
         elif agent == "gemini":
-            a = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "$HF_TOKEN"}}
-            b = {"command": "other", "cwd": "/proj", "env": a["env"]}
-            assert mcp_registration._entries_equal("gemini", a, b) is False  # command
-            c = {**a, "cwd": "/other"}
-            assert mcp_registration._entries_equal("gemini", a, c) is False  # cwd
-            d = {**a, "env": {}}
-            assert mcp_registration._entries_equal("gemini", a, d) is False  # env
-            assert mcp_registration._entries_equal("gemini", a, {**a}) is True
+            ga = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "$HF_TOKEN"}}
+            gb = {"command": "other", "cwd": "/proj", "env": ga["env"]}
+            assert mcp_registration._entries_equal("gemini", ga, gb) is False  # command
+            gc = {**ga, "cwd": "/other"}
+            assert mcp_registration._entries_equal("gemini", ga, gc) is False  # cwd
+            gd = {**ga, "env": {}}
+            assert mcp_registration._entries_equal("gemini", ga, gd) is False  # env
+            assert mcp_registration._entries_equal("gemini", ga, {**ga}) is True
         else:
             a = {"type": "local", "command": ["sofer-mcp"], "cwd": "/proj"}
             assert mcp_registration._entries_equal("opencode", a, {**a}) is True
