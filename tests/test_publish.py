@@ -1738,8 +1738,7 @@ class TestHfUpload:
 class TestRepoDiffSummaryNext:
     def _many_cfg(self, tmp_path: Path, count: int = 12) -> DatasetConfig:
         files = [
-            FileEntry(local=tmp_path / f"f{i}.csv", remote=f"data/f{i}.csv")
-            for i in range(count)
+            FileEntry(local=tmp_path / f"f{i}.csv", remote=f"data/f{i}.csv") for i in range(count)
         ]
         return _cfg(tmp_path, files)
 
