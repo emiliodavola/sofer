@@ -880,9 +880,7 @@ class TestProfileBatchSkipPaths:
         assert len(results) == 1
         assert results[0].replace("\\", "/").endswith("cache/profiles/ok.metadata.yaml")
 
-    def test_batch_all_entries_skipped_returns_empty(
-        self, tmp_path, restore_tool_config
-    ) -> None:
+    def test_batch_all_entries_skipped_returns_empty(self, tmp_path, restore_tool_config) -> None:
         """A config whose entries all fail collection returns [] (no profiles)."""
         import sofer.config as cfg_mod
         from sofer.model import DatasetConfig
@@ -998,9 +996,7 @@ class TestProfileBatchPrf05Next:
         results = generate_all_profiles(DatasetConfig.from_toml(str(toml)))
         assert len(results) == 2
         assert any(r.replace("\\", "/").endswith("cache/profiles/p.metadata.yaml") for r in results)
-        assert any(
-            r.replace("\\", "/").endswith("cache/profiles/x.metadata.yaml") for r in results
-        )
+        assert any(r.replace("\\", "/").endswith("cache/profiles/x.metadata.yaml") for r in results)
 
     def test_collision_names_sources_outside_base(
         self, tmp_path, restore_tool_config, capsys

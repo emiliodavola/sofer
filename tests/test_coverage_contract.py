@@ -94,9 +94,7 @@ def test_gate_machinery_bounded() -> None:
     pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert re.search(r"fail_under\s*=\s*90\s*$", pyproject, re.MULTILINE) is not None
     for workflow in ("ci.yml", "release.yml"):
-        raw = (_REPO_ROOT / ".github" / "workflows" / workflow).read_text(
-            encoding="utf-8"
-        ).lower()
+        raw = (_REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8").lower()
         assert "coverage xml" not in raw
         assert "codecov" not in raw
         assert "coveralls" not in raw
