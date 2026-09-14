@@ -469,9 +469,7 @@ class TestEnvForwarding:
         )
         assert rc == 0
         # Read TOML
-        _tomli = importlib.import_module(
-            "tomllib" if sys.version_info >= (3, 11) else "tomli"
-        )
+        _tomli = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
         path = proj / ".codex" / "config.toml"
         with open(path, "rb") as fh:
@@ -540,9 +538,7 @@ class TestEnvForwarding:
         assert (proj / ".codex" / "config.toml").exists()
         assert (proj / ".gemini" / "settings.json").exists()
         # codex/gemini persist names only, values absent
-        _tomli2 = importlib.import_module(
-            "tomllib" if sys.version_info >= (3, 11) else "tomli"
-        )
+        _tomli2 = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
         codex_path = proj / ".codex" / "config.toml"
         codex_doc = _tomli2.load(codex_path.open("rb"))
@@ -587,9 +583,7 @@ class TestEnvForwarding:
         # no warning for forwarding agents
         assert "receives no env" not in capsys.readouterr().err
         # codex allow-list of names present, gemini $KEY refs; values absent
-        _tomli3 = importlib.import_module(
-            "tomllib" if sys.version_info >= (3, 11) else "tomli"
-        )
+        _tomli3 = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
         codex_path = proj / ".codex" / "config.toml"
         codex_doc = _tomli3.load(codex_path.open("rb"))
@@ -785,9 +779,7 @@ class TestReadConfigMalformed:
         toml_path.write_text('hello = "scalar"', encoding="utf-8")
         # Valid TOML always yields a table, so the non-table defensive branch is
         # driven through the parser seam (a degenerate load result).
-        _tomllib = importlib.import_module(
-            "tomllib" if sys.version_info >= (3, 11) else "tomli"
-        )
+        _tomllib = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
         monkeypatch.setattr(_tomllib, "load", lambda _fh: ["not", "a", "table"])
         with pytest.raises(ValueError, match="not a TOML table"):
@@ -825,15 +817,11 @@ class TestIdempotencyNext:
         else:
             a = {"type": "local", "command": ["sofer-mcp"], "cwd": "/proj"}
             assert mcp_registration._entries_equal("opencode", a, {**a}) is True
-            assert (
-                mcp_registration._entries_equal("opencode", a, {**a, "cwd": "/x"}) is False
-            )
+            assert mcp_registration._entries_equal("opencode", a, {**a, "cwd": "/x"}) is False
 
     def test_atomic_write_toml_roundtrip(self, tmp_path) -> None:
         """atomic_write("toml") round-trips through tomllib."""
-        _tomli = importlib.import_module(
-            "tomllib" if sys.version_info >= (3, 11) else "tomli"
-        )
+        _tomli = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
         path = tmp_path / "config.toml"
         doc = {"mcp_servers": {"sofer": {"command": "sofer-mcp", "cwd": "/proj"}}}

@@ -551,9 +551,7 @@ class TestPrintVerificationReport:
         """A skipped report prints SKIPPED plus its warnings."""
         from sofer.verification import VerificationReport, _print_verification_report
 
-        report = VerificationReport(
-            skipped=True, warnings=["`datasets` package is not installed"]
-        )
+        report = VerificationReport(skipped=True, warnings=["`datasets` package is not installed"])
         _print_verification_report(report)
         out = capsys.readouterr().out
         assert "SKIPPED" in out

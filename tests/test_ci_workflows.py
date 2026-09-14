@@ -67,9 +67,7 @@ def _load_toml(rel: str) -> dict[str, Any]:
     Returns:
         The parsed TOML document as a nested mapping.
     """
-    parser = importlib.import_module(
-        "tomllib" if sys.version_info >= (3, 11) else "tomli"
-    )
+    parser = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
     return parser.loads(_read_text(rel))
 
 
@@ -183,8 +181,10 @@ def _openspec_config() -> dict[str, Any]:
     """
     path = _REPO_ROOT / "openspec" / "config.yaml"
     if not path.exists():
-        pytest.skip("openspec/config.yaml is absent (gitignored SDD state); "
-                    "asserting its values is the local SDD verify phase's job")
+        pytest.skip(
+            "openspec/config.yaml is absent (gitignored SDD state); "
+            "asserting its values is the local SDD verify phase's job"
+        )
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
@@ -192,6 +192,7 @@ def test_ci_workflow_files_present() -> None:
     """Supporting guard: the three workflow files exist before any parse."""
     required = {"ci.yml", "release.yml", "codeql.yml"}
     assert required.issubset(set(_workflow_names()))
+
 
 def test_pyproject_declares_coverage_fail_under_90() -> None:
     """CI-01 S1: pyproject.toml declares the 90% floor next to show_missing."""
@@ -217,9 +218,7 @@ def test_coverage_job_gates_core_modules_at_100() -> None:
     assert '--include="src/sofer/${f}.py" --fail-under=100 -m' in script
     for module in ("cli", "scanner", "prepare", "publish"):
         assert module in script
-    assert "bash scripts/check_core_coverage.sh" in _read_text(
-        f"{_WORKFLOW_DIR}/ci.yml"
-    )
+    assert "bash scripts/check_core_coverage.sh" in _read_text(f"{_WORKFLOW_DIR}/ci.yml")
     for raw in (
         script,
         _read_text(f"{_WORKFLOW_DIR}/ci.yml"),
@@ -233,9 +232,7 @@ def test_coverage_job_gates_core_modules_at_100() -> None:
 def test_agents_md_declares_core_100_mandate() -> None:
     """COV-06: AGENTS.md rule 14 names the modules, the 100% mandate, and the
     pragma ban."""
-    rule14 = re.search(
-        r"### 14\..*?(?=\n### 15\.|\Z)", _read_text("AGENTS.md"), re.DOTALL
-    )
+    rule14 = re.search(r"### 14\..*?(?=\n### 15\.|\Z)", _read_text("AGENTS.md"), re.DOTALL)
     assert rule14 is not None, "AGENTS.md rule 14 not found"
     text = rule14.group(0)
     for module in ("cli.py", "scanner.py", "prepare.py", "publish.py"):
@@ -269,10 +266,10 @@ def test_coverage_gate_is_config_driven_without_cli_floor() -> None:
     for job in _coverage_jobs():
         steps = job.get("steps", [])
         assert any(
-s.get("run") == "uv run coverage report -m"
-and "--fail-under" not in str(s.get("run", ""))
-and "bash scripts/check_core_coverage.sh" not in str(s.get("run", ""))
-for s in steps
+            s.get("run") == "uv run coverage report -m"
+            and "--fail-under" not in str(s.get("run", ""))
+            and "bash scripts/check_core_coverage.sh" not in str(s.get("run", ""))
+            for s in steps
         )
 
 

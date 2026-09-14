@@ -249,6 +249,48 @@ Boundary fixtures/helpers SHALL live in `tests/conftest.py` — a stdio server f
 - WHEN stdio tests run
 - THEN a single module-scoped server fixture SHALL be spawned, not one per test
 
+### Requirement: Formatter integrity on a clean checkout (PB-10)
+
+> Added by change `2026-09-14-chore-ruff-format-drift` (GitHub #177). Every scenario below is evidenced by command output rather than by a pytest assertion — the same framing this repository already uses for measured gate exit codes in the `coverage` capability (AGENTS.md rule 6).
+
+The repository's Python sources and tests SHALL satisfy the project formatter: `uv run ruff format --check src/ tests/` SHALL exit 0 on a clean checkout, reporting zero files to reformat. Reaching that state SHALL be a formatting-only edit — exactly these six test files SHALL change (`tests/test_ci_workflows.py`, `tests/test_coverage_contract.py`, `tests/test_mcp_registration.py`, `tests/test_profile.py`, `tests/test_publish.py`, `tests/test_splits.py`), no other path SHALL appear in the diff, and the edit SHALL NOT alter logic, assertions, imports or test behaviour. Because the formatter does not rewrite string contents, the two static contract guards keep their asserted strings.
+
+The requirement SHALL be satisfiable with no new CI step: enforcement remains the local pre-commit `ruff-format` hook, which sees staged files only. It therefore SHALL NOT be read as closing the drift class — a formatter drift on files nobody stages can still return, and issue #194 owns both the decision to arm such a gate and that open gap. The ruff version pin mismatch (pre-commit `v0.16.7` versus the environment's `0.16.0`) SHALL stay unaddressed here and SHALL be owned by issue #195. Evidence for this requirement is command output, and the sibling gates SHALL remain green and unweakened (PB-05, PB-07, `ci` CI-01, `coverage` COV-06).
+
+#### Scenario: Clean-checkout format check exits 0
+
+- GIVEN a clean checkout with this change applied, no `--python` flag and no local formatting
+- WHEN `uv run ruff format --check src/ tests/` runs
+- THEN it SHALL exit 0 and report zero files to reformat
+- AND `uv run ruff format --diff src/ tests/` SHALL emit no diff, so nothing is left to reformat
+
+#### Scenario: Exactly the six test files changed
+
+- GIVEN this change's diff
+- WHEN `git diff --stat` is inspected
+- THEN exactly the six named test files SHALL appear and no other path SHALL appear
+- AND there SHALL be zero `src/sofer/`, zero `.github/workflows/`, and zero `pyproject.toml` paths
+
+#### Scenario: Formatting-only — behaviour and asserted content preserved
+
+- GIVEN the suite tally recorded immediately before the reformat
+- WHEN `uv run pytest tests/ -q` runs after it
+- THEN the passed/skipped/collected counts SHALL be identical and there SHALL be 0 failures
+- AND `tests/test_ci_workflows.py` and `tests/test_coverage_contract.py` SHALL pass with their asserted strings unchanged — no logic, assertion, import, or test-behaviour edit SHALL be present
+
+#### Scenario: No CI gate was armed, and recurrence stays owned by #194
+
+- GIVEN `.github/workflows/**` before and after the change
+- WHEN scanned for a `format --check` invocation
+- THEN zero matches SHALL exist in both states and no workflow file SHALL appear in the diff
+- AND enforcement SHALL remain the local pre-commit `ruff-format` hook on staged files, with recurrence owned by issue #194 rather than by any clause of PB-10
+
+#### Scenario: Sibling gates stay green and unmoved
+
+- GIVEN the change applied
+- WHEN `uv run ruff check src/ tests/`, `uv run mypy src/`, `git diff --check`, and `uv run coverage run -m pytest` followed by `bash scripts/check_core_coverage.sh` run
+- THEN each SHALL exit 0, the coverage script SHALL reach all four of its scoped gates with every row at 100.00% and an empty `Missing` column (`coverage` COV-06), and the TOTAL floor SHALL remain the config-owned `fail_under = 90` (`ci` CI-01)
+
 ### Requirement: Verifiable test-count anchor (PB-11)
 
 > Added by change `2026-09-14-chore-agents-count-infer-type` (GitHub #162).
