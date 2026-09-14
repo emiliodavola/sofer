@@ -8,6 +8,7 @@ Run ``sofer --help`` or ``sofer <command> --help``.
 from __future__ import annotations
 
 import argparse
+import io
 import shutil
 import sys
 from pathlib import Path
@@ -546,7 +547,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"\n  The following files will be copied to {config.OUTPUT_DIR}/:")
         for f in discovered:
             flat = flatten_first_level(f.relative_to(base_dir))
-            print(f"     → {config.OUTPUT_DIR}/{flat.as_posix()}")
+            print(f"     -> {config.OUTPUT_DIR}/{flat.as_posix()}")
         try:
             answer = input("\n  Continue? [y/N] ").strip().lower()
         except EOFError:
@@ -566,7 +567,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         if copied:
             print("  DRY RUN  Would copy the following files:")
             for _src, dest in copied:
-                print(f"     → {dest.relative_to(base_dir).as_posix()}")
+                print(f"     -> {dest.relative_to(base_dir).as_posix()}")
         else:
             print(
                 "  DRY RUN  Nothing to copy — all files already present in the"
@@ -1069,8 +1070,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate the full dataset package locally (Parquet, card, LICENSE, codebooks).",
         description=(
             "Generate every artifact that makes up a dataset package on the "
-            "local machine: universal csv/tsv/xlsx/jsonl → normalized Parquet "
-            "conversion (Excel → one Parquet per sheet), cross-file schema "
+            "local machine: universal csv/tsv/xlsx/jsonl -> normalized Parquet "
+            "conversion (Excel -> one Parquet per sheet), cross-file schema "
             "checks, a schema report, the Dataset Card (README.md) and "
             "LICENSE, and - with --all-files - codebooks.  Set "
             "convert_to_parquet=false per [[file]] to keep the original.  This "
@@ -1426,7 +1427,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "\n"
             "Phase 2 — COPY raw/ -> cache/: recursively scan (excluding "
             "cache/ and EXCLUSIONS), flatten the first path segment "
-            "(raw/DPTO.csv → cache/DPTO.csv), register new files as "
+            "(raw/DPTO.csv -> cache/DPTO.csv), register new files as "
             "[[file]] entries in the TOML, and copy them into the cache/ "
             "directory via flatten_first_level + shutil.copy2.\n"
             "\n"
@@ -1553,11 +1554,48 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_console_streams() -> None:
+    """Reconfigure the console text streams to substitute unencodable text (CLI-R11).
+
+    Called as the FIRST statement of :func:`main`, ahead of ``config.reload`` and
+    ``_build_parser``: argparse resolves ``sys.stdout`` at call time, so a guard placed
+    after the parser is built would leave ``--help`` unfixed, and the ``config.reload``
+    verbose line (a resolved path interpolated into an f-string) would stay exposed.
+    Each stream is reconfigured *in place* with ``errors=config.CONSOLE_ERRORS``; the
+    stream objects are never swapped or replaced, so stream identity -- and therefore the
+    ``io.StringIO`` capture interleaving in :func:`sofer.mcp_server._capture_output` --
+    is preserved.
+
+    Defensive by construction (CLI-R11): a stream that cannot be reconfigured in place is
+    left untouched and this function SHALL NOT raise. Two cases are skipped explicitly:
+    a stream that is not an :class:`io.TextIOWrapper` (an in-memory capture object such as
+    :class:`io.StringIO`, a foreign capture stream, or ``None``) and a real wrapper that
+    refuses reconfiguration (a closed or detached buffer, or an ``OSError`` from the
+    implicit flush when the stream's reader is gone).
+
+    Returns:
+        ``None``.  The only observable effect is the error handler of the process's
+        ``sys.stdout`` / ``sys.stderr`` objects, which are the same objects on return.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if not isinstance(stream, io.TextIOWrapper):
+            continue
+        try:
+            stream.reconfigure(errors=config.CONSOLE_ERRORS)
+        except (ValueError, OSError):
+            continue
+
+
 def main() -> None:
     """Entry point (installed via ``pyproject.toml [project.scripts]``).
 
     Orchestration:
 
+        0. Console encoding guard: reconfigure ``sys.stdout``/``sys.stderr``
+           in place so a character the active console encoding cannot
+           represent is substituted rather than aborting the command
+           (CLI-R11). Runs first so argparse's ``--help`` output and the
+           ``config.reload`` verbose line are covered too.
         1. Phase-0 bootstrap: resolve ``[tool.sofer]`` anchored on the
            current working directory (``config.reload(None)``) so argparse
            defaults such as ``default_config_name`` reflect cwd-tree
@@ -1565,6 +1603,7 @@ def main() -> None:
         2. Build the parser and dispatch; dataset commands re-resolve via
            ``DatasetConfig.from_toml`` (dataset-dir anchor, TC-04/TC-05).
     """
+    _configure_console_streams()
     config.reload(None)
     parser = _build_parser()
     args = parser.parse_args()
