@@ -248,3 +248,48 @@ Boundary fixtures/helpers SHALL live in `tests/conftest.py` — a stdio server f
 - GIVEN the process-boundary module
 - WHEN stdio tests run
 - THEN a single module-scoped server fixture SHALL be spawned, not one per test
+
+### Requirement: Verifiable test-count anchor (PB-11)
+
+> Added by change `2026-09-14-chore-agents-count-infer-type` (GitHub #162).
+
+`AGENTS.md` rule 6 SHALL anchor its "never reduce coverage" floor to the source of the tally — the command that reports it — and SHALL NOT present a bare hardcoded pass/collected/skipped literal as the floor's only support. Any recorded figure SHALL match the tally that command reports on the change's branch.
+
+#### Scenario: Anchor carries its own command
+
+- GIVEN `AGENTS.md` rule 6 after the change
+- WHEN the rule text is inspected
+- THEN it SHALL name the count command (`uv run pytest tests/ -q`)
+- AND any recorded pass/collected/skipped figure SHALL match that command's actual tally
+
+#### Scenario: The stale literal is gone
+
+- GIVEN `AGENTS.md:44` pre-change (`1149 tests currently pass (1151 collected, 2 skipped)`)
+- WHEN post-change rule 6 is inspected
+- THEN the 1149/1151/2 triple SHALL be absent
+- AND no hardcoded tally SHALL remain without the reproducing command beside it
+
+### Requirement: Zero deprecation warnings from the migrated codebook surface (PB-12)
+
+> Added by change `2026-09-14-chore-agents-count-infer-type` (GitHub #162).
+
+A normal suite run SHALL emit zero `DeprecationWarning`s from the codebook type-inference surface: `_infer_type` in `src/sofer/codebook.py` SHALL be deleted (the only in-repo caller migrates to the live public API), and no module, test or doc outside `openspec/changes/archive/**` SHALL reference it. The migration SHALL NOT drop, weaken, skip or reword away a behavioural assertion: `tests/test_codebook.py` SHALL assert the SAME `(values, expected)` cases against `infer_column_type`, and `test_returns_same_as_private` — whose only subject was the alias — SHALL be replaced by those same cases asserted against the live API.
+
+#### Scenario: Suite run is deprecation-free
+
+- GIVEN the change applied on `chore/162-agents-count-infer-type`
+- WHEN `uv run pytest tests/ -q` runs
+- THEN it SHALL be green
+- AND the warnings summary SHALL contain zero `DeprecationWarning` lines from `sofer.codebook`
+
+#### Scenario: Behavioural parity preserved on the live API
+
+- GIVEN `tests/test_codebook.py` post-migration
+- WHEN `uv run pytest tests/test_codebook.py -q` runs
+- THEN every pre-change `(values, expected)` case SHALL still assert the same expected output, now against `infer_column_type`, with no case deleted, relaxed or parametrised away
+
+#### Scenario: No residual alias reference
+
+- GIVEN the post-change tree
+- WHEN `_infer_type` is searched over `src/`, `tests/`, `AGENTS.md` and the READMEs
+- THEN zero matches SHALL be found outside `openspec/changes/archive/**` historical prose
