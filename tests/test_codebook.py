@@ -8,7 +8,6 @@ import pytest
 
 from sofer.codebook import (
     _build_markdown,
-    _infer_type,
     _read_csv,
     _read_file,
     _read_jsonl,
@@ -20,57 +19,54 @@ from sofer.codebook import (
     infer_column_type,
 )
 
-# ── _infer_type ───────────────────────────────────────────────────────────────
+# ── infer_column_type ─────────────────────────────────────────────────────────
 
 
-class TestInferType:
+class TestInferColumnTypeSamples:
+    """Sample-value cases for the public infer_column_type (issue #162 migration)."""
+
     def test_numeric(self):
-        assert _infer_type(["1", "2", "3", "4"]) == "numeric"
+        assert infer_column_type(["1", "2", "3", "4"]) == "numeric"
 
     def test_numeric_with_decimals(self):
-        assert _infer_type(["1,5", "2,0", "3,7"]) == "numeric"
+        assert infer_column_type(["1,5", "2,0", "3,7"]) == "numeric"
 
     def test_categorical(self):
-        assert _infer_type(["red", "blue", "green", "red"]) == "categorical/text"
+        assert infer_column_type(["red", "blue", "green", "red"]) == "categorical/text"
 
     def test_mixed_mostly_numeric(self):
         vals = ["1", "2", "three", "4"]
-        assert "mixed" in _infer_type(vals)
+        assert "mixed" in infer_column_type(vals)
 
     def test_empty_values(self):
-        assert _infer_type(["", "NA", "MISSING"]) == "categorical/text"
+        assert infer_column_type(["", "NA", "MISSING"]) == "categorical/text"
 
     def test_mixed_with_missing(self):
         vals = ["10", "", "20", "NA", "30"]
         # 3 numeric out of 5 → 0.6 → "mixed (mostly numeric)"
-        assert "mixed" in _infer_type(vals)
+        assert "mixed" in infer_column_type(vals)
 
     def test_all_missing(self):
-        assert _infer_type(["NA", "NA", ""]) == "categorical/text"
+        assert infer_column_type(["NA", "NA", ""]) == "categorical/text"
 
     def test_single_value(self):
-        assert _infer_type(["42"]) == "numeric"
-        assert _infer_type(["hello"]) == "categorical/text"
+        assert infer_column_type(["42"]) == "numeric"
+        assert infer_column_type(["hello"]) == "categorical/text"
 
 
 class TestInferColumnType:
-    """Public ``infer_column_type`` — same logic as private ``_infer_type``."""
+    """Public infer_column_type — API surface and representative expected outputs."""
 
     def test_public_api_exists(self):
         """infer_column_type should be importable and callable."""
         assert callable(infer_column_type)
 
-    def test_returns_same_as_private(self):
-        """infer_column_type should produce identical results to _infer_type."""
-        cases = [
-            (["1", "2", "3"], "numeric"),
-            (["red", "blue"], "categorical/text"),
-            (["1", "two", "3"], "mixed (mostly numeric)"),
-            (["NA", "", "MISSING"], "categorical/text"),
-        ]
-        for values, expected in cases:
-            assert infer_column_type(values) == expected
-            assert infer_column_type(values) == _infer_type(values)
+    def test_representative_cases_expected_outputs(self):
+        """Representative (values, expected) cases asserted directly on the live API."""
+        assert infer_column_type(["1", "2", "3"]) == "numeric"
+        assert infer_column_type(["red", "blue"]) == "categorical/text"
+        assert infer_column_type(["1", "two", "3"]) == "mixed (mostly numeric)"
+        assert infer_column_type(["NA", "", "MISSING"]) == "categorical/text"
 
 
 # ── generate ──────────────────────────────────────────────────────────────────

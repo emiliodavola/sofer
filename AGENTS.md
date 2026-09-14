@@ -41,7 +41,8 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 ### 6. Tests must match specs
 - Every SDD spec scenario must have a corresponding test.
 - When implementing, run `uv run pytest tests/ -q` after every change batch.
-- 1149 tests currently pass (1151 collected, 2 skipped) — never reduce coverage.
+- Never reduce coverage. The authoritative tally is what `uv run pytest tests/ -q` reports on your branch —
+  re-derive it, never trust a figure here. Observed on this branch: 1766 passed, 6 skipped (1772 collected).
 
 ### 7. CLI help text accuracy
 - When adding a new flag or changing behavior, update the argparse `help=` and `description=` strings.
