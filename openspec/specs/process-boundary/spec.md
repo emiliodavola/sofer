@@ -56,7 +56,11 @@ The suite SHALL exercise registered MCP tools through `fastmcp.Client(server)` (
 
 ### Requirement: CLI user-visible output via executable subprocess (PB-02)
 
-Tests in `tests/test_cli.py` SHALL invoke `[sys.executable, "-m", "sofer.cli", ...]` (or the installed script) whenever the requirement concerns user-visible output; parser-level tests SHALL remain for dispatch semantics. The cp1252 help SHALL run on the ubuntu CI matrix via `PYTHONIOENCODING=cp1252` with `encoding="cp1252", errors="strict"`, SHALL exit 0, and SHALL produce strict-decodable stdout. Windows-only behavior SHALL skip without privileges rather than fail.
+> Modified by `2026-09-13-fix-cli-console-encoding` (archived 2026-09-13).
+
+Tests in `tests/test_cli.py` SHALL invoke `[sys.executable, "-m", "sofer.cli", ...]` (or the installed script) whenever the requirement concerns user-visible output; parser-level tests SHALL remain for dispatch semantics. Tests SHALL reuse the shared `tests/conftest.py::run_cli` subprocess helper (PB-09) and SHALL NOT re-implement it. The cp1252 boundary SHALL cover BOTH the help output of EVERY subcommand the CLI exposes — the nine top-level subcommands (`init`, `scan`, `validate`, `prepare`, `publish`, `codebook`, `profile`, `render`, `mcp`) plus the nested `mcp add` and `mcp remove` — AND the CLI's runtime console paths, which SHALL be exercised by at least one real command run, not only `--help`. These invocations SHALL run on the ubuntu CI matrix via `PYTHONIOENCODING=cp1252` with `encoding="cp1252", errors="strict"`, SHALL exit with their documented exit code, SHALL produce strict-decodable stdout (and strict-decodable stderr where the exercised path emits there), and SHALL NOT surface a `UnicodeEncodeError`. A cp1252 boundary assertion SHALL be shaped as exit code + cp1252-encodability + a stable ASCII substring of the surrounding message, and SHALL NOT assert a glyph, so the boundary test does not pre-commit how the CLI makes its text encodable. Windows-only behavior SHALL skip without privileges rather than fail.
+
+(Previously: the cp1252 clause was a single `--help` invocation, which renders no subparser `description=` and therefore passed while `prepare --help` / `scan --help` crashed; runtime console paths were not covered at all.)
 
 #### Scenario: Help via subprocess
 
@@ -67,8 +71,17 @@ Tests in `tests/test_cli.py` SHALL invoke `[sys.executable, "-m", "sofer.cli", .
 #### Scenario: cp1252 help on the ubuntu matrix
 
 - GIVEN `PYTHONIOENCODING=cp1252` in the subprocess env
-- WHEN `--help` runs
-- THEN exit code SHALL be 0 and stdout SHALL strict-decode as cp1252
+- WHEN `--help` runs for every subcommand the CLI exposes — `--help` alone, plus `<cmd> --help` for `init`, `scan`, `validate`, `prepare`, `publish`, `codebook`, `profile`, `render`, `mcp`, plus `mcp add --help` and `mcp remove --help`
+- THEN every invocation SHALL exit with code 0 and stdout SHALL strict-decode as cp1252
+- AND no invocation SHALL surface a `UnicodeEncodeError`
+
+#### Scenario: cp1252 runtime console output
+
+- GIVEN `PYTHONIOENCODING=cp1252` in the subprocess env and a real command whose ordinary console output carries a character outside the cp1252 repertoire (a `validate` run that reports configuration errors, and a `scan --dry-run` run that previews a copy)
+- WHEN each command runs through the executable subprocess boundary
+- THEN each SHALL exit with its documented exit code (`1` for the configuration-error report, `0` for the dry run) and stdout SHALL strict-decode as cp1252
+- AND the surrounding ASCII substring SHALL still be present (`Configuration errors`, `DRY RUN`)
+- AND no `UnicodeEncodeError` traceback SHALL appear on stderr
 
 #### Scenario: Dispatch exit codes
 
