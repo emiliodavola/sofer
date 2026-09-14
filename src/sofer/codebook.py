@@ -57,21 +57,6 @@ def infer_column_type(values: list[str]) -> str:
     return "categorical/text"
 
 
-def _infer_type(values: list[str]) -> str:
-    """Deprecated alias for :func:`infer_column_type`.
-
-    Use :func:`infer_column_type` directly instead.
-    """
-    import warnings
-
-    warnings.warn(
-        "_infer_type is deprecated, use infer_column_type",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return infer_column_type(values)
-
-
 # ══════════════════════════════════════════════════════════════════════════
 #  Format-specific readers
 # ══════════════════════════════════════════════════════════════════════════
