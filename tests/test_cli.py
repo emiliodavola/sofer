@@ -1581,6 +1581,164 @@ class TestSubprocessBoundary:
         assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"
 
 
+class TestCodebookToolConfigParity:
+    """CB-R11 - the single-file CLI codebook reads the resolved tool-wide config.
+
+    ``_cmd_codebook`` used to leave ``codebook.generate``'s literal ``";"`` /
+    ``"utf-8-sig"`` defaults in force, so a configured repository got a
+    collapsed single-column codebook (delimiter) or an uncaught
+    ``UnicodeDecodeError`` / ``LookupError`` traceback (encoding). These four
+    cases drive the ``conftest.run_cli`` subprocess boundary (PB-02) because
+    ``src/sofer/cli.py`` carries the 100.00% per-file coverage mandate with
+    ``# pragma: no cover`` forbidden (AGENTS.md rule 14): the new
+    ``ValueError`` and ``LookupError`` arms must genuinely execute there.
+    Every case uses a non-default delimiter, a non-default encoding, or a codec
+    that does not exist - a ``";"``-default case would prove nothing here.
+    ``PYTHONIOENCODING=utf-8`` pins the child's stream encoding so the
+    diagnostics are read back deterministically on every platform; the cp1252
+    console path has its own dedicated tests in ``TestConsoleEncodingGuard``.
+    """
+
+    @staticmethod
+    def _utf8_io() -> dict[str, str]:
+        """Child-process env pinning stdout/stderr to UTF-8 (fresh dict, no shared state)."""
+        return {"PYTHONIOENCODING": "utf-8"}
+
+    @staticmethod
+    def _write_tool_config(tmp_path, *lines: str) -> None:
+        """Write the ``[tool.sofer]`` block the CLI discovers from its cwd."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.sofer]\n" + "".join(f"{line}\n" for line in lines),
+            encoding="utf-8",
+        )
+
+    def test_codebook_honors_tool_sofer_delimiter(self, tmp_path) -> None:
+        """A configured ``,`` yields the two-column structure MCP already pins.
+
+        CLI twin of ``tests/test_mcp_server.py::TestSurfacingScenarios::
+        test_codebook_honors_tool_sofer_delimiter`` (MSP-R10): under the frozen
+        ``";"`` default the two-field header collapsed into one column.
+        """
+        self._write_tool_config(tmp_path, 'csv_delimiter = ","')
+        (tmp_path / "data.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 0, result.stderr
+        assert "| 1 | `name`" in result.stdout, result.stdout
+        assert "| 2 | `age`" in result.stdout, result.stdout
+
+    def test_codebook_honors_tool_sofer_encoding(self, tmp_path) -> None:
+        """A cp1252-only byte sequence is read under the configured encoding.
+
+        ``0xE1`` (``a`` with an acute accent in cp1252) is an invalid UTF-8 start
+        byte, so the frozen ``"utf-8-sig"`` default and the ``utf-8`` fallback
+        both fail on this file - only the configured ``cp1252`` decodes it.
+        """
+        self._write_tool_config(tmp_path, 'csv_delimiter = ","', 'csv_encoding = "cp1252"')
+        (tmp_path / "data.csv").write_bytes(b"name,city\nAna,M\xe1laga\n")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 0, result.stderr
+        assert "| 1 | `name`" in result.stdout, result.stdout
+        assert "| 2 | `city`" in result.stdout, result.stdout
+
+    def test_codebook_undecodable_file_is_diagnostic(self, tmp_path) -> None:
+        """Bytes undecodable under the configured encoding and both fallbacks.
+
+        ``0x81`` is undefined in cp1252 *and* an invalid UTF-8 start byte, so the
+        configured encoding plus the ``utf-8-sig`` / ``utf-8`` fallbacks are all
+        exhausted: the ``ValueError`` arm prints ``Error: ...`` on stderr and
+        exits 1 instead of letting ``UnicodeDecodeError`` escape as a traceback.
+        """
+        self._write_tool_config(tmp_path, 'csv_encoding = "cp1252"')
+        (tmp_path / "data.csv").write_bytes(b"name;age\n\x81;30\n")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 1, result.stderr
+        assert result.stderr.startswith("Error: "), result.stderr
+        assert "Cannot decode" in result.stderr, result.stderr
+        assert "Traceback" not in result.stderr
+
+    def test_codebook_unknown_codec_is_diagnostic(self, tmp_path) -> None:
+        """A codec name that does not exist takes the same diagnostic path.
+
+        ``tool-config`` TC-13 accepts any non-empty ``csv_encoding`` string, so
+        ``"not-a-codec"`` is reachable config; ``open`` raises ``LookupError``
+        (never caught by the shared reader), which the CLI branch now converts
+        into ``Error: ...`` plus exit 1 - the arm keeping ``cli.py`` at 100.00%
+        under AGENTS.md rule 14.
+        """
+        self._write_tool_config(tmp_path, 'csv_encoding = "not-a-codec"')
+        (tmp_path / "data.csv").write_text("name;age\nAlice;30\n", encoding="utf-8-sig")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 1, result.stderr
+        assert result.stderr.startswith("Error: "), result.stderr
+        assert "not-a-codec" in result.stderr, result.stderr
+        assert "Traceback" not in result.stderr
+
+
+class TestCodebookSingleFileDiagnosticArmsInProcess:
+    """In-process carriers for the two single-file diagnostic arms (rule 14).
+
+    The four ``TestCodebookToolConfigParity`` cases drive the ``conftest.run_cli``
+    subprocess boundary (PB-02) and are the CB-R11 behaviour proof, but
+    ``uv run coverage run -m pytest`` instruments only the test process: execution
+    inside the spawned ``python -m sofer.cli`` is never recorded, so ``cli.py``'s
+    new exception body would have no coverage carrier and the COV-06 per-file gate
+    would fall below 100.00 (AGENTS.md rule 14 forbids the pragma that would
+    otherwise hide it). These two cases call ``cli._cmd_codebook`` in-process,
+    exactly as ``TestCodebookAllFilesErrors`` does for the ``--all-files`` arm, so
+    both arms are genuinely executed in the instrumented process. The spec delta's
+    Test Mapping permits this in-process call and it never replaces the boundary
+    tests; the failures come from the real reader (no mock) - only the resolved
+    tool-wide config constants differ.
+    """
+
+    def test_single_file_decode_exhaustion_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """A real ``ValueError`` from the reader surfaces as ``Error: ...``, rc 1."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        monkeypatch.setattr(config, "CSV_ENCODING", "cp1252")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_bytes(b"name;age\n\x81;30\n")
+
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="unused.toml",
+                csv=str(csv_path),
+                output=None,
+                max_sample=None,
+            )
+        )
+
+        assert rc == 1
+        assert capsys.readouterr().err.startswith("Error: ")
+
+    def test_single_file_unknown_codec_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """A real ``LookupError`` from an absent codec renders the same diagnostic."""
+        monkeypatch.setattr(config, "CSV_ENCODING", "not-a-codec")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("name;age\nAlice;30\n", encoding="utf-8")
+
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="unused.toml",
+                csv=str(csv_path),
+                output=None,
+                max_sample=None,
+            )
+        )
+
+        assert rc == 1
+        assert "not-a-codec" in capsys.readouterr().err
+
+
 class TestConsoleEncodingGuard:
     """``cli._configure_console_streams`` pinned directly (CLI-R11).
 
