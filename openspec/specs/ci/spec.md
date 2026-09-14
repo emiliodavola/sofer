@@ -212,6 +212,74 @@ checklist SHALL include a coverage-gate item.
 - THEN a coverage-gate checkbox item SHALL be present alongside the existing
   README_ES sync item
 
+### Requirement: Dev interpreter pin matches the gate interpreter (CI-07)
+
+> Added by change `2026-09-14-chore-python-version-313` (GitHub #178). Every scenario below is evidenced by verify-phase static or runtime gate evidence rather than by a pytest assertion — the framing this capability's own Test Mapping already uses for gate exit codes.
+
+The repository's local development interpreter pin — the single-version `.python-version` file at the repository root, which uv resolves for every documented `uv run …` invocation — SHALL name the same Python version the gate-bearing CI jobs run on. `.python-version` SHALL contain exactly `3.13` and SHALL equal both gate pins declared in `.github/workflows/ci.yml`: the `lint` job's `python-version` (which runs `uv run mypy src/ scripts/`) and the `coverage` job's `python-version` (which runs the complete-suite coverage gate plus the four COV-06 per-file scoped gates). The pin SHALL be the single local source of the gate interpreter, so that a clean checkout needs no `--python` flag to run the gates.
+
+The pin SHALL make the documented, flag-free gate commands satisfiable on a clean checkout. `uv run mypy src/` and `uv run mypy src/ scripts/` SHALL exit 0 with zero errors — in particular zero `[no-redef]` errors at the five interpreter-selection fallback sites (`cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`, `model.py`). `uv run coverage run -m pytest` followed by `bash scripts/check_core_coverage.sh` SHALL exit 0 with each of the four core rows (`cli.py`, `scanner.py`, `prepare.py`, `publish.py`) at 100.00% and an empty `Missing` column, and the script SHALL reach its last gate (a first-file failure aborts it under `set -euo pipefail`, leaving the remaining gates unverified). A `3.10` pin could satisfy neither gate, because `3.10` installs the conditional `tomli` backport, which makes one arm of every fallback dead and therefore makes the four-module 100.00% mandate unsatisfiable by construction rather than by test quality.
+
+`.python-version` selects the interpreter a developer's tools run under; it SHALL NOT be read as a support declaration. This requirement SHALL NOT change user-facing Python support: `pyproject.toml` `[project] requires-python` SHALL remain `>=3.10`, `[tool.mypy] python_version` SHALL remain `"3.10"` (it declares the minimum language/typing level, tied to `requires-python`, not the developer interpreter), the CI test matrix SHALL keep exercising `3.10`–`3.14`, the TOTAL coverage floor SHALL remain the config-owned `fail_under = 90` (CI-01), and the diff SHALL contain zero `pyproject.toml` paths and zero `.github/workflows/` paths.
+
+`AGENTS.md` rule 12's latent-issue note SHALL be accurate and SHALL record the consequence for a contributor on an older interpreter: it SHALL name all five fallback modules, quote the real fallback form (`import tomli as _tomli` / `import tomllib as _tomli`), record that the pin is `3.13` because a `3.10` development environment installs the `tomli` backport and thereby makes the local `mypy` and COV-06 gates unsatisfiable by construction, keep the existing "do not add mypy to the version matrix" instruction, and state that a contributor on an older interpreter must pass `--python 3.13` explicitly for those two gates. The note SHALL stay where it is and SHALL NOT weaken any other rule-12 bullet.
+
+#### Scenario: Dev pin equals both gate-job pins
+
+- GIVEN `.python-version` at the repository root and `.github/workflows/ci.yml`
+- WHEN the pin is read and compared against the `python-version` declared for the
+  `lint` job and for the `coverage` job
+- THEN `.python-version` SHALL contain exactly `3.13` and no other content
+- AND it SHALL equal both job pins, so the local gate interpreter and the CI gate
+  interpreter are the same value
+
+#### Scenario: Flag-free mypy gates are green on the pinned interpreter
+
+- GIVEN a clean checkout whose only interpreter selection is `.python-version` (no
+  `--python` flag on any command)
+- WHEN `uv run mypy src/` and `uv run mypy src/ scripts/` run — the latter being the
+  exact entry of the local pre-commit mypy hook
+- THEN each SHALL exit 0 with zero errors
+- AND in particular no `[no-redef]` error SHALL be reported at any of the five
+  interpreter-selection fallback sites, which the `3.10` pin produced
+
+#### Scenario: The COV-06 gate script runs all four scoped gates to completion on the pin
+
+- GIVEN a clean checkout whose only interpreter selection is `.python-version`
+- WHEN `uv run coverage run -m pytest` runs and is followed by
+  `bash scripts/check_core_coverage.sh`
+- THEN the script SHALL exit 0
+- AND each of the four core rows SHALL be 100.00% with an empty `Missing` column
+- AND the script SHALL NOT abort before its last gate has run, so all four scoped
+  gates are verified in the same pass (the pin that made the first row fail left the
+  remaining three unverified)
+
+#### Scenario: The latent-issue note states the rationale and the escape hatch
+
+- GIVEN `AGENTS.md` rule 12's latent-issue note
+- WHEN the note is read
+- THEN it SHALL name all five fallback modules and quote the real fallback form
+  (`import tomli as _tomli` / `import tomllib as _tomli`)
+- AND it SHALL record that the pin is `3.13` because a `3.10` development environment
+  installs the `tomli` backport and makes the local `mypy` and COV-06 gates
+  unsatisfiable by construction
+- AND it SHALL keep the "do not add mypy to the version matrix" instruction
+- AND it SHALL state that a contributor on an older interpreter must pass
+  `--python 3.13` explicitly for those two gates
+
+#### Scenario: User-facing support is unchanged
+
+- GIVEN `pyproject.toml`, `.github/workflows/ci.yml`, and this change's diff
+- WHEN the support declarations, the coverage floor, and the diff are inspected
+- THEN `requires-python` SHALL still be `>=3.10` and `[tool.mypy] python_version`
+  SHALL still be `"3.10"`
+- AND the CI test matrix SHALL still exercise `3.10`, `3.11`, `3.12`, `3.13`, and
+  `3.14`
+- AND the TOTAL coverage floor SHALL still be the config-owned `fail_under = 90`
+  (CI-01), with no threshold added or re-declared
+- AND the diff SHALL contain zero `pyproject.toml` paths and zero
+  `.github/workflows/` paths
+
 ---
 
 ## Test Mapping
@@ -242,3 +310,8 @@ evidence recorded in the verify report.
 | CI-06 | CONTRIBUTING documents the floor | `tests/test_ci_workflows.py` — text inspection of CONTRIBUTING.md |
 | CI-06 | README mirrors README_ES | Verify-phase static evidence — section mirror diff (PB-05/MSP-R12 precedent); not pytest-assertable |
 | CI-06 | PR template checklist item | `tests/test_ci_workflows.py` — text inspection of the PR template |
+| CI-07 | Dev pin equals both gate-job pins | Verify-phase static evidence — `.python-version` read against the `lint` and `coverage` job pins in `ci.yml` |
+| CI-07 | Flag-free mypy gates are green on the pinned interpreter | Verify-phase runtime evidence — `uv run mypy src/` and `uv run mypy src/ scripts/` exit codes (CI-01 gate-exit-code precedent) |
+| CI-07 | The COV-06 gate script runs all four scoped gates to completion on the pin | Verify-phase runtime evidence — `bash scripts/check_core_coverage.sh` exit code with four 100.00% rows (COV-06 precedent) |
+| CI-07 | The latent-issue note states the rationale and the escape hatch | Verify-phase static evidence — `AGENTS.md` rule 12 text inspection |
+| CI-07 | User-facing support is unchanged | Verify-phase static evidence — diff and config inspection (zero `pyproject.toml` / `.github/workflows/` paths, `fail_under = 90` intact) |
