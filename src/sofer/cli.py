@@ -178,7 +178,15 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     """Generate a markdown codebook for one file or all files in the config.
 
     Without ``--all-files``: analyse *FILE* and print the codebook to
-    stdout (or write to ``--output``).  With ``--all-files``: read every
+    stdout (or write to ``--output``).  The resolved tool-wide
+    ``config.CSV_DELIMITER`` / ``config.CSV_ENCODING`` are read at call time
+    (module-constant reads, resolved by ``main()``'s single ``config.reload``
+    before dispatch), so the invocation's ``[tool.sofer]`` values reach
+    ``codebook.generate`` and its literal defaults never take effect — the
+    same source ``sofer_codebook`` uses (MSP-R10).  An unreadable input
+    (``ValueError`` from an exhausted encoding chain, ``LookupError`` from an
+    unknown codec name) prints ``Error: <message>`` on stderr and returns 1 —
+    never an uncaught traceback.  With ``--all-files``: read every
     ``[[file]]`` entry from the TOML and write one codebook per file
     under the package ``build_dir`` (``--output`` overrides it), plus a
     root index — mirroring where ``sofer_codebook_all`` and ``publish``
@@ -223,6 +231,15 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # time (post-reload), never from a frozen argparse default.
     max_sample = args.max_sample if args.max_sample is not None else config.CODEBOOK_MAX_SAMPLE
 
+    # Resolve the delimiter/encoding through the config module at call time,
+    # exactly like ``max_sample`` above (TC-04): the single reload in
+    # ``main()`` has already run, so these observe this invocation's
+    # ``[tool.sofer]`` values — the same source ``sofer_codebook`` passes
+    # (MSP-R10).  Leaving them unset would resurrect the literal ``";"`` /
+    # ``"utf-8-sig"`` defaults inside ``codebook.generate``.
+    delimiter = config.CSV_DELIMITER
+    encoding = config.CSV_ENCODING
+
     # Anchor a relative --output to the input file's parent (MSP-R10): the
     # codebook lands next to the analysed file, never in an unrelated cwd.
     output_path = args.output
@@ -232,11 +249,21 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
             out = Path(args.csv).parent / out
         output_path = str(out)
 
-    codebook = generate_codebook(
-        args.csv,
-        output_path=output_path,
-        max_sample=max_sample,
-    )
+    # Same diagnostic contract as the --all-files sibling above: an unreadable
+    # input (decode exhaustion is a ``ValueError``) or an unknown codec name
+    # (``LookupError``, reachable while TC-13 accepts any non-empty string)
+    # becomes one ``Error: …`` line on stderr with exit 1 — never a traceback.
+    try:
+        codebook = generate_codebook(
+            args.csv,
+            output_path=output_path,
+            delimiter=delimiter,
+            encoding=encoding,
+            max_sample=max_sample,
+        )
+    except (ValueError, LookupError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if not args.output:
         print(codebook)
     return 0

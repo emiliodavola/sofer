@@ -325,3 +325,58 @@ analysed the full file, so `sofer_codebook_all` (MSP-R17) and
 - WHEN `generate_all` runs without `max_sample`
 - THEN each codebook SHALL analyse up to the configured rows
 - AND codebooks whose files fit SHALL report `(full scan)`, never a sample cap
+
+---
+
+### Requirement: Single-file codebook reads through the resolved tool-wide config (CB-R11)
+
+> Added by change `2026-09-14-fix-cli-codebook-config` (GitHub #182).
+
+The `sofer codebook FILE` path SHALL pass the resolved tool-wide `config.CSV_DELIMITER` and
+`config.CSV_ENCODING` into `codebook.generate`, resolved at call time after the invocation's single
+tool-config reload (TC-04) — the same source MSP-R10 requires of the MCP codebook tools — and SHALL
+NOT let the literal defaults in `codebook.generate` (`";"`, `"utf-8-sig"`) take effect.
+
+When the input cannot be read — the configured encoding and the repository's fallback chain are
+exhausted (`ValueError`), or the configured encoding names a codec that does not exist (`LookupError`,
+reachable per TC-13) — the command SHALL print `Error: <message>` on stderr and SHALL exit non-zero.
+It SHALL NOT emit an uncaught traceback, and it SHALL NOT retry `latin-1`/`cp1252`: the fallback
+policy remains the repository's existing `utf-8-sig → utf-8` (`src/sofer/_csv_reader.py:27-31`), with
+a configured non-UTF-8 encoding honoured first. `codebook.generate`'s parameter defaults and the
+dataset-`[meta]` resolution of `generate_all` (`codebook.py:505-506`) SHALL remain unchanged, as the
+fallback for direct library callers and for the `--all-files` tier respectively.
+
+#### Scenario: Configured delimiter and encoding are what the codebook reflects
+
+- GIVEN `[tool.sofer] csv_delimiter = ","` (and, separately, a non-default `csv_encoding`) and a file matching that configuration
+- WHEN `sofer codebook FILE` runs with no `--config`
+- THEN the codebook SHALL show the columns induced by the configured delimiter (two columns for a two-field header)
+- AND the file SHALL be read under the configured encoding, not the literal `";"` / `"utf-8-sig"` defaults
+
+#### Scenario: CLI and MCP agree on the same input
+
+- GIVEN the same tool-wide config and the same file
+- WHEN the CLI single-file command and the MCP single-file tool both run
+- THEN both SHALL produce the same column structure for that file
+- AND no MCP source or MCP test SHALL be modified by this change
+
+#### Scenario: Undecodable input yields a diagnostic, never a traceback
+
+- GIVEN a file that cannot be decoded under the configured encoding nor under `utf-8-sig → utf-8`
+- WHEN `sofer codebook FILE` runs
+- THEN it SHALL print `Error: <message>` on stderr
+- AND it SHALL exit non-zero, with no uncaught traceback
+
+#### Scenario: Unknown codec name yields the same diagnostic
+
+- GIVEN `[tool.sofer] csv_encoding` naming a codec that does not exist (valid as a non-empty string under TC-13)
+- WHEN `sofer codebook FILE` runs
+- THEN the same `Error: <message>` diagnostic SHALL be printed on stderr with a non-zero exit
+- AND no traceback SHALL escape the command
+
+#### Scenario: The fallback policy is the existing one, not a new one
+
+- GIVEN the configured encoding is honoured first and then exhausted
+- WHEN the readers fall back
+- THEN only `utf-8-sig → utf-8` SHALL be tried
+- AND `latin-1`/`cp1252` SHALL NOT be added as retries
