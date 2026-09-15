@@ -64,6 +64,8 @@ cwd anchor.
 
 ### Requirement: One reload per CLI invocation after the config path resolves (TC-04)
 
+> Modified by `2026-09-14-fix-prepare-csv-config-tier` (archived 2026-09-14; GitHub #181) — the note now points at the normative precedence clause in `parquet-conversion` PC-U01 instead of contradicting it.
+
 The CLI entry point SHALL trigger exactly one tool-config resolution per
 invocation, once the effective `--config` path is known. After resolution,
 module-level config constants SHALL reflect the newly resolved values for all
@@ -77,7 +79,12 @@ subsequent reads within that invocation.
 
 (Note: the tool-wide `csv_delimiter` consumer is `sofer profile`, whose reader
 defaults flow through `stream_csv`. The `prepare` command uses the
-DATASET-level `[meta] csv_delimiter`, not this tool-wide key.)
+DATASET-level `[meta] csv_delimiter`/`csv_encoding` when the dataset declares
+them, and falls back to this tool-wide `csv_delimiter` key and
+`config.CSV_ENCODING` only when it declares neither — the resolution order is
+normative in `parquet-conversion` **PC-U01**.)
+
+(Previously: the note stated flatly that `prepare` uses the dataset-level key "not this tool-wide key", contradicting PC-U01's reader table and leaving the fallback undocumented.)
 
 #### Scenario: Single-file commands without a dataset TOML
 

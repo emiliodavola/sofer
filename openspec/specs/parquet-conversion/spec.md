@@ -510,22 +510,49 @@ least 90 % (branch coverage). The modified `upload()` function SHALL have at lea
 
 ### Requirement: Universal File-to-Parquet Conversion (PC-U01)
 
+> Modified by `2026-09-14-fix-prepare-csv-config-tier` (archived 2026-09-14; GitHub #181) — the `.csv` reader now honours the dataset-declared dialect first, with the sniff/tool-wide path as the fallback; the reader logic has exactly one home.
+
 The system MUST convert every `[[file]]` with suffix `.csv/.tsv/.xlsx/.jsonl` to Parquet unless `convert_to_parquet=false`; `.parquet` MUST be passthrough and `recursive` entries SHALL be skipped. Readers SHALL be:
 
 | Suffix | Reader |
 |--------|--------|
-| `.csv` | `pyarrow.csv.read_csv` sniffing `config.SNIFF_DELIMITERS` with `config.CSV_ENCODING` |
+| `.csv` | `pyarrow.csv.read_csv` using the dataset's declared `[meta] csv_delimiter`/`csv_encoding` when declared; otherwise sniffing `config.SNIFF_DELIMITERS` with `config.CSV_ENCODING` |
 | `.tsv` | `pyarrow.csv.read_csv` with `delimiter="\t"` (hardcoded) |
 | `.xlsx` | `openpyxl` `read_only,data_only`, all `wb.sheetnames` → `pa.Table` per sheet |
 | `.jsonl` | `pyarrow.json.read_json` with `json`+`pa.Table.from_pylist` fallback |
 | `.parquet` | Passthrough |
 
+For `.csv`, the resolution order SHALL be: (1) the dataset-declared `[meta] csv_delimiter`/`csv_encoding`, which WINS; (2) where the dataset declares no dialect, the existing sniff + tool-wide `config.CSV_ENCODING` behaviour, unchanged. "Declared" MUST be observable independently of the value, so a dataset declaring `;` remains distinguishable from one declaring nothing. The declared `csv_encoding` MUST actually govern the read — the reader SHALL NOT read raw bytes and ignore it. When the declared delimiter differs from the delimiter the sniff would have chosen, conversion SHALL emit a non-blocking warning naming BOTH values and SHALL still honour the declared one; it SHALL NOT fail. Conversion reader logic SHALL have exactly one home.
+
 Writer MUST use `config.PARQUET_COMPRESSION`/`config.PARQUET_ROW_GROUP_SIZE`, cast null-col to string, warn at `config.PARQUET_SHARD_WARNING_MB`. Per-file failure SHALL warn and stage original.
 
-#### Scenario: CSV sniff
-- GIVEN `a.csv` with `;` delimiter
-- WHEN dispatcher runs
-- THEN `pyarrow.csv` SHALL sniff `;` and write normalized `a.parquet`
+(Previously: the `.csv` row resolved tool-wide only — sniff of `config.SNIFF_DELIMITERS` with `config.CSV_ENCODING` — and `csv_encoding` was never consulted.)
+
+#### Scenario: CSV sniff when nothing is declared
+- GIVEN `a.csv` with `;` delimiter and a dataset TOML declaring no dialect
+- WHEN the dispatcher runs
+- THEN the reader SHALL sniff `;` and write normalized `a.parquet`
+
+#### Scenario: Declared delimiter outside the sniff set wins (mis-split catcher)
+- GIVEN `a.csv` is `|`-separated and `[meta] csv_delimiter = "|"` is declared (`|` ∉ `config.SNIFF_DELIMITERS`)
+- WHEN the dispatcher runs end-to-end
+- THEN `a.parquet` SHALL hold the file's true column count and SHALL NOT collapse the header into one column
+- AND the parity check SHALL be structurally unable to agree with a wrong delimiter
+
+#### Scenario: Declared encoding is honoured
+- GIVEN `a.csv` is not UTF-8 and `[meta] csv_encoding` declares its actual encoding
+- WHEN the dispatcher runs
+- THEN `a.parquet` SHALL be written with correctly decoded values and the original CSV SHALL NOT be staged
+
+#### Scenario: Declaration disagrees with the file — warn, keep declared
+- GIVEN `a.csv` is `,`-separated and `[meta] csv_delimiter = ";"` is declared
+- WHEN the dispatcher runs
+- THEN conversion SHALL still use `;` and SHALL print one non-blocking warning naming both `,` and `;`
+
+#### Scenario: No declared dialect is byte-identical to today
+- GIVEN a dataset TOML declaring no `csv_delimiter`/`csv_encoding`
+- WHEN conversion runs
+- THEN the produced Parquet SHALL be byte-identical to the pre-change output for the same input
 
 #### Scenario: TSV hardcoded tab
 - GIVEN `b.tsv` tab-separated
@@ -597,6 +624,22 @@ This is 0.x minor breaking change. Docs MUST state `tsv/xlsx/jsonl` previously s
 - GIVEN `report.xlsx` previously expected as `report.xlsx`
 - WHEN docs consulted
 - THEN migration `convert_to_parquet=false` to keep `report.xlsx` SHALL be described
+
+### Requirement: Single CSV conversion reader (PC-U06)
+
+> Added by change `2026-09-14-fix-prepare-csv-config-tier` (GitHub #181).
+
+`src/sofer/prepare.py` SHALL NOT contain a second copy of the CSV→Parquet conversion cluster (the five helper/reader copies plus `_convert_to_parquet`); no module under `src/sofer/` or `tests/` SHALL import those helpers, and the surviving reader logic SHALL have exactly one home in `src/sofer/_converters.py` (AGENTS.md rule 4). Removal SHALL delete code only and SHALL NOT weaken any coverage floor.
+
+#### Scenario: The duplicated cluster is gone and unreferenced
+- GIVEN the branch after the fix
+- WHEN `src/sofer/prepare.py` and both `src/` and `tests/` are inspected
+- THEN the cluster SHALL be absent from `prepare.py` and no `src/`- or `tests/`-module SHALL reference its symbols
+
+#### Scenario: Single home is exercised
+- GIVEN a declared-dialect CSV conversion
+- WHEN the conversion runs
+- THEN the same `_converters.py` entry point SHALL serve CLI `prepare` and library callers, with no parallel reader left to drift
 
 ### Requirement: CSV→Parquet Conversion Pipeline — Universal (Modified, supersedes §4 CSV-only)
 
