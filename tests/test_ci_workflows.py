@@ -7,12 +7,12 @@ Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
 scenario-verifying tests are the 18 `ci` Test Mapping rows whose verification
-names a test in this module, plus four tests owned by other capabilities or
+names a test in this module, plus five tests owned by other capabilities or
 supporting this one — the two `coverage` COV-06 guards, the CodeQL
-private-window guard, and `test_ci_workflow_files_present`, which fails loudly
-before any parse. Runtime gate exit-code evidence (CI-01 S2's local gate run and
-CI-08 S4's required-version mismatch probe) is recorded in the SDD verify
-report, not asserted here.
+private-window guard, `test_ci_workflow_files_present`, which fails loudly
+before any parse, and the PB-14 hook-scope guard. Runtime gate exit-code evidence
+(CI-01 S2's local gate run and CI-08 S4's required-version mismatch probe) is
+recorded in the SDD verify report, not asserted here.
 """
 
 from __future__ import annotations
@@ -493,4 +493,27 @@ def test_contributing_names_the_declared_ruff_version() -> None:
     section = text.split("### Code style", 1)[1].split("### ", 1)[0]
     assert re.search(rf"(?<![\d.]){re.escape(version)}(?![\d.])", section), (
         f"the Code style section must name ruff {version}"
+    )
+
+
+def test_ruff_format_hook_excludes_markdown() -> None:
+    """PB-14 S1: the ruff-format hook declares its own scope and excludes Markdown."""
+    config = _load_yaml(".pre-commit-config.yaml")
+    hooks = [
+        hook
+        for repo in config["repos"]
+        if repo.get("repo") == _RUFF_PRE_COMMIT_REPO
+        for hook in repo.get("hooks", [])
+        if hook.get("id") == "ruff-format"
+    ]
+    assert len(hooks) == 1, f"expected exactly one ruff-format hook entry, found {len(hooks)}"
+    types_or = hooks[0].get("types_or")
+    assert types_or is not None, (
+        "the ruff-format hook entry must declare `types_or`: its scope is a repository "
+        "declaration, not the upstream manifest default (PB-14)"
+    )
+    assert isinstance(types_or, list), f"`types_or` must be a list, got {types_or!r}"
+    assert "markdown" not in types_or, (
+        "`markdown` must not be in the ruff-format hook's `types_or`: upstream widened the "
+        "manifest at 0.16.6 and the hook rewrote README.md / README_ES.md (issue #216)"
     )

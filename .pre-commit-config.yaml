@@ -5,6 +5,12 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+        # ruff-format's file scope is a repository declaration, not the upstream default:
+        # ruff-pre-commit widened its manifest to include `markdown` at 0.16.6, which let
+        # this hook rewrite the fenced Python in README.md / README_ES.md (issue #216).
+        # Declaring it here keeps a rev bump from widening it silently; see PB-14 in
+        # `process-boundary` and the guard in tests/test_ci_workflows.py.
+        types_or: [python, pyi, jupyter]
 
   - repo: local
     hooks:
