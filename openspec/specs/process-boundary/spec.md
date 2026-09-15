@@ -374,3 +374,65 @@ A normal suite run SHALL emit zero `DeprecationWarning`s from the codebook type-
 - GIVEN the suite running in one process with a cwd `.env` present and no ambient `HF_TOKEN`
 - WHEN the resolving test at `tests/test_mcp_server.py:3168` runs before `tests/test_mcp_registration.py::TestMerge::test_codex_normalize_string_vs_array` (`:171`)
 - THEN the victim SHALL observe no `HF_TOKEN` (`collect_env()` at `mcp_registration.py:450-461` reports none), create no `.bak`, and pass — the amplifier at `tests/test_mcp_registration.py:560-577` SHALL have nothing to restore
+
+### Requirement: Repository-declared ruff-format hook file scope (PB-14)
+
+> Added by change `2026-09-15-chore-ruff-format-hook-scope` (issue #216).
+
+The `ruff-format` pre-commit hook's file-type scope SHALL be a **repository declaration**, not an
+inherited upstream default: the `astral-sh/ruff-pre-commit` hook entry in `.pre-commit-config.yaml` SHALL
+declare an explicit `types_or` naming the types this repository intends the formatter to see — `python`,
+`pyi`, and `jupyter` — and `markdown` SHALL NOT be among them. The decision is deliberate and
+rationale-bearing: upstream widened the manifest's `types_or` to include `markdown` between
+`ruff-pre-commit` 0.15.21 and 0.16.6 without this repository changing anything, and the pinned hook then
+rewrote the fenced Python inside `README.md` and `README_ES.md` (issue #216). The declared scope SHALL
+therefore NOT be read as a mirror of the upstream default, a `rev` bump SHALL NOT widen it silently, and
+the declared tag vocabulary SHALL stay consistent with the sibling scope decision
+`[tool.ruff] extend-exclude = ["openspec"]` in `pyproject.toml`.
+
+This requirement SHALL constrain **the hook only**. `types_or` is a pre-commit filter, not a ruff setting:
+a direct `ruff format <path>` still sees Markdown, and this requirement SHALL NOT be read as narrowing the
+formatter itself, as adopting a Markdown formatter, or as arming any gate. Issue **#194** SHALL retain
+ownership of the decision to arm a `ruff format --check` gate and of that gate's path scope; this
+requirement SHALL arm no CI step. This change SHALL NOT move the `ruff-pre-commit` `rev`, SHALL NOT edit
+`pyproject.toml` or any `src/sofer/**` path, and SHALL leave `README.md` / `README_ES.md` byte-identical.
+
+The declaration SHALL be statically guarded in `tests/test_ci_workflows.py` (the established home for
+static repository-shape contracts): the hook entry SHALL declare `types_or`, SHALL declare it as a list,
+and `markdown` SHALL NOT appear in it. The guard SHALL assert the **defect class**, not mirror the
+declared list, so a legitimate future widening to another type keeps it green. The guard SHALL assert
+declaration shape only: that pre-commit honours the override is verify-phase runtime evidence and SHALL
+NOT be asserted from pytest (the suite spawns no `pre-commit`).
+
+#### Scenario: The hook declares its own scope and excludes Markdown
+
+- GIVEN `.pre-commit-config.yaml` as committed by this change
+- WHEN `tests/test_ci_workflows.py::test_ruff_format_hook_excludes_markdown` parses it with the module's existing `_load_yaml` helper and selects the `astral-sh/ruff-pre-commit` repo's hook whose `id` is `ruff-format`
+- THEN the entry SHALL be found exactly once and SHALL declare a list-valued `types_or`
+- AND `"markdown"` SHALL NOT be a member of that list
+- AND the guard SHALL be red against an entry with no `types_or` key and green once the config line lands (red then green, both recorded in the verify report)
+- AND no other tag SHALL be asserted, so adding a legitimate type leaves the guard green
+
+#### Scenario: The hook no longer receives Markdown and leaves the READMEs untouched
+
+- GIVEN the pinned `ruff-pre-commit` hook materialised in the local pre-commit cache and the repository's declared `types_or` in place
+- WHEN `uv run pre-commit run ruff-format --files README.md` runs
+- THEN the hook SHALL report the file as not a hook input (`(no files to check)Skipped`) and SHALL exit 0
+- AND `uv run pre-commit run ruff-format --all-files` SHALL show no Markdown batch — no `files were modified by this hook` — listing only `python` / `pyi` / `jupyter` inputs
+- AND `git diff --stat -- README.md README_ES.md` SHALL be empty afterwards
+- AND the hook's **file-list output**, not its exit code, SHALL be the discriminating evidence: the entry is the fixing command `ruff format --force-exclude`, which exits 0 after rewriting (the #195 trap)
+- AND this evidence is **verify-phase runtime evidence** — the commands above pasted with their exit codes into the verify report (PB-10 / CI-08 S4 precedent)
+
+---
+
+## Test Mapping
+
+Every scenario SHALL map to a green test or to verify-phase runtime evidence (AGENTS.md rule 6;
+rules.specs). Static config assertions live in `tests/test_ci_workflows.py`. PB-01..PB-13 rows are not
+backfilled by this change: their evidence classes are stated in their own scenario text, and the backfill
+is a separate concern.
+
+| Req | Scenario | Verification |
+| --- | -------- | ------------ |
+| PB-14 | The hook declares its own scope and excludes Markdown | `tests/test_ci_workflows.py` — `test_ruff_format_hook_excludes_markdown`: YAML inspection of the `ruff-format` hook entry in `.pre-commit-config.yaml` |
+| PB-14 | The hook no longer receives Markdown and leaves the READMEs untouched | Verify-phase runtime evidence — `uv run pre-commit run ruff-format --files README.md` and `--all-files`, plus an empty `git diff --stat -- README.md README_ES.md` |
