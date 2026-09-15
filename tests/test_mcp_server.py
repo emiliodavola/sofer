@@ -3180,6 +3180,72 @@ class TestHfTokenFallback:
 
         assert _get_hf_token() == "from-dotenv"
 
+    def test_dotenv_call_leaves_environ_unchanged(self, tmp_path, monkeypatch, restore_tool_config):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        (tmp_path / ".env").write_text(
+            "HF_TOKEN=from-dotenv\nHF_HUB_DISABLE_IMPLICIT_TOKEN=true\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        from sofer.mcp_server import _get_hf_token
+
+        before = dict(os.environ)  # snapshot AFTER setup, BEFORE the call
+        assert _get_hf_token() == "from-dotenv"
+        assert dict(os.environ) == before
+
+    def test_dotenv_not_substituted_for_blank_present_env(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """PB-13 S2: env wins by key PRESENCE — a blank present value never falls back to `.env`."""
+        monkeypatch.setenv("HF_TOKEN", "   ")
+        monkeypatch.setenv("HF_HUB_TOKEN", "alias-token")
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        (tmp_path / ".env").write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "alias-token"
+
+    def test_dotenv_only_disable_flag_gates_file_fallback(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """PB-13 S4: a `.env`-only disable flag still gates the file fallback."""
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        (tmp_path / ".env").write_text("HF_HUB_DISABLE_IMPLICIT_TOKEN=true\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() is None
+
+    def test_python_dotenv_disabled_short_circuits_dotenv_read(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """D1: a truthy ``PYTHON_DOTENV_DISABLED`` disables the `.env` read entirely."""
+        (tmp_path / ".env").write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        from sofer.mcp_server import _read_dotenv_values
+
+        assert _read_dotenv_values() == {"HF_TOKEN": "from-dotenv"}
+        monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "true")
+        assert _read_dotenv_values() == {}
+
     def test_never_log_token(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
         _prepare_package(tmp_path)

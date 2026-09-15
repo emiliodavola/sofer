@@ -689,7 +689,9 @@ Ubicaciones y formas por agente:
   token se resuelve vía `HF_TOKEN` → `HF_HUB_TOKEN` (alias compat de sofer) →
   `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (caché de
   `hf auth login` vía `HF_TOKEN_PATH` + OIDC vía `HF_OIDC_RESOURCE` + Colab) con
-  soporte `.env` (`load_dotenv(override=False)`); `HF_HUB_DISABLE_IMPLICIT_TOKEN`
+  soporte `.env` leído sin mutar el entorno del proceso
+  (`dotenv_values`; un nombre presente en el entorno gana aunque esté en blanco);
+  `HF_HUB_DISABLE_IMPLICIT_TOKEN`
   en verdadero omite el fallback de archivo; el token nunca se registra en logs.
   El control de calidad se ejecuta antes de la comprobación del token (fallo
   determinista sin conexión). `hf auth login` es una alternativa válida a

@@ -63,7 +63,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -744,34 +744,47 @@ def _load_dataset(
     return cfg, report, config_errors
 
 
-def _load_dotenv_if_available() -> None:
-    """Load ``.env`` without overriding existing env vars (best-effort).
+def _read_dotenv_values() -> dict[str, str]:
+    """Return the `.env` view WITHOUT touching `os.environ` (`{}` when dotenv is absent/disabled).
 
-    Tries ``python-dotenv``'s :func:`load_dotenv` with ``override=False`` so
-    an env var already set in the shell prevails over a ``.env`` entry.
-    Explicitly tries ``Path.cwd() / ".env"`` first (so a ``.env`` in the
-    current working directory is found even when ``find_dotenv(usecwd=False)``
-    would miss it), then falls back to the default search. Silently no-ops
-    when the package is not installed.
+    Parity with the `load_dotenv(override=False)` used until now: the cwd `.env` wins, the default
+    search fills the rest, a key with no value contributes nothing (dotenv/main.py:107), and a
+    truthy `PYTHON_DOTENV_DISABLED` disables the read (dotenv/main.py:405-410).
     """
     try:
         from pathlib import Path
 
-        from dotenv import load_dotenv
-
-        load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
-        load_dotenv(override=False)
+        from dotenv import dotenv_values
     except ImportError:
-        pass
+        return {}
+    if _is_truthy_env("PYTHON_DOTENV_DISABLED", {}):
+        return {}
+    values: dict[str, str] = {}
+    for path in (Path.cwd() / ".env", None):
+        parsed = dotenv_values(dotenv_path=path) if path else dotenv_values()
+        for key, value in parsed.items():
+            if value is not None and key not in values:
+                values[key] = value
+    return values
 
 
-def _is_truthy_env(name: str) -> bool:
-    """Return ``True`` when env var *name* is a truthy flag.
+def _merged_env(name: str, dotenv: Mapping[str, str]) -> str:
+    """Environment value for *name* by PRESENCE, else its `.env` value, else ``""``."""
+    if name in os.environ:  # presence — NOT `os.environ.get(name) or dotenv.get(name)`
+        return os.environ[name]
+    return dotenv.get(name, "")
+
+
+def _is_truthy_env(name: str, dotenv: Mapping[str, str]) -> bool:
+    """Return ``True`` when *name* is a truthy flag in the merged environment view.
 
     Mirrors ``huggingface_hub`` truthy check: ``"1"``, ``"true"``,
-    ``"yes"``, ``"on"`` (case-insensitive, stripped).
+    ``"yes"``, ``"on"`` (case-insensitive, stripped). *dotenv* is the required
+    merged view (:func:`_merged_env`), so the ``.env``-only
+    ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` keeps gating the implicit file fallback
+    exactly as ``load_dotenv(override=False)`` made it visible before.
     """
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    return _merged_env(name, dotenv).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _clean_token(t: str | None) -> str | None:
@@ -788,22 +801,24 @@ def _clean_token(t: str | None) -> str | None:
 
 
 def _get_hf_token() -> str | None:
-    """Resolve an HF token via the full fallback chain.
+    """Resolve an HF token via the full fallback chain, without mutating ``os.environ``.
 
     Order: ``HF_TOKEN`` -> ``HF_HUB_TOKEN`` (sofer compat alias) ->
     ``HUGGING_FACE_HUB_TOKEN`` (hub native) -> ``huggingface_hub.get_token()``
     (file via ``HF_TOKEN_PATH`` + OIDC via ``HF_OIDC_RESOURCE`` + Colab).
-    Each env value is cleaned via :func:`_clean_token`; empty/whitespace-only
-    is treated as absent. ``load_dotenv(override=False)`` runs first when
-    available. ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` truthy skips the file/Colab
-    fallback; OIDC errors propagate.
+    Each name is resolved through :func:`_merged_env` — the environment wins by
+    **key presence**, ``.env`` (read with ``dotenv_values``) supplies a value
+    only when the name is absent from the environment — and cleaned via
+    :func:`_clean_token`; empty/whitespace-only is treated as absent.
+    ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` truthy skips the file/Colab fallback;
+    OIDC errors propagate. Nothing here writes to ``os.environ``.
     """
-    _load_dotenv_if_available()
+    dotenv = _read_dotenv_values()
     for env_name in ("HF_TOKEN", "HF_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        token = _clean_token(os.environ.get(env_name))
+        token = _clean_token(_merged_env(env_name, dotenv))
         if token is not None:
             return token
-    if _is_truthy_env("HF_HUB_DISABLE_IMPLICIT_TOKEN"):
+    if _is_truthy_env("HF_HUB_DISABLE_IMPLICIT_TOKEN", dotenv):
         return None
     try:
         from huggingface_hub import get_token
