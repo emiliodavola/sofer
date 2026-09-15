@@ -74,7 +74,7 @@ src/sofer/
 
 ### Code style
 
-This project uses **ruff** for linting and formatting. Configuration is in `ruff.toml` at the repo root. Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
+This project uses **ruff** 0.16.7 for linting and formatting. Configuration is in `ruff.toml` at the repo root. Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
 
 ### Type checking
 

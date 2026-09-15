@@ -282,6 +282,85 @@ The pin SHALL make the documented, flag-free gate commands satisfiable on a clea
 
 ---
 
+### Requirement: Single authoritative ruff version (CI-08)
+
+> Added by change `2026-09-15-chore-ruff-single-authority` (GitHub #195). Scenarios 1–3 are
+> asserted by three static guard tests in `tests/test_ci_workflows.py`; scenario 4 is
+> verify-phase runtime evidence — the framing this capability's own Test Mapping already
+> uses for gate exit codes.
+
+The repository SHALL declare exactly one authoritative ruff version, and the three
+declarations that decide which ruff runs SHALL name that same version: the `pyproject.toml`
+dev-group pin (an exact `==X.Y.Z` specifier, never a floor), `[tool.ruff] required-version`
+in `pyproject.toml`, and the `astral-sh/ruff-pre-commit` entry's `rev` in
+`.pre-commit-config.yaml` (`vX.Y.Z`). The dev pin SHALL be the single source of the value —
+`required-version` and the hook `rev` SHALL be derived from it — so a future bump edits
+declarations only and SHALL NOT have to edit a test literal.
+
+`[tool.ruff] required-version` SHALL be the enforcing declaration: a binary whose version
+does not satisfy it SHALL fail when configuration is loaded, so a drifted environment
+errors instead of silently formatting or linting under a version the repository did not
+declare. The declarations SHALL be statically guarded in `tests/test_ci_workflows.py`,
+extending that module's existing `_read_text` / `_load_toml` / `_load_yaml` helpers: the dev
+pin's exact specifier, the `required-version` value, and the hook `rev` SHALL be asserted
+equal; no file under `.github/workflows/` SHALL declare a ruff version literal (the version
+reaches CI through `uv.lock`, not through a workflow); and the extracted `X.Y.Z` SHALL
+appear in `CONTRIBUTING.md`'s Code style section. Each guard SHALL derive the version from
+the dev pin and SHALL NOT hardcode a version literal.
+
+This requirement SHALL arm no CI step and SHALL add no workflow file: it SHALL NOT
+introduce a `ruff format --check` invocation under `.github/workflows/**`, enforcement of
+the staged-file formatter SHALL remain the local pre-commit `ruff-format` hook, and issue
+#194 SHALL retain the un-staged-file gap (`process-boundary` PB-10). A change that moves
+the pin SHALL refresh `uv.lock` in the same change, confined to the ruff package
+block and the dev specifier. `packaging` PKG-06 states the same regeneration class for its own
+`fastmcp` declaration and SHALL NOT be read as owning this one: its `uv.lock` clause is scoped to that
+declaration, so the obligation for a ruff pin move is stated here, in CI-08.
+
+#### Scenario: Dev pin, required-version, and hook rev agree
+
+- GIVEN the three ruff version declarations — the `[dependency-groups] dev` pin in
+  `pyproject.toml`, `[tool.ruff] required-version`, and the `astral-sh/ruff-pre-commit`
+  entry in `.pre-commit-config.yaml`
+- WHEN `tests/test_ci_workflows.py::test_ruff_pin_hook_rev_and_required_version_agree`
+  extracts `X.Y.Z` from the dev pin and compares the other two declarations against it
+- THEN the dev specifier SHALL be exact (`==X.Y.Z`, so a `>=` floor SHALL fail the guard)
+- AND `[tool.ruff] required-version` SHALL equal `"==" + X.Y.Z`
+- AND the hook entry's `rev` SHALL equal `"v" + X.Y.Z`
+
+#### Scenario: No workflow declares a ruff version
+
+- GIVEN every file under `.github/workflows/`
+- WHEN `tests/test_ci_workflows.py::test_workflows_do_not_declare_a_ruff_version` scans
+  them for a ruff version literal
+- THEN zero matches SHALL exist, so the authority stays in the three declarations and CI
+  receives the version through `uv.lock`
+
+#### Scenario: CONTRIBUTING names the declared version
+
+- GIVEN `CONTRIBUTING.md`'s Code style section
+- WHEN `tests/test_ci_workflows.py::test_contributing_names_the_declared_ruff_version`
+  looks for the `X.Y.Z` extracted from the dev pin
+- THEN that value SHALL appear
+- AND the guard SHALL hold no version literal of its own, so a bump cannot leave the
+  documentation silently stale
+
+#### Scenario: required-version rejects a mismatched binary
+
+- GIVEN the repository's declared `[tool.ruff] required-version` and a mismatch probe that
+  declares a different required version
+- WHEN `uv run ruff check src/ tests/ scripts/` and
+  `uv run ruff format --check src/ tests/ scripts/` run under the probe, and both run again
+  under the declared value
+- THEN each probe run SHALL exit non-zero and SHALL report both the required and the
+  running version
+- AND each declared-value run SHALL exit 0, so the mismatch fails loudly instead of
+  disagreeing quietly
+- AND this evidence is **verify-phase runtime evidence** — the commands above, pasted with
+  their exit codes into the verify report (CI-01 gate-exit-code precedent)
+
+---
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -315,3 +394,7 @@ evidence recorded in the verify report.
 | CI-07 | The COV-06 gate script runs all four scoped gates to completion on the pin | Verify-phase runtime evidence — `bash scripts/check_core_coverage.sh` exit code with four 100.00% rows (COV-06 precedent) |
 | CI-07 | The latent-issue note states the rationale and the escape hatch | Verify-phase static evidence — `AGENTS.md` rule 12 text inspection |
 | CI-07 | User-facing support is unchanged | Verify-phase static evidence — diff and config inspection (zero `pyproject.toml` / `.github/workflows/` paths, `fail_under = 90` intact) |
+| CI-08 | Dev pin, required-version, and hook rev agree | `tests/test_ci_workflows.py` — `test_ruff_pin_hook_rev_and_required_version_agree`: tomllib + YAML declaration equality, with `X.Y.Z` extracted from the dev pin |
+| CI-08 | No workflow declares a ruff version | `tests/test_ci_workflows.py` — `test_workflows_do_not_declare_a_ruff_version`: YAML/full-text scan of `.github/workflows/*.yml` |
+| CI-08 | CONTRIBUTING names the declared version | `tests/test_ci_workflows.py` — `test_contributing_names_the_declared_ruff_version`: text inspection of `CONTRIBUTING.md` |
+| CI-08 | required-version rejects a mismatched binary | Verify-phase runtime evidence — `uv run ruff check src/ tests/ scripts/` and `uv run ruff format --check src/ tests/ scripts/` exit codes under a mismatched `required-version` probe and under the declared value (CI-01 gate-exit-code precedent) |
