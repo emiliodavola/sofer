@@ -3,13 +3,16 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-06) by parsing the repository's
+`ci` specification (requirements CI-01..CI-08) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 15 mapped rows of the spec Test Mapping table,
-plus one supporting guard (`test_ci_workflow_files_present`) that fails loudly
-before any parse. Runtime gate exit-code evidence (CI-01 S2's local gate run)
-is recorded in the SDD verify report, not asserted here.
+scenario-verifying tests are the 18 `ci` Test Mapping rows whose verification
+names a test in this module, plus four tests owned by other capabilities or
+supporting this one — the two `coverage` COV-06 guards, the CodeQL
+private-window guard, and `test_ci_workflow_files_present`, which fails loudly
+before any parse. Runtime gate exit-code evidence (CI-01 S2's local gate run and
+CI-08 S4's required-version mismatch probe) is recorded in the SDD verify
+report, not asserted here.
 """
 
 from __future__ import annotations
@@ -83,6 +86,37 @@ def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
     return value if isinstance(value, list) else [value]
+
+
+_RUFF_PRE_COMMIT_REPO = "https://github.com/astral-sh/ruff-pre-commit"
+_DEV_ENTRY_RE = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?P<spec>[<>=!~].*)$")
+_EXACT_PIN_RE = re.compile(r"^==(?P<version>\d+\.\d+\.\d+)$")
+
+
+def _declared_ruff_version() -> str:
+    """Extract the ``X.Y.Z`` version from the ``pyproject.toml`` dev-group ruff pin.
+
+    CI-08's single source of the ruff version: all three declarations the guards
+    compare are derived from this value and the guards carry no version literal of
+    their own, so bumping ruff edits declarations only.
+
+    Returns:
+        The version without its specifier — the ``X.Y.Z`` of the ``==X.Y.Z`` pin.
+    """
+    dev = _load_toml("pyproject.toml")["dependency-groups"]["dev"]
+    pins = []
+    for entry in dev:
+        match = _DEV_ENTRY_RE.match(entry) if isinstance(entry, str) else None
+        if match is not None and match.group("name") == "ruff":
+            pins.append(match.group("spec").strip())
+    assert len(pins) == 1, f"expected exactly one ruff dev pin, found {pins}"
+    exact = _EXACT_PIN_RE.match(pins[0])
+    assert exact is not None, (
+        f"the ruff dev pin must be an exact ==X.Y.Z specifier, got {pins[0]!r} — a floor "
+        "lets `uv lock` drift the formatter away from the version the hook runs, which is "
+        "exactly how the ambient binary drifted from the pre-commit rev"
+    )
+    return exact.group("version")
 
 
 def _workflow(rel: str) -> tuple[dict[str, Any], str]:
@@ -424,3 +458,39 @@ def test_pr_template_has_coverage_checklist_item() -> None:
     checklist = text.split("## Checklist", 1)[1] if "## Checklist" in text else text
     assert "Coverage gate met" in checklist
     assert "README_ES.md updated" in checklist
+
+
+def test_ruff_pin_hook_rev_and_required_version_agree() -> None:
+    """CI-08 S1: the dev pin, required-version, and the hook rev name one version."""
+    version = _declared_ruff_version()
+    required = _load_toml("pyproject.toml")["tool"]["ruff"]["required-version"]
+    assert required == f"=={version}", f"required-version must be '=={version}', got {required!r}"
+    config = _load_yaml(".pre-commit-config.yaml")
+    revs = [
+        repo.get("rev") for repo in config["repos"] if repo.get("repo") == _RUFF_PRE_COMMIT_REPO
+    ]
+    assert revs == [f"v{version}"], f"ruff-pre-commit rev must be 'v{version}', got {revs!r}"
+
+
+def test_workflows_do_not_declare_a_ruff_version() -> None:
+    """CI-08 S2: the version reaches CI through uv.lock, never through a workflow."""
+    version = _declared_ruff_version()
+    names = _workflow_names()
+    assert names, "no workflow files found — the scan would pass vacuously"
+    for name in names:
+        raw = _read_text(f"{_WORKFLOW_DIR}/{name}")
+        assert version not in raw, f"{name} declares the ruff version {version}"
+        assert re.search(r"ruff\s*(?:==|@|>=|<=|~=|!=|>|<|=)\s*\d", raw) is None, (
+            f"{name} declares a ruff version specifier"
+        )
+
+
+def test_contributing_names_the_declared_ruff_version() -> None:
+    """CI-08 S3: the Code style section names the version the pin declares."""
+    version = _declared_ruff_version()
+    text = _read_text("CONTRIBUTING.md")
+    assert "### Code style" in text, "CONTRIBUTING.md has no '### Code style' section"
+    section = text.split("### Code style", 1)[1].split("### ", 1)[0]
+    assert re.search(rf"(?<![\d.]){re.escape(version)}(?![\d.])", section), (
+        f"the Code style section must name ruff {version}"
+    )
