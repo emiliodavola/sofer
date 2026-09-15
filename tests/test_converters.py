@@ -17,12 +17,15 @@ import pytest
 from sofer import config
 from sofer._converters import (
     CONVERTIBLE_SUFFIXES,
+    _check_conversion_parity,
+    _read_csv_raw_values,
     _write_parquet_table,
     convert_file_to_parquet,
     normalize_parquet_remote,
     sanitize_sheet_name,
 )
 from sofer._mirror import parquet_remote_for
+from sofer.model import DatasetConfig
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  normalize_parquet_remote
@@ -280,3 +283,147 @@ class TestConvertFileToParquet:
         assert ".xlsx" in CONVERTIBLE_SUFFIXES
         assert ".jsonl" in CONVERTIBLE_SUFFIXES
         assert ".parquet" not in CONVERTIBLE_SUFFIXES
+
+
+class TestCsvDialectResolution:
+    """Declared dialect vs fallback resolution (PC-U01, E2)."""
+
+    def _cfg_with_declared(self, delimiter: str) -> DatasetConfig:
+        """Programmatic cfg carrying the declared-keys presence signal."""
+        return DatasetConfig(
+            name="t",
+            repo_id="user/t",
+            files=[],
+            csv_delimiter=delimiter,
+            declared_meta_keys=frozenset({"csv_delimiter"}),
+        )
+
+    def test_declared_semicolon_wins(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging", self._cfg_with_declared(";"))
+        assert result
+        assert pq.read_table(result["data"]).column_names == ["a", "b"]
+
+    def test_declared_comma_wins(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("a,b\n1,2\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging", self._cfg_with_declared(","))
+        assert result
+        assert pq.read_table(result["data"]).column_names == ["a", "b"]
+
+    def test_nothing_declared_falls_back_to_sniff(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(name="t", repo_id="user/t", files=[])
+        assert "csv_delimiter" not in cfg.declared_meta_keys
+        result = convert_file_to_parquet(csv, tmp_path / "staging", cfg)
+        assert result
+        assert pq.read_table(result["data"]).column_names == ["a", "b"]
+
+    def test_declared_encoding_reaches_python_parity_read(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_bytes("name\nJos\u00e9\n".encode("cp1252"))
+        cfg = DatasetConfig(
+            name="t",
+            repo_id="user/t",
+            files=[],
+            csv_encoding="cp1252",
+            declared_meta_keys=frozenset({"csv_encoding"}),
+        )
+        result = convert_file_to_parquet(csv, tmp_path / "staging", cfg)
+        assert result
+        assert pq.read_table(result["data"]).column("name").to_pylist() == ["Jos\u00e9"]
+
+    def test_read_csv_raw_values_honours_encoding(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_bytes("name\nJos\u00e9\n".encode("cp1252"))
+        assert _read_csv_raw_values(csv, ";", "cp1252") == (["name"], [["Jos\u00e9"]])
+        assert _read_csv_raw_values(csv, ";") is None
+
+    def test_collapse_guard_fires_when_raw_header_carries_resolved_delimiter(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """A one-column table whose raw header still carries the delimiter is a mis-split.
+
+        The guard keys on the *resolved* delimiter (design D3) — the reading that
+        keeps the D2 disagreement case silent — so a hand-built one-column table
+        is the only way to reach the branch with the delimiter genuinely present.
+        """
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1\n", encoding="utf-8-sig")
+        table = pa.table({"a;b": [1]})
+        assert table.num_columns == 1
+        ok, _warnings = _check_conversion_parity(csv, ";", table, config.CSV_ENCODING)
+        assert ok is False
+        assert "single column but the raw header contains" in capsys.readouterr().out
+
+    def test_collapse_guard_silent_when_declared_delimiter_absent(self, tmp_path: Path) -> None:
+        import pyarrow.csv as pc
+
+        csv = tmp_path / "data.csv"
+        csv.write_text("a,b\n1,2\n", encoding="utf-8-sig")
+        table = pc.read_csv(csv, parse_options=pc.ParseOptions(delimiter=";"))
+        assert table.num_columns == 1
+        ok, _warnings = _check_conversion_parity(csv, ";", table, config.CSV_ENCODING)
+        assert ok is True
+
+
+class TestConvertFileToParquetRetargetedArms:
+    """Arms retargeted from the removed prepare conversion cluster (D4)."""
+
+    def test_csv_type_inference_and_values(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("id;name;age\n1;Alice;30\n2;Bob;25\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging")
+        table = pq.read_table(result["data"])
+        assert table.num_rows == 2
+        assert table.column_names == ["id", "name", "age"]
+        assert table.column("name").to_pylist() == ["Alice", "Bob"]
+        assert table.schema.field("id").type == pa.int64()
+
+    def test_corrupt_csv_returns_empty_and_warns(self, tmp_path: Path, capsys) -> None:
+        csv = tmp_path / "corrupt.csv"
+        csv.write_bytes(bytes([0, 1, 2, 255, 254]))
+        result = convert_file_to_parquet(csv, tmp_path / "staging")
+        assert result == {}
+        assert "conversion failed" in capsys.readouterr().out.lower()
+
+    def test_missing_csv_returns_empty(self, tmp_path: Path) -> None:
+        assert convert_file_to_parquet(tmp_path / "ghost.csv", tmp_path / "staging") == {}
+
+    def test_parity_failure_returns_empty(self, tmp_path: Path) -> None:
+        csv = tmp_path / "parity.csv"
+        csv.write_text("a;b\n1;2\n\n\n", encoding="utf-8")
+        assert convert_file_to_parquet(csv, tmp_path / "staging") == {}
+
+    def test_oversized_shard_warns(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        csv = tmp_path / "big.csv"
+        csv.write_text("a;b\n" + "1;2\n" * 2000, encoding="utf-8")
+        monkeypatch.setattr(config, "PARQUET_SHARD_WARNING_MB", 0.000001)
+        result = convert_file_to_parquet(csv, tmp_path / "staging")
+        assert result
+        assert "Consider sharding into" in capsys.readouterr().out
+
+    def test_value_parity_warns_per_column(self, tmp_path: Path, capsys) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("zip;sku\n01234;00099\n05678;00100\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging")
+        assert result
+        out = capsys.readouterr().out
+        assert "zip" in out and "sku" in out
+
+    def test_value_parity_silent_when_values_match(self, tmp_path: Path, capsys) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("name;age\nAlice;30\nBob;25\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging")
+        assert result
+        assert "altered" not in capsys.readouterr().out.lower()
+
+    def test_all_null_column_via_conversion_cast_to_string(self, tmp_path: Path) -> None:
+        csv = tmp_path / "data.csv"
+        csv.write_text("name;empty_col\nAlice;\nBob;\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging")
+        table = pq.read_table(result["data"])
+        col_type = table.schema.field("empty_col").type
+        assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)

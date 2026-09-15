@@ -36,15 +36,18 @@ Orchestration flow (mirrors the generation half of the legacy
        regardless (PRP-08).
 
 This module performs ZERO network calls: it never imports ``huggingface_hub``
-and never requires an ``HF_TOKEN``.  The conversion / schema helpers that the
-legacy ``uploader`` used to own now live here (PR 4): CSV→Parquet conversion
-with parity checks, delimiter sniffing, cross-file schema assertion, large
-value warnings, and the card-dtype sanity check.
+and never requires an ``HF_TOKEN``.  CSV→Parquet conversion — the readers, the
+parity checks, and the delimiter/encoding resolution — has exactly one home in
+:mod:`sofer._converters` (PC-U06) and is reached through
+:func:`sofer._converters.convert_file_to_parquet` with the dataset config, so a
+declared ``[meta] csv_delimiter``/``csv_encoding`` governs the read.  What
+remains here are the schema helpers the legacy ``uploader`` used to own (PR 4):
+cross-file schema assertion, large-value warnings, and the card-dtype sanity
+check.
 """
 
 from __future__ import annotations
 
-import csv as csv_module
 import shutil
 import sys
 import tempfile
@@ -55,7 +58,6 @@ if TYPE_CHECKING:
     from .model import DatasetConfig
 
 import pyarrow as pa
-import pyarrow.csv as pc
 import pyarrow.parquet as pq
 
 from . import config
@@ -76,255 +78,6 @@ from .verification import _print_verification_report, verify_load_dataset
 
 # Files that count as "generated artifacts" for the PRP-07 overwrite check.
 _GENERATED_ROOT_FILES: tuple[str, ...] = ("README.md", "LICENSE", "codebook.md")
-
-
-# ── CSV → Parquet conversion helpers (moved from uploader.py, PR 4) ────────────
-
-
-def _sniff_csv_delimiter(csv_path: Path) -> str:
-    """Heuristic delimiter detection from the first line.
-
-    Counts ``;``, ``,``, and ``\\t`` **outside double-quoted fields** so that
-    quoted values like ``"a,b"`` do not sway the count.  Falls back to ``;``
-    when the file cannot be read.
-
-    Args:
-        csv_path: Path to the CSV file.
-
-    Returns:
-        The detected delimiter (``";"``, ``","``, or ``"\\t"``).
-    """
-    try:
-        first = csv_path.read_text(encoding="utf-8-sig").splitlines()[0]
-        counts = _count_delimiters_outside_quotes(first)
-        semi = counts.get(";", 0)
-        comma = counts.get(",", 0)
-        tab = counts.get("\t", 0)
-        best = max(semi, comma, tab)
-        if best == 0:
-            return ";"
-        # Prefer whichever delimiter appears most often
-        if semi == best:
-            return ";"
-        if tab == best:
-            return "\t"
-        return ","
-    except Exception:
-        return ";"
-
-
-def _count_delimiters_outside_quotes(line: str) -> dict[str, int]:
-    """Count occurrences of ``;``, ``,``, and ``\\t`` outside double-quoted spans.
-
-    Args:
-        line: A single line of CSV text.
-
-    Returns:
-        ``{delimiter: count}`` for every delimiter in ``config.SNIFF_DELIMITERS``.
-    """
-    counts: dict[str, int] = {d: 0 for d in config.SNIFF_DELIMITERS}
-    in_quotes = False
-    for ch in line:
-        if ch == '"':
-            in_quotes = not in_quotes
-            continue
-        if in_quotes:
-            continue
-        if ch in counts:
-            counts[ch] += 1
-    return counts
-
-
-def _cast_null_columns_to_string(table: pa.Table) -> pa.Table:
-    """Cast any column whose Arrow type is ``null`` to ``string``.
-
-    pyarrow infers the ``null`` type when a column contains only missing
-    values.  Downstream consumers (the schema report, Hugging Face Dataset
-    Viewer) handle ``string`` gracefully; ``null`` confuses them.
-
-    Args:
-        table: Table produced by ``pyarrow.csv.read_csv``.
-
-    Returns:
-        A copy of *table* with all-null columns cast to ``string``.
-    """
-    for field_idx, field in enumerate(table.schema):
-        if pa.types.is_null(field.type):
-            col = table.column(field_idx)
-            table = table.set_column(field_idx, field.name, col.cast(pa.string()))
-    return table
-
-
-def _read_csv_raw_values(
-    csv_path: Path,
-    delimiter: str,
-) -> tuple[list[str], list[list[str]]] | None:
-    """Read a CSV file into header and rows using Python's csv module.
-
-    Args:
-        csv_path:  Path to the CSV file.
-        delimiter: Field delimiter (e.g. ``";"``).
-
-    Returns:
-        ``(header, rows)`` where *rows* is a list of lists of raw strings,
-        or ``None`` if the file cannot be read.
-    """
-    try:
-        with open(csv_path, newline="", encoding="utf-8-sig") as fh:
-            reader = csv_module.reader(fh, delimiter=delimiter)
-            try:
-                header = next(reader)
-            except StopIteration:
-                return ([], [])
-            rows = [row for row in reader]
-            return (header, rows)
-    except Exception:
-        return None
-
-
-def _check_conversion_parity(
-    csv_path: Path,
-    delimiter: str,
-    table: pa.Table,
-) -> tuple[bool, list[str]]:
-    """Assert row count, column count, and column names match CSV ↔ Parquet.
-
-    Args:
-        csv_path:  Original CSV file.
-        delimiter: Field delimiter used to read *csv_path*.
-        table:     Parquet table produced from *csv_path*.
-
-    Returns:
-        ``(ok, warnings)`` where *ok* is ``False`` when a hard parity
-        violation is detected (conversion should fail), and *warnings* is a
-        list of human-readable messages about value alterations
-        (non-blocking).
-    """
-    raw = _read_csv_raw_values(csv_path, delimiter)
-    if raw is None:
-        return (False, ["Cannot read CSV for parity check"])
-
-    csv_header, csv_rows = raw
-    csv_row_count = len(csv_rows)
-    csv_col_count = len(csv_header)
-    parquet_row_count = table.num_rows
-    parquet_col_names = table.column_names
-
-    # ── Hard parity checks (fail conversion on mismatch) ─────────────────
-    if csv_row_count != parquet_row_count:
-        print(
-            f"  \u26a0  PARITY FAIL: row count mismatch — "
-            f"CSV={csv_row_count}, Parquet={parquet_row_count}"
-        )
-        return (False, [])
-
-    if csv_col_count != len(parquet_col_names):
-        print(
-            f"  \u26a0  PARITY FAIL: column count mismatch — "
-            f"CSV={csv_col_count}, Parquet={len(parquet_col_names)}"
-        )
-        return (False, [])
-
-    if csv_header != parquet_col_names:
-        print(
-            f"  \u26a0  PARITY FAIL: column names diverge — "
-            f"CSV={csv_header}, Parquet={parquet_col_names}"
-        )
-        return (False, [])
-
-    # ── Soft value parity check (warning only) ───────────────────────────
-    warnings: list[str] = []
-    for col_idx, col_name in enumerate(csv_header):
-        # Build CSV value set (string-normalized)
-        csv_values: set[str] = set()
-        for row in csv_rows:
-            if col_idx < len(row):
-                csv_values.add(row[col_idx].strip())
-
-        # Build Parquet value set (string-ified)
-        parquet_col = table.column(col_idx)
-        parquet_values: set[str] = set()
-        for i in range(parquet_col.length()):
-            val = parquet_col[i].as_py()
-            if val is None:
-                parquet_values.add("")
-            else:
-                parquet_values.add(str(val).strip())
-
-        # Detect any value present in CSV but missing from Parquet after
-        # stringification — this catches leading-zero stripping, comma
-        # decimals, and other type-coercion artefacts.
-        altered = csv_values - parquet_values
-        if altered:
-            first = sorted(altered)[0]
-            warnings.append(
-                f"  [!] VALUE ALTERED: column '{col_name}' — "
-                f"e.g. '{first}' changed after type inference"
-            )
-
-    for w in warnings:
-        print(w)
-
-    return (True, warnings)
-
-
-def _convert_to_parquet(
-    csv_path: Path,
-    staging_dir: Path,
-    delimiter: str | None = None,
-) -> Path | None:
-    """Convert a CSV file to Parquet in *staging_dir*.
-
-    Args:
-        csv_path:    Path to the original CSV file.
-        staging_dir: Temporary directory for the converted file.
-        delimiter:   Explicit CSV delimiter.  When ``None`` (default), the
-                     delimiter is sniffed from the first line via
-                     :func:`_sniff_csv_delimiter`.
-
-    Returns:
-        Path to the converted Parquet file on success,
-        ``None`` on conversion failure (warning already printed).
-    """
-    try:
-        if delimiter is None:
-            delimiter = _sniff_csv_delimiter(csv_path)
-        parse_opts = pc.ParseOptions(delimiter=delimiter)
-        table = pc.read_csv(csv_path, parse_options=parse_opts)
-        parquet_path = staging_dir / f"{csv_path.stem}.parquet"
-
-        # ── Row / column / value parity ───────────────────────────────────
-        parity_ok, _parity_warnings = _check_conversion_parity(csv_path, delimiter, table)
-        if not parity_ok:
-            return None
-
-        # ── All-null column handling ──────────────────────────────────────
-        # pyarrow infers `null` type for columns where every value is missing;
-        # cast those to `string` so the schema report renders them correctly.
-        table = _cast_null_columns_to_string(table)
-
-        pq.write_table(
-            table,
-            parquet_path,
-            compression=config.PARQUET_COMPRESSION,
-            write_page_index=True,
-            row_group_size=config.PARQUET_ROW_GROUP_SIZE,
-        )
-
-        # ── Size check: warn when the shard exceeds the threshold ─────────
-        size_mb = parquet_path.stat().st_size / (1024 * 1024)
-        if size_mb > config.PARQUET_SHARD_WARNING_MB:
-            print(
-                f"  \u26a0  {parquet_path.name}: {size_mb:.1f} MB "
-                f"(> {config.PARQUET_SHARD_WARNING_MB} MB). Consider sharding into "
-                f"smaller files for better Dataset Viewer performance."
-            )
-
-        return parquet_path
-    except Exception as exc:
-        print(f"  \u26a0  {csv_path.name}: conversion failed \u2014 uploading as CSV")
-        print(f"       ({exc})")
-        return None
 
 
 def _assert_cross_file_schema(
@@ -754,7 +507,7 @@ def prepare(
 
             entry_tmp = tmpdir / str(idx)
             entry_tmp.mkdir()
-            dispatch_result = convert_file_to_parquet(local, entry_tmp)
+            dispatch_result = convert_file_to_parquet(local, entry_tmp, cfg)
             if not dispatch_result:
                 # Conversion failed — warn already printed; fallback to original
                 print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")

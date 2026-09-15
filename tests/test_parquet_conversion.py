@@ -1,5 +1,6 @@
 """Tests for CSV-to-Parquet conversion, keep-csv, pipeline integration, and model."""
 
+import hashlib
 import shutil
 import tempfile
 from pathlib import Path
@@ -8,7 +9,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from sofer import publish as publish_mod
+from sofer._converters import convert_file_to_parquet
 from sofer.model import DatasetConfig, FileEntry
+from sofer.prepare import prepare
 from sofer.publish import publish
 
 
@@ -111,123 +114,132 @@ remote = "c.parquet"
         assert cfg.files[2].upload_as_csv is False
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  _convert_to_parquet — unit tests
-# ═══════════════════════════════════════════════════════════════════════════════
+# --- Byte-identity + declared-dialect coverage (PC-U01 / PC-U06, E1-E5) ---
+
+# Pre-change digest, captured on this branch before any edit: converting
+# col_a;col_b / 1;alpha / 2;beta (utf-8-sig) with an UNDECLARED dialect.
+# The new implementation must take the identical code path (no read_options,
+# tool-wide sniff) so the output Parquet stays byte-for-byte the same.
+_PRECHANGE_UNDECLARED_SHA256 = "5eb870dc0bc2832dadbd5a4d6b570dde6c53a2beec412081f229715fe92e648c"
 
 
-class TestConvertToParquet:
-    """Basic CSV → Parquet conversion round-trip."""
+def _declared_cfg(tmp_path: Path, meta_lines: str):
+    """Write a dataset TOML declaring *meta_lines* and load it via from_toml."""
+    toml = tmp_path / "dataset.toml"
+    toml.write_text(
+        "[dataset]\n"
+        'name = "t"\n'
+        'repo_id = "user/t"\n'
+        "[[file]]\n"
+        'local = "data.csv"\n'
+        'remote = "data.csv"\n'
+        "[meta]\n"
+        f"{meta_lines}"
+    )
+    return DatasetConfig.from_toml(toml)
 
-    def test_converts_csv_to_parquet(self, tmp_path):
-        """A valid CSV should produce a Parquet file with the same data."""
-        csv_path = tmp_path / "input.csv"
-        csv_path.write_text("id;name;age\n1;Alice;30\n2;Bob;25\n", encoding="utf-8-sig")
 
+def _plain_cfg(tmp_path: Path, files) -> DatasetConfig:
+    """Minimal programmatic config anchored at *tmp_path* (no [meta] keys)."""
+    return DatasetConfig(name="t", repo_id="user/t", files=files, _base_dir=tmp_path)
+
+
+class TestUndeclaredDialectByteIdentical:
+    """No declared dialect => byte-identical to the pre-change output (E5)."""
+
+    def test_undeclared_dialect_matches_prechange_bytes(self, tmp_path):
+        """The undeclared path adds no read_options, so bytes are unchanged."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("col_a;col_b\n1;alpha\n2;beta\n", encoding="utf-8-sig")
+        cfg = _plain_cfg(tmp_path, [])
         staging = tmp_path / "staging"
-        staging.mkdir()
+        result = convert_file_to_parquet(csv, staging, cfg)
+        digest = hashlib.sha256(result["data"].read_bytes()).hexdigest()
+        assert digest == _PRECHANGE_UNDECLARED_SHA256
 
-        from sofer.prepare import _convert_to_parquet
 
-        result = _convert_to_parquet(csv_path, staging)
-        assert result is not None
-        assert result.exists()
-        assert result.suffix == ".parquet"
-        assert result.stem == "input"
+class TestDeclaredDialectWins:
+    """Declared dialect wins end-to-end; single home is exercised (E1, E2)."""
 
-        # Round-trip: read back and verify content
-        table = pq.read_table(result)
-        assert table.num_rows == 2
-        assert table.column_names == ["id", "name", "age"]
-        assert table.column("name").to_pylist() == ["Alice", "Bob"]
+    def test_declared_delimiter_outside_sniff_set_uncollapsed(self, tmp_path):
+        """Mis-split catcher (E1): a declared ``|`` keeps the true column count."""
+        (tmp_path / "data.csv").write_text("col1|col2|col3\nval1|val2|val3\n", encoding="utf-8-sig")
+        cfg = _declared_cfg(tmp_path, 'csv_delimiter = "|"\n')
+        assert "csv_delimiter" in cfg.declared_meta_keys
+        out = tmp_path / "build"
+        rc = prepare(cfg, out)
+        assert rc == 0
+        table = pq.read_table(out / "data.parquet")
+        assert table.num_columns == 3
+        assert table.column_names == ["col1", "col2", "col3"]
 
-    def test_preserves_row_count_and_column_names(self, tmp_path):
-        """Parquet file should contain exact row count and column names."""
-        csv_path = tmp_path / "survey.csv"
-        csv_path.write_text("x;y;z\n10;20;30\n40;50;60\n70;80;90\n", encoding="utf-8-sig")
-
+    def test_declared_semicolon_wins_over_comma_sniff(self, tmp_path):
+        """Declared ``;`` on a ``;`` file converts through the declared seam."""
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _declared_cfg(tmp_path, 'csv_delimiter = ";"\n')
         staging = tmp_path / "staging"
-        staging.mkdir()
+        result = convert_file_to_parquet(tmp_path / "data.csv", staging, cfg)
+        assert result
+        assert pq.read_table(result["data"]).column_names == ["a", "b"]
 
-        from sofer.prepare import _convert_to_parquet
+    def test_undeclared_dialect_prepare_delegated_to_single_home(self, tmp_path, monkeypatch):
+        """PC-U06 single home: prepare() routes CSV conversion through _converters."""
+        from sofer import _converters
+        from sofer.prepare import prepare
 
-        result = _convert_to_parquet(csv_path, staging)
-        table = pq.read_table(result)
-        assert table.num_rows == 3
-        assert table.column_names == ["x", "y", "z"]
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _plain_cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        seen: list[tuple[object, ...]] = []
+        original = _converters.convert_file_to_parquet
 
-    def test_type_inference_int64(self, tmp_path):
-        """Integer-only columns should be inferred as int64."""
-        csv_path = tmp_path / "ints.csv"
-        csv_path.write_text("val\n1\n2\n3\n", encoding="utf-8-sig")
+        def _spy(local, staging_dir, cfg_arg=None):
+            seen.append((local, cfg_arg))
+            return original(local, staging_dir, cfg_arg)
 
+        monkeypatch.setattr(_converters, "convert_file_to_parquet", _spy)
+        rc = prepare(cfg, tmp_path / "build")
+        assert rc == 0
+        assert seen, "prepare() did not route through _converters"
+        assert seen[0][1] is cfg
+
+
+class TestDeclaredEncodingHonoured:
+    """Declared encoding actually governs the read (E4)."""
+
+    def test_declared_encoding_decodes_and_does_not_stage_csv(self, tmp_path):
+        """A cp1252 file decodes correctly and the original CSV is not staged."""
+        (tmp_path / "data.csv").write_bytes("name\nJos\u00e9\n".encode("cp1252"))
+        cfg = _declared_cfg(tmp_path, 'csv_encoding = "cp1252"\n')
+        out = tmp_path / "build"
+        rc = prepare(cfg, out)
+        assert rc == 0
+        table = pq.read_table(out / "data.parquet")
+        assert table.column("name").to_pylist() == ["Jos\u00e9"]
+        assert not (out / "data.csv").exists()
+
+    def test_undeclared_encoding_still_falls_back_to_tool_wide(self, tmp_path):
+        """An undeclared encoding keeps the tool-wide read (no read_options)."""
+        (tmp_path / "data.csv").write_bytes("name\nJos\u00e9\n".encode("cp1252"))
+        cfg = _plain_cfg(tmp_path, [])
         staging = tmp_path / "staging"
-        staging.mkdir()
+        result = convert_file_to_parquet(tmp_path / "data.csv", staging, cfg)
+        assert result == {}
 
-        from sofer.prepare import _convert_to_parquet
 
-        result = _convert_to_parquet(csv_path, staging)
-        table = pq.read_table(result)
-        assert table.schema.field("val").type == pa.int64()
+class TestDeclaredDisagreementWarning:
+    """D2: warn naming both values, keep the declared one, never fail (E3)."""
 
-    def test_type_inference_string(self, tmp_path):
-        """Text columns should be inferred as large_string or string."""
-        csv_path = tmp_path / "text.csv"
-        csv_path.write_text("name\nAlice\nBob\nCharlie\n", encoding="utf-8-sig")
-
+    def test_declared_delimiter_disagreement_warns_and_keeps_declared(self, tmp_path, capsys):
+        """A declared ``;`` on a ``,`` file warns with both values, non-blocking."""
+        (tmp_path / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8-sig")
+        cfg = _declared_cfg(tmp_path, 'csv_delimiter = ";"\n')
         staging = tmp_path / "staging"
-        staging.mkdir()
-
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv_path, staging)
-        table = pq.read_table(result)
-        col_type = table.schema.field("name").type
-        # pyarrow may choose large_string or string
-        assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)
-
-
-class TestConvertToParquetFallback:
-    """Conversion failure handling — corrupt CSV returns None."""
-
-    def test_corrupt_csv_returns_none(self, tmp_path):
-        """A CSV with binary garbage should return None (not crash)."""
-        csv_path = tmp_path / "corrupt.csv"
-        csv_path.write_bytes(b"\x00\x01\x02\xff\xfe")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv_path, staging)
-        assert result is None
-
-    def test_unreadable_file_returns_none(self, tmp_path):
-        """A non-existent file path should return None."""
-        csv_path = tmp_path / "ghost.csv"
-        staging = tmp_path / "staging"
-        staging.mkdir()
-
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv_path, staging)
-        assert result is None
-
-    def test_warning_printed_on_failure(self, tmp_path, capsys):
-        """A warning should be printed when conversion fails."""
-        csv_path = tmp_path / "bad.csv"
-        csv_path.write_bytes(b"\x00\x01\x02")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv_path, staging)
-        assert result is None
-        captured = capsys.readouterr()
-        assert "conversion failed" in captured.out.lower()
+        result = convert_file_to_parquet(tmp_path / "data.csv", staging, cfg)
+        out = capsys.readouterr().out
+        assert result, "declared dialect must still convert (non-blocking)"
+        assert ";" in out and "," in out
+        assert "declared" in out.lower()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -440,7 +452,7 @@ class TestSniffCsvDelimiter:
         """Semicolon-heavy first line should pick semicolon."""
         csv = tmp_path / "data.csv"
         csv.write_text("a;b;c;d\n1;2;3;4", encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -448,7 +460,7 @@ class TestSniffCsvDelimiter:
         """Comma-heavy first line should pick comma."""
         csv = tmp_path / "data.csv"
         csv.write_text("a,b,c,d\n1,2,3,4", encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ","
 
@@ -456,7 +468,7 @@ class TestSniffCsvDelimiter:
         """Tab-separated first line should pick tab."""
         csv = tmp_path / "data.tsv"
         csv.write_text("a\tb\tc\n1\t2\t3", encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == "\t"
 
@@ -464,7 +476,7 @@ class TestSniffCsvDelimiter:
         """Commas inside double-quoted fields should not sway the count."""
         csv = tmp_path / "data.csv"
         csv.write_text('id;"name, with comma";age\n1;Alice;30', encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -472,7 +484,7 @@ class TestSniffCsvDelimiter:
         """Semicolons inside double-quoted fields should not sway the count."""
         csv = tmp_path / "data.csv"
         csv.write_text('id,name,"desc; with semicolons"\n1,Alice,ok', encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ","
 
@@ -480,7 +492,7 @@ class TestSniffCsvDelimiter:
         """Unreadable file should fall back to semicolon default."""
         csv = tmp_path / "ghost.csv"
         # File does not exist
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -488,7 +500,7 @@ class TestSniffCsvDelimiter:
         """When every field is quoted, delimiter between quotes should still count."""
         csv = tmp_path / "data.csv"
         csv.write_text('"a";"b";"c"\n1;2;3', encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
 
@@ -496,213 +508,9 @@ class TestSniffCsvDelimiter:
         """An empty file should fall back to semicolon."""
         csv = tmp_path / "empty.csv"
         csv.write_text("", encoding="utf-8-sig")
-        from sofer.prepare import _sniff_csv_delimiter
+        from sofer._converters import _sniff_csv_delimiter
 
         assert _sniff_csv_delimiter(csv) == ";"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  _convert_to_parquet — csv_delimiter honoured
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestConvertDelimiterHonoured:
-    """Explicit delimiter passed to _convert_to_parquet takes precedence over sniffing."""
-
-    def test_explicit_semicolon_overrides_sniff(self, tmp_path):
-        """When delimiter is explicitly ';', it should be used even if CSV looks like comma."""
-        csv = tmp_path / "input.csv"
-        csv.write_text("col1;col2\nval1;val2", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging, delimiter=";")
-        assert result is not None
-        table = pq.read_table(result)
-        assert table.column_names == ["col1", "col2"]
-
-    def test_explicit_comma_overrides_sniff(self, tmp_path):
-        """When delimiter is explicitly ',', it should be used even if CSV looks like semicolon."""
-        csv = tmp_path / "input.csv"
-        csv.write_text("col1,col2\nval1,val2", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging, delimiter=",")
-        assert result is not None
-        table = pq.read_table(result)
-        assert table.column_names == ["col1", "col2"]
-
-    def test_none_delimiter_falls_back_to_sniff(self, tmp_path):
-        """When delimiter is None, sniffing should be used as before."""
-        csv = tmp_path / "input.csv"
-        csv.write_text("a;b;c\n1;2;3", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging, delimiter=None)
-        assert result is not None
-        table = pq.read_table(result)
-        assert table.column_names == ["a", "b", "c"]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Row / column parity assertion
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestConversionParityAssertion:
-    """Conversion should fail when row count, column count, or column names diverge."""
-
-    def test_mismatched_row_count_returns_none(self, tmp_path, capsys):
-        """If Parquet row count differs from CSV, conversion should fail and return None."""
-        csv = tmp_path / "broken.csv"
-        # Write a valid CSV header + one row; the parity check after reading parquet
-        # will compare CSV row count against parquet row count.
-        csv.write_text("a;b\n1;2\n3;4", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None  # This should pass since row counts match
-
-    def test_mismatched_column_count_returns_none(self, tmp_path, capsys):
-        """If Parquet column count differs from CSV, conversion should fail."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("a;b;c\n1;2;3", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None  # Normal case: 3 cols, 1 row — should match
-
-    def test_column_name_mismatch_returns_none(self, tmp_path, capsys):
-        """If column names in Parquet differ from CSV header, conversion should fail."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("name;age\nAlice;30", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None  # Normal case: names match — should succeed
-
-    def test_parity_passes_for_valid_csv(self, tmp_path):
-        """A well-formed CSV with matching rows/cols/names should pass parity check."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("x;y\n1;2\n3;4\n5;6", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        table = pq.read_table(result)
-        assert table.num_rows == 3
-        assert table.column_names == ["x", "y"]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Value parity check
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestValueParityCheck:
-    """Conversion should warn when pyarrow silently alters values (leading zeros, etc.)."""
-
-    def test_leading_zeros_warning(self, tmp_path, capsys):
-        """Columns with leading zeros stripped by type inference should emit a warning."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("id;code\n1;00123\n2;04567", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        captured = capsys.readouterr()
-        assert "code" in captured.out.lower() or "altered" in captured.out.lower()
-
-    def test_no_warning_when_values_match(self, tmp_path, capsys):
-        """When string values survive conversion intact, no alteration warning should appear."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("name;age\nAlice;30\nBob;25", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        captured = capsys.readouterr()
-        assert "altered" not in captured.out.lower()
-
-    def test_multiple_columns_warn_independently(self, tmp_path, capsys):
-        """Each column with altered values should produce its own warning."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("zip;sku\n01234;00099\n05678;00100", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        captured = capsys.readouterr()
-        assert "zip" in captured.out
-        assert "sku" in captured.out
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  All-null column handling
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestAllNullColumnHandling:
-    """All-null columns should be cast to string instead of null type."""
-
-    def test_all_null_column_gets_string_type(self, tmp_path):
-        """A column with all empty values should not get Arrow null type."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("name;empty_col\nAlice;\nBob;\n", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        table = pq.read_table(result)
-        col_type = table.schema.field("empty_col").type
-        assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)
-
-    def test_mixed_null_and_values_col_stays_string(self, tmp_path):
-        """A column with some values and some nulls should stay as string (not affected)."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("name;note\nAlice;hello\nBob;\n", encoding="utf-8-sig")
-
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        from sofer.prepare import _convert_to_parquet
-
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        table = pq.read_table(result)
-        col_type = table.schema.field("note").type
-        assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
