@@ -335,3 +335,40 @@ A normal suite run SHALL emit zero `DeprecationWarning`s from the codebook type-
 - GIVEN the post-change tree
 - WHEN `_infer_type` is searched over `src/`, `tests/`, `AGENTS.md` and the READMEs
 - THEN zero matches SHALL be found outside `openspec/changes/archive/**` historical prose
+
+### Requirement: Side-effect-free HF token resolution and cross-test env hermeticity (PB-13)
+
+> Added by change `2026-09-14-fix-hf-token-env-isolation` (issue #176).
+
+`_get_hf_token()` and its `.env` helper SHALL resolve a token **without writing to `os.environ`**: `.env` SHALL be read with `dotenv_values` and consulted as a value fallback, so no call path of shipped `src/sofer/mcp_server.py` SHALL assign into the process environment (today `load_dotenv(override=False)` at `:762-763` does, unrecorded). Precedence SHALL be decided by **key presence in `os.environ`, never by value truthiness** — a name present in the environment wins over the `.env` entry for that name even when its value is whitespace-only and `_clean_token` maps it to `None`, mirroring `load_dotenv(override=False)`, which skips a merely-present key; the `.env` value SHALL be consulted only when the name is absent from the environment. The resolution order SHALL stay `HF_TOKEN` → `HF_HUB_TOKEN` → `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (file/OIDC/Colab), and the `.env` view SHALL remain visible to the implicit-token gate `HF_HUB_DISABLE_IMPLICIT_TOKEN` (read at `src/sofer/mcp_server.py:806` via `_is_truthy_env`), which SHALL keep skipping the file/Colab fallback exactly as today. Consequently the suite SHALL be environment-hermetic: a test SHALL NOT leave the process environment mutated for later tests, and token resolution SHALL NOT mutate it at all.
+
+#### Scenario: Resolution leaves the process environment unchanged (the gate)
+
+- GIVEN a temp cwd holding a `.env` with `HF_TOKEN=from-dotenv` and a second key, and `HF_TOKEN`/`HF_HUB_TOKEN`/`HUGGING_FACE_HUB_TOKEN` absent from the environment, with an `os.environ` snapshot taken before the call
+- WHEN `_get_hf_token()` is called
+- THEN it SHALL return `"from-dotenv"`
+- AND `os.environ` SHALL equal that snapshot — no injected key, not even from the second `.env` line
+
+#### Scenario: Environment presence beats `.env` even when the value is blank
+
+- GIVEN `.env` holding `HF_TOKEN=from-dotenv`, a *present but whitespace-only* `HF_TOKEN` in the environment, and `HF_HUB_TOKEN=alias-token`
+- WHEN `_get_hf_token()` is called
+- THEN it SHALL return `"alias-token"` — the `.env` value SHALL NOT be substituted for the blank present key (key-presence semantics, not value-truthiness)
+
+#### Scenario: `.env` supplies a value only when the environment omits the name
+
+- GIVEN `HF_TOKEN` absent from the environment and `.env` holding `HF_TOKEN=from-dotenv`
+- WHEN `_get_hf_token()` is called
+- THEN it SHALL return `"from-dotenv"` (`tests/test_mcp_server.py:3181` keeps holding), and the file fallback SHALL keep its position when neither the environment nor `.env` supplies a token
+
+#### Scenario: `.env`-only disable flag still gates the implicit file fallback
+
+- GIVEN `HF_HUB_DISABLE_IMPLICIT_TOKEN=true` present **only** in `.env`, no token in the environment or `.env`, and a valid token file configured
+- WHEN `_get_hf_token()` is called
+- THEN it SHALL return `None` rather than the file token — the `.env` view remains visible to the flag, so this change alters no production resolution outcome
+
+#### Scenario: No test leaks a token to a later test (issue #176)
+
+- GIVEN the suite running in one process with a cwd `.env` present and no ambient `HF_TOKEN`
+- WHEN the resolving test at `tests/test_mcp_server.py:3168` runs before `tests/test_mcp_registration.py::TestMerge::test_codex_normalize_string_vs_array` (`:171`)
+- THEN the victim SHALL observe no `HF_TOKEN` (`collect_env()` at `mcp_registration.py:450-461` reports none), create no `.bak`, and pass — the amplifier at `tests/test_mcp_registration.py:560-577` SHALL have nothing to restore
