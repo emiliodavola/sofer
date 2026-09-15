@@ -655,7 +655,9 @@ Per-agent locations and shapes:
   `HF_TOKEN` → `HF_HUB_TOKEN` (sofer compat alias) →
   `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (`hf auth login`
   cache via `HF_TOKEN_PATH` + OIDC via `HF_OIDC_RESOURCE` + Colab) with
-  `.env` support (`load_dotenv(override=False)`); `HF_HUB_DISABLE_IMPLICIT_TOKEN`
+  `.env` support read without mutating the process environment
+  (`dotenv_values`; a name present in the environment wins even when blank);
+  `HF_HUB_DISABLE_IMPLICIT_TOKEN`
   truthy skips the file fallback; the token is never logged. The quality
   gate runs before the token check (offline, deterministic fail). `hf auth login`
   is a valid alternative to setting `HF_TOKEN`; `HF_HUB_TOKEN` is kept for
