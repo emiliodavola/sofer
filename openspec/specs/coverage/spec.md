@@ -280,6 +280,56 @@ edited in this scoped pass.
 
 ---
 
+### Requirement: Second-tier per-file floors are deliberately verify-phase-only (COV-07)
+
+The three COV-01 floors — `src/sofer/profile.py`, `src/sofer/mcp_registration.py`,
+and `src/sofer/verification.py` — SHALL remain **verify-phase-evidenced only**: no
+CI step, workflow, committed gate script, or `pyproject.toml` key SHALL enforce
+them, and this requirement arms none. The posture is deliberate, not an oversight,
+for three in-repo reasons: (a) coverage.py cannot express a per-file floor in
+config — `[tool.coverage.report] fail_under` is a single scalar owned by the TOTAL
+gate (CI-01 / COV-02); (b) the only executable in-repo ≥90 check,
+`tests/test_coverage_contract.py`, skips when no local `.coverage` data file is
+present, which is exactly the state the CI coverage job collects in, and COV-01-S3
+declares that skip intended; and (c) the CLI-core 100% mandate (COV-06) already
+consumes the repository's per-file gate machinery, and its S1 floor-literal ban is
+the boundary this repository chose.
+
+The enforcement boundary SHALL be that COV-06-S1 ban, scoped to the surfaces it
+actually covers: `scripts/check_core_coverage.sh`, whose module roster is exactly
+`cli scanner prepare publish`, and the raw text of `.github/workflows/ci.yml` and
+`.github/workflows/release.yml`, pinned by
+`tests/test_ci_workflows.py::test_coverage_job_gates_core_modules_at_100` and
+`::test_coverage_gate_is_config_driven_without_cli_floor`. That boundary SHALL NOT
+be read as a fence around the whole repository: a new gate script or workflow step
+carrying a floor other than 100 would turn no existing test red, so what makes such
+a move illegitimate is this requirement, not the ban alone.
+
+Arming any gate for the three floors — a non-100 scoped invocation, a new gate
+script, a per-file config key, or a workflow step — SHALL be its own SDD change,
+and that change SHALL amend this requirement together with COV-06 and COV-03 and
+the two ban-pinning guards named above, in the same change. This requirement SHALL
+NOT restate, lower, raise, re-measure, or promise a coverage value, and SHALL NOT
+be read as authorizing any of those floors to drift below the value COV-01
+declares: the floors' values and their verify-phase evidence class stay exactly as
+COV-01 declares them, and the TOTAL gate stays config-owned at 90 (COV-02 / `ci`
+CI-01).
+
+This requirement is additive: COV-01..COV-06 SHALL keep their clauses, scenarios,
+and earned verify evidence unchanged, and this requirement SHALL NOT be read as
+substituting for COV-01 (the floors still bind as declared) nor as weakening
+COV-06, which owns the four-module mandate.
+
+#### Scenario: No gate is armed for the three second-tier floors
+
+- GIVEN the enforcement surfaces as committed by this change — `scripts/check_core_coverage.sh`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `pyproject.toml`'s `[tool.coverage.report]`
+- WHEN they are inspected at verify time
+- THEN the gate script's module roster SHALL still be exactly the four CLI-core modules, no `--fail-under` value other than 100 SHALL appear in the script or in either workflow (the COV-06-S1 boundary), and the only coverage threshold in `pyproject.toml` SHALL still be the scalar TOTAL `fail_under = 90` (CI-01 / COV-02)
+- AND `profile.py`, `mcp_registration.py`, and `verification.py` SHALL appear in no gated invocation and no CI step SHALL enforce a per-file floor for any of them — they stay COV-01 verify-phase evidence
+- AND this SHALL remain **verify-phase static evidence** recorded in the verify report: this requirement adds no test, and the two ban-pinning guards SHALL stay green **unmodified** — they keep the existing surfaces closed and do not make the ban airtight (the scoping paragraph above is the record)
+
+---
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static/runtime
@@ -322,3 +372,4 @@ and `tests/test_ci_workflows.py` additions/modifications as mapped below.
 | COV-06 | AGENTS.md carries the mandatory rule | **new** `tests/test_ci_workflows.py::test_agents_md_declares_core_100_mandate` — text inspection of AGENTS.md rule 14: names the four modules, declares 100.00%, forbids `# pragma: no cover` |
 | COV-06 | The cli.py __main__ guard is executed under the coverage tracer | **new** `tests/test_cli.py::test_cli_main_guard_executed_via_runpy` — in-process `runpy.run_module("sofer.cli", run_name="__main__")` with argv at a harmless subcommand; asserts rc/exit-call; runs under the coverage tracer so the guard lines count as covered (mandatory part of the cli.py 100.00 row; REPLACES the planned `test_cli_has_no_main_guard` guard-absence scan) |
 | COV-06 | TOTAL stays config-owned at 90 | `tests/test_ci_workflows.py::test_pyproject_declares_coverage_fail_under_90` (existing, unchanged) + verify-phase run of the four per-file gate invocations (each rc 0) and the TOTAL gate (rc 0) |
+| COV-07 | No gate is armed for the three second-tier floors | Verify-phase **static evidence** — read of `scripts/check_core_coverage.sh` (roster = the four CLI-core modules; every `--fail-under` literal is 100), `.github/workflows/ci.yml` and `.github/workflows/release.yml` (no `--fail-under`/`fail-under`/`fail_under`), and `pyproject.toml`'s `[tool.coverage.report]` (scalar `fail_under = 90` only), pasted into the verify report; the two guards `tests/test_ci_workflows.py::test_coverage_job_gates_core_modules_at_100` and `::test_coverage_gate_is_config_driven_without_cli_floor` stay green **unmodified** — this requirement adds no test |

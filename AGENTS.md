@@ -125,3 +125,4 @@ Rules:
 - This rule's 100% mandate covers exactly those four modules. Other modules are
   governed by their own per-file floors (spec `coverage` COV-01) or have no
   floor.
+- Adjacent policy pointer (not part of this rule's mandate): the three second-tier per-file floors (`profile.py`, `mcp_registration.py`, `verification.py`) are deliberately **not** CI-gated — they stay verify-phase evidence only, and arming a gate for them is a spec change (see spec `coverage` COV-07).
