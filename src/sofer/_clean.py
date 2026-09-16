@@ -29,8 +29,12 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import config
+
+if TYPE_CHECKING:
+    from .model import DatasetConfig
 
 # Re-exported for tests / callers that want to check compliance membership.
 _AUTO_GENERATED: frozenset[str] = frozenset({"readme.md", "license", "codebook.md"})
@@ -56,7 +60,7 @@ def _is_auto_generated(remote: str) -> bool:
 
 
 def allowed_output_remotes(
-    cfg,  # DatasetConfig — avoid hard import cycle at module load
+    cfg: DatasetConfig,
     keep_csv: bool,
     output_dir: Path,
 ) -> set[str]:
@@ -180,7 +184,7 @@ def prune_orphans(output_dir: Path, allowed: set[str]) -> list[Path]:
     return removed
 
 
-def clean_build(cfg, override: str | None) -> None:
+def clean_build(cfg: DatasetConfig, override: str | None) -> None:
     """Remove the resolved build directory when it exists.
 
     Resolution matches :func:`sofer.prepare.resolve_output_dir` so a

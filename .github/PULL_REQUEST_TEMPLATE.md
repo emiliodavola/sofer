@@ -22,6 +22,9 @@ All checks passed!
 
 $ uv run mypy src/
 Success: no issues found
+
+$ uv run pyright
+0 errors, 0 warnings
 ```
 
 ## Files changed
@@ -43,6 +46,7 @@ Specs updated: `openspec/specs/<domain>/spec.md`
 - [ ] `uv run ruff check src/ tests/` — clean
 - [ ] `uv run ruff format --check src/ tests/` — clean
 - [ ] `uv run mypy src/` — clean
+- [ ] `uv run pyright` — clean (pyright gate, `[tool.pyright]`)
 - [ ] New behaviour covered by tests
 - [ ] Coverage gate met — `uv run coverage report -m` ≥ 90% (CI enforces `fail_under = 90`)
 - [ ] README updated if CLI surface changed

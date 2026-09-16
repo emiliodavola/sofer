@@ -442,7 +442,7 @@ def prepare(
 
     # Ensure UTF-8 output for Unicode characters on Windows.
     if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")  # pyright: ignore[reportAttributeAccessIssue]
 
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
 

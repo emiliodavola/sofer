@@ -752,6 +752,10 @@ Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quality gates and security scanning
 
+- **Type checking**: `src/` and `scripts/` pass two type gates — **mypy** (strict mode,
+  `[tool.mypy]`) and **pyright** (`standard` mode, `[tool.pyright]`) — both declared in
+  `pyproject.toml` and run in CI and in the local pre-commit hooks. `tests/` is excluded
+  from both gates by policy (`openspec/specs/ci/spec.md` CI-09).
 - **Coverage gate**: total test coverage is gated at **90%** — the floor lives
   in `pyproject.toml` (`[tool.coverage.report] fail_under = 90`) and is enforced
   by coverage.py on every PR (`ci.yml`) and before every release

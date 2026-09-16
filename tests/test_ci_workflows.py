@@ -3,21 +3,25 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-08) by parsing the repository's
+`ci` specification (requirements CI-01..CI-09) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 18 `ci` Test Mapping rows whose verification
-names a test in this module, plus five tests owned by other capabilities or
-supporting this one — the two `coverage` COV-06 guards, the CodeQL
-private-window guard, `test_ci_workflow_files_present`, which fails loudly
-before any parse, and the PB-14 hook-scope guard. Runtime gate exit-code evidence
-(CI-01 S2's local gate run and CI-08 S4's required-version mismatch probe) is
-recorded in the SDD verify report, not asserted here.
+scenario-verifying tests are the 23 `ci` Test Mapping rows whose verification
+names a test in this module (CI-09's posture row is carried by two guards), plus
+six tests owned by other capabilities or supporting this one — the two
+`coverage` COV-06 guards, the CodeQL private-window guard,
+`test_ci_workflow_files_present`, which fails loudly before any parse, the PB-14
+hook-scope guard, and the CI-07 clause-agreement guard, which re-enforces an
+existing CI-07 row rather than adding one. Runtime gate exit-code evidence
+(CI-01 S2's local gate run, CI-08 S4's required-version mismatch probe, and
+CI-09 S2's pyright gate run) is recorded in the SDD verify report, not asserted
+here.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -92,6 +96,15 @@ _RUFF_PRE_COMMIT_REPO = "https://github.com/astral-sh/ruff-pre-commit"
 _DEV_ENTRY_RE = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?P<spec>[<>=!~].*)$")
 _EXACT_PIN_RE = re.compile(r"^==(?P<version>\d+\.\d+\.\d+)$")
 
+# Machine-local trees the CI-09 S3 config-home walk prunes: virtualenv, dependency
+# caches, coverage output and VCS metadata can all carry a third-party
+# `pyrightconfig.json` that is not a repository declaration.
+_SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "htmlcov", ".pytest_cache", "__pycache__"})
+
+# The analyzers whose dev pins G5 forces to be exact and lock-resolved; ruff is
+# governed by its own trio guard (`test_ruff_pin_hook_rev_and_required_version_agree`).
+_ANALYZER_DEV_PINS = ("mypy", "pyright")
+
 
 def _declared_ruff_version() -> str:
     """Extract the ``X.Y.Z`` version from the ``pyproject.toml`` dev-group ruff pin.
@@ -117,6 +130,48 @@ def _declared_ruff_version() -> str:
         "exactly how the ambient binary drifted from the pre-commit rev"
     )
     return exact.group("version")
+
+
+def _declared_exact_dev_pin(name: str) -> str:
+    """Extract the ``X.Y.Z`` version from a ``pyproject.toml`` dev-group exact pin.
+
+    The single derivation shared by the analyzer pins (G5) and the pyright workflow
+    scan (G3): both hold no version literal of their own, so bumping an analyzer
+    edits declarations only.
+
+    Args:
+        name: The distribution name whose dev pin is read (e.g. ``mypy``).
+
+    Returns:
+        The version without its specifier — the ``X.Y.Z`` of the ``==X.Y.Z`` pin.
+        A missing pin, a duplicated pin, or a non-exact specifier raises.
+    """
+    dev = _load_toml("pyproject.toml")["dependency-groups"]["dev"]
+    pins = []
+    for entry in dev:
+        match = _DEV_ENTRY_RE.match(entry) if isinstance(entry, str) else None
+        if match is not None and match.group("name") == name:
+            pins.append(match.group("spec").strip())
+    assert len(pins) == 1, f"expected exactly one {name} dev pin, found {pins}"
+    exact = _EXACT_PIN_RE.match(pins[0])
+    assert exact is not None, (
+        f"the {name} dev pin must be an exact ==X.Y.Z specifier, got {pins[0]!r} — a floor "
+        "lets `uv lock` drift the analyzer away from the version the gate runs"
+    )
+    return exact.group("version")
+
+
+def _declared_pyright_version() -> str:
+    """CI-09 S2/S4: the pyright version, derived from its exact dev-group pin.
+
+    The workflow scan (S2) and the lock comparison (S4) both derive this value and
+    the guards carry no version literal of their own, so bumping pyright edits
+    declarations only.
+
+    Returns:
+        The version without its specifier — the ``X.Y.Z`` of the ``==X.Y.Z`` pin.
+    """
+    return _declared_exact_dev_pin("pyright")
 
 
 def _workflow(rel: str) -> tuple[dict[str, Any], str]:
@@ -516,4 +571,220 @@ def test_ruff_format_hook_excludes_markdown() -> None:
     assert "markdown" not in types_or, (
         "`markdown` must not be in the ruff-format hook's `types_or`: upstream widened the "
         "manifest at 0.16.6 and the hook rewrote README.md / README_ES.md (issue #216)"
+    )
+
+
+def test_pyright_config_declares_the_decided_posture() -> None:
+    """CI-09 S2: [tool.pyright] declares mode, scope, exclusions, interpreter, stub."""
+    tool = _load_toml("pyproject.toml")["tool"]
+    assert "pyright" in tool, (
+        "pyproject.toml must declare a `[tool.pyright]` table: it is the single config "
+        "authority for the second type gate (CI-09 S2)"
+    )
+    pyright = tool["pyright"]
+    assert pyright["typeCheckingMode"] == "standard", (
+        f"[tool.pyright] typeCheckingMode must be 'standard', got {pyright['typeCheckingMode']!r}"
+    )
+    include = set(pyright["include"])
+    assert {"src", "scripts"} <= include, (
+        f"[tool.pyright] include must cover the enforced mypy scope (src/, scripts/), got {include}"
+    )
+    exclude = {entry.rstrip("/") for entry in pyright["exclude"]}
+    assert "tests" in exclude, (
+        f"[tool.pyright] exclude must contain tests (CI-09 S1), got {pyright['exclude']}"
+    )
+    interpreter = _read_text(".python-version").strip()
+    assert pyright["pythonVersion"] == interpreter, (
+        "[tool.pyright] pythonVersion must equal the gate interpreter .python-version "
+        f"({interpreter}), got {pyright['pythonVersion']!r} (CI-07's invariant)"
+    )
+    assert pyright["stubPath"] == "typings", (
+        "[tool.pyright] stubPath must name the committed tomli stub directory, "
+        f"got {pyright['stubPath']!r}"
+    )
+    assert pyright["reportMissingImports"] not in ("none", False), (
+        "[tool.pyright] must not globally disable reportMissingImports: any rule worth "
+        "binding is declared, not inherited (CI-09 S2)"
+    )
+
+
+def test_pyright_has_exactly_one_config_home() -> None:
+    """CI-09 S3: no pyrightconfig.json exists, so [tool.pyright] stays authoritative."""
+    found: list[str] = []
+    saw_files = False
+    for dirpath, dirnames, filenames in os.walk(_REPO_ROOT):
+        dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS]
+        if filenames:
+            saw_files = True
+        for filename in filenames:
+            if filename == "pyrightconfig.json":
+                found.append(str(Path(dirpath, filename).relative_to(_REPO_ROOT)))
+    assert saw_files, "the config-home walk saw no files — the scan would pass vacuously"
+    assert not found, (
+        f"pyright prefers pyrightconfig.json over [tool.pyright]; found {found} — the table "
+        "must stay the single configuration authority (CI-09 S3)"
+    )
+
+
+def test_ci_lint_job_runs_the_pyright_gate() -> None:
+    """CI-09 S2: the lint job runs the bare gate, and no workflow pins a version."""
+    ci, _ = _workflow("ci.yml")
+    lint = ci.get("jobs", {}).get("lint", {})
+    assert isinstance(lint, dict), "ci.yml has no `lint` job"
+    assert _find_step(lint, run="uv run pyright") is not None, (
+        "the ci.yml `lint` job must contain a step whose run is exactly 'uv run pyright' — "
+        "bare, because [tool.pyright]'s include is the single scope authority (CI-09 S2)"
+    )
+    version = _declared_pyright_version()
+    names = _workflow_names()
+    assert names, "no workflow files found — the scan would pass vacuously"
+    for name in names:
+        raw = _read_text(f"{_WORKFLOW_DIR}/{name}")
+        assert version not in raw, f"{name} declares the pyright version {version}"
+        assert re.search(r"pyright\s*(?:==|@|>=|<=|~=|!=|>|<|=)\s*\d", raw) is None, (
+            f"{name} declares a pyright version specifier"
+        )
+
+
+def test_mypy_and_pyright_exclude_tests() -> None:
+    """CI-09 S1: tests/ stays out of both type gates and the posture is documented."""
+    tool = _load_toml("pyproject.toml")["tool"]
+    mypy_exclude = {entry.rstrip("/") for entry in tool["mypy"]["exclude"]}
+    assert "tests" in mypy_exclude, (
+        f"[tool.mypy] exclude must contain tests/ (CI-09 S1), got {tool['mypy']['exclude']}"
+    )
+
+    ci, _ = _workflow("ci.yml")
+    lint = ci.get("jobs", {}).get("lint", {})
+    invocations = [
+        str(step.get("run", ""))
+        for step in lint.get("steps", [])
+        if isinstance(step, dict) and "mypy" in str(step.get("run", ""))
+    ]
+    hooks = [
+        hook
+        for repo in _load_yaml(".pre-commit-config.yaml")["repos"]
+        if repo.get("repo") == "local"
+        for hook in repo.get("hooks", [])
+        if hook.get("id") == "mypy"
+    ]
+    assert len(hooks) == 1, f"expected exactly one local mypy hook entry, found {len(hooks)}"
+    assert hooks[0].get("entry") == "uv run mypy src/ scripts/", (
+        "the local mypy hook entry must be exactly 'uv run mypy src/ scripts/', "
+        f"got {hooks[0].get('entry')!r}"
+    )
+    invocations.append(str(hooks[0].get("entry", "")))
+    assert invocations, "no mypy invocation found — the scope assertions would pass vacuously"
+    for invocation in invocations:
+        assert "src" in invocation and "scripts" in invocation, (
+            f"every mypy invocation must name src/ and scripts/, got {invocation!r}"
+        )
+        assert "tests" not in invocation, (
+            f"no mypy invocation may name tests/ (CI-09 S1), got {invocation!r}"
+        )
+
+    pyright = tool.get("pyright")
+    assert isinstance(pyright, dict), (
+        "pyproject.toml must declare a `[tool.pyright]` table before its exclude can be read "
+        "(CI-09 S1)"
+    )
+    pyright_exclude = {entry.rstrip("/") for entry in pyright["exclude"]}
+    assert "tests" in pyright_exclude, (
+        f"[tool.pyright] exclude must contain tests (CI-09 S1), got {pyright['exclude']}"
+    )
+
+    contributing = _read_text("CONTRIBUTING.md")
+    assert "### Type checking" in contributing, "CONTRIBUTING.md has no '### Type checking' section"
+    section = contributing.split("### Type checking", 1)[1].split("### ", 1)[0]
+    for required in ("uv run mypy", "uv run pyright", "tests/"):
+        assert required in section, (
+            f"the CONTRIBUTING.md type-checking section must state {required!r}: it is where "
+            "a contributor reads the Q1 answer (CI-09 S1)"
+        )
+
+    template = _read_text(".github/PULL_REQUEST_TEMPLATE.md")
+    checklist = template.split("## Checklist", 1)[1] if "## Checklist" in template else template
+    assert "pyright" in checklist, (
+        "the PR-template Checklist must carry the pyright item, the CI-06 S4 shape (CI-09 S1)"
+    )
+
+
+def test_analyzer_dev_pins_are_exact_and_match_the_lock() -> None:
+    """CI-09 S4: every analyzer dev pin is exact and equals its lock resolution.
+
+    Both sides are derived from declarations — the pin from `[dependency-groups]
+    dev`, the version from `uv.lock` — so the guard holds no literal. COR-6 extends
+    the single-authority discipline (D10, CI-08's ruff precedent) from pyright to
+    every analyzer, so a floating range cannot move the gate's version under CI.
+    """
+    packages = _load_toml("uv.lock").get("package", [])
+    for name in _ANALYZER_DEV_PINS:
+        version = _declared_exact_dev_pin(name)
+        resolved = [
+            package.get("version")
+            for package in packages
+            if isinstance(package, dict) and package.get("name") == name
+        ]
+        assert resolved == [version], (
+            f"uv.lock must resolve exactly one {name} package at the dev pin {version}, "
+            f"got {resolved} — a pin/lock drift means the gate runs a version nobody declared"
+        )
+
+
+def test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates() -> None:
+    """CI-09 S5: adopting pyright leaves every existing gate declaration intact."""
+    ci, _ = _workflow("ci.yml")
+    lint = ci.get("jobs", {}).get("lint", {})
+    assert _find_step(lint, run="uv run mypy src/ scripts/") is not None, (
+        "the ci.yml `lint` job must still contain the 'uv run mypy src/ scripts/' step"
+    )
+
+    config = _load_yaml(".pre-commit-config.yaml")
+    entries = [
+        hook.get("entry")
+        for repo in config["repos"]
+        if repo.get("repo") == "local"
+        for hook in repo.get("hooks", [])
+        if hook.get("id") == "mypy"
+    ]
+    assert entries == ["uv run mypy src/ scripts/"], (
+        f"the local mypy hook entry must stay 'uv run mypy src/ scripts/', got {entries!r}"
+    )
+
+    for name in _workflow_names():
+        raw = _read_text(f"{_WORKFLOW_DIR}/{name}")
+        for literal in ("fail_under", "--fail-under"):
+            assert literal not in raw, (
+                f"{name} declares {literal!r}: the TOTAL coverage floor stays config-owned "
+                "(CI-01, CI-09 S5)"
+            )
+
+    ruff_format_hooks = [
+        hook
+        for repo in config["repos"]
+        if repo.get("repo") == _RUFF_PRE_COMMIT_REPO
+        for hook in repo.get("hooks", [])
+        if hook.get("id") == "ruff-format"
+    ]
+    assert len(ruff_format_hooks) == 1, (
+        f"expected exactly one ruff-format hook entry, found {len(ruff_format_hooks)} (PB-14)"
+    )
+
+
+def test_ci07_names_the_declared_mypy_language_level() -> None:
+    """CI-07: the canonical clause names the declared [tool.mypy] python_version."""
+    version = _load_toml("pyproject.toml")["tool"]["mypy"]["python_version"]
+    blocks = _read_text("openspec/specs/ci/spec.md").split("### Requirement: ")
+    ci07 = next((block for block in blocks if "(CI-07)" in block.split("\n", 1)[0]), None)
+    assert ci07 is not None, "openspec/specs/ci/spec.md has no CI-07 requirement block"
+    assert f'"{version}"' in ci07, (
+        f"CI-07 must name the declared [tool.mypy] python_version ({version}): the committed "
+        "configuration and the canonical clause cannot diverge (issue #201)"
+    )
+    # The retired value is asserted as a literal on purpose: no declaration is left to
+    # derive it from, and the whole point is that this string is gone. Every other
+    # version in this module is derived.
+    assert '"3.10"' not in ci07, (
+        'CI-07 must not still declare the retired [tool.mypy] python_version "3.10": its '
+        "clause and its scenario bullet were amended to the declared value (issue #201)"
     )

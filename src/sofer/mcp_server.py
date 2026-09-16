@@ -683,10 +683,12 @@ def _read_toml_text(path: Path) -> dict[str, Any]:
     Uses the project-standard ``tomli``/``tomllib`` fallback. Errors
     propagate to the caller.
     """
-    try:
-        import tomli as _tomli
-    except ImportError:  # Python >= 3.11
+    # Import is version-gated (not try/except) so a static checker evaluates
+    # exactly one arm: `tomllib` is stdlib from 3.11 on, `tomli` backports it.
+    if sys.version_info >= (3, 11):
         import tomllib as _tomli
+    else:
+        import tomli as _tomli
     with open(path, "rb") as fh:
         return _tomli.load(fh)
 

@@ -34,9 +34,9 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Example: quality check names were hardcoded in 4 places — now in `quality.QUALITY_CHECK_NAMES`.
 
 ### 5. Pre-commit hooks run automatically
-- `ruff` (lint + fix + format) and `mypy` run on every commit.
+- `ruff` (lint + fix + format), `mypy`, and `pyright` run on every commit.
 - Never commit with `--no-verify` unless you have a documented reason.
-- Before pushing, run `uv run mypy src/` — the CI will reject type errors.
+- Before pushing, run `uv run mypy src/` and `uv run pyright` — the CI will reject type errors.
 
 ### 6. Tests must match specs
 - Every SDD spec scenario must have a corresponding test.
@@ -88,7 +88,7 @@ Cutting a release:
 Rules:
 - Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the release notes (e.g. v0.2.0 removed the `upload` subcommand). The shipped version always equals the tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed metadata (never a static constant).
 - **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
-- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: a `3.10` development environment installs the conditional `tomli` backport (`pyproject.toml:27`), which makes the `import tomli as _tomli` arm of the five `try:` / `except ImportError:` fallbacks live and the `import tomllib as _tomli` arm dead, so the second import of the same name triggers `no-redef` errors (known latent issue in `cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`, `model.py`) — and it leaves the COV-06 per-file gates unsatisfiable by construction, because the dead arm cannot be executed by any test while `# pragma: no cover` is forbidden in those modules (rule 14). The dev-environment pin (`.python-version`) is therefore `3.13`; a contributor whose interpreter is older must pass `--python 3.13` explicitly for those two gates (`uv run --python 3.13 mypy src/ scripts/`, `uv run --python 3.13 coverage run -m pytest`).
+- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: a `3.10` development environment installs the conditional `tomli` backport (`pyproject.toml:27`), which makes the `import tomli as _tomli` arm of the five `try:` / `except ImportError:` fallbacks live and the `import tomllib as _tomli` arm dead, so the second import of the same name triggers `no-redef` errors (known latent issue in `cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`, `model.py`) — and it leaves the COV-06 per-file gates unsatisfiable by construction, because the dead arm cannot be executed by any test while `# pragma: no cover` is forbidden in those modules (rule 14). The dev-environment pin (`.python-version`) is therefore `3.13`; a contributor whose interpreter is older must pass `--python 3.13` explicitly for those two gates (`uv run --python 3.13 mypy src/ scripts/`, `uv run --python 3.13 coverage run -m pytest`). A pyright gate (`uv run pyright`, `[tool.pyright]`) now covers the same `src/` and `scripts/` scope; the four `try:` / `except ImportError:` `tomli` sites named here are resolved for that gate by the committed `typings/tomli-stubs/` stub (`mcp_server.py` is version-gated instead, so a static checker prunes its `tomli` arm; mypy already resolves the remaining sites through the global `ignore_missing_imports = true`), never by adding `tomli` to the dev group — which is exactly the move this note forbids.
 - Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time).
 
 ### 13. README / README_ES sync

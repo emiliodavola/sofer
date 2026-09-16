@@ -791,6 +791,10 @@ mcp_registration). El árbol de módulos anotado está en
 
 ## Controles de calidad y escaneo de seguridad
 
+- **Type checking**: `src/` y `scripts/` pasan por dos compuertas de tipos — **mypy** (modo strict,
+  `[tool.mypy]`) y **pyright** (modo `standard`, `[tool.pyright]`) — ambas declaradas en
+  `pyproject.toml` y ejecutadas en CI y en los hooks locales de pre-commit. `tests/` queda
+  excluido de ambas por política (`openspec/specs/ci/spec.md` CI-09).
 - **Coverage gate**: la cobertura total de tests está limitada al **90%** — el
   valor mínimo vive en `pyproject.toml` (`[tool.coverage.report] fail_under = 90`)
   y lo aplica coverage.py en cada PR (`ci.yml`) y antes de cada release

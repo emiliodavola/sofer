@@ -94,7 +94,7 @@ def verify_load_dataset(
         )
 
     # ── Inspect splits ───────────────────────────────────────────────────
-    actual_splits = list(ds.keys())
+    actual_splits = [str(name) for name in ds.keys()]
     split_row_counts: dict[str, int] = {}
     for name in actual_splits:
         try:

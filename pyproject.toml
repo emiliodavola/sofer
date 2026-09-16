@@ -27,6 +27,8 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",
     "pyyaml>=6.0",
+    "datasets>=5.0.1",
+    "numpy<2.3",
 ]
 
 [project.urls]
@@ -45,10 +47,13 @@ sofer-mcp = "sofer.mcp_server:main"
 dev = [
     "pytest>=8.0",
     "ruff==0.16.7",
-    "mypy>=1.15.0",
+    "mypy==2.3.0",
     "pre-commit>=4.0.0",
     "fastmcp>=3.4,<4",
     "coverage>=7.16.0",
+    "types-openpyxl>=3.1.5.20260827",
+    "types-pyyaml>=6.0.12.20260906",
+    "pyright==1.1.414",
 ]
 
 # ── Ruff: linter & formatter ─────────────────────────────────────────────
@@ -75,12 +80,42 @@ indent-style = "space"
 # ── mypy: static type checking ───────────────────────────────────────────
 
 [tool.mypy]
-python_version = "3.10"
-strict = false
+python_version = "3.11"
+strict = true
 check_untyped_defs = true
 ignore_missing_imports = true
 warn_unused_ignores = true
 exclude = ["tests/", ".venv/"]
+
+[[tool.mypy.overrides]]
+module = [
+    "pyarrow",
+    "pyarrow.*",
+    "datasets",
+    "datasets.*",
+]
+
+# ── pyright: second type checker (real gate) ─────────────────────────────
+# Not advisory: `uv run pyright` is a gate in the CI `lint` job and in the
+# pre-commit hooks. `standard` is the strongest mode reachable without a cleanup
+# campaign — `basic` would silently drop the one real defect it found
+# (`_converters.py:650`), and `strict` is a 578-error campaign, not a policy
+# change. `pythonVersion` mirrors the gate interpreter (`.python-version`, 3.13)
+# because pyright analyses the runtime environment it runs in: there the
+# `tomllib` arm is the live one and the `tomli` fallback arm is the stale one the
+# stub below targets. The scope is the enforced mypy scope; `tests/` is excluded
+# from BOTH type gates by policy (openspec/specs/ci/spec.md CI-09). `venvPath`/
+# `venv` are declared so import resolution can never depend on an inherited
+# VIRTUAL_ENV. Invoke it as `uv run pyright` — never bare, never `uvx`.
+[tool.pyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+include = ["src", "scripts"]
+exclude = ["tests", ".venv", "**/node_modules", "**/__pycache__"]
+stubPath = "typings"
+reportMissingImports = "error"
 
 # ── pytest ───────────────────────────────────────────────────────────────
 
@@ -165,6 +200,12 @@ agent_resource_max_bytes = 50000000
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.build.targets.sdist]
+# `typings/` is a type-checker artifact: it must never ship in a distribution.
+# The wheel already excludes it (hatchling's src-layout selection builds
+# src/sofer); this keeps the sdist to the same rule.
+exclude = ["/typings"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
