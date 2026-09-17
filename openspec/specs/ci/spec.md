@@ -215,12 +215,21 @@ checklist SHALL include a coverage-gate item.
 ### Requirement: Dev interpreter pin matches the gate interpreter (CI-07)
 
 > Added by change `2026-09-14-chore-python-version-313` (GitHub #178). Every scenario below is evidenced by verify-phase static or runtime gate evidence rather than by a pytest assertion — the framing this capability's own Test Mapping already uses for gate exit codes.
+>
+> Modified by `2026-09-15-chore-type-gate-policy` (GitHub #201) — the `[tool.mypy] python_version` declaration
+> moved to `"3.11"` by maintainer decision; the `.python-version` pin, its equality with both gate-job pins, and
+> every other clause are unchanged.
 
 The repository's local development interpreter pin — the single-version `.python-version` file at the repository root, which uv resolves for every documented `uv run …` invocation — SHALL name the same Python version the gate-bearing CI jobs run on. `.python-version` SHALL contain exactly `3.13` and SHALL equal both gate pins declared in `.github/workflows/ci.yml`: the `lint` job's `python-version` (which runs `uv run mypy src/ scripts/`) and the `coverage` job's `python-version` (which runs the complete-suite coverage gate plus the four COV-06 per-file scoped gates). The pin SHALL be the single local source of the gate interpreter, so that a clean checkout needs no `--python` flag to run the gates.
 
 The pin SHALL make the documented, flag-free gate commands satisfiable on a clean checkout. `uv run mypy src/` and `uv run mypy src/ scripts/` SHALL exit 0 with zero errors — in particular zero `[no-redef]` errors at the five interpreter-selection fallback sites (`cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`, `model.py`). `uv run coverage run -m pytest` followed by `bash scripts/check_core_coverage.sh` SHALL exit 0 with each of the four core rows (`cli.py`, `scanner.py`, `prepare.py`, `publish.py`) at 100.00% and an empty `Missing` column, and the script SHALL reach its last gate (a first-file failure aborts it under `set -euo pipefail`, leaving the remaining gates unverified). A `3.10` pin could satisfy neither gate, because `3.10` installs the conditional `tomli` backport, which makes one arm of every fallback dead and therefore makes the four-module 100.00% mandate unsatisfiable by construction rather than by test quality.
 
-`.python-version` selects the interpreter a developer's tools run under; it SHALL NOT be read as a support declaration. This requirement SHALL NOT change user-facing Python support: `pyproject.toml` `[project] requires-python` SHALL remain `>=3.10`, `[tool.mypy] python_version` SHALL remain `"3.10"` (it declares the minimum language/typing level, tied to `requires-python`, not the developer interpreter), the CI test matrix SHALL keep exercising `3.10`–`3.14`, the TOTAL coverage floor SHALL remain the config-owned `fail_under = 90` (CI-01), and the diff SHALL contain zero `pyproject.toml` paths and zero `.github/workflows/` paths.
+`.python-version` selects the interpreter a developer's tools run under; it SHALL NOT be read as a support declaration. This requirement SHALL NOT change user-facing Python support: `pyproject.toml` `[project] requires-python` SHALL remain `>=3.10`, `[tool.mypy] python_version` SHALL be `"3.11"` — the language level mypy analyses against, declared independently of both `requires-python` (`>=3.10`, the support floor) and `.python-version` (`3.13`, the gate interpreter). At `3.11` the `import tomllib as _tomli` arm of the interpreter-selection fallbacks is a resolvable stdlib module for mypy, while the marker-only `tomli` arm is covered by the global `ignore_missing_imports = true`. It SHALL NOT be read as a support declaration: `requires-python` SHALL remain `>=3.10`. A change that moves this value SHALL amend this clause in the same change. The CI test matrix SHALL keep exercising `3.10`–`3.14`, the TOTAL coverage floor SHALL remain the config-owned `fail_under = 90` (CI-01), and the diff SHALL contain zero `pyproject.toml` paths and zero `.github/workflows/` paths.
+
+(Previously: this clause required `[tool.mypy] python_version` to remain `3.10` and described it as the
+minimum language level tied to `requires-python`; the maintainer declared `"3.11"` as the analysis level and
+change `2026-09-15-chore-type-gate-policy` (GitHub #201) amends the clause to match the committed
+configuration.)
 
 `AGENTS.md` rule 12's latent-issue note SHALL be accurate and SHALL record the consequence for a contributor on an older interpreter: it SHALL name all five fallback modules, quote the real fallback form (`import tomli as _tomli` / `import tomllib as _tomli`), record that the pin is `3.13` because a `3.10` development environment installs the `tomli` backport and thereby makes the local `mypy` and COV-06 gates unsatisfiable by construction, keep the existing "do not add mypy to the version matrix" instruction, and state that a contributor on an older interpreter must pass `--python 3.13` explicitly for those two gates. The note SHALL stay where it is and SHALL NOT weaken any other rule-12 bullet.
 
@@ -272,7 +281,8 @@ The pin SHALL make the documented, flag-free gate commands satisfiable on a clea
 - GIVEN `pyproject.toml`, `.github/workflows/ci.yml`, and this change's diff
 - WHEN the support declarations, the coverage floor, and the diff are inspected
 - THEN `requires-python` SHALL still be `>=3.10` and `[tool.mypy] python_version`
-  SHALL still be `"3.10"`
+  SHALL be `"3.11"` — the declared analysis level, amended by change
+  `2026-09-15-chore-type-gate-policy` (GitHub #201) to match the committed configuration
 - AND the CI test matrix SHALL still exercise `3.10`, `3.11`, `3.12`, `3.13`, and
   `3.14`
 - AND the TOTAL coverage floor SHALL still be the config-owned `fail_under = 90`
@@ -361,6 +371,121 @@ declaration, so the obligation for a ruff pin move is stated here, in CI-08.
 
 ---
 
+### Requirement: Type-gate posture — `tests/` excluded from both type gates and pyright adopted as a real gate (CI-09)
+
+> Added by change `2026-09-15-chore-type-gate-policy` (GitHub #201). Scenarios 1–4 are asserted
+> by static guard tests in `tests/test_ci_workflows.py`; scenario 5's mypy-exit-zero half is
+> verify-phase runtime evidence — the framing this capability's Test Mapping already uses for gate
+> exit codes.
+
+**Clause group Q1 — the `tests/` exclusion (the durable record of decision (a)).**
+
+The repository SHALL keep `tests/` out of **every** enforced type gate. `[tool.mypy] exclude` SHALL contain
+`tests/`; every mypy invocation in `.github/workflows/ci.yml` and `.pre-commit-config.yaml` SHALL name
+`src`/`scripts` and SHALL NOT name `tests`; and `[tool.pyright] exclude` SHALL contain `tests`, so the
+exclusion is declared once in configuration and the pyright gate SHALL be invoked **bare** (no path
+arguments) for that declaration to be the single authority. The posture SHALL be documented in
+`CONTRIBUTING.md`'s type-checking section, and this requirement SHALL NOT be read as relaxing
+`process-boundary` PB-07: new test helpers SHALL still be type-annotated by convention even though neither
+gate analyses them.
+
+**Clause group Q2 — the pyright gate (the durable record of decision (c)).**
+
+pyright SHALL be a **real** gate, not an advisory analyzer. `pyproject.toml` SHALL declare exactly one
+`[tool.pyright]` table — the single configuration authority; no `pyrightconfig.json` SHALL exist anywhere in
+the tree, because pyright silently prefers it over the table. That table SHALL declare
+`typeCheckingMode = "standard"`, `include` covering `src` and `scripts` (the enforced mypy scope),
+`exclude` containing `tests`, `pythonVersion` equal to the gate interpreter that `.python-version` pins,
+`stubPath` naming the committed `tomli` stub directory, and SHALL NOT globally disable
+`reportMissingImports`. One step in the `lint` job of `.github/workflows/ci.yml` SHALL run the gate, and one
+local pre-commit hook SHALL run it locally, mirroring the `mypy` hook's shape (`pass_filenames: false`).
+
+pyright SHALL be pinned by an exact `pyright==X.Y.Z` entry in `[dependency-groups] dev`, and the version
+SHALL reach CI through `uv.lock`: **no file under `.github/workflows/` SHALL declare a pyright version
+literal**. pyright has no `required-version` analogue, so the enforcement SHALL be a runtime equality proof
+— `uv run pyright --version` SHALL equal the dev pin — recorded as verify-phase evidence.
+
+The gate's exit contract SHALL be **errors only**: no invocation SHALL pass `--warnings`, and any rule the
+repository wants to bind SHALL be declared at `error` severity in `[tool.pyright]` rather than left at
+warning severity and hoped for. The measured `"N errors, M warnings"` summary SHALL be recorded as
+verify-phase evidence so a warning-count jump is visible without failing the build.
+
+The four `tomli` fallback sites that still select the parser behind `try:` / `except ImportError:`
+(`cli.py`, `config.py`, `mcp_registration.py`, `model.py`) SHALL be resolved by the committed stub under
+`stubPath`; `mcp_server.py`'s fallback is version-gated (`sys.version_info >= (3, 11)`), so a static checker
+prunes its `tomli` arm and it needs no stub. `tomli` SHALL NOT be added to any dependency group, which would
+make the fallback arm dead on the pinned interpreter and break the `cli.py` COV-06 row (AGENTS.md rule 12). The gate SHALL be invoked as `uv run pyright`, so
+third-party imports resolve against the project environment.
+
+**Clause group S — no weakening.** Adopting the new posture SHALL NOT weaken what already holds: under the
+committed `[tool.mypy] strict = true`, `uv run mypy src/ scripts/` SHALL exit 0; the `[tool.coverage.report]`
+TOTAL floor, the four COV-06 per-file gates, the CI test matrix and the `release.yml` `needs` graph SHALL be
+unchanged; and no resolution of a type diagnostic SHALL add a `# pragma: no cover` anywhere.
+
+#### Scenario: `tests/` stays out of both type gates
+
+- GIVEN `pyproject.toml`'s `[tool.mypy]` and `[tool.pyright]` blocks, every mypy invocation in
+  `.github/workflows/ci.yml` and `.pre-commit-config.yaml`, and `CONTRIBUTING.md`'s type-checking section
+- WHEN `tests/test_ci_workflows.py::test_mypy_and_pyright_exclude_tests` inspects them
+- THEN `[tool.mypy] exclude` SHALL contain `tests/` and `[tool.pyright] exclude` SHALL contain `tests`
+- AND every mypy invocation SHALL name `src`/`scripts` and SHALL NOT name `tests`
+- AND the type-checking section SHALL name both gate commands and state that `tests/` is excluded from
+  both gates, so Q1's answer is documented where a contributor reads it
+- AND the PR template's Checklist SHALL carry the pyright item (the CI-06 S4 shape), and
+  `process-boundary` PB-07 SHALL be cross-referenced, not edited — its "test helpers are still
+  annotated by convention" clause stays in force
+
+#### Scenario: `[tool.pyright]` declares the decided posture and the gate runs
+
+- GIVEN `pyproject.toml`, `.github/workflows/ci.yml`, and `.pre-commit-config.yaml`
+- WHEN `tests/test_ci_workflows.py::test_pyright_config_declares_the_decided_posture` and
+  `::test_ci_lint_job_runs_the_pyright_gate` inspect them
+- THEN `[tool.pyright]` SHALL declare `typeCheckingMode = "standard"`, an `include` covering both
+  `src` and `scripts`, an `exclude` containing `tests`, a `pythonVersion` equal to the value
+  `.python-version` pins, and a `stubPath` naming the committed `tomli` stub directory
+- AND `reportMissingImports` SHALL NOT be globally disabled
+- AND the `lint` job SHALL contain exactly the bare gate invocation `uv run pyright`, and no file
+  under `.github/workflows/` SHALL declare a pyright version literal
+- AND the committed invocation SHALL exit 0 on the committed tree, with the measured
+  `"N errors, 0 warnings"` summary recorded as verify-phase runtime evidence
+
+#### Scenario: Exactly one pyright config home exists
+
+- GIVEN the repository tree, excluding the virtual environment and other machine-local directories
+- WHEN `tests/test_ci_workflows.py::test_pyright_has_exactly_one_config_home` searches it
+- THEN zero `pyrightconfig.json` files SHALL exist, so `[tool.pyright]` stays the single
+  configuration authority — the analogue of CI-08's single-declaration rule, which a stray JSON
+  file would silently defeat because pyright prefers it over the table
+
+#### Scenario: The pin is exact, reaches CI through the lock, and matches the running binary
+
+- GIVEN `pyproject.toml`'s `[dependency-groups] dev` list and `uv.lock`
+- WHEN `tests/test_ci_workflows.py::test_analyzer_dev_pins_are_exact_and_match_the_lock` derives
+  `X.Y.Z` from the dev pin and compares the lock's resolved entry against it, and when
+  `uv run pyright --version` runs
+- THEN exactly one pyright dev entry SHALL exist and its specifier SHALL be the exact
+  `==X.Y.Z`, so a `>=` floor SHALL fail the guard
+- AND `uv.lock`'s resolved pyright package SHALL carry that same version
+- AND the guard SHALL hold no version literal of its own, so a bump edits declarations only
+- AND `uv run pyright --version` SHALL equal that version — the enforcement pyright itself lacks
+  (it has no `required-version` analogue) — recorded as verify-phase runtime evidence
+
+#### Scenario: Adopting the gate leaves every existing gate declaration intact
+
+- GIVEN `.github/workflows/ci.yml`, `.github/workflows/release.yml`,
+  `.pre-commit-config.yaml`, and `pyproject.toml`
+- WHEN `tests/test_ci_workflows.py::test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates`
+  inspects them, and when `uv run mypy src/ scripts/` runs under the committed `strict = true`
+- THEN the mypy invocations SHALL still be exactly `uv run mypy src/ scripts/` on both surfaces
+  (the `lint` job step and the local `mypy` hook entry)
+- AND no workflow SHALL declare a coverage floor literal or a `--fail-under` flag in its raw text,
+  and exactly one `ruff-format` hook entry SHALL remain (PB-14)
+- AND `uv run mypy src/ scripts/` SHALL exit 0 with zero errors, and the CI test matrix,
+  `release.yml`'s `needs` graph, the TOTAL floor and the four COV-06 rows SHALL be unchanged —
+  recorded as verify-phase runtime evidence (CI-01 gate-exit-code precedent)
+
+---
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -398,3 +523,8 @@ evidence recorded in the verify report.
 | CI-08 | No workflow declares a ruff version | `tests/test_ci_workflows.py` — `test_workflows_do_not_declare_a_ruff_version`: YAML/full-text scan of `.github/workflows/*.yml` |
 | CI-08 | CONTRIBUTING names the declared version | `tests/test_ci_workflows.py` — `test_contributing_names_the_declared_ruff_version`: text inspection of `CONTRIBUTING.md` |
 | CI-08 | required-version rejects a mismatched binary | Verify-phase runtime evidence — `uv run ruff check src/ tests/ scripts/` and `uv run ruff format --check src/ tests/ scripts/` exit codes under a mismatched `required-version` probe and under the declared value (CI-01 gate-exit-code precedent) |
+| CI-09 | `tests/` stays out of both type gates | `tests/test_ci_workflows.py` — `test_mypy_and_pyright_exclude_tests`: tomllib parse of both type-checker blocks + text inspection of every mypy invocation and of `CONTRIBUTING.md`'s type-checking section and the PR template |
+| CI-09 | `[tool.pyright]` declares the decided posture and the gate runs | `tests/test_ci_workflows.py` — `test_pyright_config_declares_the_decided_posture` and `test_ci_lint_job_runs_the_pyright_gate`: tomllib + YAML inspection; local gate run `uv run pyright` exit code with the measured summary line (verify-phase runtime evidence) |
+| CI-09 | Exactly one pyright config home exists | `tests/test_ci_workflows.py` — `test_pyright_has_exactly_one_config_home`: tree walk for `pyrightconfig.json` |
+| CI-09 | The pin is exact, reaches CI through the lock, and matches the running binary | `tests/test_ci_workflows.py` — `test_analyzer_dev_pins_are_exact_and_match_the_lock`: dev-pin derivation + `uv.lock` resolution equality; `uv run pyright --version` equality (verify-phase runtime evidence) |
+| CI-09 | Adopting the gate leaves every existing gate declaration intact | `tests/test_ci_workflows.py` — `test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates`: YAML/tomllib inspection; `uv run mypy src/ scripts/` exit code (CI-01 gate-exit-code precedent) |

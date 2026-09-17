@@ -26,6 +26,7 @@ Run these from the repository root:
 ```bash
 uv run pytest
 uv run mypy src/
+uv run pyright                   # second type gate (config-driven; src/ + scripts/)
 uv run ruff check src/ tests/
 uv run coverage run -m pytest   # complete suite under coverage (gate: 90%)
 uv run coverage report -m       # totals + per-file missed lines; fails below 90%
@@ -78,7 +79,22 @@ This project uses **ruff** 0.16.7 for linting and formatting. Configuration is i
 
 ### Type checking
 
-We use **mypy** in strict mode. Run `mypy src/` to check types. The CI will reject PRs that don't type-check.
+Two type checkers gate the source — **mypy** (`[tool.mypy]`, `strict = true`) and **pyright**
+(`[tool.pyright]`, `typeCheckingMode = "standard"`). Both are wired into the local pre-commit hooks and
+into the CI `lint` job, and `pyproject.toml` is the single source of the mode, scope and version each one
+runs with:
+
+```bash
+uv run mypy src/ scripts/   # the enforced mypy invocation (CI + the `mypy` hook)
+uv run pyright              # the enforced pyright invocation (CI + the `pyright` hook)
+```
+
+The scope is `src/` and `scripts/`; **`tests/` is excluded from both type gates** by policy (recorded in
+`openspec/specs/ci/spec.md` CI-09) — test helpers are still annotated by convention
+(`process-boundary` PB-07), but the test tree is never type-checked. Both analyzers are pinned exactly in `[dependency-groups] dev` and resolved through `uv.lock` — a
+floating range would let the gate's behaviour move under CI with no diff (the rule CI-08 already enforces
+for ruff). pyright must be run through `uv run`: it resolves third-party imports against the project
+environment, so running it any other way (bare, `npx`, `uvx`) can report phantom missing imports.
 
 ### Commit messages
 

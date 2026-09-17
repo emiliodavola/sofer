@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from .model import DatasetConfig
 
 from huggingface_hub import HfApi
-from huggingface_hub.utils import RepositoryNotFoundError
+from huggingface_hub.errors import RepositoryNotFoundError
 
 from . import config
 from ._mirror import copy_to_mirror, expanded_planned_remotes, planned_remotes
@@ -683,7 +683,7 @@ def publish(
 
     # Ensure UTF-8 output for Unicode characters on Windows.
     if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")  # pyright: ignore[reportAttributeAccessIssue]
 
     # ── 1. Auto-prepare (PUB-03) — never under --dry-run (PUB-04) ────────
     # all_files=True: the delivered package must include codebooks even when

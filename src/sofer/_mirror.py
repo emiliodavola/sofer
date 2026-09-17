@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .model import DatasetConfig
+    from .model import DatasetConfig, FileEntry
 
 
 def _validate_remote_paths(cfg: DatasetConfig) -> list[str]:
@@ -74,7 +74,7 @@ def parquet_remote_for(remote: str) -> str:
     return str(PurePosixPath(posix_remote).with_suffix(".parquet"))
 
 
-def _is_convertible_entry(entry) -> bool:
+def _is_convertible_entry(entry: FileEntry) -> bool:
     """Return True when *entry* is convertible (universal set, normalized)."""
     # Import here to avoid cycle — _converters never imports _mirror
     from ._converters import CONVERTIBLE_SUFFIXES

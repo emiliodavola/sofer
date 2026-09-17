@@ -19,6 +19,8 @@ jobs:
         run: uv run ruff check src/ tests/ scripts/
       - name: Type check with mypy
         run: uv run mypy src/ scripts/
+      - name: Type check with pyright
+        run: uv run pyright
 
   test:
     runs-on: ${{ matrix.os }}

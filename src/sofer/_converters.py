@@ -611,7 +611,7 @@ def _convert_xlsx_to_parquet(
                 raw_rows: list[list[object]] = []
                 for row in rows_iter:
                     # row is tuple of values; pad to header length
-                    vals = list(row) if row is not None else []
+                    vals: list[object] = list(row) if row is not None else []
                     # Extend/truncate to header length
                     if len(vals) < len(header):
                         vals.extend([None] * (len(header) - len(vals)))
@@ -645,9 +645,11 @@ def _convert_xlsx_to_parquet(
             pq_path = _write_parquet_table(table, staging_dir, stem)
             result[key_stem] = pq_path
 
-            # Clean locals for next iteration
-            if "raw_rows" in locals():
-                del raw_rows
+            # Release the parsed rows before the next sheet. An explicit rebind,
+            # not a `del` behind a runtime membership test: static checkers cannot
+            # model that test (`reportPossiblyUnboundVariable`), and the rebind
+            # frees the same list.
+            raw_rows = []
     except Exception as exc:
         print(f"  \u26a0  {local.name}: xlsx conversion failed ({exc})")
         return result
