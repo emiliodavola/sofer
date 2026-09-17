@@ -28,7 +28,12 @@ dependencies = [
     "tomli-w>=1.0",
     "pyyaml>=6.0",
     "datasets>=5.0.1",
-    "numpy<2.3",
+    # Split by interpreter on purpose: numpy 2.2.x ships no cp314 wheel, so a single ceiling made
+    # 3.14 build numpy from source (12 min) and crash with an access violation at import
+    # (CI: windows-latest 3.14). Below 3.14 the ceiling is kept; on 3.14 the floor selects a
+    # release that actually publishes cp314 wheels.
+    "numpy<2.3; python_version < '3.14'",
+    "numpy>=2.3; python_version >= '3.14'",
 ]
 
 [project.urls]
