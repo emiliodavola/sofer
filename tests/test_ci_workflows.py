@@ -6,16 +6,15 @@ Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
 `ci` specification (requirements CI-01..CI-11) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 28 `ci` Test Mapping rows whose verification
+scenario-verifying tests are the 29 `ci` Test Mapping rows whose verification
 names a test in this module (CI-09's posture row is carried by two guards), plus
-six tests owned by other capabilities or supporting this one — the two
-`coverage` COV-06 guards, the CodeQL private-window guard,
-`test_ci_workflow_files_present`, which fails loudly before any parse, the PB-14
-hook-scope guard, and the CI-07 clause-agreement guard, which re-enforces an
-existing CI-07 row rather than adding one. Runtime gate exit-code evidence
-(CI-01 S2's local gate run, CI-08 S4's required-version mismatch probe, and
-CI-09 S2's pyright gate run) is recorded in the SDD verify report, not asserted
-here.
+five tests owned by other capabilities or supporting this one — the two
+`coverage` COV-06 guards, `test_ci_workflow_files_present`, which fails loudly
+before any parse, the PB-14 hook-scope guard, and the CI-07 clause-agreement
+guard, which re-enforces an existing CI-07 row rather than adding one. Runtime
+gate exit-code evidence (CI-01 S2's local gate run, CI-08 S4's required-version
+mismatch probe, and CI-09 S2's pyright gate run) is recorded in the SDD verify
+report, not asserted here.
 """
 
 from __future__ import annotations
@@ -470,7 +469,7 @@ def test_codeql_init_references_config_file() -> None:
 
 
 def test_codeql_private_window_publishes_sarif_artifact_without_upload() -> None:
-    """While the repository is private, SARIF is an artifact, not an upload.
+    """CI-04 S4: while the repository is private, SARIF is an artifact, not an upload.
 
     Code scanning cannot be enabled on a private repository without GitHub Code
     Security, so uploading SARIF to the Security tab would fail every run. The
