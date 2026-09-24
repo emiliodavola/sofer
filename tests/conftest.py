@@ -85,6 +85,49 @@ def restore_tool_config():
     config.SOURCE_PATH = saved_source
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the ``reads_cwd_dotenv`` marker (opt-out of the #207 isolation)."""
+    config.addinivalue_line(
+        "markers",
+        "reads_cwd_dotenv: test deliberately reads a `.env` from its own cwd "
+        "(opts out of the #207 ambient-dotenv isolation).",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd_dotenv(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Neutralize the ambient ``.env`` for tests that do not opt in (#207).
+
+    ``sofer.mcp_server._read_dotenv_values`` merges two legs: an explicit
+    ``Path.cwd() / ".env"`` read and a bare ``dotenv_values()`` fallback
+    whose ``find_dotenv(usecwd=False)`` is *caller-file-anchored* — i.e. it
+    resolves to the repository-root ``.env`` whenever the suite runs from
+    the checkout, regardless of ``chdir``. So a developer-local ``.env``
+    used to flip token-resolution tests (PB-06: deterministic and offline).
+    Stubbing the read — rather than root-anchoring the load (a
+    product-behaviour change) or ``chdir``-ing each test (which cannot
+    escape the caller-anchored leg) — keeps production untouched. Tests
+    that deliberately exercise ``.env`` reads opt out with
+    ``@pytest.mark.reads_cwd_dotenv``; for them the fallback leg is scoped
+    to their own ``tmp_path`` so the ambient repository ``.env`` cannot
+    merge in either.
+    """
+    if request.node.get_closest_marker("reads_cwd_dotenv") is not None:
+        scoped = request.getfixturevalue("tmp_path")
+
+        def _scoped_find_dotenv(*args: object, **kwargs: object) -> str:
+            return os.fspath(scoped / ".env")
+
+        monkeypatch.setattr("dotenv.main.find_dotenv", _scoped_find_dotenv)
+        return
+    import sofer.mcp_server as mcp_server
+
+    def _empty_dotenv() -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(mcp_server, "_read_dotenv_values", _empty_dotenv)
+
+
 # ---------------------------------------------------------------------------
 #  Process-boundary helpers (PB-01..PB-09)
 # ---------------------------------------------------------------------------
