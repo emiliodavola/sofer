@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]  # tests/ -> repo root
@@ -258,23 +257,16 @@ def _find_step(
 
 
 def _openspec_config() -> dict[str, Any]:
-    """Parse ``openspec/config.yaml`` — gitignored SDD-local state.
+    """Parse ``openspec/config.yaml`` — a committed project artifact.
 
-    The file is listed in ``.gitignore`` (SDD generated artifact) and may be
-    absent from CI checkouts, so the test skips when it is missing; the values
-    asserted here are recorded as working-tree evidence by the SDD verify
-    phase. Correct under both the tracked and untracked readings (D5 note).
+    The file is tracked (issue #210, decision a) so CI-06 is enforceable in
+    every checkout: a missing file fails loudly via ``_load_yaml`` instead of
+    skipping.
 
     Returns:
         The parsed config mapping.
     """
-    path = _REPO_ROOT / "openspec" / "config.yaml"
-    if not path.exists():
-        pytest.skip(
-            "openspec/config.yaml is absent (gitignored SDD state); "
-            "asserting its values is the local SDD verify phase's job"
-        )
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return _load_yaml("openspec/config.yaml")
 
 
 def test_ci_workflow_files_present() -> None:
@@ -490,7 +482,8 @@ def test_codeql_paths_ignore_covers_non_code_trees() -> None:
 def test_openspec_config_declares_coverage_available_at_90() -> None:
     """CI-06 S1: openspec/config.yaml declares coverage available at 90.
 
-    Skips when the (gitignored) file is absent — see ``_openspec_config``.
+    The file is committed (issue #210, decision a), so this test fails loudly
+    when it is absent or misdeclared — no skip on this path.
     """
     config = _openspec_config()
     assert config["testing"]["coverage"]["available"] is True
