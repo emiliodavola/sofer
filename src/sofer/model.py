@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from . import config
+from . import _toml, config
 from ._mirror import _validate_case_fold_collisions
 
 QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
@@ -407,11 +407,6 @@ class DatasetConfig:
         Returns:
             A fully populated :class:`DatasetConfig` instance.
         """
-        try:
-            import tomli as _tomli
-        except ImportError:  # Python ≥ 3.11
-            import tomllib as _tomli
-
         path = Path(path)
         base_dir = path.parent
 
@@ -431,7 +426,7 @@ class DatasetConfig:
             config.reload(base_dir)
 
         with open(path, "rb") as fh:
-            data = _tomli.load(fh)
+            data = _toml.load(fh)
 
         ds = data["dataset"]
 

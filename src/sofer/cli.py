@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from . import config
+from . import _toml, config
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
@@ -460,15 +460,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"  X  Config file not found: {config_path}", file=sys.stderr)
         return 1
 
-    # 1. Load raw TOML.
-    try:
-        import tomli as _tomli
-    except ImportError:
-        import tomllib as _tomli
-
+    # 1. Load raw TOML (parser resolved once in `sofer._toml`, #192).
     try:
         with open(config_path, "rb") as fh:
-            raw_toml = _tomli.load(fh)
+            raw_toml = _toml.load(fh)
     except Exception as exc:
         print(f"  X  Failed to read TOML: {exc}", file=sys.stderr)
         return 1
