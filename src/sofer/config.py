@@ -68,6 +68,13 @@ _DEFAULTS: dict[str, Any] = {
     # (repo_compliance.build_schema_report). Balances statistical confidence
     # against read-time cost; also surfaced in the card's stats footnote.
     "schema_sample_size": 10_000,
+    # Cap for distinct quality values tracked per column (issue #189):
+    # values stored in the per-file non-empty set are truncated to this
+    # many characters to bound memory on wide free-text columns.
+    "quality_value_preview_len": 50,
+    # Cap for unclassified filenames listed by splits.validate_layout
+    # (issue #189): the slice and its ellipsis guard derive from this one value.
+    "splits_max_unclassified_names": 5,
     # Metadata-core (profile/render) inference knobs.
     # ``semantic_priors["email"] = 0.98``: an email column's ``@`` + TLD
     # structure is distinctive, so a regex match-rate near 1.0 is highly
@@ -371,6 +378,9 @@ CARD_BOOLEAN_VALUES: list[str] = _DEFAULTS["card_boolean_values"]
 
 SCHEMA_DUP_THRESHOLD: int = _DEFAULTS["schema_dup_threshold"]
 SCHEMA_SAMPLE_SIZE: int = _DEFAULTS["schema_sample_size"]
+
+QUALITY_VALUE_PREVIEW_LEN: int = _DEFAULTS["quality_value_preview_len"]
+SPLITS_MAX_UNCLASSIFIED_NAMES: int = _DEFAULTS["splits_max_unclassified_names"]
 
 # Metadata-core (profile/render) inference knobs.
 SEMANTIC_PRIORS: dict[str, float] = _DEFAULTS["semantic_priors"]

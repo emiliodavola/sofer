@@ -189,6 +189,12 @@ schema_sample_size = 10_000
 # warnings; above it a single summary (repo_compliance.build_schema_report).
 schema_dup_threshold = 3
 
+# ── Report truncation limits (issue #189) ──
+# Distinct quality values per column truncate to this many chars.
+quality_value_preview_len = 50
+# Unclassified filenames listed by splits.validate_layout (slice + guard).
+splits_max_unclassified_names = 5
+
 # ── Metadata core (profile / render) ──
 # All keys optional — these mirror the code defaults in src/sofer/config.py.
 # Prior probability per semantic detector name (email prior 0.98: the @ + TLD
