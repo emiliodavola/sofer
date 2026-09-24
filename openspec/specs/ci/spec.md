@@ -126,14 +126,19 @@ a tag cannot publish while a core module (`cli.py`, `scanner.py`, `prepare.py`,
 
 ---
 
-### Requirement: CodeQL scan cadence and SARIF upload (CI-04)
+### Requirement: CodeQL scan cadence and SARIF delivery (CI-04)
 
 CodeQL SHALL scan the Python codebase through a versioned Advanced-Setup
 workflow committed at `.github/workflows/codeql.yml` — enabled by the workflow,
 never by GitHub's Default Setup UI. Scanning SHALL trigger on push to `main` and
 `dev`, on pull requests targeting `main` and `dev`, and on a weekly `schedule`
-cron. The workflow SHALL declare `permissions: security-events: write` so the
-`analyze` step uploads SARIF results to the Security tab; results SHALL be
+cron. The workflow SHALL declare `permissions: security-events: write`. While
+the repository is private, code scanning cannot be enabled (it requires GitHub
+Code Security), so the `analyze` step SHALL declare `upload: never` and SHALL
+write SARIF to `codeql-results`; a dedicated `actions/upload-artifact` step
+SHALL publish `codeql-results/*.sarif` as the `codeql-sarif` workflow artifact.
+The declared write permission and the `upload: always` switch keep the Security
+tab upload available for when the repository becomes public. Results SHALL be
 informational only (no merge gating).
 
 #### Scenario: Push, PR, and weekly triggers present
@@ -149,13 +154,26 @@ informational only (no merge gating).
 - WHEN its branch list is inspected
 - THEN `dev` SHALL be included alongside `main`
 
-#### Scenario: SARIF upload permission granted
+#### Scenario: Security-events write permission declared
 
 - GIVEN `.github/workflows/codeql.yml`
-- WHEN the workflow permissions and the `analyze` step are inspected
-- THEN `permissions.security-events` SHALL equal `write` and the `analyze` step
-  SHALL declare `languages: python`, uploading SARIF (the default once the
-  permission is granted)
+- WHEN the workflow permissions, the `init` step, and the `analyze` step are
+  inspected
+- THEN `permissions` SHALL declare `actions: read`, `contents: read`, and
+  `security-events: write` — the write permission kept so the Security-tab
+  upload works once the repository becomes public
+- AND the `init` step SHALL declare `languages: python` and an
+  `github/codeql-action/analyze@v4` step SHALL exist
+
+#### Scenario: SARIF stays a workflow artifact while the repository is private
+
+- GIVEN `.github/workflows/codeql.yml`
+- WHEN the `analyze` step and the artifact-upload step are inspected
+- THEN the `analyze` step SHALL declare `upload: never` (the Security-tab upload
+  stays off while the repository is private) and SHALL write results to
+  `codeql-results`
+- AND an `actions/upload-artifact` step SHALL publish `codeql-results/*.sarif`
+  as the `codeql-sarif` artifact
 
 ---
 
@@ -591,9 +609,10 @@ evidence recorded in the verify report.
 | CI-03 | Coverage job in the release needs chain | `tests/test_ci_workflows.py` — YAML inspection of release.yml `needs` |
 | CI-03 | Tag push below the floor yields no release | Verify-phase static evidence — needs-chain proof per the PB-05/MSP-R12 precedent (no release path below the floor) |
 | CI-03 | Release coverage job runs the core 100% gates | `tests/test_ci_workflows.py` — `test_release_coverage_job_runs_core_100_gates`: YAML inspection of the release.yml `coverage` job steps |
-| CI-04 | Push, PR, and weekly triggers present | `tests/test_ci_workflows.py` — YAML inspection of codeql.yml |
-| CI-04 | Pull request includes dev | `tests/test_ci_workflows.py` — YAML inspection |
-| CI-04 | SARIF upload permission granted | `tests/test_ci_workflows.py` — YAML inspection |
+| CI-04 | Push, PR, and weekly triggers present | `tests/test_ci_workflows.py` — `test_codeql_has_push_pr_and_weekly_triggers`: YAML inspection of codeql.yml |
+| CI-04 | Pull request includes dev | `tests/test_ci_workflows.py` — `test_codeql_pull_request_targets_dev`: YAML inspection |
+| CI-04 | Security-events write permission declared | `tests/test_ci_workflows.py` — `test_codeql_security_write_permission_and_python`: YAML inspection |
+| CI-04 | SARIF stays a workflow artifact while the repository is private | `tests/test_ci_workflows.py` — `test_codeql_private_window_publishes_sarif_artifact_without_upload`: YAML inspection |
 | CI-05 | Config file referenced by init | `tests/test_ci_workflows.py` — YAML inspection |
 | CI-05 | Paths-ignore covers non-code trees | `tests/test_ci_workflows.py` — YAML inspection of `.github/codeql/config.yml` |
 | CI-06 | Config declares coverage available at 90 | `tests/test_ci_workflows.py` — pyyaml parse of `openspec/config.yaml` |
