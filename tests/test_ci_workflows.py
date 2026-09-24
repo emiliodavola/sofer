@@ -6,7 +6,7 @@ Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
 `ci` specification (requirements CI-01..CI-09) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 23 `ci` Test Mapping rows whose verification
+scenario-verifying tests are the 24 `ci` Test Mapping rows whose verification
 names a test in this module (CI-09's posture row is carried by two guards), plus
 six tests owned by other capabilities or supporting this one — the two
 `coverage` COV-06 guards, the CodeQL private-window guard,
@@ -396,6 +396,25 @@ def test_release_is_gated_on_the_coverage_job() -> None:
     assert "coverage" in _as_list(jobs["build"].get("needs"))
     assert _as_list(jobs["citation-check"].get("needs")) == ["coverage"]
     assert "coverage" in _as_list(jobs["release"].get("needs"))
+
+
+def test_release_coverage_job_runs_core_100_gates() -> None:
+    """CI-03 S3: release.yml coverage job invokes the COV-06 gate script.
+
+    The release coverage job SHALL run the same
+    ``bash scripts/check_core_coverage.sh`` step as ci.yml — the script
+    itself, not a re-implementation — so a tag cannot publish while a core
+    module sits below the AGENTS.md rule-14 100% mandate. Pins the step by
+    its exact ``run`` command so it cannot silently disappear again.
+    """
+    release, _ = _workflow("release.yml")
+    job = release.get("jobs", {}).get("coverage", {})
+    assert isinstance(job, dict), "release.yml has no `coverage` job"
+    assert _find_step(job, run="bash scripts/check_core_coverage.sh") is not None, (
+        "the release.yml `coverage` job must contain a step whose run is exactly "
+        "'bash scripts/check_core_coverage.sh' — the COV-06 per-file 100% gates "
+        "(AGENTS.md rule 14), same script as ci.yml"
+    )
 
 
 def test_codeql_has_push_pr_and_weekly_triggers() -> None:
