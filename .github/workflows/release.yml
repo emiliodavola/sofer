@@ -2,7 +2,10 @@ name: Release
 
 # Publishes a GitHub Release when a version tag (v*) is pushed.
 # Runs the same quality gates as CI first; if anything fails,
-# no release is created.
+# no release is created. The test job mirrors ci.yml's OS axis
+# (ubuntu-latest + windows-latest) and the `uv run sofer --help`
+# smoke test (issue #209); the COV-06 core-coverage gate in the
+# coverage job is tracked separately as issue #185.
 
 on:
   push:
@@ -32,9 +35,10 @@ jobs:
         run: uv run mypy src/ scripts/
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
@@ -50,6 +54,9 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -v
+
+      - name: Run CLI help smoke test
+        run: uv run sofer --help
 
   coverage:
     needs: [lint, test]

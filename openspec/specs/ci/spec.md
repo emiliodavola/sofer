@@ -500,6 +500,39 @@ unchanged; and no resolution of a type diagnostic SHALL add a `# pragma: no cove
 
 ---
 
+### Requirement: Release test job parity with CI (CI-10)
+
+> Added by change `2026-09-24-fix-release-test-parity` (GitHub #209). The release workflow's
+> header claims to run the same quality gates as CI, so its `test` job SHALL mirror the CI
+> `test` job's OS axis (`ubuntu-latest` + `windows-latest`, driven by
+> `runs-on: ${{ matrix.os }}`) and SHALL run the same CLI help smoke test
+> (`uv run sofer --help`) after the full-suite step. The COV-06 core-coverage gate in the
+> release `coverage` job is deliberately separate and tracked as issue #185 — this requirement
+> SHALL NOT re-implement it, and the release header comment SHALL keep cross-referencing it.
+
+#### Scenario: Test job OS axis matches CI
+
+- GIVEN `.github/workflows/ci.yml` and `.github/workflows/release.yml`
+- WHEN the `test` job matrix declarations are compared
+- THEN the release `test` job SHALL run on `${{ matrix.os }}` and SHALL declare the
+  same `os` list as the CI `test` job (`ubuntu-latest` and `windows-latest`)
+
+#### Scenario: CLI help smoke test runs at tag time
+
+- GIVEN the release workflow's `test` job steps
+- WHEN they are inspected for the entrypoint smoke test
+- THEN a step named `Run CLI help smoke test` SHALL run `uv run sofer --help` after
+  the `uv run pytest -v` full-suite step, matching `ci.yml`
+
+#### Scenario: COV-06 stays cross-referenced as issue #185
+
+- GIVEN the release workflow header comment
+- WHEN it is read for the parity claim
+- THEN it SHALL name issue #185 as the deliberately separate change that adds the
+  COV-06 core-coverage gate to the release `coverage` job
+
+---
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -543,3 +576,6 @@ evidence recorded in the verify report.
 | CI-09 | Exactly one pyright config home exists | `tests/test_ci_workflows.py` — `test_pyright_has_exactly_one_config_home`: tree walk for `pyrightconfig.json` |
 | CI-09 | The pin is exact, reaches CI through the lock, and matches the running binary | `tests/test_ci_workflows.py` — `test_analyzer_dev_pins_are_exact_and_match_the_lock`: dev-pin derivation + `uv.lock` resolution equality; `uv run pyright --version` equality (verify-phase runtime evidence) |
 | CI-09 | Adopting the gate leaves every existing gate declaration intact | `tests/test_ci_workflows.py` — `test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates`: YAML/tomllib inspection; `uv run mypy src/ scripts/` exit code (CI-01 gate-exit-code precedent) |
+| CI-10 | Test job OS axis matches CI | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of both `test` job matrices |
+| CI-10 | CLI help smoke test runs at tag time | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of the release `test` job steps |
+| CI-10 | COV-06 stays cross-referenced as issue #185 | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: full-text scan of the release header comment |
