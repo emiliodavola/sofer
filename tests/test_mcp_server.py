@@ -133,9 +133,17 @@ def _make_link(link: Path, target: Path) -> bool:
 class TestImportWithoutExtra:
     def test_import_raises_without_fastmcp(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "fastmcp", None)
-        sys.modules.pop("sofer.mcp_server", None)
-        with pytest.raises(ImportError) as excinfo:
-            importlib.import_module("sofer.mcp_server")
+        # Restore the original module object afterwards: without this the
+        # failed re-import permanently swaps ``sys.modules`` for a fresh
+        # module, orphaning every pre-existing ``from sofer.mcp_server
+        # import ...`` reference (and any module-attribute patching, e.g.
+        # the #207 dotenv isolation) for the rest of the session.
+        real_mcp_server = sys.modules.pop("sofer.mcp_server")
+        try:
+            with pytest.raises(ImportError) as excinfo:
+                importlib.import_module("sofer.mcp_server")
+        finally:
+            sys.modules["sofer.mcp_server"] = real_mcp_server
         msg = str(excinfo.value)
         assert "sofer[mcp]" in msg
         assert "pip install" in msg
@@ -3150,6 +3158,7 @@ class TestHfTokenFallback:
         # huggingface_hub raises OIDCError when OIDC resource set but no provider
         assert "HF_OIDC_RESOURCE" in str(excinfo.value) or "OIDC" in str(excinfo.value)
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_not_override_env(self, tmp_path, monkeypatch, restore_tool_config):
         monkeypatch.setenv("HF_TOKEN", "env-token")
         env_file = tmp_path / ".env"
@@ -3165,6 +3174,7 @@ class TestHfTokenFallback:
 
         assert _get_hf_token() == "env-token"
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_loads_when_env_absent(self, tmp_path, monkeypatch, restore_tool_config):
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
@@ -3180,6 +3190,7 @@ class TestHfTokenFallback:
 
         assert _get_hf_token() == "from-dotenv"
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_call_leaves_environ_unchanged(self, tmp_path, monkeypatch, restore_tool_config):
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
@@ -3198,6 +3209,7 @@ class TestHfTokenFallback:
         assert _get_hf_token() == "from-dotenv"
         assert dict(os.environ) == before
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_not_substituted_for_blank_present_env(
         self, tmp_path, monkeypatch, restore_tool_config
     ):
@@ -3215,6 +3227,7 @@ class TestHfTokenFallback:
 
         assert _get_hf_token() == "alias-token"
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_only_disable_flag_gates_file_fallback(
         self, tmp_path, monkeypatch, restore_tool_config
     ):
@@ -3234,6 +3247,7 @@ class TestHfTokenFallback:
 
         assert _get_hf_token() is None
 
+    @pytest.mark.reads_cwd_dotenv
     def test_python_dotenv_disabled_short_circuits_dotenv_read(
         self, tmp_path, monkeypatch, restore_tool_config
     ):
@@ -3315,6 +3329,32 @@ class TestHfTokenFallback:
         ).data
         assert captured["token"] == "tok-123"
         assert envelope["ok"] is True
+
+
+class TestCwdDotenvIsolation:
+    """#207: the suite outcome never depends on a `.env` in the cwd."""
+
+    def test_cwd_dotenv_ignored_without_opt_in(self, tmp_path, monkeypatch, restore_tool_config):
+        """A cwd `.env` is invisible unless the test opts into the read.
+
+        Regression pin for #207: this test chdirs into a directory
+        carrying a ``.env`` with ``HF_TOKEN`` set. Without the autouse
+        :func:`_isolate_cwd_dotenv` fixture the lookup below returns the
+        leaked value and this fails; with it the read is neutralized.
+        """
+        (tmp_path / ".env").write_text("HF_TOKEN=leaked-from-cwd-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        from sofer.mcp_server import _get_hf_token, _read_dotenv_values
+
+        assert _read_dotenv_values() == {}
+        assert _get_hf_token() is None
 
 
 class TestHfTokenIntegration:
