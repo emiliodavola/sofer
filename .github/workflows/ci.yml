@@ -17,6 +17,14 @@ jobs:
         run: uv sync
       - name: Lint with ruff
         run: uv run ruff check src/ tests/ scripts/
+      # ── Format gate (CI-11) ────────────────────────────────────────────
+      # Closes the un-staged-file drift class (issue #194): the pre-commit
+      # `ruff-format` hook sees staged files only, so a formatting regression
+      # on files nobody edits was invisible to CI. `src/ tests/` mirrors the
+      # PB-10 clean-checkout scope; the formatter runs after `Lint with ruff`
+      # so it shares the already-installed environment.
+      - name: Check formatting with ruff
+        run: uv run ruff format --check src/ tests/
       - name: Type check with mypy
         run: uv run mypy src/ scripts/
       - name: Type check with pyright

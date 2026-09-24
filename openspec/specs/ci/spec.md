@@ -334,8 +334,9 @@ the dev pin and SHALL NOT hardcode a version literal.
 
 This requirement SHALL arm no CI step and SHALL add no workflow file: it SHALL NOT
 introduce a `ruff format --check` invocation under `.github/workflows/**`, enforcement of
-the staged-file formatter SHALL remain the local pre-commit `ruff-format` hook, and issue
-#194 SHALL retain the un-staged-file gap (`process-boundary` PB-10). A change that moves
+the staged-file formatter SHALL remain the local pre-commit `ruff-format` hook, and the
+un-staged-file gap (`process-boundary` PB-10) SHALL be closed by CI-11, which arms
+`ruff format --check src/ tests/` in the `lint` job (GitHub #194). A change that moves
 the pin SHALL refresh `uv.lock` in the same change, confined to the ruff package
 block and the dev specifier. `packaging` PKG-06 states the same regeneration class for its own
 `fastmcp` declaration and SHALL NOT be read as owning this one: its `uv.lock` clause is scoped to that
@@ -533,6 +534,43 @@ unchanged; and no resolution of a type diagnostic SHALL add a `# pragma: no cove
 
 ---
 
+### Requirement: Format gate in the lint job (CI-11)
+
+> Added by change `2026-09-24-fix-194-ruff-format-gate` (GitHub #194). Closes the
+> un-staged-file drift class that PB-10 deliberately left open: the local pre-commit
+> `ruff-format` hook sees staged files only, so a formatting regression on files nobody
+> edits is invisible to CI. CI-08's "SHALL arm no CI step" clause stays scoped to that
+> requirement; this one is the deliberate exception that arms the gate.
+
+The `lint` job of `.github/workflows/ci.yml` SHALL run the formatter as a gate: a step
+named `Check formatting with ruff` SHALL run exactly `uv run ruff format --check src/
+tests/`, placed after the `Lint with ruff` step so it shares the already-installed
+environment. The invocation SHALL mirror the PB-10 clean-checkout scope (`src/ tests/`),
+SHALL name no other path, and SHALL NOT carry a `--diff` flag, a version literal, or a
+floor value — the version reaches the step through `uv.lock` and the pin under CI-08. The
+gate SHALL exit non-zero when any file under `src/` or `tests/` would be reformatted, so
+the drift class is closed for the enforced scope. A contributor who does not install the
+pre-commit hooks SHALL still be blocked by CI on an unformatted PR.
+
+#### Scenario: Lint job runs the format gate
+
+- GIVEN `.github/workflows/ci.yml`
+- WHEN the `lint` job steps are inspected
+- THEN a step named `Check formatting with ruff` SHALL run exactly
+  `uv run ruff format --check src/ tests/`
+- AND it SHALL appear after the `Lint with ruff` step in the same job
+- AND the invocation SHALL name no other path, SHALL carry no `--diff` flag, no version
+  literal, and no floor value
+
+#### Scenario: Format gate is green on a clean checkout
+
+- GIVEN a clean checkout of `dev` with this change applied
+- WHEN `uv run ruff format --check src/ tests/` runs
+- THEN it SHALL exit 0 and report zero files to reformat (verify-phase runtime evidence,
+  CI-01 gate-exit-code precedent)
+
+---
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -579,3 +617,5 @@ evidence recorded in the verify report.
 | CI-10 | Test job OS axis matches CI | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of both `test` job matrices |
 | CI-10 | CLI help smoke test runs at tag time | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of the release `test` job steps |
 | CI-10 | COV-06 stays cross-referenced as issue #185 | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: full-text scan of the release header comment |
+| CI-11 | Lint job runs the format gate | `tests/test_ci_workflows.py` — `test_ci_lint_job_runs_the_ruff_format_gate`: YAML inspection of the ci.yml `lint` job steps |
+| CI-11 | Format gate is green on a clean checkout | Verify-phase runtime evidence — `uv run ruff format --check src/ tests/` exit code on `dev` (CI-01 gate-exit-code precedent) |

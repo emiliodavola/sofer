@@ -3,10 +3,10 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-10) by parsing the repository's
+`ci` specification (requirements CI-01..CI-11) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 27 `ci` Test Mapping rows whose verification
+scenario-verifying tests are the 28 `ci` Test Mapping rows whose verification
 names a test in this module (CI-09's posture row is carried by two guards), plus
 six tests owned by other capabilities or supporting this one — the two
 `coverage` COV-06 guards, the CodeQL private-window guard,
@@ -656,6 +656,42 @@ def test_ci_lint_job_runs_the_pyright_gate() -> None:
         assert re.search(r"pyright\s*(?:==|@|>=|<=|~=|!=|>|<|=)\s*\d", raw) is None, (
             f"{name} declares a pyright version specifier"
         )
+
+
+def test_ci_lint_job_runs_the_ruff_format_gate() -> None:
+    """CI-11 S1: the lint job runs `ruff format --check src/ tests/` after Lint.
+
+    Issue #194: the un-staged-file drift class — the local pre-commit
+    ``ruff-format`` hook sees staged files only, so a formatting regression on
+    files nobody edits is invisible to CI. The ci.yml ``lint`` job SHALL carry a
+    step named ``Check formatting with ruff`` whose run is exactly
+    ``uv run ruff format --check src/ tests/``, placed after the ``Lint with
+    ruff`` step so it shares the installed environment. Pins the step by name
+    and exact run so it cannot silently disappear.
+    """
+    ci, _ = _workflow("ci.yml")
+    lint = ci.get("jobs", {}).get("lint", {})
+    assert isinstance(lint, dict), "ci.yml has no `lint` job"
+    steps = lint.get("steps", [])
+    assert isinstance(steps, list), "the ci.yml `lint` job has no step list"
+    lint_step = _find_step(lint, run="uv run ruff check src/ tests/ scripts/")
+    format_step = _find_step(lint, run="uv run ruff format --check src/ tests/")
+    assert lint_step is not None, (
+        "the ci.yml `lint` job must contain the 'Lint with ruff' step "
+        "'uv run ruff check src/ tests/ scripts/'"
+    )
+    assert format_step is not None, (
+        "the ci.yml `lint` job must contain a step whose run is exactly "
+        "'uv run ruff format --check src/ tests/' — the CI-11 format gate "
+        "closing the issue #194 un-staged-file drift class"
+    )
+    assert format_step.get("name") == "Check formatting with ruff", (
+        "the CI-11 step must be named 'Check formatting with ruff'"
+    )
+    assert steps.index(format_step) > steps.index(lint_step), (
+        "the CI-11 format gate must run after the 'Lint with ruff' step, sharing "
+        "the already-installed environment"
+    )
 
 
 def test_mypy_and_pyright_exclude_tests() -> None:
