@@ -29,8 +29,8 @@ complete-run gate, never a focused subset.
 
 > COV-06 (spec `coverage`) is the documented, additive exception: per-file
 > scoped `--fail-under=100` gates exist only as the four invocations in
-> `scripts/check_core_coverage.sh` referenced by the `ci.yml` coverage job, and
-> SHALL NOT weaken or re-declare the config-owned TOTAL floor.
+> `scripts/check_core_coverage.sh` referenced by the `ci.yml` and `release.yml`
+> coverage jobs, and SHALL NOT weaken or re-declare the config-owned TOTAL floor.
 
 #### Scenario: Config declares the 90% floor
 
@@ -96,7 +96,11 @@ dedicated `coverage` job SHALL exist in `.github/workflows/release.yml`, and
 (the `citation-check` job, which currently runs parallel, SHALL gain `coverage`
 in its `needs`). A tag push whose total coverage is below the CI-01 floor SHALL
 produce no wheel-build validation and no GitHub Release — there SHALL be no
-publish path that skips the gate.
+publish path that skips the gate. The release `coverage` job SHALL additionally
+invoke the COV-06 per-file 100% gates via `bash scripts/check_core_coverage.sh`
+— the same script the `ci.yml` coverage job runs, not a re-implementation — so
+a tag cannot publish while a core module (`cli.py`, `scanner.py`, `prepare.py`,
+`publish.py`) sits below the AGENTS.md rule-14 mandate the PR pipeline enforces.
 
 #### Scenario: Coverage job in the release needs chain
 
@@ -111,6 +115,14 @@ publish path that skips the gate.
 - WHEN a tag push triggers release while total coverage is below the CI-01 floor
 - THEN the `coverage` job SHALL fail, `build`/`citation-check`/`release` SHALL be
   skipped, and no GitHub Release SHALL be produced
+
+#### Scenario: Release coverage job runs the core 100% gates
+
+- GIVEN `.github/workflows/release.yml`
+- WHEN the `coverage` job steps are inspected
+- THEN one step SHALL run exactly `bash scripts/check_core_coverage.sh` — the
+  same COV-06 gate script the `ci.yml` coverage job runs — so a core module
+  below 100% fails the job before `build`/`citation-check`/`release` run
 
 ---
 
@@ -507,6 +519,7 @@ evidence recorded in the verify report.
 | CI-02 | No XML or third-party coverage references | `tests/test_ci_workflows.py` — YAML/full-text scan |
 | CI-03 | Coverage job in the release needs chain | `tests/test_ci_workflows.py` — YAML inspection of release.yml `needs` |
 | CI-03 | Tag push below the floor yields no release | Verify-phase static evidence — needs-chain proof per the PB-05/MSP-R12 precedent (no release path below the floor) |
+| CI-03 | Release coverage job runs the core 100% gates | `tests/test_ci_workflows.py` — `test_release_coverage_job_runs_core_100_gates`: YAML inspection of the release.yml `coverage` job steps |
 | CI-04 | Push, PR, and weekly triggers present | `tests/test_ci_workflows.py` — YAML inspection of codeql.yml |
 | CI-04 | Pull request includes dev | `tests/test_ci_workflows.py` — YAML inspection |
 | CI-04 | SARIF upload permission granted | `tests/test_ci_workflows.py` — YAML inspection |
