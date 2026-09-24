@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import config
+
 # ── Split keyword registry ─────────────────────────────────────────────────────
 
 _SPLIT_KEYWORDS: dict[str, list[str]] = {
@@ -281,8 +283,9 @@ def validate_layout(files: list[str]) -> list[str]:
         )
 
     if report.unclassified:
-        names = ", ".join(report.unclassified[:5])
-        suffix = " …" if len(report.unclassified) > 5 else ""
+        limit = config.SPLITS_MAX_UNCLASSIFIED_NAMES
+        names = ", ".join(report.unclassified[:limit])
+        suffix = " …" if len(report.unclassified) > limit else ""
         warnings.append(
             f"{len(report.unclassified)} file(s) could not be classified "
             f"into a split: {names}{suffix}. "

@@ -293,7 +293,9 @@ class QualityValidator:
             # empty_columns — track if we've seen any non-empty value
             # Key with file prefix to isolate per-file (Issue #14)
             if not is_missing:
-                self._col_nonempty[f"{self._current_file}::{col_name}"].add(value[:50])
+                self._col_nonempty[f"{self._current_file}::{col_name}"].add(
+                    value[: config.QUALITY_VALUE_PREVIEW_LEN]
+                )
 
             # null_profiling
             key_n = f"{self._current_file}:{col_name}"

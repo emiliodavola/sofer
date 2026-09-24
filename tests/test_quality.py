@@ -1083,3 +1083,34 @@ class TestMixedAndRanChecksAndEncoding:
         assert is_text_eligible(Path("a.csv.gz")) is False  # suffix .gz
         assert is_text_eligible(Path("README")) is False
         assert is_text_eligible(Path("DATA.XLSX")) is False
+
+
+# ── Quality value preview cap (issue #189) ────────────────────────────────────
+
+
+class TestValuePreviewLen:
+    """Distinct quality values truncate to ``config.QUALITY_VALUE_PREVIEW_LEN``."""
+
+    LONG_VALUE = "x" * 60
+
+    def _stored_value(self, tmp_path, monkeypatch=None, preview_len=None):
+        import sofer.config as _config
+
+        if preview_len is not None:
+            monkeypatch.setattr(_config, "QUALITY_VALUE_PREVIEW_LEN", preview_len)
+        cfg, _ = _make_csv_cfg(tmp_path, ["note"], [[self.LONG_VALUE]])
+        validator = QualityValidator(cfg)
+        validator.run()
+        stored = validator._col_nonempty["data.csv::note"]
+        assert len(stored) == 1
+        return next(iter(stored))
+
+    def test_default_truncates_to_fifty(self, tmp_path):
+        """Default cap (50) truncates a 60-char value to 50 chars."""
+        stored = self._stored_value(tmp_path)
+        assert stored == "x" * 50
+
+    def test_override_changes_stored_length(self, tmp_path, monkeypatch):
+        """Overriding the cap changes the stored value length."""
+        stored = self._stored_value(tmp_path, monkeypatch, preview_len=7)
+        assert stored == "x" * 7
