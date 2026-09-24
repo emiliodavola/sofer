@@ -82,8 +82,8 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
+from . import _toml, workflow
 from . import config as sofer_config
-from . import workflow
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
@@ -683,14 +683,9 @@ def _read_toml_text(path: Path) -> dict[str, Any]:
     Uses the project-standard ``tomli``/``tomllib`` fallback. Errors
     propagate to the caller.
     """
-    # Import is version-gated (not try/except) so a static checker evaluates
-    # exactly one arm: `tomllib` is stdlib from 3.11 on, `tomli` backports it.
-    if sys.version_info >= (3, 11):
-        import tomllib as _tomli
-    else:
-        import tomli as _tomli
+    # Parser resolved once in `sofer._toml` (#192).
     with open(path, "rb") as fh:
-        return _tomli.load(fh)
+        return _toml.load(fh)
 
 
 def _load_dataset(

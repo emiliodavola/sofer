@@ -33,6 +33,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from . import _toml
+
 AgentName = Literal["opencode", "codex", "gemini"]
 Scope = Literal["user", "project"]
 
@@ -123,14 +125,9 @@ def read_config(path: Path) -> tuple[dict[str, object], str]:
             if not isinstance(data, dict):
                 raise ValueError(f"config {path} is not a JSON object")
             return data, fmt
-    # toml
-    try:
-        import tomli as _tomli
-    except ImportError:
-        import tomllib as _tomli
-
+    # toml (parser resolved once in `sofer._toml`, #192)
     with open(path, "rb") as fh:
-        data = _tomli.load(fh)
+        data = _toml.load(fh)
     if not isinstance(data, dict):
         raise ValueError(f"config {path} is not a TOML table")
     return data, fmt

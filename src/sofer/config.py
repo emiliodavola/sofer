@@ -20,6 +20,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from . import _toml
+
 # ---------------------------------------------------------------------------
 #  Hard-coded fallback defaults — used when pyproject.toml is absent or
 #  the ``[tool.sofer]`` section is missing keys.
@@ -155,13 +157,8 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     toml_data: dict[str, Any] = {}
     if toml_path is not None and toml_path.is_file():
         try:
-            import tomli as _tomli
-        except ImportError:  # Python ≥ 3.11
-            import tomllib as _tomli
-
-        try:
             with open(toml_path, "rb") as fh:
-                toml_data = _tomli.load(fh)
+                toml_data = _toml.load(fh)
         except Exception:
             toml_data = {}
 
