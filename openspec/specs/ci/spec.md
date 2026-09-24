@@ -176,7 +176,9 @@ SHALL declare `paths-ignore` covering non-code trees — `docs/`, `.github/`,
 `openspec/config.yaml` SHALL declare coverage available —
 `testing.coverage.available: true`, `testing.coverage.command` set to the
 coverage invocation, and `rules.verify.coverage_threshold: 90` — so the SDD
-verify phase enforces the same floor CI-01 does. CONTRIBUTING.md SHALL document
+verify phase enforces the same floor CI-01 does. `openspec/config.yaml` is a
+committed project artifact (issue #210, decision a): it SHALL NOT be gitignored,
+so the S1 guard asserts on it unconditionally in every checkout. CONTRIBUTING.md SHALL document
 the 90% floor and the coverage commands, replacing the vague "Target: no drop in
 coverage" line. README.md and README_ES.md SHALL carry a mirrored
 quality-gates/CI section: headings mirror (AGENTS.md rule 13) and technical
