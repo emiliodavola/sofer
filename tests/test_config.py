@@ -594,8 +594,14 @@ class TestTc10RawDirBootstrap:
         assert "default_config_name" in docs
         assert "output_dir" in docs or "OUTPUT_DIR" in docs
 
-    def test_pyproject_has_raw_dir_key(self):
-        """Repository pyproject.toml declares raw_dir under [tool.sofer]."""
+    def test_pyproject_declares_full_default_surface(self):
+        """Repo pyproject.toml [tool.sofer] matches config._DEFAULTS exactly.
+
+        Set parity both ways plus value parity: every tunable default must
+        be declared (AGENTS.md rule 1, #213) and no declared key may drift
+        from its default. A new _DEFAULTS entry without a [tool.sofer]
+        declaration fails here by construction.
+        """
         try:
             import tomli as _tomli
         except ImportError:
@@ -603,7 +609,13 @@ class TestTc10RawDirBootstrap:
 
         with open("pyproject.toml", "rb") as fh:
             data = _tomli.load(fh)
-        assert data["tool"]["sofer"]["raw_dir"] == "raw"
+        declared = data["tool"]["sofer"]
+        assert set(declared) == set(config._DEFAULTS), (
+            f"undeclared={sorted(set(config._DEFAULTS) - set(declared))} "
+            f"unknown={sorted(set(declared) - set(config._DEFAULTS))}"
+        )
+        for key, default in config._DEFAULTS.items():
+            assert declared[key] == default, f"{key}: {declared[key]!r} != {default!r}"
 
 
 class TestTc08SourceVisibility:

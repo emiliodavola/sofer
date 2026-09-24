@@ -184,7 +184,10 @@ card_collapse_threshold = 15
 
 # ── Schema report ──
 # Rows sampled per file for schema inference (schema report + card footnote).
-# schema_sample_size = 10_000
+schema_sample_size = 10_000
+# Duplicate column names across files at or below this count emit individual
+# warnings; above it a single summary (repo_compliance.build_schema_report).
+schema_dup_threshold = 3
 
 # ── Metadata core (profile / render) ──
 # All keys optional — these mirror the code defaults in src/sofer/config.py.
@@ -202,6 +205,9 @@ render_dir = "renders"
 # ── MCP agent resources ──
 # Size guard for sofer://dataset | sofer://codebook | sofer://metadata reads.
 agent_resource_max_bytes = 50000000
+# Size cap for the MCP tool "output" envelope (captured stdout/stderr):
+# larger outputs are truncated, not refused.
+output_max_bytes = 1_000_000
 
 [tool.hatch.version]
 source = "vcs"
