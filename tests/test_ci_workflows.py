@@ -3,10 +3,10 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-09) by parsing the repository's
+`ci` specification (requirements CI-01..CI-10) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 24 `ci` Test Mapping rows whose verification
+scenario-verifying tests are the 27 `ci` Test Mapping rows whose verification
 names a test in this module (CI-09's posture row is carried by two guards), plus
 six tests owned by other capabilities or supporting this one — the two
 `coverage` COV-06 guards, the CodeQL private-window guard,
@@ -799,4 +799,48 @@ def test_ci07_names_the_declared_mypy_language_level() -> None:
     assert '"3.10"' not in ci07, (
         'CI-07 must not still declare the retired [tool.mypy] python_version "3.10": its '
         "clause and its scenario bullet were amended to the declared value (issue #201)"
+    )
+
+
+def test_release_test_job_mirrors_ci_os_axis_and_cli_smoke() -> None:
+    """CI-10 S1/S2/S3: the release test job mirrors CI's OS axis and the help smoke.
+
+    Issue #209: release.yml claimed to run the same quality gates as CI while its
+    ``test`` job dropped the Windows axis and the ``uv run sofer --help`` smoke
+    test. The release ``test`` job SHALL declare the same ``os`` matrix as the CI
+    ``test`` job and run on ``${{ matrix.os }}``, and SHALL run the CLI help smoke
+    test after the full-suite step. The release header comment SHALL keep
+    cross-referencing issue #185 as the deliberately separate change that adds the
+    COV-06 core-coverage gate to the release ``coverage`` job.
+    """
+    ci, _ = _workflow("ci.yml")
+    release, _ = _workflow("release.yml")
+    ci_test = ci.get("jobs", {}).get("test", {})
+    release_test = release.get("jobs", {}).get("test", {})
+    assert isinstance(ci_test, dict), "ci.yml has no `test` job"
+    assert isinstance(release_test, dict), "release.yml has no `test` job"
+    assert release_test.get("runs-on") == "${{ matrix.os }}", (
+        "the release `test` job must run on ${{ matrix.os }} (CI-10)"
+    )
+    ci_os = ci_test.get("strategy", {}).get("matrix", {}).get("os")
+    release_os = release_test.get("strategy", {}).get("matrix", {}).get("os")
+    assert isinstance(ci_os, list) and isinstance(release_os, list), (
+        "both `test` jobs must declare an `os` matrix axis (CI-10)"
+    )
+    assert release_os == ci_os == ["ubuntu-latest", "windows-latest"], (
+        "the release `test` job must declare the same OS axis as the CI `test` job (CI-10)"
+    )
+    release_steps = release_test.get("steps", [])
+    run_tests = _find_step(release_test, run="uv run pytest -v")
+    smoke = _find_step(release_test, run="uv run sofer --help")
+    assert run_tests is not None, "the release `test` job must run the full suite (CI-10)"
+    assert smoke is not None, "the release `test` job must run `uv run sofer --help` (CI-10)"
+    assert smoke.get("name") == "Run CLI help smoke test"
+    assert release_steps.index(smoke) > release_steps.index(run_tests), (
+        "the CLI help smoke test must run after the full-suite step, matching ci.yml (CI-10)"
+    )
+    header = _read_text(f"{_WORKFLOW_DIR}/release.yml").split("on:", 1)[0]
+    assert "185" in header, (
+        "the release header comment must cross-reference issue #185 as the deliberately "
+        "separate COV-06 change (CI-10)"
     )
