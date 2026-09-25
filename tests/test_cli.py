@@ -1234,6 +1234,21 @@ class TestMcpCliHelp:
         assert "codex, gemini and pi receive env forwarding (names only" in flat
         assert "opencode entries carry no environment" in flat
 
+    def test_mcp_help_native_delegation_fidelity(self, capsys):
+        """Both help texts document the native fidelity gate (#167/#232)."""
+        import re
+
+        import pytest
+
+        for command in ("add", "remove"):
+            with pytest.raises(SystemExit):
+                cli._build_parser().parse_args(["mcp", command, "--help"])
+            out = capsys.readouterr().out
+            flat = re.sub(r"\s+", " ", out).lower()
+            assert "native" in flat
+            assert "config file" in flat
+            assert "warning" in flat
+
 
 # ── subprocess boundary: user-visible output via executable CLI (PB-02) ───────
 
@@ -2520,6 +2535,116 @@ class TestMcpRemoveCliFailure:
         assert rc == 1
         err = capsys.readouterr().err
         assert expected in err
+
+
+class TestMcpNativeDelegationFidelityCli:
+    """CLI surface for the unified native-delegation fidelity gate (#167/#232)."""
+
+    def test_add_declines_env_warns_and_file_edits(self, tmp_path, monkeypatch, capsys) -> None:
+        import json as _json
+        from pathlib import Path as _Path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(_Path, "home", lambda: home)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(Namespace(agent="gemini", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "native mcp add cannot express env forwarding" in err
+        assert "hf123" not in err
+        # file edit ran and persisted the env NAME only
+        settings = home / ".config" / "gemini" / "settings.json"
+        data = _json.loads(settings.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["sofer"]["env"] == {"HF_TOKEN": "$HF_TOKEN"}
+        assert "hf123" not in settings.read_text(encoding="utf-8")
+
+    def test_add_declines_project_scope_for_codex(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="codex", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        assert "native mcp add cannot express project scope" in capsys.readouterr().err
+        assert (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_add_passes_requested_scope_to_native(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        seen: list[tuple[str, str]] = []
+
+        def _delegate(agent, cwd, env_keys, scope):
+            seen.append((agent, scope))
+            return True
+
+        monkeypatch.setattr(mcp_registration, "delegate_add", _delegate)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="gemini", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        assert seen == [("gemini", "project")]
+        assert "gemini delegated via native mcp add" in capsys.readouterr().out
+        assert not (tmp_path / ".gemini" / "settings.json").exists()
+
+    def test_add_generic_failure_when_no_fidelity_reason(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        from pathlib import Path as _Path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "delegate_add", lambda *a, **kw: False)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(Namespace(agent="codex", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "native delegation failed, falling back to file edit" in err
+        assert "cannot express" not in err
+
+    def test_remove_declines_project_scope_for_codex(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_remove(Namespace(agent="codex", scope="project", dry_run=False))
+        assert rc == 0
+        assert "native mcp remove cannot express project scope" in capsys.readouterr().err
+
+    def test_remove_passes_scope_and_generic_failure(self, tmp_path, monkeypatch, capsys) -> None:
+        from pathlib import Path as _Path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        seen: list[tuple[str, str]] = []
+
+        def _delegate(agent, scope):
+            seen.append((agent, scope))
+            return len(seen) == 1
+
+        monkeypatch.setattr(mcp_registration, "delegate_remove", _delegate)
+        rc = cli._cmd_mcp_remove(Namespace(agent="gemini", scope="user", dry_run=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert seen == [("gemini", "user")]
+        assert "gemini delegated remove via native mcp remove" in out
+        rc2 = cli._cmd_mcp_remove(Namespace(agent="gemini", scope="user", dry_run=False))
+        assert rc2 == 0
+        err = capsys.readouterr().err
+        # Second call returns False with no fidelity reason -> generic message.
+        assert "native remove failed, falling back to file edit" in err
+        assert "cannot express" not in err
 
 
 class TestInitMoveExistingCoverage:

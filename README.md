@@ -636,9 +636,16 @@ Per-agent locations and shapes:
   the dropped variables and leaves the exit code unchanged.
 - **Delegation:** when a native binary is available (`codex`/`gemini`), its
   `mcp add`/`remove` is tried first (probe via `shutil.which` + `mcp --help`
-  with a 3 s timeout); on failure or timeout the command falls back to
-  direct file edit. Opencode and Pi always use file-edit (Pi ships no native
-  `mcp add` CLI).
+  with a 3 s timeout) — but only when it can faithfully reproduce what the
+  file edit would write. The native CLI must be able to forward the same env
+  NAMES and the requested scope: Gemini receives `--scope user|project` (its
+  CLI supports it), while Codex has no scope selector and its native env flag
+  takes literal values. A non-empty env (both agents), or `--scope project`
+  for Codex, therefore makes sofer decline, print a warning on stderr naming
+  the reason (`env forwarding`, `project scope` — NAMES only, never values),
+  and edit the config file instead. On any native failure or timeout the command also falls
+  back to direct file edit. Opencode and Pi always use file-edit (Pi ships no
+  native `mcp add` CLI).
 - **TOML warning:** edits via `tomli`/`tomli-w` do not preserve comments or
   formatting in `config.toml` — the file is reformatted and comments are
   stripped.
