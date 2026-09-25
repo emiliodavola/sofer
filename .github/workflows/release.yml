@@ -4,8 +4,10 @@ name: Release
 # Runs the same quality gates as CI first; if anything fails,
 # no release is created. The test job mirrors ci.yml's OS axis
 # (ubuntu-latest + windows-latest) and the `uv run sofer --help`
-# smoke test (issue #209); the COV-06 core-coverage gate in the
-# coverage job is tracked separately as issue #185.
+# smoke test (issue #209); the lint job mirrors ci.yml's lint
+# gates (ruff check, ruff format --check, mypy, pyright, and the
+# spec test-mapping checker; issue #233); and the coverage job
+# runs the COV-06 core-coverage gate (CI-03, issue #185 — shipped).
 
 on:
   push:
@@ -31,8 +33,17 @@ jobs:
       - name: Lint with ruff
         run: uv run ruff check src/ tests/ scripts/
 
+      - name: Check formatting with ruff
+        run: uv run ruff format --check src/ tests/
+
       - name: Type check with mypy
         run: uv run mypy src/ scripts/
+
+      - name: Type check with pyright
+        run: uv run pyright
+
+      - name: Check spec test mapping
+        run: uv run python scripts/check_test_mapping.py
 
   test:
     runs-on: ${{ matrix.os }}
