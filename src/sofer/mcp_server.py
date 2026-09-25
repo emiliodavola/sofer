@@ -148,6 +148,20 @@ _ERROR_ENVELOPE_SCHEMA_FIELDS: dict[str, dict[str, str]] = {
     "hints": {"type": "object"},
 }
 
+# Optional explicit-dialect echo (MSP-R18): the four CSV-reading tools add a
+# "dialect" key only when the caller supplies delimiter/encoding. Declared on
+# their output_schema so FastMCP's validation does not drop the key at the
+# boundary (same rationale as the error-envelope fields above).
+_DIALECT_ENVELOPE_SCHEMA_FIELD: dict[str, dict[str, Any]] = {
+    "dialect": {
+        "type": ["object", "null"],
+        "description": (
+            "Echo of the explicit delimiter/encoding supplied for this call; "
+            "null when neither was supplied."
+        ),
+    }
+}
+
 # Error codes for the single error envelope (10.3). Path escapes are raised
 # as PathOutsideRootError (transport-mapped to isError), never emitted as an
 # error envelope, so they are deliberately absent here.
@@ -437,6 +451,28 @@ def _captured_text(out: io.StringIO, err: io.StringIO) -> str:
     if stderr_text:
         text += stderr_text
     return _truncate_output(text)
+
+
+def _dialect_envelope(delimiter: str | None, encoding: str | None) -> dict[str, Any]:
+    """Echo a supplied explicit CSV dialect in the tool envelope (issue #204).
+
+    Traceability contract (MSP-R18): when the caller states a dialect, the
+    envelope names what was supplied.  When neither parameter is supplied the
+    value is ``None`` (the declared field FastMCP materializes), so the omitted
+    path's dialect resolution is unchanged.
+
+    Args:
+        delimiter: Explicit delimiter parameter for this call, or ``None``.
+        encoding: Explicit encoding parameter for this call, or ``None``.
+
+    Returns:
+        ``{"dialect": None}`` when neither is supplied, else
+        ``{"dialect": {"delimiter": ..., "encoding": ...}}`` echoing the
+        supplied values.
+    """
+    if delimiter is None and encoding is None:
+        return {"dialect": None}
+    return {"dialect": {"delimiter": delimiter, "encoding": encoding}}
 
 
 # ---------------------------------------------------------------------------
@@ -1468,6 +1504,25 @@ def sofer_codebook(
             description="Maximum rows to sample for codebook inference; defaults to config codebook_max_sample."
         ),
     ] = None,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter for this call (wins over the "
+                "configured csv_delimiter); when omitted, the configured value "
+                "applies. Applies to .csv only; .tsv stays tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding for this call (wins over the configured "
+                "csv_encoding); when omitted, the configured value applies."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Generate a markdown codebook for one data file.
 
@@ -1490,11 +1545,13 @@ def sofer_codebook(
             if output_file is not None
             else None
         )
+        effective_delimiter = delimiter if delimiter is not None else sofer_config.CSV_DELIMITER
+        effective_encoding = encoding if encoding is not None else sofer_config.CSV_ENCODING
         markdown = generate_codebook(
             str(data_path),
             output_path=str(output_path) if output_path is not None else None,
-            delimiter=sofer_config.CSV_DELIMITER,
-            encoding=sofer_config.CSV_ENCODING,
+            delimiter=effective_delimiter,
+            encoding=effective_encoding,
             max_sample=max_sample,
         )
         return {
@@ -1502,6 +1559,7 @@ def sofer_codebook(
             "exit_code": 0,
             "output": _truncate_output(markdown),
             "output_path": str(output_path) if output_path is not None else None,
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -1521,6 +1579,26 @@ def sofer_codebook_all(
             description=(
                 "Maximum rows to sample for codebook inference; defaults to "
                 "config codebook_max_sample. Omitted = config default."
+            )
+        ),
+    ] = None,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter applied to every .csv entry; wins "
+                "over the dataset [meta] csv_delimiter. When omitted, the "
+                "dataset's configured value applies. .tsv stays tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding applied to every .csv/.tsv entry; wins "
+                "over the dataset [meta] csv_encoding. When omitted, the "
+                "dataset's configured value applies."
             )
         ),
     ] = None,
@@ -1552,8 +1630,8 @@ def sofer_codebook_all(
             generated = generate_all_codebooks(
                 cfg,
                 output_dir=output_path,
-                delimiter=cfg.csv_delimiter,
-                encoding=cfg.csv_encoding,
+                delimiter=delimiter,
+                encoding=encoding,
                 max_sample=max_sample,
             )
         except ValueError as exc:
@@ -1575,6 +1653,7 @@ def sofer_codebook_all(
             "confidential": cfg.confidential,
             "config_errors": config_errors,
             "next": _workflow_next("sofer_codebook_all", config),
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -1594,6 +1673,25 @@ def sofer_profile(
     force: Annotated[
         bool, Field(description="Overwrite existing metadata.yaml when true.")
     ] = False,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter for this call (wins over the "
+                "configured csv_delimiter); when omitted, the configured value "
+                "applies. Applies to .csv only; .tsv stays tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding for this call (wins over the configured "
+                "csv_encoding); when omitted, the configured value applies."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Profile a dataset read-only and write a metadata.yaml document.
 
@@ -1614,7 +1712,13 @@ def sofer_profile(
             else None
         )
         try:
-            rc = run_profile(data_path, output_dir=output_path, force=force)
+            rc = run_profile(
+                data_path,
+                output_dir=output_path,
+                force=force,
+                delimiter=delimiter,
+                encoding=encoding,
+            )
         except FileExistsError as exc:
             return {
                 "ok": False,
@@ -1648,6 +1752,7 @@ def sofer_profile(
             "exit_code": rc,
             "output": _captured_text(out, err),
             "pii_findings": pii_findings,
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -1660,6 +1765,25 @@ def sofer_profile_all(
         str | None,
         Field(
             description="Override directory for batch profiles (default: profiles). Must stay under server root."
+        ),
+    ] = None,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter applied to every .csv entry; when "
+                "omitted, the configured csv_delimiter applies. .tsv stays "
+                "tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding applied to every .csv/.tsv entry; when "
+                "omitted, the configured csv_encoding applies."
+            )
         ),
     ] = None,
 ) -> dict[str, Any]:
@@ -1704,7 +1828,12 @@ def sofer_profile_all(
         from .profile import generate_all_profiles as _gen_all
 
         try:
-            files = _gen_all(cfg, output_dir=output_path)
+            files = _gen_all(
+                cfg,
+                output_dir=output_path,
+                delimiter=delimiter,
+                encoding=encoding,
+            )
         except ValueError:
             return {
                 "ok": False,
@@ -1722,6 +1851,7 @@ def sofer_profile_all(
             "files": files,
             "config_errors": [],
             "next": _workflow_next("sofer_profile_all", config),
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -2623,6 +2753,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "output_path": {"type": ["string", "null"]},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2646,6 +2777,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2667,6 +2799,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "pii_findings": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2689,6 +2822,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "files": {"type": "array"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },

@@ -189,6 +189,12 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     under the package ``build_dir`` (``--output`` overrides it), plus a
     root index — mirroring where ``sofer_codebook_all`` and ``publish``
     collect codebooks.
+
+    ``--delimiter`` / ``--encoding`` are additive overrides (issue #204): when
+    supplied they win over the applicable tier (single-file: the tool-wide
+    values above; ``--all-files``: the dataset ``[meta]``), and when omitted
+    the resolution is exactly today's.  A supplied override is echoed on
+    stderr (``_echo_explicit_dialect``).
     """
     if args.all_files:
         if args.csv:
@@ -207,10 +213,13 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
             for err in validation_errors:
                 print(f"Error: {err}", file=sys.stderr)
             return 1
+        _echo_explicit_dialect(args)
         try:
             generate_all_codebooks(
                 cfg,
                 output_dir=resolve_output_dir(cfg, args.output),
+                delimiter=getattr(args, "delimiter", None),
+                encoding=getattr(args, "encoding", None),
                 max_sample=args.max_sample,
             )
         except ValueError as exc:
@@ -234,9 +243,14 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # ``main()`` has already run, so these observe this invocation's
     # ``[tool.sofer]`` values — the same source ``sofer_codebook`` passes
     # (MSP-R10).  Leaving them unset would resurrect the literal ``";"`` /
-    # ``"utf-8-sig"`` defaults inside ``codebook.generate``.
-    delimiter = config.CSV_DELIMITER
-    encoding = config.CSV_ENCODING
+    # ``"utf-8-sig"`` defaults inside ``codebook.generate``.  An explicit
+    # ``--delimiter`` / ``--encoding`` wins over the configured value (CB-R12).
+    delimiter = getattr(args, "delimiter", None)
+    if delimiter is None:
+        delimiter = config.CSV_DELIMITER
+    encoding = getattr(args, "encoding", None)
+    if encoding is None:
+        encoding = config.CSV_ENCODING
 
     # Anchor a relative --output to the input file's parent (MSP-R10): the
     # codebook lands next to the analysed file, never in an unrelated cwd.
@@ -251,6 +265,7 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # input (decode exhaustion is a ``ValueError``) or an unknown codec name
     # (``LookupError``, reachable while TC-13 accepts any non-empty string)
     # becomes one ``Error: …`` line on stderr with exit 1 — never a traceback.
+    _echo_explicit_dialect(args)
     try:
         codebook = generate_codebook(
             args.csv,
@@ -288,6 +303,11 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     the domain function (0 on success, 1 on error). A missing destination
     guard without ``--force`` surfaces ``FileExistsError`` as exit 1 with a
     ``use --force to overwrite`` hint.
+
+    ``--delimiter`` / ``--encoding`` are additive overrides (issue #204): when
+    supplied they win over the resolved ``config.CSV_*`` values, and when
+    omitted the resolution is exactly today's.  A supplied override is echoed
+    on stderr (``_echo_explicit_dialect``).
     """
     if getattr(args, "all_files", False):
         # Positional ``dataset`` is the TOML path when --all-files is set;
@@ -319,8 +339,14 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             return 1
         from .profile import generate_all_profiles as _gen_all
 
+        _echo_explicit_dialect(args)
         try:
-            _gen_all(cfg, output_dir=args.output)
+            _gen_all(
+                cfg,
+                output_dir=args.output,
+                delimiter=getattr(args, "delimiter", None),
+                encoding=getattr(args, "encoding", None),
+            )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -334,11 +360,14 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     output_dir = Path(args.output) if args.output else None
     if output_dir is not None and not output_dir.is_absolute():
         output_dir = Path(args.dataset).parent / output_dir
+    _echo_explicit_dialect(args)
     try:
         return run_profile(
             Path(args.dataset),
             output_dir=output_dir,
             force=bool(getattr(args, "force", False)),
+            delimiter=getattr(args, "delimiter", None),
+            encoding=getattr(args, "encoding", None),
         )
     except FileExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1081,6 +1110,59 @@ def _cmd_init(args: argparse.Namespace) -> int:
 # ── argument parser ───────────────────────────────────────────────────
 
 
+def _add_dialect_args(parser: argparse.ArgumentParser) -> None:
+    """Add the optional explicit CSV dialect flags (issue #204).
+
+    Both default to ``None`` ("not supplied"), so the omitted path reuses the
+    exact config resolution the command already performs — the override is
+    additive and byte-identical when unused.  When supplied, the explicit value
+    wins over the configured one; the encoding still fronts the shared
+    ``utf-8-sig → utf-8`` fallback chain in ``_csv_reader.stream_csv``.
+
+    Args:
+        parser: The ``codebook`` or ``profile`` subparser to extend.
+    """
+    parser.add_argument(
+        "--delimiter",
+        default=None,
+        help=(
+            "Explicit CSV field delimiter for this invocation; wins over the "
+            "configured csv_delimiter. Omitted = configured value (applies to "
+            ".csv only; .tsv stays tab-delimited)."
+        ),
+    )
+    parser.add_argument(
+        "--encoding",
+        default=None,
+        help=(
+            "Explicit CSV encoding for this invocation; wins over the configured "
+            "csv_encoding. Omitted = configured value (applies to .csv and .tsv)."
+        ),
+    )
+
+
+def _echo_explicit_dialect(args: argparse.Namespace) -> None:
+    """Echo a supplied ``--delimiter`` / ``--encoding`` on stderr (issue #204).
+
+    Traceability contract: when the caller states a dialect explicitly, the
+    command names what was supplied. Only the supplied keys are listed, so an
+    omitted flag is never reported as if it had been chosen. stderr is used so
+    the single-file codebook's stdout stays pure markdown.
+
+    Args:
+        args: Parsed CLI namespace carrying ``delimiter`` / ``encoding``.
+    """
+    parts: list[str] = []
+    delimiter = getattr(args, "delimiter", None)
+    if delimiter is not None:
+        parts.append(f"delimiter={delimiter!r}")
+    encoding = getattr(args, "encoding", None)
+    if encoding is not None:
+        parts.append(f"encoding={encoding!r}")
+    if parts:
+        print(f"  i  Explicit dialect: {' '.join(parts)}", file=sys.stderr)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sofer",
@@ -1253,7 +1335,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "and a sample value.\n"
             "\n"
             "Use --all-files to generate one codebook per [[file]] entry "
-            "in the TOML configuration, written under the package build_dir/."
+            "in the TOML configuration, written under the package build_dir/.\n"
+            "\n"
+            "--delimiter / --encoding override the resolved CSV dialect for "
+            "this invocation: the explicit value wins over the configured one, "
+            "and omitting both keeps the current behaviour."
         ),
     )
     c.add_argument(
@@ -1288,6 +1374,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "default_config_name from [tool.sofer])."
         ),
     )
+    _add_dialect_args(c)
     c.set_defaults(func=_cmd_codebook)
 
     # ── profile ──────────────────────────────────────────────────
@@ -1313,7 +1400,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "--output anchors to the TOML directory (Option B); writes never "
             "mutate cache/ when --output is given. TOML without [[file]] "
             "fails fast. Collisions write non-colliding first then raise "
-            "ValueError."
+            "ValueError.\n"
+            "\n"
+            "--delimiter / --encoding override the resolved CSV dialect for "
+            "this invocation: the explicit value wins over the configured one, "
+            "and omitting both keeps the current behaviour."
         ),
     )
     prf.add_argument(
@@ -1344,6 +1435,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the TOML config file used with --all-files "
         "(default: default_config_name from [tool.sofer]).",
     )
+    _add_dialect_args(prf)
     prf.set_defaults(func=_cmd_profile)
 
     # ── render ──────────────────────────────────────────────────

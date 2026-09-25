@@ -474,3 +474,40 @@ class TestHappyPath:
 
         # Cleanup
         monkeypatch.delenv("HF_TOKEN", raising=False)
+
+
+class TestExplicitDialectParams:
+    """Issue #204 / MSP-R18 — optional dialect params on the CSV-reading tools."""
+
+    DIALECT_TOOLS = (
+        "sofer_codebook",
+        "sofer_codebook_all",
+        "sofer_profile",
+        "sofer_profile_all",
+    )
+    SCAN_TOOLS = ("sofer_scan_dry_run", "sofer_scan_apply")
+
+    def test_dialect_params_exist_and_are_optional(self, tmp_path: Path):
+        tools = _tools_dict(tmp_path)
+        for name in self.DIALECT_TOOLS:
+            schema = tools[name].inputSchema or {}
+            props = schema.get("properties", {})
+            assert "delimiter" in props, name
+            assert "encoding" in props, name
+            required = schema.get("required", [])
+            assert "delimiter" not in required, name
+            assert "encoding" not in required, name
+
+    def test_dialect_params_are_described(self, tmp_path: Path):
+        tools = _tools_dict(tmp_path)
+        for name in self.DIALECT_TOOLS:
+            props = (tools[name].inputSchema or {}).get("properties", {})
+            for param in ("delimiter", "encoding"):
+                assert props[param].get("description"), f"{name}.{param} missing description"
+
+    def test_scan_tools_gain_no_inert_dialect_param(self, tmp_path: Path):
+        tools = _tools_dict(tmp_path)
+        for name in self.SCAN_TOOLS:
+            props = (tools[name].inputSchema or {}).get("properties", {})
+            assert "delimiter" not in props, name
+            assert "encoding" not in props, name

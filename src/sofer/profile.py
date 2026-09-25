@@ -101,6 +101,8 @@ def profile(
     output_dir: Path | None = None,
     *,
     force: bool = False,
+    delimiter: str | None = None,
+    encoding: str | None = None,
 ) -> int:
     """Profile *dataset_path* read-only and return an exit code.
 
@@ -131,6 +133,12 @@ def profile(
         force: When ``False`` and the destination exists, raise
             ``FileExistsError`` with a ``use --force to overwrite`` hint
             (PRF-06). When ``True``, overwrite unconditionally.
+        delimiter: Explicit CSV field delimiter for this call (PRF-07); when
+            ``None`` the configured ``config.CSV_DELIMITER`` applies. ``.tsv``
+            stays tab-delimited by format, and non-streamed formats ignore it.
+        encoding: Explicit file encoding for this call (PRF-07); when ``None``
+            the configured ``config.CSV_ENCODING`` applies, still fronting the
+            shared ``utf-8-sig → utf-8`` fallback chain.
 
     Returns:
         ``0`` on success, ``1`` when the format is unsupported or the file
@@ -159,14 +167,20 @@ def profile(
         return 1
 
     if suffix in _STREAMED_FORMATS:
-        delimiter = "\t" if suffix == ".tsv" else config.CSV_DELIMITER
-        headers, columns, rows = _stream_columns(dataset_path, delimiter)
-        encoding = config.CSV_ENCODING
+        resolved_delimiter = (
+            "\t"
+            if suffix == ".tsv"
+            else (delimiter if delimiter is not None else config.CSV_DELIMITER)
+        )
+        resolved_encoding = encoding if encoding is not None else config.CSV_ENCODING
+        headers, columns, rows = _stream_columns(
+            dataset_path, resolved_delimiter, resolved_encoding
+        )
     else:
         headers, columns, _dtypes = _read_file(str(dataset_path))
         rows = len(columns[0]) if columns else 0
-        encoding = ""
-        delimiter = ""
+        resolved_encoding = ""
+        resolved_delimiter = ""
 
     schema = [_build_column(name, values) for name, values in zip(headers, columns)]
 
@@ -174,8 +188,8 @@ def profile(
         file=FileMetadata(
             path=str(dataset_path),
             format=suffix.lstrip("."),
-            encoding=encoding,
-            delimiter=delimiter,
+            encoding=resolved_encoding,
+            delimiter=resolved_delimiter,
             rows=rows,
             columns=len(headers),
         ),
@@ -201,6 +215,8 @@ def profile(
 def generate_all_profiles(
     cfg: DatasetConfig,
     output_dir: str | Path | None = None,
+    delimiter: str | None = None,
+    encoding: str | None = None,
 ) -> list[str]:
     """Generate one ``metadata.yaml`` per ``[[file]]`` entry under ``profiles/``.
 
@@ -221,6 +237,11 @@ def generate_all_profiles(
             ``output_dir/profiles/`` and the shared ``cache/profiles/``
             directory is never mutated. When ``None`` (default), profiles go
             to ``cache/profiles/``.
+        delimiter: Explicit CSV field delimiter applied to every ``.csv``
+            entry (PRF-07); ``None`` resolves to ``config.CSV_DELIMITER``.
+            ``.tsv`` stays tab-delimited and non-streamed formats ignore it.
+        encoding: Explicit encoding applied to every ``.csv``/``.tsv`` entry
+            (PRF-07); ``None`` resolves to ``config.CSV_ENCODING``.
 
     Returns:
         List of generated profile file paths.
@@ -324,8 +345,8 @@ def generate_all_profiles(
             if out_path is None:
                 continue
             try:
-                headers, columns, rows, encoding, delimiter = _read_dataset_for_profile(
-                    local, suffix
+                headers, columns, rows, used_encoding, used_delimiter = _read_dataset_for_profile(
+                    local, suffix, delimiter=delimiter, encoding=encoding
                 )
             except Exception as exc:
                 print(f"  \u2717  Error reading {local}: {exc}", file=sys.stderr)
@@ -335,8 +356,8 @@ def generate_all_profiles(
                 file=FileMetadata(
                     path=str(local),
                     format=suffix.lstrip("."),
-                    encoding=encoding,
-                    delimiter=delimiter,
+                    encoding=used_encoding,
+                    delimiter=used_delimiter,
                     rows=rows,
                     columns=len(headers),
                 ),
@@ -468,7 +489,10 @@ def generate_all_profiles(
 
 
 def _read_dataset_for_profile(
-    path: Path, suffix: str
+    path: Path,
+    suffix: str,
+    delimiter: str | None = None,
+    encoding: str | None = None,
 ) -> tuple[list[str], list[list[str]], int, str, str]:
     """Read *path* for profile batch, returning columnar data plus meta.
 
@@ -476,15 +500,24 @@ def _read_dataset_for_profile(
         path: Absolute path to the dataset file.
         suffix: Lowercased suffix (already validated against
             :data:`SUPPORTED_FORMATS`).
+        delimiter: Explicit CSV delimiter (PRF-07); ``None`` resolves to
+            ``config.CSV_DELIMITER``. ``.tsv`` stays tab-delimited.
+        encoding: Explicit encoding (PRF-07); ``None`` resolves to
+            ``config.CSV_ENCODING``.
 
     Returns:
-        ``(headers, columns, rows, encoding, delimiter)``.
+        ``(headers, columns, rows, encoding, delimiter)`` with the dialect
+        actually used.
     """
     if suffix in _STREAMED_FORMATS:
-        delimiter = "\t" if suffix == ".tsv" else config.CSV_DELIMITER
-        headers, columns, rows = _stream_columns(path, delimiter)
-        encoding = config.CSV_ENCODING
-        return headers, columns, rows, encoding, delimiter
+        used_delimiter = (
+            "\t"
+            if suffix == ".tsv"
+            else (delimiter if delimiter is not None else config.CSV_DELIMITER)
+        )
+        used_encoding = encoding if encoding is not None else config.CSV_ENCODING
+        headers, columns, rows = _stream_columns(path, used_delimiter, used_encoding)
+        return headers, columns, rows, used_encoding, used_delimiter
     headers, columns, _dtypes = _read_file(str(path))
     rows = len(columns[0]) if columns else 0
     return headers, columns, rows, "", ""
@@ -493,6 +526,7 @@ def _read_dataset_for_profile(
 def _stream_columns(
     path: Path,
     delimiter: str,
+    encoding: str | None = None,
 ) -> tuple[list[str], list[list[str]], int]:
     """Read a CSV/TSV via :func:`stream_csv`, returning columnar data.
 
@@ -503,6 +537,8 @@ def _stream_columns(
     Args:
         path:      Path to the CSV/TSV file.
         delimiter: Field delimiter (``CSV_DELIMITER`` for CSV, ``\\t`` for TSV).
+        encoding:  Initial encoding; ``None`` resolves to
+            ``config.CSV_ENCODING`` at call time.
 
     Returns:
         ``(headers, columns, rows)`` — *columns* is one ``list[str]`` per
@@ -510,13 +546,14 @@ def _stream_columns(
         *rows* is the number of data rows read (bounded by
         ``PROFILE_MAX_SAMPLE``).
     """
+    resolved_encoding = encoding if encoding is not None else config.CSV_ENCODING
     headers: list[str] = []
     columns: list[list[str]] = []
     rows = 0
     for header, row in stream_csv(
         path,
         delimiter=delimiter,
-        encoding=config.CSV_ENCODING,
+        encoding=resolved_encoding,
         max_sample=config.PROFILE_MAX_SAMPLE,
     ):
         if row is None:
