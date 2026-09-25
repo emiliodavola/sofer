@@ -5,6 +5,12 @@ Provides per-agent adapters (path resolution, JSON/TOML I/O, merge,
 backup, atomic write, delegation probe) and entry builders. The CLI
 layer in ``sofer.cli`` orchestrates these helpers.
 
+The supported agent set and every per-agent capability live in the single
+:data:`ADAPTERS` registry: adding an agent is one entry there, and
+:data:`AGENT_NAMES` (CLI ``choices`` / ``all`` expansion), path
+resolution, entry building, merge/remove, native delegation and the
+env-drop probe all derive from it (#235).
+
 Each agent has a distinct on-disk shape:
 
 - opencode: ``opencode.json`` JSON ``mcp.sofer={type:"local",command:["sofer-mcp"],cwd}``
@@ -31,28 +37,123 @@ import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict
 
 from . import _toml
 
-AgentName = Literal["opencode", "codex", "gemini"]
+AgentName: TypeAlias = str
+"""Registry key for one supported MCP agent — the domain of :data:`ADAPTERS`.
+
+This is a plain ``str`` alias on purpose: :data:`ADAPTERS` is the single
+source of truth for the agent set, and ``typing.Literal`` cannot be derived
+from runtime data. Adding an agent means adding exactly one :data:`ADAPTERS`
+entry (plus a new field only if the agent needs a shape no other agent has).
+"""
+
 Scope = Literal["user", "project"]
 
 _ENV_KEYS: list[str] = ["HF_TOKEN", "SOFER_MCP_APPROVAL_PHRASE"]
 
 
 class Adapter(TypedDict):
-    """Typed adapter descriptor for registry introspection."""
+    """Single-source descriptor for one MCP agent.
+
+    Every per-agent branch in this module reads this table — config path,
+    entry shape, native delegation, env capability — so adding an agent is
+    one entry here (#235).
+
+    Attributes:
+        fmt: Config serialization format consumed by ``cli.py`` atomic writes.
+        key: Config table that holds the servers mapping.
+        user_parts: Path components under ``Path.home()``.
+        project_parts: Path components under the project root.
+        command: ``"array"`` for ``["sofer-mcp"]``, ``"string"`` for ``"sofer-mcp"``.
+        adds_type_local: Whether the entry carries ``type="local"`` (opencode).
+        env: ``"none"`` (dropped), ``"allow_list"`` (``env_vars``) or
+            ``"refs"`` (``env`` ``$KEY`` references).
+        delegates: Whether a native ``<agent> mcp add/remove`` is attempted.
+    """
 
     fmt: Literal["json", "toml"]
     key: str
+    user_parts: tuple[str, ...]
+    project_parts: tuple[str, ...]
+    command: Literal["array", "string"]
+    adds_type_local: bool
+    env: Literal["none", "allow_list", "refs"]
+    delegates: bool
 
 
 ADAPTERS: dict[AgentName, Adapter] = {
-    "opencode": {"fmt": "json", "key": "mcp"},
-    "codex": {"fmt": "toml", "key": "mcp_servers"},
-    "gemini": {"fmt": "json", "key": "mcpServers"},
+    "opencode": {
+        "fmt": "json",
+        "key": "mcp",
+        "user_parts": (".config", "opencode", "opencode.json"),
+        "project_parts": ("opencode.json",),
+        "command": "array",
+        "adds_type_local": True,
+        "env": "none",
+        "delegates": False,
+    },
+    "codex": {
+        "fmt": "toml",
+        "key": "mcp_servers",
+        "user_parts": (".codex", "config.toml"),
+        "project_parts": (".codex", "config.toml"),
+        "command": "string",
+        "adds_type_local": False,
+        "env": "allow_list",
+        "delegates": True,
+    },
+    "gemini": {
+        "fmt": "json",
+        "key": "mcpServers",
+        "user_parts": (".config", "gemini", "settings.json"),
+        "project_parts": (".gemini", "settings.json"),
+        "command": "string",
+        "adds_type_local": False,
+        "env": "refs",
+        "delegates": True,
+    },
 }
+
+AGENT_NAMES: tuple[AgentName, ...] = tuple(ADAPTERS)
+"""The supported agent set, derived from :data:`ADAPTERS` (single source)."""
+
+
+def _adapter(agent: AgentName) -> Adapter:
+    """Return the adapter descriptor for *agent*.
+
+    Args:
+        agent: Registry agent key.
+
+    Returns:
+        The :class:`Adapter` registered for *agent*.
+
+    Raises:
+        ValueError: When *agent* is not a registered agent.
+    """
+    try:
+        return ADAPTERS[agent]
+    except KeyError:
+        raise ValueError(f"unknown agent: {agent}") from None
+
+
+def _delegates(agent: AgentName) -> bool:
+    """Return whether native ``mcp add/remove`` is attempted for *agent*.
+
+    Registered agents read their ``delegates`` capability. Unregistered
+    names keep the pre-#235 fall-through (attempt native) so this refactor
+    changes no callable's contract.
+
+    Args:
+        agent: Registry agent key.
+
+    Returns:
+        ``True`` when native delegation should be attempted.
+    """
+    spec = ADAPTERS.get(agent)
+    return spec["delegates"] if spec is not None else True
 
 
 def resolve_config_path(
@@ -75,24 +176,11 @@ def resolve_config_path(
     Returns:
         Absolute path to the agent's config file.
     """
+    spec = _adapter(agent)
     if scope == "user":
-        home = Path.home()
-        if agent == "opencode":
-            return home / ".config" / "opencode" / "opencode.json"
-        if agent == "codex":
-            return home / ".codex" / "config.toml"
-        if agent == "gemini":
-            return home / ".config" / "gemini" / "settings.json"
-        raise ValueError(f"unknown agent: {agent}")
-    # project scope
+        return Path.home().joinpath(*spec["user_parts"])
     base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
-    if agent == "opencode":
-        return base / "opencode.json"
-    if agent == "codex":
-        return base / ".codex" / "config.toml"
-    if agent == "gemini":
-        return base / ".gemini" / "settings.json"
-    raise ValueError(f"unknown agent: {agent}")
+    return base.joinpath(*spec["project_parts"])
 
 
 def _infer_fmt(path: Path) -> str:
@@ -154,25 +242,21 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
     Returns:
         Entry dict ready to merge into the agent's config.
     """
+    spec = _adapter(agent)
     cwd_str = str(cwd.resolve())
-    if agent == "opencode":
-        return {"type": "local", "command": ["sofer-mcp"], "cwd": cwd_str}
-    if agent == "codex":
-        return {
-            "command": "sofer-mcp",
-            "cwd": cwd_str,
-            "env_vars": _present_env_keys(env),
-        }
-    if agent == "gemini":
-        return {
-            "command": "sofer-mcp",
-            "cwd": cwd_str,
-            "env": {k: f"${k}" for k in _present_env_keys(env)},
-        }
-    raise ValueError(f"unknown agent: {agent}")
+    entry: dict[str, Any] = {}
+    if spec["adds_type_local"]:
+        entry["type"] = "local"
+    entry["command"] = ["sofer-mcp"] if spec["command"] == "array" else "sofer-mcp"
+    entry["cwd"] = cwd_str
+    if spec["env"] == "allow_list":
+        entry["env_vars"] = _present_env_keys(env)
+    elif spec["env"] == "refs":
+        entry["env"] = {k: f"${k}" for k in _present_env_keys(env)}
+    return entry
 
 
-def _normalize_codex_command(value: object) -> list[str]:
+def _normalize_command(value: object) -> list[str]:
     if isinstance(value, str):
         return [value]
     if isinstance(value, list):
@@ -181,27 +265,25 @@ def _normalize_codex_command(value: object) -> list[str]:
 
 
 def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Return True when *a* and *b* are the same entry for *agent*.
+
+    Codex command string/array variations are normalized before comparison
+    (Codex accepts either form); gemini and opencode compare their shape
+    directly, preserving each agent's on-disk idempotency contract.
+    """
     if agent == "codex":
-        # Normalize command string vs array before comparison
-        a_cmd = _normalize_codex_command(a.get("command"))
-        b_cmd = _normalize_codex_command(b.get("command"))
-        if a_cmd != b_cmd:
+        if _normalize_command(a.get("command")) != _normalize_command(b.get("command")):
             return False
-        # Compare cwd and env_vars
         if a.get("cwd") != b.get("cwd"):
             return False
-        a_env = sorted(a.get("env_vars", []))
-        b_env = sorted(b.get("env_vars", []))
-        return a_env == b_env
+        return sorted(a.get("env_vars", [])) == sorted(b.get("env_vars", []))
     if agent == "gemini":
         if a.get("command") != b.get("command"):
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
-        if a.get("env") != b.get("env"):
-            return False
-        return True
-    # opencode
+        return a.get("env") == b.get("env")
+    # opencode — no env capability: full structural equality.
     return a == b
 
 
@@ -225,39 +307,15 @@ def merge(
     """
     # Work on a shallow copy; nested dicts are copied where mutated
     new_doc = dict(existing)
-    if agent == "opencode":
-        mcp = dict(new_doc.get("mcp", {})) if isinstance(new_doc.get("mcp"), dict) else {}
-        current = mcp.get("sofer")
-        if isinstance(current, dict) and _entries_equal(agent, current, desired):
-            return new_doc, False
-        mcp["sofer"] = desired
-        new_doc["mcp"] = mcp
-        return new_doc, True
-    if agent == "codex":
-        servers = (
-            dict(new_doc.get("mcp_servers", {}))
-            if isinstance(new_doc.get("mcp_servers"), dict)
-            else {}
-        )
-        current = servers.get("sofer")
-        if isinstance(current, dict) and _entries_equal(agent, current, desired):
-            return new_doc, False
-        servers["sofer"] = desired
-        new_doc["mcp_servers"] = servers
-        return new_doc, True
-    if agent == "gemini":
-        servers = (
-            dict(new_doc.get("mcpServers", {}))
-            if isinstance(new_doc.get("mcpServers"), dict)
-            else {}
-        )
-        current = servers.get("sofer")
-        if isinstance(current, dict) and _entries_equal(agent, current, desired):
-            return new_doc, False
-        servers["sofer"] = desired
-        new_doc["mcpServers"] = servers
-        return new_doc, True
-    raise ValueError(f"unknown agent: {agent}")
+    key = _adapter(agent)["key"]
+    current_table = new_doc.get(key)
+    servers = dict(current_table) if isinstance(current_table, dict) else {}
+    current = servers.get("sofer")
+    if isinstance(current, dict) and _entries_equal(agent, current, desired):
+        return new_doc, False
+    servers["sofer"] = desired
+    new_doc[key] = servers
+    return new_doc, True
 
 
 def remove_entry(agent: AgentName, existing: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -271,40 +329,17 @@ def remove_entry(agent: AgentName, existing: dict[str, Any]) -> tuple[dict[str, 
         ``(new_doc, changed)``.
     """
     new_doc = dict(existing)
-    if agent == "opencode":
-        mcp = new_doc.get("mcp")
-        if not isinstance(mcp, dict) or "sofer" not in mcp:
-            return new_doc, False
-        new_mcp = dict(mcp)
-        new_mcp.pop("sofer", None)
-        if new_mcp:
-            new_doc["mcp"] = new_mcp
-        else:
-            new_doc.pop("mcp", None)
-        return new_doc, True
-    if agent == "codex":
-        servers = new_doc.get("mcp_servers")
-        if not isinstance(servers, dict) or "sofer" not in servers:
-            return new_doc, False
-        new_servers = dict(servers)
-        new_servers.pop("sofer", None)
-        if new_servers:
-            new_doc["mcp_servers"] = new_servers
-        else:
-            new_doc.pop("mcp_servers", None)
-        return new_doc, True
-    if agent == "gemini":
-        servers = new_doc.get("mcpServers")
-        if not isinstance(servers, dict) or "sofer" not in servers:
-            return new_doc, False
-        new_servers = dict(servers)
-        new_servers.pop("sofer", None)
-        if new_servers:
-            new_doc["mcpServers"] = new_servers
-        else:
-            new_doc.pop("mcpServers", None)
-        return new_doc, True
-    raise ValueError(f"unknown agent: {agent}")
+    key = _adapter(agent)["key"]
+    servers = new_doc.get(key)
+    if not isinstance(servers, dict) or "sofer" not in servers:
+        return new_doc, False
+    new_servers = dict(servers)
+    new_servers.pop("sofer", None)
+    if new_servers:
+        new_doc[key] = new_servers
+    else:
+        new_doc.pop(key, None)
+    return new_doc, True
 
 
 def backup(path: Path) -> Path | None:
@@ -356,6 +391,7 @@ def probe_native(agent: AgentName, timeout: float = 3.0) -> bool:
 
     Opencode always returns ``False`` (file-edit only). For codex/gemini,
     checks ``shutil.which`` and runs ``<agent> mcp --help`` with a timeout.
+    Whether an agent delegates comes from :data:`ADAPTERS`.
 
     Args:
         agent: Agent to probe.
@@ -364,7 +400,7 @@ def probe_native(agent: AgentName, timeout: float = 3.0) -> bool:
     Returns:
         ``True`` when delegation should be attempted.
     """
-    if agent == "opencode":
+    if not _delegates(agent):
         return False
     exe = shutil.which(agent)
     if not exe:
@@ -386,7 +422,10 @@ def probe_native(agent: AgentName, timeout: float = 3.0) -> bool:
 def delegate_add(agent: AgentName, cwd: Path, env_keys: list[str]) -> bool:
     """Attempt native ``add`` delegation for *agent*.
 
-    Only codex/gemini are delegated; opencode returns ``False``.
+    Only agents whose adapter declares ``delegates=True`` are delegated;
+    the rest (opencode) return ``False``. A single native shape is used —
+    ``<agent> mcp add sofer --command sofer-mcp --cwd <cwd>`` — and a
+    non-zero exit falls back to the caller's file edit (no shape retry).
 
     Args:
         agent: Target agent.
@@ -398,31 +437,24 @@ def delegate_add(agent: AgentName, cwd: Path, env_keys: list[str]) -> bool:
         ``True`` on success, ``False`` on failure or absence (caller
         should fallback to file-edit).
     """
-    if agent == "opencode":
+    if not _delegates(agent):
         return False
     exe = shutil.which(agent)
     if not exe:
         return False
-    # Try the most common native shape: `agent mcp add sofer --command sofer-mcp --cwd <cwd>`
-    # Fall back to simpler shape on failure is handled by caller (retry file-edit)
-    cmd_variants = [
-        [exe, "mcp", "add", "sofer", "--command", "sofer-mcp", "--cwd", str(cwd)],
-        [exe, "mcp", "add", "sofer", "--", "sofer-mcp"],
-        [exe, "mcp", "add", "sofer"],
-    ]
-    for cmd in cmd_variants[:1]:  # only try first variant; keep simple
-        try:
-            result = subprocess.run(cmd, timeout=3.0, capture_output=True)
-            if result.returncode == 0:
-                return True
-            return False
-        except (subprocess.TimeoutExpired, OSError):
-            return False
-    return False
+    cmd = [exe, "mcp", "add", "sofer", "--command", "sofer-mcp", "--cwd", str(cwd)]
+    try:
+        result = subprocess.run(cmd, timeout=3.0, capture_output=True)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
 
 
 def delegate_remove(agent: AgentName) -> bool:
     """Attempt native ``remove`` delegation for *agent*.
+
+    Only agents whose adapter declares ``delegates=True`` are delegated;
+    the rest (opencode) return ``False``.
 
     Args:
         agent: Target agent.
@@ -430,7 +462,7 @@ def delegate_remove(agent: AgentName) -> bool:
     Returns:
         ``True`` on success, ``False`` otherwise.
     """
-    if agent == "opencode":
+    if not _delegates(agent):
         return False
     exe = shutil.which(agent)
     if not exe:
@@ -478,10 +510,11 @@ def _present_env_keys(env: Mapping[str, str]) -> list[str]:
 def dropped_env_keys(agent: AgentName, env: Mapping[str, str]) -> list[str]:
     """Known env NAMES that would be dropped for *agent*.
 
-    opencode entries cannot carry env, so every present known key is dropped;
-    codex/gemini forward names (``env_vars`` allow-list / ``env`` ``$KEY``
-    refs), so nothing is. Reads *env* keys only; returns NAMES never values.
-    Returns ``[]`` (not ``None``) when nothing is dropped.
+    Agents whose adapter declares ``env="none"`` cannot carry env, so every
+    present known key is dropped; agents that forward names (``env_vars``
+    allow-list / ``env`` ``$KEY`` refs) drop nothing. Reads *env* keys only;
+    returns NAMES never values. Returns ``[]`` (not ``None``) when nothing
+    is dropped.
 
     Args:
         agent: Target agent name.
@@ -491,7 +524,8 @@ def dropped_env_keys(agent: AgentName, env: Mapping[str, str]) -> list[str]:
         Names of known env keys that would be dropped for *agent*, in
         ``_ENV_KEYS`` order; ``[]`` (never ``None``) when nothing is dropped.
     """
-    if agent == "opencode":
+    spec = ADAPTERS.get(agent)
+    if spec is not None and spec["env"] == "none":
         return _present_env_keys(env)
     return []
 

@@ -792,9 +792,9 @@ class TestReadConfigMalformed:
 
 
 class TestIdempotencyNext:
-    def test_normalize_codex_command_non_string_returns_empty(self) -> None:
-        assert mcp_registration._normalize_codex_command(42) == []
-        assert mcp_registration._normalize_codex_command(None) == []
+    def test_normalize_command_non_string_returns_empty(self) -> None:
+        assert mcp_registration._normalize_command(42) == []
+        assert mcp_registration._normalize_command(None) == []
 
     @pytest.mark.parametrize(
         "agent",
@@ -1017,3 +1017,141 @@ class TestRemoveUnknownAgent:
         bad: mcp_registration.AgentName = _cast(mcp_registration.AgentName, _cast(object, "nope"))
         with pytest.raises(ValueError, match="unknown agent"):
             mcp_registration.remove_entry(bad, {})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Single-source agent registry (#235) — every site derives from ADAPTERS.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _parser_agent_choices(command: str) -> list[str]:
+    """Return the ``--agent`` choices for ``mcp add`` / ``mcp remove``."""
+    import argparse as _argparse
+
+    parser = cli._build_parser()
+    mcp_action = next(
+        a
+        for a in parser._actions
+        if isinstance(a, _argparse._SubParsersAction) and "mcp" in a.choices
+    )
+    mcp_sub = mcp_action.choices["mcp"]
+    cmd_action = next(
+        a
+        for a in mcp_sub._actions
+        if isinstance(a, _argparse._SubParsersAction) and command in a.choices
+    )
+    cmd_parser = cmd_action.choices[command]
+    agent_action = next(a for a in cmd_parser._actions if getattr(a, "dest", None) == "agent")
+    return list(agent_action.choices)
+
+
+class TestSingleSourceRegistry:
+    """The agent set lives in one place; every consumer derives from it."""
+
+    def test_agent_names_derive_from_adapter_registry(self) -> None:
+        assert mcp_registration.AGENT_NAMES == tuple(mcp_registration.ADAPTERS)
+        assert mcp_registration.AGENT_NAMES  # non-empty
+
+    def test_every_agent_name_has_a_complete_adapter(self) -> None:
+        required = {
+            "fmt",
+            "key",
+            "user_parts",
+            "project_parts",
+            "command",
+            "adds_type_local",
+            "env",
+            "delegates",
+        }
+        for agent in mcp_registration.AGENT_NAMES:
+            spec = mcp_registration.ADAPTERS[agent]
+            assert set(spec) == required, agent
+            assert spec["fmt"] in {"json", "toml"}
+            assert spec["command"] in {"array", "string"}
+            assert spec["env"] in {"none", "allow_list", "refs"}
+
+    def test_resolve_config_path_matches_registry_for_every_agent(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        for agent in mcp_registration.AGENT_NAMES:
+            spec = mcp_registration.ADAPTERS[agent]
+            assert mcp_registration.resolve_config_path(agent, "user") == home.joinpath(
+                *spec["user_parts"]
+            )
+            assert mcp_registration.resolve_config_path(
+                agent, "project", proj
+            ) == proj.resolve().joinpath(*spec["project_parts"])
+
+    @pytest.mark.parametrize("command", ["add", "remove"])
+    def test_cli_agent_choices_derive_from_registry(self, command: str) -> None:
+        assert _parser_agent_choices(command) == [*mcp_registration.AGENT_NAMES, "all"]
+
+    def test_all_expansion_and_choices_track_a_new_registry_entry(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A fake registry entry flows into CLI choices and ``--agent all``.
+
+        Guards the single-source contract: adding an agent to ``ADAPTERS`` is
+        the only edit needed for the CLI to accept and expand it.
+        """
+        sentinel = {
+            "fmt": "json",
+            "key": "mcpSentinel",
+            "user_parts": (".sentinel", "sentinel.json"),
+            "project_parts": ("sentinel.json",),
+            "command": "string",
+            "adds_type_local": False,
+            "env": "none",
+            "delegates": False,
+        }
+        patched = {**mcp_registration.ADAPTERS, "sentinel": sentinel}
+        monkeypatch.setattr(mcp_registration, "ADAPTERS", patched)
+        monkeypatch.setattr(mcp_registration, "AGENT_NAMES", tuple(patched))
+
+        assert _parser_agent_choices("add") == [*tuple(patched), "all"]
+        assert _parser_agent_choices("remove") == [*tuple(patched), "all"]
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        rc = cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=False))
+        assert rc == 0
+        assert (proj / "sentinel.json").exists()
+        assert (proj / "opencode.json").exists()
+        assert (proj / ".codex" / "config.toml").exists()
+        assert (proj / ".gemini" / "settings.json").exists()
+
+
+class TestRefactorParity:
+    """Pin the behaviors the single-source refactor must preserve exactly."""
+
+    def test_opencode_entry_key_order_matches_legacy(self, tmp_path) -> None:
+        """Serialized key order stays ``type, command, cwd`` for opencode."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("opencode", cwd, {})
+        assert list(entry) == ["type", "command", "cwd"]
+
+    def test_gemini_command_array_is_not_treated_as_equal(self) -> None:
+        """Gemini does not normalize command: array vs string is a change."""
+        string_cmd = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "$HF_TOKEN"}}
+        array_cmd = {"command": ["sofer-mcp"], "cwd": "/proj", "env": {"HF_TOKEN": "$HF_TOKEN"}}
+        assert mcp_registration._entries_equal("gemini", string_cmd, array_cmd) is False
+        _, changed = mcp_registration.merge(
+            "gemini", {"mcpServers": {"sofer": array_cmd}}, string_cmd
+        )
+        assert changed is True
+
+    def test_unknown_agent_keeps_legacy_fallthrough(self, monkeypatch) -> None:
+        """Unregistered agents keep the pre-#235 fall-through (no ValueError)."""
+        monkeypatch.setattr("shutil.which", lambda _x: "/fake/ghost")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: MagicMock(returncode=0))
+        assert mcp_registration.probe_native("ghost") is True
+        assert mcp_registration.delegate_add("ghost", Path("/tmp"), []) is True
+        assert mcp_registration.delegate_remove("ghost") is True
+        assert mcp_registration.dropped_env_keys("ghost", {"HF_TOKEN": "x"}) == []
