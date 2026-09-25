@@ -6,12 +6,14 @@ Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
 `ci` specification (requirements CI-01..CI-11) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
-scenario-verifying tests are the 29 `ci` Test Mapping rows whose verification
+scenario-verifying tests are the `ci` Test Mapping rows whose verification
 names a test in this module (CI-09's posture row is carried by two guards), plus
-five tests owned by other capabilities or supporting this one — the two
+the tests owned by other capabilities or supporting this one — the two
 `coverage` COV-06 guards, `test_ci_workflow_files_present`, which fails loudly
-before any parse, the PB-14 hook-scope guard, and the CI-07 clause-agreement
-guard, which re-enforces an existing CI-07 row rather than adding one. Runtime
+before any parse, the PB-14 hook-scope guard, the CI-07 clause-agreement guard,
+which re-enforces an existing CI-07 row rather than adding one, and the three
+`211-test-mapping-gate` guards (rule 6 / config contract agreement, the config
+context tally, and the lint-job checker step). Runtime
 gate exit-code evidence (CI-01 S2's local gate run, CI-08 S4's required-version
 mismatch probe, and CI-09 S2's pyright gate run) is recorded in the SDD verify
 report, not asserted here.
@@ -878,4 +880,73 @@ def test_release_test_job_mirrors_ci_os_axis_and_cli_smoke() -> None:
     assert "185" in header, (
         "the release header comment must cross-reference issue #185 as the deliberately "
         "separate COV-06 change (CI-10)"
+    )
+
+
+_RULE6_RE = re.compile(r"### 6\..*?(?=\n### )", re.DOTALL)
+# The contract terms both normative homes must state (R6-04): the two prefixes,
+# the existence/collection limit, and the registry boundary.
+_CONTRACT_TERMS = ("test:", "verify:", "collected", "registry")
+# Stale hand-maintained tallies #214 files: a bare count followed by the noun.
+_STALE_TALLY_RE = re.compile(r"\b\d+\s+(?:tests|collected|skipped)\b|\b\d+\s+spec\s+scenarios\b")
+
+
+def test_rule6_and_config_agree_on_contract_terms() -> None:
+    """R6-04/R6-05: AGENTS rule 6 and config rules.specs state the same contract.
+
+    Issue #211/#214: rule 6's unenforced absolute and its stale tally were
+    replaced by the enforced contract — the ``test:``/``verify:`` prefixes, the
+    existence/collection limit (not proof of exercise), the ``verify:`` escape
+    hatch, and the registry boundary — plus the reproducing command alone. The
+    two normative homes must agree on those contract terms, and no stale
+    pass/collected/skipped triple may remain in rule 6.
+    """
+    match = _RULE6_RE.search(_read_text("AGENTS.md"))
+    assert match is not None, "AGENTS.md rule 6 not found"
+    rule6 = match.group(0)
+    specs_rules = " ".join(str(entry) for entry in _openspec_config()["rules"]["specs"])
+    for term in _CONTRACT_TERMS:
+        assert term in rule6, f"AGENTS.md rule 6 must state the contract term {term!r}"
+        assert term in specs_rules, f"config rules.specs must state the contract term {term!r}"
+    assert "1766" not in rule6 and "1772" not in rule6, (
+        "AGENTS.md rule 6 must not carry the stale #214 tally"
+    )
+    assert "uv run pytest tests/ -q" in rule6, (
+        "rule 6 must keep the reproducing command as the tally's sole anchor (R6-05)"
+    )
+
+
+def test_config_context_has_no_stale_tally() -> None:
+    """R6-06: config ``context`` carries no stale count and keeps the test command."""
+    config = _openspec_config()
+    context = str(config["context"])
+    assert _STALE_TALLY_RE.search(context) is None, (
+        "openspec/config.yaml context must not carry a stale hand-maintained tally (R6-06)"
+    )
+    assert config["testing"]["test_command"] == "uv run pytest tests/ -q", (
+        "the reproducing command must remain declared under testing (R6-06)"
+    )
+
+
+def test_lint_job_runs_the_test_mapping_checker() -> None:
+    """MC-07 S1: exactly one lint-job step runs the checker; no new job/axis."""
+    ci, _ = _workflow("ci.yml")
+    jobs = ci.get("jobs", {})
+    assert isinstance(jobs, dict), "ci.yml has no `jobs` mapping"
+    lint = jobs.get("lint", {})
+    assert isinstance(lint, dict), "ci.yml has no `lint` job"
+    checker_steps = [
+        step
+        for step in lint.get("steps", [])
+        if isinstance(step, dict) and "check_test_mapping" in str(step.get("run", ""))
+    ]
+    assert len(checker_steps) == 1, (
+        "the ci.yml `lint` job must contain exactly one test-mapping checker step (MC-07)"
+    )
+    assert checker_steps[0].get("run") == "uv run python scripts/check_test_mapping.py", (
+        "the checker step must invoke scripts/check_test_mapping.py directly (MC-07)"
+    )
+    assert set(jobs) == {"lint", "test", "coverage"}, (
+        "the checker must not add a new job or matrix axis — one step in the existing "
+        f"`lint` job only (MC-07 S1), got {sorted(jobs)}"
     )

@@ -600,41 +600,41 @@ evidence recorded in the verify report.
 
 | Req | Scenario | Verification |
 | --- | -------- | ------------ |
-| CI-01 | Config declares the 90% floor | `tests/test_ci_workflows.py` — tomllib parse of `pyproject.toml` |
-| CI-01 | Gate is config-driven | `tests/test_ci_workflows.py` — YAML inspection (no floor literal, no `--fail-under`); local gate run — `uv run coverage report -m` exit code (verify-phase runtime evidence) |
-| CI-01 | Report honors show_missing | `tests/test_ci_workflows.py` — tomllib parse of `pyproject.toml` |
-| CI-02 | htmlcov artifact step present | `tests/test_ci_workflows.py` — YAML inspection of ci.yml + release.yml |
-| CI-02 | Missing-lines list in the job log | `tests/test_ci_workflows.py` — YAML inspection |
-| CI-02 | No XML or third-party coverage references | `tests/test_ci_workflows.py` — YAML/full-text scan |
-| CI-03 | Coverage job in the release needs chain | `tests/test_ci_workflows.py` — YAML inspection of release.yml `needs` |
-| CI-03 | Tag push below the floor yields no release | Verify-phase static evidence — needs-chain proof per the PB-05/MSP-R12 precedent (no release path below the floor) |
-| CI-03 | Release coverage job runs the core 100% gates | `tests/test_ci_workflows.py` — `test_release_coverage_job_runs_core_100_gates`: YAML inspection of the release.yml `coverage` job steps |
-| CI-04 | Push, PR, and weekly triggers present | `tests/test_ci_workflows.py` — `test_codeql_has_push_pr_and_weekly_triggers`: YAML inspection of codeql.yml |
-| CI-04 | Pull request includes dev | `tests/test_ci_workflows.py` — `test_codeql_pull_request_targets_dev`: YAML inspection |
-| CI-04 | Security-events write permission declared | `tests/test_ci_workflows.py` — `test_codeql_security_write_permission_and_python`: YAML inspection |
-| CI-04 | SARIF stays a workflow artifact while the repository is private | `tests/test_ci_workflows.py` — `test_codeql_private_window_publishes_sarif_artifact_without_upload`: YAML inspection |
-| CI-05 | Config file referenced by init | `tests/test_ci_workflows.py` — YAML inspection |
-| CI-05 | Paths-ignore covers non-code trees | `tests/test_ci_workflows.py` — YAML inspection of `.github/codeql/config.yml` |
-| CI-06 | Config declares coverage available at 90 | `tests/test_ci_workflows.py` — pyyaml parse of `openspec/config.yaml` |
-| CI-06 | CONTRIBUTING documents the floor | `tests/test_ci_workflows.py` — text inspection of CONTRIBUTING.md |
-| CI-06 | README mirrors README_ES | Verify-phase static evidence — section mirror diff (PB-05/MSP-R12 precedent); not pytest-assertable |
-| CI-06 | PR template checklist item | `tests/test_ci_workflows.py` — text inspection of the PR template |
-| CI-07 | Dev pin equals both gate-job pins | Verify-phase static evidence — `.python-version` read against the `lint` and `coverage` job pins in `ci.yml` |
-| CI-07 | Flag-free mypy gates are green on the pinned interpreter | Verify-phase runtime evidence — `uv run mypy src/` and `uv run mypy src/ scripts/` exit codes (CI-01 gate-exit-code precedent) |
-| CI-07 | The COV-06 gate script runs all four scoped gates to completion on the pin | Verify-phase runtime evidence — `bash scripts/check_core_coverage.sh` exit code with four 100.00% rows (COV-06 precedent) |
-| CI-07 | The latent-issue note states the rationale and the escape hatch | Verify-phase static evidence — `AGENTS.md` rule 12 text inspection |
-| CI-07 | User-facing support is unchanged | Verify-phase static evidence — diff and config inspection (zero `pyproject.toml` / `.github/workflows/` paths, `fail_under = 90` intact) |
-| CI-08 | Dev pin, required-version, and hook rev agree | `tests/test_ci_workflows.py` — `test_ruff_pin_hook_rev_and_required_version_agree`: tomllib + YAML declaration equality, with `X.Y.Z` extracted from the dev pin |
-| CI-08 | No workflow declares a ruff version | `tests/test_ci_workflows.py` — `test_workflows_do_not_declare_a_ruff_version`: YAML/full-text scan of `.github/workflows/*.yml` |
-| CI-08 | CONTRIBUTING names the declared version | `tests/test_ci_workflows.py` — `test_contributing_names_the_declared_ruff_version`: text inspection of `CONTRIBUTING.md` |
-| CI-08 | required-version rejects a mismatched binary | Verify-phase runtime evidence — `uv run ruff check src/ tests/ scripts/` and `uv run ruff format --check src/ tests/ scripts/` exit codes under a mismatched `required-version` probe and under the declared value (CI-01 gate-exit-code precedent) |
-| CI-09 | `tests/` stays out of both type gates | `tests/test_ci_workflows.py` — `test_mypy_and_pyright_exclude_tests`: tomllib parse of both type-checker blocks + text inspection of every mypy invocation and of `CONTRIBUTING.md`'s type-checking section and the PR template |
-| CI-09 | `[tool.pyright]` declares the decided posture and the gate runs | `tests/test_ci_workflows.py` — `test_pyright_config_declares_the_decided_posture` and `test_ci_lint_job_runs_the_pyright_gate`: tomllib + YAML inspection; local gate run `uv run pyright` exit code with the measured summary line (verify-phase runtime evidence) |
-| CI-09 | Exactly one pyright config home exists | `tests/test_ci_workflows.py` — `test_pyright_has_exactly_one_config_home`: tree walk for `pyrightconfig.json` |
-| CI-09 | The pin is exact, reaches CI through the lock, and matches the running binary | `tests/test_ci_workflows.py` — `test_analyzer_dev_pins_are_exact_and_match_the_lock`: dev-pin derivation + `uv.lock` resolution equality; `uv run pyright --version` equality (verify-phase runtime evidence) |
-| CI-09 | Adopting the gate leaves every existing gate declaration intact | `tests/test_ci_workflows.py` — `test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates`: YAML/tomllib inspection; `uv run mypy src/ scripts/` exit code (CI-01 gate-exit-code precedent) |
-| CI-10 | Test job OS axis matches CI | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of both `test` job matrices |
-| CI-10 | CLI help smoke test runs at tag time | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of the release `test` job steps |
-| CI-10 | COV-06 stays cross-referenced as issue #185 | `tests/test_ci_workflows.py` — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: full-text scan of the release header comment |
-| CI-11 | Lint job runs the format gate | `tests/test_ci_workflows.py` — `test_ci_lint_job_runs_the_ruff_format_gate`: YAML inspection of the ci.yml `lint` job steps |
-| CI-11 | Format gate is green on a clean checkout | Verify-phase runtime evidence — `uv run ruff format --check src/ tests/` exit code on `dev` (CI-01 gate-exit-code precedent) |
+| CI-01 | Config declares the 90% floor | test:tests/test_ci_workflows.py — tomllib parse of `pyproject.toml` |
+| CI-01 | Gate is config-driven | test:tests/test_ci_workflows.py — YAML inspection (no floor literal, no `--fail-under`); local gate run — `uv run coverage report -m` exit code (verify-phase runtime evidence) |
+| CI-01 | Report honors show_missing | test:tests/test_ci_workflows.py — tomllib parse of `pyproject.toml` |
+| CI-02 | htmlcov artifact step present | test:tests/test_ci_workflows.py — YAML inspection of ci.yml + release.yml |
+| CI-02 | Missing-lines list in the job log | test:tests/test_ci_workflows.py — YAML inspection |
+| CI-02 | No XML or third-party coverage references | test:tests/test_ci_workflows.py — YAML/full-text scan |
+| CI-03 | Coverage job in the release needs chain | test:tests/test_ci_workflows.py — YAML inspection of release.yml `needs` |
+| CI-03 | Tag push below the floor yields no release | verify:Verify-phase static evidence — needs-chain proof per the PB-05/MSP-R12 precedent (no release path below the floor) |
+| CI-03 | Release coverage job runs the core 100% gates | test:tests/test_ci_workflows.py — `test_release_coverage_job_runs_core_100_gates`: YAML inspection of the release.yml `coverage` job steps |
+| CI-04 | Push, PR, and weekly triggers present | test:tests/test_ci_workflows.py — `test_codeql_has_push_pr_and_weekly_triggers`: YAML inspection of codeql.yml |
+| CI-04 | Pull request includes dev | test:tests/test_ci_workflows.py — `test_codeql_pull_request_targets_dev`: YAML inspection |
+| CI-04 | Security-events write permission declared | test:tests/test_ci_workflows.py — `test_codeql_security_write_permission_and_python`: YAML inspection |
+| CI-04 | SARIF stays a workflow artifact while the repository is private | test:tests/test_ci_workflows.py — `test_codeql_private_window_publishes_sarif_artifact_without_upload`: YAML inspection |
+| CI-05 | Config file referenced by init | test:tests/test_ci_workflows.py — YAML inspection |
+| CI-05 | Paths-ignore covers non-code trees | test:tests/test_ci_workflows.py — YAML inspection of `.github/codeql/config.yml` |
+| CI-06 | Config declares coverage available at 90 | test:tests/test_ci_workflows.py — pyyaml parse of `openspec/config.yaml` |
+| CI-06 | CONTRIBUTING documents the floor | test:tests/test_ci_workflows.py — text inspection of CONTRIBUTING.md |
+| CI-06 | README mirrors README_ES | verify:Verify-phase static evidence — section mirror diff (PB-05/MSP-R12 precedent); not pytest-assertable |
+| CI-06 | PR template checklist item | test:tests/test_ci_workflows.py — text inspection of the PR template |
+| CI-07 | Dev pin equals both gate-job pins | verify:Verify-phase static evidence — `.python-version` read against the `lint` and `coverage` job pins in `ci.yml` |
+| CI-07 | Flag-free mypy gates are green on the pinned interpreter | verify:Verify-phase runtime evidence — `uv run mypy src/` and `uv run mypy src/ scripts/` exit codes (CI-01 gate-exit-code precedent) |
+| CI-07 | The COV-06 gate script runs all four scoped gates to completion on the pin | verify:Verify-phase runtime evidence — `bash scripts/check_core_coverage.sh` exit code with four 100.00% rows (COV-06 precedent) |
+| CI-07 | The latent-issue note states the rationale and the escape hatch | verify:Verify-phase static evidence — `AGENTS.md` rule 12 text inspection |
+| CI-07 | User-facing support is unchanged | verify:Verify-phase static evidence — diff and config inspection (zero `pyproject.toml` / `.github/workflows/` paths, `fail_under = 90` intact) |
+| CI-08 | Dev pin, required-version, and hook rev agree | test:tests/test_ci_workflows.py — `test_ruff_pin_hook_rev_and_required_version_agree`: tomllib + YAML declaration equality, with `X.Y.Z` extracted from the dev pin |
+| CI-08 | No workflow declares a ruff version | test:tests/test_ci_workflows.py — `test_workflows_do_not_declare_a_ruff_version`: YAML/full-text scan of `.github/workflows/*.yml` |
+| CI-08 | CONTRIBUTING names the declared version | test:tests/test_ci_workflows.py — `test_contributing_names_the_declared_ruff_version`: text inspection of `CONTRIBUTING.md` |
+| CI-08 | required-version rejects a mismatched binary | verify:Verify-phase runtime evidence — `uv run ruff check src/ tests/ scripts/` and `uv run ruff format --check src/ tests/ scripts/` exit codes under a mismatched `required-version` probe and under the declared value (CI-01 gate-exit-code precedent) |
+| CI-09 | `tests/` stays out of both type gates | test:tests/test_ci_workflows.py — `test_mypy_and_pyright_exclude_tests`: tomllib parse of both type-checker blocks + text inspection of every mypy invocation and of `CONTRIBUTING.md`'s type-checking section and the PR template |
+| CI-09 | `[tool.pyright]` declares the decided posture and the gate runs | test:tests/test_ci_workflows.py — `test_pyright_config_declares_the_decided_posture` and `test_ci_lint_job_runs_the_pyright_gate`: tomllib + YAML inspection; local gate run `uv run pyright` exit code with the measured summary line (verify-phase runtime evidence) |
+| CI-09 | Exactly one pyright config home exists | test:tests/test_ci_workflows.py — `test_pyright_has_exactly_one_config_home`: tree walk for `pyrightconfig.json` |
+| CI-09 | The pin is exact, reaches CI through the lock, and matches the running binary | test:tests/test_ci_workflows.py — `test_analyzer_dev_pins_are_exact_and_match_the_lock`: dev-pin derivation + `uv.lock` resolution equality; `uv run pyright --version` equality (verify-phase runtime evidence) |
+| CI-09 | Adopting the gate leaves every existing gate declaration intact | test:tests/test_ci_workflows.py — `test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates`: YAML/tomllib inspection; `uv run mypy src/ scripts/` exit code (CI-01 gate-exit-code precedent) |
+| CI-10 | Test job OS axis matches CI | test:tests/test_ci_workflows.py — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of both `test` job matrices |
+| CI-10 | CLI help smoke test runs at tag time | test:tests/test_ci_workflows.py — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of the release `test` job steps |
+| CI-10 | COV-06 stays cross-referenced as issue #185 | test:tests/test_ci_workflows.py — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: full-text scan of the release header comment |
+| CI-11 | Lint job runs the format gate | test:tests/test_ci_workflows.py — `test_ci_lint_job_runs_the_ruff_format_gate`: YAML inspection of the ci.yml `lint` job steps |
+| CI-11 | Format gate is green on a clean checkout | verify:Verify-phase runtime evidence — `uv run ruff format --check src/ tests/` exit code on `dev` (CI-01 gate-exit-code precedent) |

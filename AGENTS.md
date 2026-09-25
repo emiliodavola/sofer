@@ -39,10 +39,20 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Before pushing, run `uv run mypy src/` and `uv run pyright` — the CI will reject type errors.
 
 ### 6. Tests must match specs
-- Every SDD spec scenario must have a corresponding test.
-- When implementing, run `uv run pytest tests/ -q` after every change batch.
-- Never reduce coverage. The authoritative tally is what `uv run pytest tests/ -q` reports on your branch —
-  re-derive it, never trust a figure here. Observed on this branch: 1766 passed, 6 skipped (1772 collected).
+- Every SDD spec scenario maps to a repository test (`test:`) or to declared verify-phase evidence
+  (`verify:`). A spec that carries a `## Test Mapping` table SHALL list every `#### Scenario:` in
+  exactly one row, and each row's Verification cell SHALL begin with exactly one evidence prefix:
+  `test:` (a repository test path, optionally `path::test_name`) or `verify:` (a declared evidence
+  class). The contract of record is the `test-mapping-contract` capability.
+- The gate (`scripts/check_test_mapping.py`, run in CI's `lint` job) verifies that a `test:` reference
+  **exists and is collected by pytest**. That is an existence/collection check, not proof that the
+  referenced test exercises the scenario; a `verify:` row is the declared escape hatch, never proof.
+- Specs without a `## Test Mapping` table are recorded in `openspec/test-mapping-registry.md` and stay
+  outside the gate until they adopt one. The checker enforces the registry↔tree bijection, so no spec
+  can silently fall outside the gate.
+- When implementing, run `uv run pytest tests/ -q` after every change batch. Never reduce coverage: the
+  authoritative tally is what `uv run pytest tests/ -q` reports on your branch — re-derive it, never
+  trust a figure written here.
 
 ### 7. CLI help text accuracy
 - When adding a new flag or changing behavior, update the argparse `help=` and `description=` strings.
