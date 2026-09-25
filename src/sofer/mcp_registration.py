@@ -29,6 +29,13 @@ entries use that form. ``command`` string/array variations are normalized
 before comparison. Native delegation (``codex``/``gemini``) is probed via
 ``shutil.which`` + ``--help`` with a timeout and falls back to file-edit;
 opencode and pi always use file-edit.
+
+Native delegation is **fidelity-gated** (#167, #232): it is used only when the
+native CLI can express the same registration the file edit would write. When env
+NAMES must be forwarded, or ``--scope project`` is requested, and the native CLI
+cannot express that faithfully, the delegate declines and the caller edits the
+file instead. The gate is :func:`native_delegation_decline_reasons`, driven by
+the ``native_env`` / ``native_scope`` capabilities of :data:`ADAPTERS`.
 """
 
 from __future__ import annotations
@@ -76,6 +83,15 @@ class Adapter(TypedDict):
             (``env`` ``$KEY`` references) or ``"refs_braced"`` (``env`` ``${KEY}``
             references, Pi's interpolation form).
         delegates: Whether a native ``<agent> mcp add/remove`` is attempted.
+        native_env: Whether the native ``mcp add`` can forward env NAMES with
+            the file edit's never-persist-values semantics. ``False`` for
+            every current agent: the native env flags (``--env`` / ``-e``)
+            take literal ``KEY=VALUE`` pairs, so forwarding would persist a
+            value — the gate declines and the file edit (NAMES only) runs.
+        native_scope: Whether the native ``mcp add``/``mcp remove`` accepts a
+            ``--scope user|project`` selector. ``True`` for Gemini, whose CLI
+            supports it (default is ``project``); ``False`` for Codex, whose
+            native commands always act on the global ``$CODEX_HOME`` config.
         user_env_dir: Environment variable naming a directory that overrides
             the user-scope config directory (the file name is
             ``user_parts[-1]``); ``None`` for agents without such an override.
@@ -89,6 +105,8 @@ class Adapter(TypedDict):
     adds_type_local: bool
     env: Literal["none", "allow_list", "refs", "refs_braced"]
     delegates: bool
+    native_env: bool
+    native_scope: bool
     user_env_dir: str | None
 
 
@@ -102,6 +120,8 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": True,
         "env": "none",
         "delegates": False,
+        "native_env": False,
+        "native_scope": False,
         "user_env_dir": None,
     },
     "codex": {
@@ -113,6 +133,8 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": False,
         "env": "allow_list",
         "delegates": True,
+        "native_env": False,
+        "native_scope": False,
         "user_env_dir": None,
     },
     "gemini": {
@@ -124,6 +146,8 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": False,
         "env": "refs",
         "delegates": True,
+        "native_env": False,
+        "native_scope": True,
         "user_env_dir": None,
     },
     "pi": {
@@ -135,6 +159,8 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": False,
         "env": "refs_braced",
         "delegates": False,
+        "native_env": False,
+        "native_scope": False,
         "user_env_dir": "PI_CODING_AGENT_DIR",
     },
 }
@@ -425,6 +451,41 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
     os.replace(tmp, path)
 
 
+def native_delegation_decline_reasons(
+    agent: AgentName, env_keys: list[str], scope: Scope
+) -> list[str]:
+    """Return why native delegation must decline, or ``[]`` when it may proceed.
+
+    The single fidelity gate shared by ``add`` and ``remove`` (#167, #232):
+    native delegation is faithful only when it can express the same
+    registration the file-edit path would write. It reads the adapter's
+    ``native_env`` / ``native_scope`` capabilities — one source of truth, no
+    per-agent branch here.
+
+    Args:
+        agent: Target agent.
+        env_keys: Env NAMES that must be forwarded (empty for ``remove``).
+            Keys only, never values.
+        scope: Requested ``"user"`` or ``"project"`` scope.
+
+    Returns:
+        Reasons the native path is unfaithful, in fixed order: ``"env
+        forwarding"`` when *env_keys* is non-empty and the native CLI cannot
+        forward NAME references; ``"project scope"`` when *scope* is
+        ``"project"`` and the native CLI has no scope selector. ``[]`` (never
+        ``None``) when delegation may proceed.
+    """
+    spec = ADAPTERS.get(agent)
+    native_env = spec["native_env"] if spec is not None else False
+    native_scope = spec["native_scope"] if spec is not None else False
+    reasons: list[str] = []
+    if env_keys and not native_env:
+        reasons.append("env forwarding")
+    if scope == "project" and not native_scope:
+        reasons.append("project scope")
+    return reasons
+
+
 def probe_native(agent: AgentName, timeout: float = 3.0) -> bool:
     """Probe whether native ``agent mcp add`` delegation is available.
 
@@ -458,30 +519,47 @@ def probe_native(agent: AgentName, timeout: float = 3.0) -> bool:
         return False
 
 
-def delegate_add(agent: AgentName, cwd: Path, env_keys: list[str]) -> bool:
+def delegate_add(
+    agent: AgentName,
+    cwd: Path,
+    env_keys: list[str],
+    scope: Scope = "user",
+) -> bool:
     """Attempt native ``add`` delegation for *agent*.
 
-    Only agents whose adapter declares ``delegates=True`` are delegated;
-    the rest (opencode, pi) return ``False``. A single native shape is used —
-    ``<agent> mcp add sofer --command sofer-mcp --cwd <cwd>`` — and a
-    non-zero exit falls back to the caller's file edit (no shape retry).
+    Only agents whose adapter declares ``delegates=True`` are delegated; the
+    rest (opencode, pi) return ``False``. The call is fidelity-gated (#167,
+    #232): when :func:`native_delegation_decline_reasons` is non-empty the
+    function returns ``False`` without spawning, so the caller edits the file
+    (which forwards env NAMES and honours the requested scope). When the
+    adapter declares ``native_scope`` the argv carries ``--scope <scope>``.
+    A non-zero exit falls back to the caller's file edit (no shape retry).
 
     Args:
         agent: Target agent.
         cwd: Resolved cwd for the server.
-        env_keys: Env keys to forward (unused for native path but kept
-            for signature parity).
+        env_keys: Env NAMES required by the registration. Non-empty declines
+            for agents whose native CLI cannot forward NAME references.
+        scope: Requested ``"user"`` or ``"project"`` scope; forwarded as
+            ``--scope`` only when the adapter declares ``native_scope``.
 
     Returns:
-        ``True`` on success, ``False`` on failure or absence (caller
-        should fallback to file-edit).
+        ``True`` on success, ``False`` when delegation is unfaithful, the
+        binary is absent, or the native command fails (caller should fall
+        back to file-edit).
     """
     if not _delegates(agent):
+        return False
+    if native_delegation_decline_reasons(agent, env_keys, scope):
         return False
     exe = shutil.which(agent)
     if not exe:
         return False
-    cmd = [exe, "mcp", "add", "sofer", "--command", "sofer-mcp", "--cwd", str(cwd)]
+    spec = ADAPTERS.get(agent)
+    cmd = [exe, "mcp", "add"]
+    if spec is not None and spec["native_scope"]:
+        cmd += ["--scope", scope]
+    cmd += ["sofer", "--command", "sofer-mcp", "--cwd", str(cwd)]
     try:
         result = subprocess.run(cmd, timeout=3.0, capture_output=True)
     except (subprocess.TimeoutExpired, OSError):
@@ -489,25 +567,39 @@ def delegate_add(agent: AgentName, cwd: Path, env_keys: list[str]) -> bool:
     return result.returncode == 0
 
 
-def delegate_remove(agent: AgentName) -> bool:
+def delegate_remove(agent: AgentName, scope: Scope = "user") -> bool:
     """Attempt native ``remove`` delegation for *agent*.
 
-    Only agents whose adapter declares ``delegates=True`` are delegated;
-    the rest (opencode, pi) return ``False``.
+    Only agents whose adapter declares ``delegates=True`` are delegated; the
+    rest (opencode, pi) return ``False``. The call is fidelity-gated (#232):
+    when the native CLI has no scope selector, a ``project`` request returns
+    ``False`` without spawning so the caller removes via file edit (which
+    targets the requested scope). When the adapter declares ``native_scope``
+    the argv carries ``--scope <scope>``.
 
     Args:
         agent: Target agent.
+        scope: Requested ``"user"`` or ``"project"`` scope; forwarded as
+            ``--scope`` only when the adapter declares ``native_scope``.
 
     Returns:
-        ``True`` on success, ``False`` otherwise.
+        ``True`` on success, ``False`` when delegation is unfaithful, the
+        binary is absent, or the native command fails.
     """
     if not _delegates(agent):
+        return False
+    if native_delegation_decline_reasons(agent, [], scope):
         return False
     exe = shutil.which(agent)
     if not exe:
         return False
+    spec = ADAPTERS.get(agent)
+    cmd = [exe, "mcp", "remove"]
+    if spec is not None and spec["native_scope"]:
+        cmd += ["--scope", scope]
+    cmd += ["sofer"]
     try:
-        result = subprocess.run([exe, "mcp", "remove", "sofer"], timeout=3.0, capture_output=True)
+        result = subprocess.run(cmd, timeout=3.0, capture_output=True)
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False

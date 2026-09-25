@@ -1,10 +1,17 @@
-# mcp-registration Specification
+# Spec delta: fix-mcp-native-delegation
 
-## Purpose
+> **Change:** `2026-09-25-fix-mcp-native-delegation` (GitHub #167, #232) · branch
+> `fix/167-232-native-mcp-delegation`.
+>
+> The native `codex`/`gemini` delegation path is made **fidelity-gated**: it is
+> used only when the native CLI can express the same registration the file-edit
+> path would write. It forwards the scope flag where the agent has one
+> (`gemini`), and it declines — falling back to file edit, with an informational
+> warning — when the native CLI cannot forward env NAMES without persisting
+> values (#167) or cannot express the requested scope (#232). MCP-REG-01/02 are
+> MODIFIED to qualify "prefer native"; MCP-REG-04 states the gate.
 
-Register `sofer-mcp` in opencode/codex/gemini/pi agent configs via the `sofer mcp add/remove` subcommands. Registration edits the agent's on-disk config idempotently: unrelated keys are preserved, a single `.bak` backup precedes the first mutation, writes are atomic, and the agent process (or file merge fallback) is preferred over direct file surgery. Env forwarding persists **names only** — secret values are never written to disk.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: MCP add idempotent and safe (MCP-REG-01)
 
@@ -227,6 +234,8 @@ before the preview branch), so a preview surfaces the drop instead of hiding it.
 - THEN neither `hf123` nor `phrase123` SHALL appear in stdout, stderr, or any written config file
 
 ---
+
+## ADDED Requirements
 
 ### Requirement: Native delegation fidelity (MCP-REG-04)
 

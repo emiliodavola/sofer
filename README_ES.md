@@ -669,9 +669,16 @@ Ubicaciones y formas por agente:
   y deja el código de salida sin cambios.
 - **Delegación:** cuando hay un binario nativo disponible (`codex`/`gemini`), se
   prueba primero su `mcp add`/`remove` (sondeo vía `shutil.which` + `mcp --help`
-  con timeout de 3 s); si falla o expira se recurre a la edición directa del
-  archivo. Opencode y pi siempre usan edición directa (pi no trae un CLI nativo
-  `mcp add`).
+  con timeout de 3 s) — pero solo cuando puede reproducir fielmente lo que
+  escribiría la edición de archivo. El CLI nativo debe poder reenviar los mismos
+  NOMBRES de env y el scope pedido: gemini recibe `--scope user|project` (su CLI
+  lo soporta), mientras que codex no tiene selector de scope y su flag nativo de
+  env toma valores literales. Por eso, con env no vacío (en ambos agentes) o
+  `--scope project` para codex, sofer declina, imprime una advertencia en stderr
+  nombrando el motivo (`env forwarding`, `project scope` — solo NOMBRES, nunca
+  valores) y edita el archivo de configuración. Ante cualquier fallo o timeout
+  nativo también se recurre a la edición directa del archivo. Opencode y pi
+  siempre usan edición directa (pi no trae un CLI nativo `mcp add`).
 - **Aviso TOML:** las ediciones vía `tomli`/`tomli-w` no preservan comentarios ni
   formato en `config.toml` — el archivo se reformatea y los comentarios se
   eliminan.

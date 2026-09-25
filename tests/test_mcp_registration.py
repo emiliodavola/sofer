@@ -661,8 +661,18 @@ class TestDelegation:
         mock_run = MagicMock(return_value=MagicMock(returncode=0))
         monkeypatch.setattr(subprocess, "run", mock_run)
         assert mcp_registration.probe_native("codex") is True
-        assert mcp_registration.delegate_add("codex", Path("/tmp"), ["HF_TOKEN"]) is True
+        # Empty env + user scope is faithful, so codex delegates.
+        assert mcp_registration.delegate_add("codex", Path("/tmp"), []) is True
         mock_run.assert_called()
+
+    def test_present_delegates_declines_env(self, monkeypatch):
+        """#167: a non-empty env_keys makes the native path decline (file edit wins)."""
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/codex" if x == "codex" else None)
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        assert mcp_registration.delegate_add("codex", Path("/tmp"), ["HF_TOKEN"]) is False
+        assert mcp_registration.delegate_add("gemini", Path("/tmp"), ["HF_TOKEN"]) is False
+        mock_run.assert_not_called()
 
     def test_absent_fallback(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
@@ -1071,6 +1081,8 @@ class TestSingleSourceRegistry:
             "adds_type_local",
             "env",
             "delegates",
+            "native_env",
+            "native_scope",
             "user_env_dir",
         }
         for agent in mcp_registration.AGENT_NAMES:
@@ -1121,6 +1133,8 @@ class TestSingleSourceRegistry:
             "adds_type_local": False,
             "env": "none",
             "delegates": False,
+            "native_env": False,
+            "native_scope": False,
             "user_env_dir": None,
         }
         patched = {**mcp_registration.ADAPTERS, "sentinel": sentinel}
@@ -1191,6 +1205,8 @@ class TestPiAdapter:
             "adds_type_local": False,
             "env": "refs_braced",
             "delegates": False,
+            "native_env": False,
+            "native_scope": False,
             "user_env_dir": "PI_CODING_AGENT_DIR",
         }
 
@@ -1356,3 +1372,103 @@ class TestPiCli:
         rc = cli._cmd_mcp_remove(Namespace(agent="pi", scope="project", dry_run=False))
         assert rc == 0
         assert not (tmp_path / ".pi" / "mcp.json").exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Native delegation fidelity (#167 env, #232 scope) — one unified criterion.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestNativeDelegationFidelity:
+    """The single gate decides both env (#167) and scope (#232) fidelity."""
+
+    def test_registry_capability_fields(self) -> None:
+        # Native env flags take literal values, so no agent forwards NAMES.
+        assert all(spec["native_env"] is False for spec in mcp_registration.ADAPTERS.values())
+        # Only gemini has a native scope selector.
+        assert mcp_registration.ADAPTERS["gemini"]["native_scope"] is True
+        assert mcp_registration.ADAPTERS["codex"]["native_scope"] is False
+        assert mcp_registration.ADAPTERS["opencode"]["native_scope"] is False
+        assert mcp_registration.ADAPTERS["pi"]["native_scope"] is False
+
+    def test_decline_reasons_truth_table(self) -> None:
+        r = mcp_registration.native_delegation_decline_reasons
+        # Faithful: no env, and scope expressible (gemini both, codex user).
+        assert r("gemini", [], "user") == []
+        assert r("gemini", [], "project") == []
+        assert r("codex", [], "user") == []
+        # Env must be forwarded but no native NAME forwarding exists.
+        assert r("codex", ["HF_TOKEN"], "user") == ["env forwarding"]
+        # gemini can express project scope, so only the env reason applies…
+        assert r("gemini", ["HF_TOKEN"], "project") == ["env forwarding"]
+        # …while codex accumulates both reasons.
+        assert r("codex", ["HF_TOKEN"], "project") == ["env forwarding", "project scope"]
+        # Project scope requested from a scope-less native CLI.
+        assert r("codex", [], "project") == ["project scope"]
+        # Unregistered agents are treated conservatively.
+        assert r("ghost", ["HF_TOKEN"], "user") == ["env forwarding"]
+        assert r("ghost", [], "project") == ["project scope"]
+
+    def test_delegate_add_forwards_scope_to_gemini(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/gemini" if x == "gemini" else None)
+        seen: dict[str, list[str]] = {}
+
+        def _run(cmd, *a, **k):
+            seen["cmd"] = list(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        project = Path("/proj")
+        assert mcp_registration.delegate_add("gemini", project, [], "project") is True
+        assert seen["cmd"] == [
+            "/fake/gemini",
+            "mcp",
+            "add",
+            "--scope",
+            "project",
+            "sofer",
+            "--command",
+            "sofer-mcp",
+            "--cwd",
+            str(project),
+        ]
+
+    def test_delegate_add_codex_user_is_scope_less(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/codex" if x == "codex" else None)
+        seen: dict[str, list[str]] = {}
+
+        def _run(cmd, *a, **k):
+            seen["cmd"] = list(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        assert mcp_registration.delegate_add("codex", Path("/proj"), [], "user") is True
+        assert "--scope" not in seen["cmd"]
+
+    def test_delegate_add_declines_unfaithful_without_spawn(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: f"/fake/{x}")
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        # codex + project scope (no native scope selector).
+        assert mcp_registration.delegate_add("codex", Path("/proj"), [], "project") is False
+        # env NAMES present for both delegating agents.
+        assert mcp_registration.delegate_add("codex", Path("/proj"), ["HF_TOKEN"], "user") is False
+        assert mcp_registration.delegate_add("gemini", Path("/proj"), ["HF_TOKEN"], "user") is False
+        mock_run.assert_not_called()
+
+    def test_delegate_remove_scope_gate(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: f"/fake/{x}")
+        seen: dict[str, list[str]] = {}
+
+        def _run(cmd, *a, **k):
+            seen["cmd"] = list(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        assert mcp_registration.delegate_remove("gemini", "user") is True
+        assert seen["cmd"] == ["/fake/gemini", "mcp", "remove", "--scope", "user", "sofer"]
+        # codex cannot express project scope: declines without spawning.
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        assert mcp_registration.delegate_remove("codex", "project") is False
+        mock_run.assert_not_called()
