@@ -1502,7 +1502,7 @@ by the suite per that capability's policy.
 
 | File | Reason |
 |------|--------|
-| `src/sofer/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
+| `src/sofer/cli.py` | No CLI changes in P0; delivery is invoked through `publish.py` — the `upload` subcommand and the `uploader` module were removed. |
 | `src/sofer/checks.py` | Compliance is not validation — separate concern. |
 | `src/sofer/__init__.py` | No public API changes for P0. |
 | `src/sofer/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |
