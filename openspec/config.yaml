@@ -6,7 +6,7 @@ schema: spec-driven
 context: |
   Tech stack: Python 3.10+ CLI tool, uv + hatchling, ruff 0.16.0 (lint+format), mypy 2.3.0.
   Architecture: flat src/sofer/ package, argparse CLI with func dispatch, one module per concern.
-  Testing: pytest 9.1.1, 1029 tests (2 skipped, 1031 collected, 334 spec scenarios), spec-driven scenarios, Strict TDD disabled (tests follow specs but red-green-refactor is not enforced per mem #441).
+  Testing: pytest 9.1.1, spec-driven scenarios; Strict TDD disabled (tests follow specs but red-green-refactor is not enforced per mem #441). Run `uv run pytest tests/ -q` for the authoritative tally.
   Style: no hardcoded values (config via pyproject [tool.sofer] + per-dataset TOML), mandatory docstrings,
   English artifacts. See AGENTS.md for the full repo conventions.
 
@@ -37,7 +37,11 @@ rules:
     - No hardcoded values in proposed changes — defaults go in [tool.sofer] or DatasetConfig.
   specs:
     - Use Given/When/Then scenarios; use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
-    - Every spec scenario MUST have a corresponding test (AGENTS.md rule 6).
+    - Every spec scenario MUST map to a repository test (test:) or to declared verify-phase evidence
+      (verify:); every data row of a `## Test Mapping` table begins with exactly one such prefix.
+    - The test-mapping checker (scripts/check_test_mapping.py) verifies that a `test:` reference exists
+      and is collected by pytest — existence/collection, not exercise. Specs without a table are
+      recorded in openspec/test-mapping-registry.md and stay outside the gate until they adopt one.
   design:
     - Follow the one-module-per-concern layout; document orchestration flow for _cmd_* handlers.
     - Document architecture decisions with rationale; update CLI help= and README in the same change.

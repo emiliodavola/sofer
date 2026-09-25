@@ -29,6 +29,12 @@ jobs:
         run: uv run mypy src/ scripts/
       - name: Type check with pyright
         run: uv run pyright
+      # ── Spec↔test mapping gate (AGENTS.md rule 6) ──────────────────────
+      # Enforces the `test:` / `verify:` contract on every `## Test Mapping`
+      # table and the registry↔tree bijection. Static and offline — pytest
+      # collection only, never test execution (mapping-checker MC-03, MC-07).
+      - name: Check spec test mapping
+        run: uv run python scripts/check_test_mapping.py
 
   test:
     runs-on: ${{ matrix.os }}

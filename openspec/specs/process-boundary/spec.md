@@ -427,12 +427,60 @@ NOT be asserted from pytest (the suite spawns no `pre-commit`).
 
 ## Test Mapping
 
-Every scenario SHALL map to a green test or to verify-phase runtime evidence (AGENTS.md rule 6;
-rules.specs). Static config assertions live in `tests/test_ci_workflows.py`. PB-01..PB-13 rows are not
-backfilled by this change: their evidence classes are stated in their own scenario text, and the backfill
-is a separate concern.
+Every `#### Scenario:` in this spec appears in exactly one row below — the full scenario↔row bijection
+(`mapping-checker` MC-02; AGENTS.md rule 6; rules.specs). Static config assertions live in
+`tests/test_ci_workflows.py`; the remaining rows route to declared verify-phase evidence (`verify:`),
+whose evidence classes are stated in each scenario's own text. The PB-01..PB-13 backfill lands here:
+their rows are `verify:` references to those scenario-stated evidence classes — not invented tests, and
+not a machine-verified claim that a test exercises the scenario.
 
 | Req | Scenario | Verification |
 | --- | -------- | ------------ |
-| PB-14 | The hook declares its own scope and excludes Markdown | `tests/test_ci_workflows.py` — `test_ruff_format_hook_excludes_markdown`: YAML inspection of the `ruff-format` hook entry in `.pre-commit-config.yaml` |
-| PB-14 | The hook no longer receives Markdown and leaves the READMEs untouched | Verify-phase runtime evidence — `uv run pre-commit run ruff-format --files README.md` and `--all-files`, plus an empty `git diff --stat -- README.md README_ES.md` |
+| PB-01 | tools/list and call via in-process client | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` in-process `Client(server)`: `tools/list` lists the 14 callables and one `tools/call` returns the documented envelope |
+| PB-01 | Seven publish/scan_apply conversions through the client | verify:Verify-phase runtime evidence — the seven conversion sites in `tests/test_mcp_server.py` run via `_call(...)` through `Client(server)`; valid-input sites return the documented envelope shape |
+| PB-01 | Stdio transport with clean framing | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` stdio subprocess `initialize → tools/list → tools/call`; every response is valid JSON-RPC with no stray stdout bytes |
+| PB-01 | No remaining direct-call proofs | verify:Verify-phase static evidence — enumeration of direct-call sites across `tests/test_mcp_server.py` and `tests/test_mcp_schema.py`: zero registered tool imported and called directly |
+| PB-01 | Invalid Literal target rejected before the tool body | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py::test_garbage_target_dry_run_false_refused_no_api` and the `ToolError` rejection for non-`local` `sofer_publish` targets at the `Client(server)` boundary |
+| PB-01 | Stream-restore conversion exercises the tool body | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py::TestStreamRestore::test_stdout_stderr_restored_after_raise` via `Client(server)` |
+| PB-01 | auth_status routes via the boundary and exposes next | verify:Verify-phase runtime evidence — `tests/test_mcp_schema.py::test_auth_status_no_leak` via `Client(server)`; asserts the envelope includes `next` |
+| PB-02 | Help via subprocess | verify:Verify-phase runtime evidence — `tests/test_cli.py` via `tests/conftest.py::run_cli`: `python -m sofer.cli --help` exits 0 and lists every subcommand |
+| PB-02 | cp1252 help on the ubuntu matrix | verify:Verify-phase runtime evidence — `tests/test_cli.py` cp1252 subprocess runs for `--help`, every `<cmd> --help`, `mcp add --help`, and `mcp remove --help`; exit 0 and strict-decodable stdout |
+| PB-02 | cp1252 runtime console output | verify:Verify-phase runtime evidence — `tests/test_cli.py` cp1252 `validate` (rc 1, `Configuration errors`) and `scan --dry-run` (rc 0, `DRY RUN`) subprocess runs |
+| PB-02 | Dispatch exit codes | verify:Verify-phase runtime evidence — `tests/test_cli.py` subprocess run of an unknown command; argparse exits 2 |
+| PB-03 | publish_confirm replay | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `sofer_publish_confirm` risk-gate refusal, then the `{"acknowledge_risk": True}` replay reaches the approval gate |
+| PB-03 | init refusal replay | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `sofer_init` file-exists/name-empty refusals replayed with the hinted values reach the intended branch |
+| PB-04 | Empty config | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `sofer_validate` via `Client(server)` on a TOML with no `[[file]]` |
+| PB-04 | Existing config | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` pipeline on a TOML with registered files; validate passes without re-registration |
+| PB-04 | Greenfield bootstrap | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `sofer_init` then `sofer_scan_apply` on an empty directory; files register and `sofer_validate` passes |
+| PB-04 | Triage | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `sofer_scan_dry_run` on unregistered files; the preview lists candidates without copying files or writing the TOML |
+| PB-04 | Nested output CWD | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` dataset tools with the nested CWD; writes land under the nested dataset, not the parent root |
+| PB-04 | Real-process parent-root launch, cwd omitted fails closed | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` second module-scoped stdio fixture; `sofer_init` with `cwd` omitted is refused and no `parent/test.toml` or `raw/` is written |
+| PB-04 | Real-process parent-root launch, cwd=child anchors identity | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` stdio `sofer_init(cwd="child")`; `child/test.toml` and `child/raw/` exist and `parent/test.toml` does not |
+| PB-04 | Real-process greenfield chain reaches publish dry-run | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` module-scoped stdio fixture running init → scan_apply → validate → prepare → codebook_all → publish(dry_run=True) fully offline |
+| PB-05 | CI runs the complete suite | verify:Verify-phase static evidence — `.github/workflows/ci.yml` `test` job runs `uv run pytest -v`, the full suite rather than a focused subset |
+| PB-05 | No focused-only gate | verify:Verify-phase static evidence — the CI `uv run pytest -v` and the developer `uv run pytest tests/ -q` both cover the complete suite |
+| PB-06 | Offline happy path | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` with `publish._api` monkeypatched: validate → prepare → codebook → profile → render → publish all pass with no real network access |
+| PB-06 | No credentials required | verify:Verify-phase runtime evidence — suite run with `HF_TOKEN` absent from the environment; passes with no credential-dependent skips or failures |
+| PB-07 | Full suite passes | verify:Verify-phase runtime evidence — `uv run pytest tests/ -q` green with the pre-existing count not regressed |
+| PB-07 | Lint, types, whitespace | verify:Verify-phase runtime evidence — `uv run ruff check src/ tests/`, `uv run mypy src/`, and `git diff --check` all exit 0 |
+| PB-08 | Untracked trace file untouched | verify:Verify-phase runtime evidence — `SOFER_TRACE.md` untracked at the repo root; the suite and gates leave it unchanged and unstaged |
+| PB-09 | One server per test | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py`/`tests/conftest.py` two tests calling `build_server()`; no server-root or approval-phrase state leaks between them |
+| PB-09 | Shared conftest helpers | verify:Verify-phase static evidence — `tests/conftest.py` helpers reused by `tests/test_mcp_process.py` and sibling modules; no module re-implements a boundary helper |
+| PB-09 | Lean process spawns | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` module-scoped stdio fixture spawns a single server per module, not one per test |
+| PB-10 | Clean-checkout format check exits 0 | verify:Verify-phase runtime evidence — `uv run ruff format --check src/ tests/` exits 0 with zero files to reformat and `--diff` emits no diff |
+| PB-10 | Exactly the six test files changed | verify:Verify-phase static evidence — `git diff --stat` of the PB-10 change shows exactly the six named test files and zero `src/sofer/`, `.github/workflows/`, `pyproject.toml` paths |
+| PB-10 | Formatting-only — behaviour and asserted content preserved | verify:Verify-phase runtime evidence — `uv run pytest tests/ -q` after the reformat reports identical pass/skip/collect counts with 0 failures |
+| PB-10 | No CI gate was armed, and recurrence stays owned by #194 | verify:Verify-phase static evidence — `.github/workflows/**` scanned for a `format --check` invocation in both the pre- and post-change states: zero matches |
+| PB-10 | Sibling gates stay green and unmoved | verify:Verify-phase runtime evidence — `uv run ruff check src/ tests/`, `uv run mypy src/`, `git diff --check`, and `uv run coverage run -m pytest` followed by `bash scripts/check_core_coverage.sh` all exit 0 |
+| PB-11 | Anchor carries its own command | verify:Verify-phase static evidence — `AGENTS.md` rule 6 text names `uv run pytest tests/ -q` as the count command; any recorded figure matches that command's tally |
+| PB-11 | The stale literal is gone | verify:Verify-phase static evidence — `AGENTS.md` rule 6 post-change carries no stale pass/collected/skipped triple, and no hardcoded tally remains without the reproducing command beside it |
+| PB-12 | Suite run is deprecation-free | verify:Verify-phase runtime evidence — `uv run pytest tests/ -q` green; the warnings summary contains zero `DeprecationWarning` lines from `sofer.codebook` |
+| PB-12 | Behavioural parity preserved on the live API | verify:Verify-phase runtime evidence — `uv run pytest tests/test_codebook.py -q` green with every pre-change `(values, expected)` case asserted against `infer_column_type` |
+| PB-12 | No residual alias reference | verify:Verify-phase static evidence — search of `src/`, `tests/`, `AGENTS.md`, and the READMEs for `_infer_type`: zero matches outside `openspec/changes/archive/**` |
+| PB-13 | Resolution leaves the process environment unchanged (the gate) | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `_get_hf_token()` with a temp-cwd `.env`; returns `"from-dotenv"` and `os.environ` equals the pre-call snapshot |
+| PB-13 | Environment presence beats `.env` even when the value is blank | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `_get_hf_token()` with a present whitespace-only `HF_TOKEN` and `HF_HUB_TOKEN=alias-token`; returns `"alias-token"` |
+| PB-13 | `.env` supplies a value only when the environment omits the name | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `_get_hf_token()` with `HF_TOKEN` absent from the environment and `.env` holding it; returns `"from-dotenv"` |
+| PB-13 | `.env`-only disable flag still gates the implicit file fallback | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` `_get_hf_token()` with `HF_HUB_DISABLE_IMPLICIT_TOKEN=true` only in `.env`; returns `None` rather than the file token |
+| PB-13 | No test leaks a token to a later test (issue #176) | verify:Verify-phase runtime evidence — same-process ordering of `tests/test_mcp_server.py:3168` before `tests/test_mcp_registration.py::TestMerge::test_codex_normalize_string_vs_array`; the victim observes no `HF_TOKEN` and passes |
+| PB-14 | The hook declares its own scope and excludes Markdown | test:tests/test_ci_workflows.py::test_ruff_format_hook_excludes_markdown — YAML inspection of the `ruff-format` hook entry in `.pre-commit-config.yaml` |
+| PB-14 | The hook no longer receives Markdown and leaves the READMEs untouched | verify:Verify-phase runtime evidence — `uv run pre-commit run ruff-format --files README.md` and `--all-files`, plus an empty `git diff --stat -- README.md README_ES.md` |
