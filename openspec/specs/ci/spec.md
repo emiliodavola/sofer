@@ -526,8 +526,12 @@ unchanged; and no resolution of a type diagnostic SHALL add a `# pragma: no cove
 > `test` job's OS axis (`ubuntu-latest` + `windows-latest`, driven by
 > `runs-on: ${{ matrix.os }}`) and SHALL run the same CLI help smoke test
 > (`uv run sofer --help`) after the full-suite step. The COV-06 core-coverage gate in the
-> release `coverage` job is deliberately separate and tracked as issue #185 — this requirement
-> SHALL NOT re-implement it, and the release header comment SHALL keep cross-referencing it.
+> release `coverage` job is owned by CI-03 (GitHub #185, shipped) — this requirement SHALL NOT
+> re-implement it.
+
+(Previously: the note claimed the COV-06 gate was "deliberately separate and tracked as issue
+#185" and a third scenario required the release header to cross-reference that pending issue;
+issue #185 has since shipped and is CI-03's, so both statements contradicted CI-03.)
 
 #### Scenario: Test job OS axis matches CI
 
@@ -542,13 +546,6 @@ unchanged; and no resolution of a type diagnostic SHALL add a `# pragma: no cove
 - WHEN they are inspected for the entrypoint smoke test
 - THEN a step named `Run CLI help smoke test` SHALL run `uv run sofer --help` after
   the `uv run pytest -v` full-suite step, matching `ci.yml`
-
-#### Scenario: COV-06 stays cross-referenced as issue #185
-
-- GIVEN the release workflow header comment
-- WHEN it is read for the parity claim
-- THEN it SHALL name issue #185 as the deliberately separate change that adds the
-  COV-06 core-coverage gate to the release `coverage` job
 
 ---
 
@@ -586,6 +583,52 @@ pre-commit hooks SHALL still be blocked by CI on an unformatted PR.
 - WHEN `uv run ruff format --check src/ tests/` runs
 - THEN it SHALL exit 0 and report zero files to reformat (verify-phase runtime evidence,
   CI-01 gate-exit-code precedent)
+
+---
+
+### Requirement: Release lint job parity with CI (CI-12)
+
+> Added by change `fix-release-gate-integrity` (GitHub #233). The release workflow header claims
+> to run the same quality gates as CI; CI-10 covers the `test` job and this requirement closes the
+> `lint` job gap. Before this change the release `lint` job ran only `ruff check` and `mypy`, so a
+> formatting regression, a pyright error, or a broken spec↔test mapping could not block a tag even
+> though each blocks a PR.
+
+The `lint` job of `.github/workflows/release.yml` SHALL run the same gates as the `lint` job of
+`.github/workflows/ci.yml`, in the same order: exactly `uv run ruff check src/ tests/ scripts/`,
+then exactly `uv run ruff format --check src/ tests/`, then exactly
+`uv run mypy src/ scripts/`, then exactly the bare `uv run pyright`, then exactly
+`uv run python scripts/check_test_mapping.py`. No step SHALL re-implement a gate the CI job
+delegates: the format gate's scope stays `src/ tests/` (CI-11), pyright stays bare and
+config-driven (CI-09), and the mapping checker stays a single direct invocation (MC-07). The
+release `lint` job SHALL keep its single `ubuntu-latest` / `"3.13"` axis, so a tag is gated on the
+same interpreter the PR pipeline uses. The release workflow header comment SHALL state the
+lint-job parity and SHALL NOT claim the COV-06 gate is pending or tracked separately (CI-03 owns
+that gate).
+
+#### Scenario: Release lint job runs the three missing gates
+
+- GIVEN `.github/workflows/release.yml`
+- WHEN the `lint` job steps are inspected
+- THEN a step SHALL run exactly `uv run ruff format --check src/ tests/`
+- AND a step SHALL run exactly the bare `uv run pyright`
+- AND a step SHALL run exactly `uv run python scripts/check_test_mapping.py`
+- AND each SHALL keep the `lint` job's single `ubuntu-latest` / `"3.13"` runner axis
+
+#### Scenario: Release lint gate invocations match the CI lint job
+
+- GIVEN `.github/workflows/ci.yml` and `.github/workflows/release.yml`
+- WHEN the ordered gate invocations of both `lint` jobs are compared
+- THEN the release `lint` job's gate commands SHALL equal the CI `lint` job's gate commands in the
+  same order: `uv run ruff check src/ tests/ scripts/`, `uv run ruff format --check src/ tests/`,
+  `uv run mypy src/ scripts/`, `uv run pyright`, `uv run python scripts/check_test_mapping.py`
+
+#### Scenario: Release header states the enforced parity
+
+- GIVEN the release workflow header comment
+- WHEN it is read for the parity claim
+- THEN it SHALL state that the `lint` job mirrors `ci.yml`'s lint gates
+- AND it SHALL NOT describe the COV-06 core-coverage gate as pending or "tracked separately"
 
 ---
 
@@ -635,6 +678,8 @@ evidence recorded in the verify report.
 | CI-09 | Adopting the gate leaves every existing gate declaration intact | test:tests/test_ci_workflows.py — `test_type_gate_invocations_and_pins_are_unchanged_for_existing_gates`: YAML/tomllib inspection; `uv run mypy src/ scripts/` exit code (CI-01 gate-exit-code precedent) |
 | CI-10 | Test job OS axis matches CI | test:tests/test_ci_workflows.py — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of both `test` job matrices |
 | CI-10 | CLI help smoke test runs at tag time | test:tests/test_ci_workflows.py — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: YAML inspection of the release `test` job steps |
-| CI-10 | COV-06 stays cross-referenced as issue #185 | test:tests/test_ci_workflows.py — `test_release_test_job_mirrors_ci_os_axis_and_cli_smoke`: full-text scan of the release header comment |
 | CI-11 | Lint job runs the format gate | test:tests/test_ci_workflows.py — `test_ci_lint_job_runs_the_ruff_format_gate`: YAML inspection of the ci.yml `lint` job steps |
 | CI-11 | Format gate is green on a clean checkout | verify:Verify-phase runtime evidence — `uv run ruff format --check src/ tests/` exit code on `dev` (CI-01 gate-exit-code precedent) |
+| CI-12 | Release lint job runs the three missing gates | test:tests/test_ci_workflows.py — `test_release_lint_job_runs_the_ci_lint_gates`: YAML inspection of the release `lint` job steps |
+| CI-12 | Release lint gate invocations match the CI lint job | test:tests/test_ci_workflows.py — `test_release_lint_job_mirrors_ci_lint_invocations`: YAML inspection of both `lint` jobs |
+| CI-12 | Release header states the enforced parity | test:tests/test_ci_workflows.py — `test_release_header_states_lint_parity_without_the_stale_cov06_claim`: full-text scan of the release header comment |

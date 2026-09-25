@@ -3,7 +3,7 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-11) by parsing the repository's
+`ci` specification (requirements CI-01..CI-12) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
 scenario-verifying tests are the `ci` Test Mapping rows whose verification
@@ -11,9 +11,10 @@ names a test in this module (CI-09's posture row is carried by two guards), plus
 the tests owned by other capabilities or supporting this one — the two
 `coverage` COV-06 guards, `test_ci_workflow_files_present`, which fails loudly
 before any parse, the PB-14 hook-scope guard, the CI-07 clause-agreement guard,
-which re-enforces an existing CI-07 row rather than adding one, and the three
+which re-enforces an existing CI-07 row rather than adding one, the three
 `211-test-mapping-gate` guards (rule 6 / config contract agreement, the config
-context tally, and the lint-job checker step). Runtime
+context tally, and the lint-job checker step), and the three CI-12 release
+lint-job parity guards. Runtime
 gate exit-code evidence (CI-01 S2's local gate run, CI-08 S4's required-version
 mismatch probe, and CI-09 S2's pyright gate run) is recorded in the SDD verify
 report, not asserted here.
@@ -104,6 +105,17 @@ _SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "htmlcov", ".pytest_cac
 # The analyzers whose dev pins G5 forces to be exact and lock-resolved; ruff is
 # governed by its own trio guard (`test_ruff_pin_hook_rev_and_required_version_agree`).
 _ANALYZER_DEV_PINS = ("mypy", "pyright")
+
+# The ordered gate invocations every `lint` job runs; the release `lint` job
+# mirrors this list exactly (CI-12). Kept in one place so the two CI-12 guards
+# compare against the same contract rather than duplicating the strings.
+_CI_LINT_GATE_RUNS = (
+    "uv run ruff check src/ tests/ scripts/",
+    "uv run ruff format --check src/ tests/",
+    "uv run mypy src/ scripts/",
+    "uv run pyright",
+    "uv run python scripts/check_test_mapping.py",
+)
 
 
 def _declared_ruff_version() -> str:
@@ -840,15 +852,15 @@ def test_ci07_names_the_declared_mypy_language_level() -> None:
 
 
 def test_release_test_job_mirrors_ci_os_axis_and_cli_smoke() -> None:
-    """CI-10 S1/S2/S3: the release test job mirrors CI's OS axis and the help smoke.
+    """CI-10 S1/S2: the release test job mirrors CI's OS axis and the help smoke.
 
     Issue #209: release.yml claimed to run the same quality gates as CI while its
     ``test`` job dropped the Windows axis and the ``uv run sofer --help`` smoke
     test. The release ``test`` job SHALL declare the same ``os`` matrix as the CI
     ``test`` job and run on ``${{ matrix.os }}``, and SHALL run the CLI help smoke
-    test after the full-suite step. The release header comment SHALL keep
-    cross-referencing issue #185 as the deliberately separate change that adds the
-    COV-06 core-coverage gate to the release ``coverage`` job.
+    test after the full-suite step. The stale claim that the COV-06 gate was
+    "tracked separately as issue #185" is gone: GitHub #185 is closed and the gate
+    is shipped as CI-03.
     """
     ci, _ = _workflow("ci.yml")
     release, _ = _workflow("release.yml")
@@ -876,10 +888,82 @@ def test_release_test_job_mirrors_ci_os_axis_and_cli_smoke() -> None:
     assert release_steps.index(smoke) > release_steps.index(run_tests), (
         "the CLI help smoke test must run after the full-suite step, matching ci.yml (CI-10)"
     )
+
+
+def _lint_gate_runs(job: dict[str, Any]) -> list[str]:
+    """Return a ``lint`` job's gate ``run`` commands, in step order.
+
+    Filters the parsed steps down to the shared gate invocations (ruff, mypy,
+    pyright, and the test-mapping checker), dropping setup steps (checkout,
+    ``uv sync``, ``setup-uv``) so the two ``lint`` jobs can be compared directly.
+
+    Args:
+        job: A parsed ``lint`` job mapping.
+
+    Returns:
+        The ordered gate ``run`` strings found in the job.
+    """
+    return [
+        step["run"]
+        for step in job.get("steps", [])
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and step["run"] in _CI_LINT_GATE_RUNS
+    ]
+
+
+def test_release_lint_job_runs_the_ci_lint_gates() -> None:
+    """CI-12 S1: the release `lint` job runs the format, pyright and mapping gates.
+
+    Issue #233: the release header claimed CI parity while the `lint` job omitted
+    three gates the CI `lint` job runs. Each SHALL be present with its exact
+    invocation and SHALL keep the job's single ubuntu-latest / 3.13 axis.
+    """
+    release, _ = _workflow("release.yml")
+    lint = release.get("jobs", {}).get("lint", {})
+    assert isinstance(lint, dict), "release.yml has no `lint` job"
+    for command in (
+        "uv run ruff format --check src/ tests/",
+        "uv run pyright",
+        "uv run python scripts/check_test_mapping.py",
+    ):
+        assert _find_step(lint, run=command) is not None, (
+            f"the release `lint` job must run exactly {command!r} (CI-12)"
+        )
+    assert lint.get("runs-on") == "ubuntu-latest", "the release `lint` job keeps its single OS axis"
+    uv_step = _find_step(lint, uses="astral-sh/setup-uv@v10.1.0")
+    assert uv_step is not None and uv_step.get("with", {}).get("python-version") == "3.13", (
+        "the release `lint` job must keep its single Python axis (3.13), matching ci.yml (CI-12)"
+    )
+
+
+def test_release_lint_job_mirrors_ci_lint_invocations() -> None:
+    """CI-12 S2: both `lint` jobs carry the same gates in the same order."""
+    ci, _ = _workflow("ci.yml")
+    release, _ = _workflow("release.yml")
+    ci_lint = ci.get("jobs", {}).get("lint", {})
+    release_lint = release.get("jobs", {}).get("lint", {})
+    assert _lint_gate_runs(ci_lint) == list(_CI_LINT_GATE_RUNS), (
+        "the ci.yml `lint` job gate invocations moved; update the shared contract"
+    )
+    assert _lint_gate_runs(release_lint) == list(_CI_LINT_GATE_RUNS), (
+        "the release `lint` job must run the same gates, in the same order, as ci.yml (CI-12)"
+    )
+
+
+def test_release_header_states_lint_parity_without_the_stale_cov06_claim() -> None:
+    """CI-12 S3: the release header states lint parity and the shipped COV-06 gate.
+
+    The stale claim that the COV-06 gate was "tracked separately" is gone (CI-03
+    owns it), and the header now states the lint-job parity.
+    """
     header = _read_text(f"{_WORKFLOW_DIR}/release.yml").split("on:", 1)[0]
-    assert "185" in header, (
-        "the release header comment must cross-reference issue #185 as the deliberately "
-        "separate COV-06 change (CI-10)"
+    assert "lint job mirrors" in header, (
+        "the release header must state that the `lint` job mirrors ci.yml's lint gates (CI-12)"
+    )
+    assert "tracked separately" not in header, (
+        "the release header must not keep the stale claim that the COV-06 gate is tracked "
+        "separately (CI-12 / CI-03)"
     )
 
 
