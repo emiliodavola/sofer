@@ -137,7 +137,7 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 | Topic | What to do | Why / detail |
 | ------- | ------------ | -------------- |
 | **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
-| **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/elaze/Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
+| **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
 | **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `flatten_first_level`. |
 | **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
 | **Console encoding** | Nothing to do: the CLI never aborts on a character the active console encoding cannot represent — the character is substituted in the emitted text and the command keeps its documented exit code (CLI-R11). Unicode-capable terminals (Windows Terminal, VS Code, macOS, Linux) are unaffected and keep sofer's `⚠`/`✓`/`✗`/`→` markers. | Affects streams that are not a Unicode-capable console: output redirected to a file or pipe (`sofer scan --help > out.txt`), an IDE/CI capture, or a legacy code page forced with `PYTHONIOENCODING=cp1252`. The unencodable character is written as a placeholder (or an escape sequence) instead of raising `UnicodeEncodeError`. To keep every marker, set `PYTHONIOENCODING=utf-8`. |
@@ -145,8 +145,8 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 Reproducible greenfield chain (run from the correct CWD / `cwd` — issue #113 checklist f):
 
 ```bash
-# CLI (from C:\Users\elaze\Desktop\test):
-sofer init test --user emiliodavola
+# CLI (from C:\Users\...\Desktop\test):
+sofer init test --user <hf-user>
 sofer scan test.toml              # or: sofer scan --dry-run first
 sofer validate test.toml
 sofer prepare test.toml
@@ -160,7 +160,7 @@ sofer publish test.toml             # --target hf (needs HF_TOKEN)
 
 ```python
 # MCP (server root must contain the dataset dir; cwd stays under root):
-sofer_init(name="test", user="emiliodavola", cwd="C:/Users/elaze/Desktop/test")
+sofer_init(name="test", user="<hf-user>", cwd="C:/Users/.../Desktop/test")
 sofer_scan_dry_run(config="test.toml")   # preview — no writes
 sofer_scan_apply(config="test.toml")     # registers DATA_GOT_ALL.xlsx + dataset.xlsx -> cache/
 sofer_validate(config="test.toml")       # must pass before build
@@ -174,7 +174,7 @@ sofer_auth_status(config="test.toml")             # preflight: token / confident
 sofer_publish_confirm(config="test.toml", acknowledge_risk=True)
 ```
 
-> If a previous buggy run left `C:\Users\elaze\Desktop\test.toml` or `C:\Users\elaze\Desktop\raw\` in the parent, delete them — re-running `sofer_init` from the correct `C:\Users\elaze\Desktop\test` is idempotent and will not duplicate parent artifacts.
+> If a previous buggy run left `C:\Users\...\Desktop\test.toml` or `C:\Users\...\Desktop\raw\` in the parent, delete them — re-running `sofer_init` from the correct `C:\Users\...\Desktop\test` is idempotent and will not duplicate parent artifacts.
 
 ## TOML reference
 
@@ -329,7 +329,7 @@ detector class, no changes to the pipeline.
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (delete build after successful `hf` upload only when `fail==0`, quality passed, not `--dry-run`; `--output` anchoring via `resolve_output_dir`), `--clean-cache`/`--all` (also delete `cache/` at `cfg._base_dir/cache`, shared tool-wide — sibling datasets may be affected; requires `--clean`). For `--target local`, `--clean` deletes the resolved destination only. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
 | `--help` | Detailed help for any command. |
-| `sofer-mcp` | Launch the MCP server over stdio (11 tools, 3 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
+| `sofer-mcp` | Launch the MCP server over stdio (14 tools, 4 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
 > generation half (offline, inspectable) and the delivery half (network).
@@ -340,15 +340,15 @@ detector class, no changes to the pipeline.
 | --- | --- | --- |
 | `--keep-csv` | `publish` (HF target only) | Also upload the original CSV alongside the converted Parquet; no effect with `--target local`. |
 | `--no-checks` | `prepare` | Skip the structural and quality validators — generate the package without running checks. |
-| `--force` | `prepare`, `publish`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
-| `--dry-run` | `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
+| `--force` | `init`, `prepare`, `publish`, `profile`, `render`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
+| `--dry-run` | `init`, `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
 | `--clean` | `publish` | Delete the build directory after a successful `hf` publish (`fail==0`, quality passed, not `--dry-run`); build-only by default. Anchored via `resolve_output_dir(cfg, --output)` so `--output ./staging` deletes `./staging`. For `local`, deletes the resolved destination only; without `--clean` nothing is deleted. |
 | `--clean-cache` / `--all` | `publish` (with `--clean`) | Also delete `cache/` (`cfg._base_dir/cache`, `config.OUTPUT_DIR`, shared tool-wide). Requires explicit opt-in; sibling datasets share `cache/` — warn before use. |
 | `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`build/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
 | `--config` | `codebook`, `profile`, `render` | Path to the TOML config for `--all-files` (default: `default_config_name` from `[tool.sofer]`). |
 | `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
 | `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); required — missing `--user` exits 2, placeholder (`YOUR_USER`) or unsafe values exit 1, no file written. |
-| `--output DIR` | `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
+| `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`; for `codebook`, `-o`/`--output` is the output file path, default stdout). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
 | `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
@@ -514,15 +514,20 @@ The server exposes 14 tool callables (`sofer_validate`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`), 3 resources (`sofer://dataset/{config}`,
-`sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`), and 3
-prompts (`prepare_dataset`, `assess_dataset`, `finalize_and_publish`). No
-remote/streamable-http transport is exposed in v1.
+`sofer_auth_status`), 4 resources (`sofer://dataset/{config}`,
+`sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`, and the
+static `sofer://status`), and 3 prompts (`prepare_dataset`,
+`assess_dataset`, `finalize_and_publish`). No remote/streamable-http
+transport is exposed in v1.
 
 Resource URIs are resolved **relative to the server root** — e.g.
 `sofer://dataset/dataset.toml` reads `<root>/dataset.toml`. Absolute POSIX
 paths are also accepted (rest-pattern templates): `sofer://dataset//tmp/...`
 arrives with a leading `/` and must still resolve inside the root.
+
+`sofer://status` is a static resource with no path variables. It returns the
+server posture snapshot (`approval_configured`, `phrase_source`, `root`,
+`version`, `started_at`, `tool_count`) and never reads a dataset file.
 
 ### Canonical build chain — Phased (tools/list is self-sufficient)
 
