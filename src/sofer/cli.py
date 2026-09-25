@@ -14,15 +14,13 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from . import _toml, config
+from . import _toml, config, mcp_registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
 from .execution_context import resolve_dataset_root, validate_identity
-from .mcp_registration import AgentName as _AgentName
-from .mcp_registration import Scope as _Scope
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
@@ -630,7 +628,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     Orchestration:
 
-        1. Expand ``--agent all`` to the three agents.
+        1. Expand ``--agent all`` to the registry agents (``mcp_registration.AGENT_NAMES``).
         2. Resolve the desired ``cwd`` (``--cwd`` or ``Path.cwd()``) to an
            absolute path via ``Path.resolve()`` and validate containment with
            ``mcp_registration.validate_cwd`` (``is_relative_to`` user/project
@@ -659,11 +657,9 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
         ``all``) is chosen with known env keys present, the step-3 warning is
         printed once per run and names the variables that cannot be forwarded.
     """
-    from . import mcp_registration
-
     # Expand agent
     raw_agent: str = getattr(args, "agent")
-    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    agents: list[str] = list(mcp_registration.AGENT_NAMES) if raw_agent == "all" else [raw_agent]
     scope: str = getattr(args, "scope", "user")
     cwd_raw: str | None = getattr(args, "cwd", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
@@ -676,7 +672,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     # Containment check — must be absolute and inside allowed root
     # validate_cwd uses is_relative_to logic; reject outside
-    if not mcp_registration.validate_cwd(cwd_resolved, cast(_Scope, scope)):
+    if not mcp_registration.validate_cwd(cwd_resolved, cast(mcp_registration.Scope, scope)):
         print(
             f"  X  --cwd {cwd_resolved} is outside the allowed root for scope '{scope}'",
             file=sys.stderr,
@@ -687,20 +683,19 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     overall = 0
 
     for agent in agents:
-        _agent = cast(_AgentName, agent)
-        # Informational opencode env-drop warning (names only, never values)
-        dropped = mcp_registration.dropped_env_keys(_agent, env)
+        # Informational env-drop warning (names only, never values)
+        dropped = mcp_registration.dropped_env_keys(agent, env)
         if dropped:
             print(
-                f"  !  opencode registration receives no env: {', '.join(dropped)} "
+                f"  !  {agent} registration receives no env: {', '.join(dropped)} "
                 "not forwarded. See README for the launcher environment or an explicit "
                 "'environment' literal in opencode.json.",
                 file=sys.stderr,
             )
         # Prefer native delegation for codex/gemini
-        if mcp_registration.probe_native(_agent, timeout=3.0):
+        if mcp_registration.probe_native(agent, timeout=3.0):
             try:
-                delegated = mcp_registration.delegate_add(_agent, cwd_resolved, list(env.keys()))
+                delegated = mcp_registration.delegate_add(agent, cwd_resolved, list(env.keys()))
             except Exception:
                 delegated = False
             if delegated:
@@ -711,16 +706,11 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-        # File-edit fallback — resolve path (project scope anchored on
-        # cwd_resolved when --cwd given; else Path.cwd())
-        _scope = cast(_Scope, scope)
-        if scope == "project" and cwd_raw is not None:
-            # When project scope with custom cwd, anchor project config under that cwd
-            path = mcp_registration.resolve_config_path(_agent, _scope, cwd_resolved)
-        elif scope == "project":
-            path = mcp_registration.resolve_config_path(_agent, _scope, None)
-        else:
-            path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        # File-edit fallback — project scope anchors on the resolved cwd; user
+        # scope ignores the anchor and resolves under Path.home().
+        _scope = cast(mcp_registration.Scope, scope)
+        anchor = cwd_resolved if scope == "project" else None
+        path = mcp_registration.resolve_config_path(agent, _scope, anchor)
 
         try:
             existing, _fmt = mcp_registration.read_config(path)
@@ -729,8 +719,8 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
             overall = 1
             continue
 
-        desired = mcp_registration.build_entry(_agent, cwd_resolved, env)
-        new_doc, changed = mcp_registration.merge(_agent, existing, desired)
+        desired = mcp_registration.build_entry(agent, cwd_resolved, env)
+        new_doc, changed = mcp_registration.merge(agent, existing, desired)
         if not changed:
             print(f"  OK  {agent} already registered (idempotent)")
             continue
@@ -745,7 +735,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
             overall = 1
             continue
         # Atomic write — fmt from adapter (preserve agent's expected format)
-        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        fmt_expected = mcp_registration.ADAPTERS[agent]["fmt"]
         try:
             mcp_registration.atomic_write(path, new_doc, fmt_expected)
         except Exception as exc:
@@ -773,20 +763,17 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
 
     No ``--cwd`` flag exists on remove (CLI-R09: only add accepts cwd).
     """
-    from . import mcp_registration
-
     raw_agent: str = getattr(args, "agent")
-    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    agents: list[str] = list(mcp_registration.AGENT_NAMES) if raw_agent == "all" else [raw_agent]
     scope: str = getattr(args, "scope", "user")
     dry_run: bool = bool(getattr(args, "dry_run", False))
     overall = 0
 
     for agent in agents:
-        _agent = cast(_AgentName, agent)
-        _scope = cast(_Scope, scope)
-        if mcp_registration.probe_native(_agent, timeout=3.0):
+        _scope = cast(mcp_registration.Scope, scope)
+        if mcp_registration.probe_native(agent, timeout=3.0):
             try:
-                delegated = mcp_registration.delegate_remove(_agent)
+                delegated = mcp_registration.delegate_remove(agent)
             except Exception:
                 delegated = False
             if delegated:
@@ -797,7 +784,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-        path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        path = mcp_registration.resolve_config_path(agent, _scope, None)
         try:
             existing, _fmt2 = mcp_registration.read_config(path)
         except Exception as exc:
@@ -805,7 +792,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
             overall = 1
             continue
 
-        new_doc, changed = mcp_registration.remove_entry(_agent, existing)
+        new_doc, changed = mcp_registration.remove_entry(agent, existing)
         if not changed:
             print(f"  OK  {agent} already absent (idempotent)")
             continue
@@ -818,7 +805,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
             print(f"  X  {agent} backup failed: {exc}", file=sys.stderr)
             overall = 1
             continue
-        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        fmt_expected = mcp_registration.ADAPTERS[agent]["fmt"]
         try:
             mcp_registration.atomic_write(path, new_doc, fmt_expected)
         except Exception as exc:
@@ -1524,7 +1511,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_add.add_argument(
         "--agent",
-        choices=["opencode", "codex", "gemini", "all"],
+        choices=[*mcp_registration.AGENT_NAMES, "all"],
         required=True,
         help="Target agent or 'all' for every agent.",
     )
@@ -1556,7 +1543,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_remove.add_argument(
         "--agent",
-        choices=["opencode", "codex", "gemini", "all"],
+        choices=[*mcp_registration.AGENT_NAMES, "all"],
         required=True,
         help="Target agent or 'all' for every agent.",
     )
