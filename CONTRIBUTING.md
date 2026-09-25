@@ -25,9 +25,9 @@ Run these from the repository root:
 
 ```bash
 uv run pytest
-uv run mypy src/
+uv run mypy src/ scripts/
 uv run pyright                   # second type gate (config-driven; src/ + scripts/)
-uv run ruff check src/ tests/
+uv run ruff check src/ tests/ scripts/
 uv run coverage run -m pytest   # complete suite under coverage (gate: 90%)
 uv run coverage report -m       # totals + per-file missed lines; fails below 90%
 ```
