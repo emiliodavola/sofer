@@ -109,11 +109,20 @@ dependencies = [
 
 ---
 
-## 4. Conversion Logic — `uploader.py`
+## 4. Conversion Logic — `_converters.py` (historically `uploader.py`)
 
-### 4.1 New module function
+> **Superseded.** This section records the original pre-split design: conversion
+> lived in the delivery module `uploader.py` and ran inside `upload()`. It was
+> superseded by §13 (universal dispatch) and by the `upload` → `prepare` + `publish`
+> split. Conversion now lives in `src/sofer/_converters.py` (per-format readers plus
+> the shared writer) and is orchestrated by `src/sofer/prepare.py::prepare`; delivery
+> and `keep_csv` staging live in `src/sofer/publish.py::publish`. The text below is
+> preserved as the historical record.
 
-A new module-level function SHALL be added to `src/sofer/uploader.py`:
+### 4.1 Original module function
+
+The original design added a module-level function to the delivery module (the deleted
+`uploader.py`); the shipped conversion home is `src/sofer/_converters.py`:
 
 ```python
 def _convert_to_parquet(
@@ -150,7 +159,7 @@ Key details:
 - **Output path**: The Parquet file SHALL have the same stem as the original CSV
   with a `.parquet` extension (e.g. `survey.csv` → `survey.parquet`).
 
-### 4.2 Conversion pipeline in `upload()`
+### 4.2 Original conversion pipeline in `upload()` (superseded)
 
 The conversion step SHALL be inserted **after** compliance generation (schema
 report, dataset card, license) and **before** the upload loop:
@@ -228,9 +237,13 @@ On conversion failure:
 
 ## 5. CLI: `--keep-csv` flag
 
+> **Superseded (subcommand only).** `--keep-csv` now lives on the `publish`
+> subcommand; the `upload` subcommand was removed. The flag behaviour below is
+> unchanged.
+
 ### 5.1 Behaviour
 
-When `--keep-csv` is passed to the `upload` subcommand, the original CSV file
+When `--keep-csv` is passed to the `publish` subcommand, the original CSV file
 SHALL be staged alongside the converted Parquet file **and** uploaded to the
 Hub as a separate file. This preserves the raw source data for users who want
 both formats.
@@ -458,13 +471,13 @@ following test areas:
 
 ### 10.3 Coverage target
 
-All new code in the conversion module/function SHALL have unit-test coverage of at
-least 90 % (branch coverage). The modified `upload()` function SHALL have at least
-80 % coverage for the conversion-path branches.
+Per-module coverage floors are owned by the `coverage` capability
+(`openspec/specs/coverage/spec.md`), which is the single place that declares a
+number; this historical section does not re-declare one.
 
 ---
 
-## 11. File Checklist
+## 11. File Checklist (historical implementation plan)
 
 ### 11.1 Files to modify
 
@@ -472,8 +485,8 @@ least 90 % (branch coverage). The modified `upload()` function SHALL have at lea
 |------|--------|
 | `pyproject.toml` | Add `pyarrow>=14.0` to `dependencies`. |
 | `src/sofer/model.py` | Add `upload_as_csv: bool = False` to `FileEntry`; update `from_toml()` to read the field. |
-| `src/sofer/uploader.py` | Add `_convert_to_parquet()` function; add conversion loop in `upload()`; update `_hf_upload` call sites; add `keep_csv` parameter. |
-| `src/sofer/cli.py` | Add `--keep-csv` argument to upload subparser; pass to `upload()`. |
+| `src/sofer/_converters.py` + `src/sofer/prepare.py` + `src/sofer/publish.py` | Conversion functions live in `_converters.py` and are orchestrated by `prepare.py`; delivery and `keep_csv` staging live in `publish.py`. (The original plan named the deleted `uploader.py`.) |
+| `src/sofer/cli.py` | `--keep-csv` is registered on the `publish` subparser and passed to `publish()` (the `upload` subcommand was removed). |
 
 ### 11.2 Files to create
 

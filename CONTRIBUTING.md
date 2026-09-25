@@ -50,6 +50,7 @@ src/sofer/
 ├── _clean.py            # Build/cache cleanup helpers (publish --clean)
 ├── _converters.py       # Format-specific Parquet conversion
 ├── _parquet_helpers.py  # Shared Parquet dtype helpers
+├── _toml.py             # TOML parser selection (tomllib/tomli fallback)
 ├── cli.py               # argparse CLI with 9 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp)
 ├── config.py            # Tool-wide defaults from [tool.sofer] (discovery + reload)
 ├── model.py             # DatasetConfig + InferenceStatus
@@ -67,6 +68,9 @@ src/sofer/
 ├── repo_compliance.py   # Dataset Card & schema compliance
 ├── splits.py            # Split detection (train/test/validation)
 ├── verification.py      # load_dataset() end-to-end verification
+├── execution_context.py # Shared dataset-identity contract (CLI init + MCP sofer_init)
+├── manifest.py          # Package artifact manifest (publishable vs intermediate)
+├── workflow.py          # Typed workflow metadata + result envelopes for adapters
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
 └── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini)
 ```
@@ -75,7 +79,7 @@ src/sofer/
 
 ### Code style
 
-This project uses **ruff** 0.16.7 for linting and formatting. Configuration is in `ruff.toml` at the repo root. Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
+This project uses **ruff** 0.16.7 for linting and formatting. Configuration lives in `pyproject.toml` under `[tool.ruff]` (`target-version = "py310"`, `line-length = 100`, `extend-exclude = ["openspec"]`). Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
 
 ### Type checking
 

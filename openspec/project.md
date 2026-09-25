@@ -20,7 +20,7 @@ Publish any dataset to Hugging Face Hub with built-in validation and data-sharin
 
 ```
 src/sofer/
-├── cli.py               # argparse CLI, 8 commands: init, validate, prepare, publish, codebook, scan, profile, render (+ MCP)
+├── cli.py               # argparse CLI, 9 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp
 ├── model.py             # DatasetConfig dataclass, TOML loading, config validation
 ├── config.py            # Tool-wide defaults from [tool.sofer] in pyproject.toml
 ├── checks.py            # DatasetValidator — data integrity checks
@@ -33,11 +33,11 @@ src/sofer/
 ├── metadata.py          # Metadata core (profile/render domain model)
 ├── semantic.py / pii.py # Semantic type + PII inference
 ├── mcp_server.py        # MCP server (sofer-mcp) — fastmcp (included by default; sofer[mcp] is alias)
-├── _mirror.py / _formats.py / _csv_reader.py / _parquet_helpers.py / _converters.py / _patterns.py / _sentinels.py / _version.py
-├── repo_compliance.py / splits.py / verification.py / quality.py
-└── __init__.py
+├── _mirror.py / _formats.py / _csv_reader.py / _parquet_helpers.py / _converters.py / _patterns.py / _sentinels.py / _version.py / _toml.py
+├── repo_compliance.py / splits.py / verification.py / quality.py / execution_context.py / manifest.py / workflow.py
+└── __init__.py          # package docstring + public API — the module set follows `ls src/sofer/`
 
-tests/  (29 files, 1342 passed, 2 skipped)
+tests/  (pytest suite — `uv run pytest tests/ -q`; CI runs the matrix `uv run pytest -v` on Python 3.10–3.14)
 ├── test_cli.py / test_checks.py / test_codebook.py / test_model.py / test_prepare.py / test_publish.py
 ├── test_micro*.py, test_scanner.py / test_repo_compliance.py / test_quality.py / test_profile.py / test_render.py / ...
 └── test_update_citation.py, test_mcp*.py, test_parquet_conversion.py, test_sentinels.py, ...
@@ -54,7 +54,7 @@ tests/  (29 files, 1342 passed, 2 skipped)
 - `codebook.generate()` analyses tabular files and returns markdown string; `generate_all()` emits N codebooks per XLSX sheet (`codebooks/<rel>/<stem>__<sanitized>.md` via `sanitize_sheet_name` + `seen` dedup, sheet-aware collision/index, single-sheet stays `stem.md`)
 - `repo_compliance.build_dataset_card()` groups `ColumnSchema` by `origin` and renders per-sheet collapsible Data Fields (`<details><summary>Data Fields -- <sheet> (N cols)</summary>` + blank line) gated by `config.CARD_COLLAPSE_THRESHOLD` (`[tool.sofer] card_collapse_threshold=15`, `int>=0`, `len(group)>thr OR len(groups)>1`)
 - Tool defaults centralized in `config.py` from `[tool.sofer]` — never hardcoded in functions
-- Directory contract: `data/` source files, `cache/` sofer artifacts, `build/` prepare output (via `[dataset] build_dir`)
+- Directory contract: `raw/` source files, `cache/` sofer artifacts, `build/` prepare output (via `[dataset] build_dir`)
 - No async, no web framework, no database
 - Domain-agnostic: works for any file-based dataset
 
@@ -66,7 +66,7 @@ tests/  (29 files, 1342 passed, 2 skipped)
 - Classes named `Test*` and methods `test_*`
 - `tmp_path` fixture used for filesystem tests, `monkeypatch` for env/args
 - Typed code with `from __future__ import annotations`
-- `__init__.py` exports version constant
+- `__init__.py` is the package docstring + public API; the version resolves at runtime from installed metadata via `_version.py` (no static constant)
 - Pre-commit hook order: ruff fix -> ruff format -> mypy
 - CI matrix tests across Python 3.10–3.14
 - Config via TOML files, secrets via .env with HF_TOKEN
@@ -78,10 +78,10 @@ tests/  (29 files, 1342 passed, 2 skipped)
 ## Testing
 
 - Strict TDD: disabled — tests MUST match spec scenarios (AGENTS.md rule 6) but red-green-refactor is not enforced (authoritative: mem #441, openspec/config.yaml strict_tdd false)
-- Test runner: pytest 9.1.1 — `uv run pytest tests/ -q` (1342 passed, 2 skipped on 2026-09-04; 334+ spec scenarios across 16 specs, CB-R09/RC-R21/TC-12/PRP-10 + MSP-R02/R12/PKG-03/PKG-06 added; mcp auto-install: fastmcp in dependencies with alias; fix-dataset-identity-context adds 52 mapped scenarios across mcp-server/cli/tool-config/process-boundary)
-- CI: `uv run pytest -v` matrix Python 3.10–3.14; lint `uv run ruff check src/ tests/` (ruff 0.16.0), type `uv run mypy src/` (mypy 2.3.0), format `uv run ruff format`
+- Test runner: pytest 9.1.1 — `uv run pytest tests/ -q` is the authoritative local tally; CI runs `uv run pytest -v` across Python 3.10–3.14. Scenario counts are re-derived by `scripts/check_test_mapping.py`, never stored here.
+- CI: `uv run pytest -v` matrix Python 3.10–3.14; lint `uv run ruff check src/ tests/ scripts/` (ruff 0.16.0), type `uv run mypy src/ scripts/` (mypy 2.3.0), format `uv run ruff format --check src/ tests/`
 - Pre-commit: ruff (lint --fix + format) + mypy (uv run mypy src/ scripts/), runs on every commit
-- Coverage tooling: not installed (no pytest-cov / coverage dependency)
+- Coverage: `coverage` is a dev dependency — `uv run coverage run -m pytest` then `uv run coverage report -m`; `[tool.coverage.run]` sets `branch = true` / `source = ["src/sofer"]`, and `[tool.coverage.report]` enforces `fail_under = 90` (spec `coverage`)
 
 ---
-*Generated by sdd-init. Last updated: 2026-09-04 — fix-dataset-identity-context archived (INIT-02 fail-closed cwd + INIT-05 identity validation + INIT-03 canonical identity reporting, MSP-R03 schema identity fields, MSP-R10 discovery_root bound, CLI-R07 `--user` required, TC-05 discovery_root, PB-04/PB-09 real-process parent-root identity; 1342 passed, 2 skipped).*
+*Generated by sdd-init. Last updated: 2026-09-25 — documentation-veracity sweep: stale absolute suite counts dropped in favour of the CI suite gate, the module inventory defers to `ls src/sofer/`, and the coverage tooling is recorded as installed (`[tool.coverage]`, gate 90).*

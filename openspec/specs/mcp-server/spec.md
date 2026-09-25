@@ -836,9 +836,9 @@ After `sofer_init` → `sofer_scan_apply`, scanner MUST discover `DATA_GOT_ALL.x
 
 #### Scenario: Valid identity accepted
 
-- GIVEN `sofer_init(name="test", user="emiliodavola", cwd="Desktop/test")`
+- GIVEN `sofer_init(name="test", user="<hf-user>", cwd="Desktop/test")`
 - WHEN the call executes
-- THEN `ok:true` and `Desktop/test/test.toml` SHALL contain `repo_id = "emiliodavola/test"`
+- THEN `ok:true` and `Desktop/test/test.toml` SHALL contain `repo_id = "<hf-user>/test"`
 
 #### Scenario: Missing or blank identity refused before write
 
