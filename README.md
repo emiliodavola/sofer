@@ -319,7 +319,7 @@ detector class, no changes to the pipeline.
 | --- | --- |
 | `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
-| `mcp add --agent <opencode\|codex\|gemini\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
+| `mcp add --agent <opencode\|codex\|gemini\|pi\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` or `__<sanitized>.metadata.yaml` per sheet for `.xlsx` N>1, `PurePath.suffixes`, sanitization + `seen _{n}`, normalized `__+`→`_` collision `ValueError` with `::sheet`), `--force` (overwrite guard), `--config` (TOML path for batch). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
 | `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` or `__<sanitized>.README.md` per sheet for `.xlsx` N>1 with same sanitization/dedup/collision parity, skip missing `metadata.yaml`), `--force`, `--config`. |
@@ -349,7 +349,7 @@ detector class, no changes to the pipeline.
 | `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
 | `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); required — missing `--user` exits 2, placeholder (`YOUR_USER`) or unsafe values exit 1, no file written. |
 | `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`; for `codebook`, `-o`/`--output` is the output file path, default stdout). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
-| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
+| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
 | `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
 
@@ -589,18 +589,19 @@ claude mcp add sofer -- uv run sofer-mcp
 The server inherits its working directory — pass an explicit root when the
 agent should only reach a specific tree (see below).
 
-### Register sofer-mcp with AI agents (opencode, codex, gemini)
+### Register sofer-mcp with AI agents (opencode, codex, gemini, pi)
 
-`sofer` can register itself in the three supported agent configs
+`sofer` can register itself in the four supported agent configs
 idempotently, preserving existing servers and backing up the original to
 `.bak`:
 
 ```bash
-sofer mcp add --agent all                 # register in all three
+sofer mcp add --agent all                 # register in all four
 sofer mcp add --agent opencode --scope project --cwd ./my-proj
 sofer mcp add --agent codex --scope user
 sofer mcp add --agent gemini --scope user --dry-run   # preview, no write
-sofer mcp remove --agent all              # remove from all three
+sofer mcp add --agent pi --scope user                 # pi-mcp-adapter
+sofer mcp remove --agent all              # remove from all four
 ```
 
 Per-agent locations and shapes:
@@ -611,8 +612,10 @@ Per-agent locations and shapes:
 | opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
 | codex | `--scope user` | `~/.codex/config.toml` | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
 | codex | `--scope project` | `./.codex/config.toml` | same |
-| gemini | `--scope user` | `~/.config/gemini/settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN,…}}` |
+| gemini | `--scope user` | `~/.config/gemini/settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"$HF_TOKEN",…}}` |
 | gemini | `--scope project` | `./.gemini/settings.json` | same |
+| pi | `--scope user` | `$PI_CODING_AGENT_DIR/mcp.json` (default `~/.pi/agent/mcp.json`) | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
+| pi | `--scope project` | `./.pi/mcp.json` | same |
 
 - **Idempotency:** re-running with the same `cwd` and env does no write and
   creates no `.bak`; the file is byte-identical.
@@ -624,15 +627,18 @@ Per-agent locations and shapes:
   contained under the scope root (`Path.resolve()` + `is_relative_to`);
   otherwise the command exits 1 with the offending path.
 - **Env:** `HF_TOKEN` and `SOFER_MCP_APPROVAL_PHRASE` from the shell are
-  forwarded — codex as an `env_vars` allow-list, gemini as an explicit
-  `env` dict (no shell inheritance). Opencode receives no env. When
+  forwarded — codex as an `env_vars` allow-list, gemini and pi as an explicit
+  `env` dict (no shell inheritance). Gemini emits `$KEY` references; Pi emits
+  `${KEY}` references because `pi-mcp-adapter` interpolates only the braced
+  form. Opencode receives no env. When
   `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode`
   (or `all`) is chosen, `sofer mcp add` prints a warning on stderr naming
   the dropped variables and leaves the exit code unchanged.
 - **Delegation:** when a native binary is available (`codex`/`gemini`), its
   `mcp add`/`remove` is tried first (probe via `shutil.which` + `mcp --help`
   with a 3 s timeout); on failure or timeout the command falls back to
-  direct file edit. Opencode always uses file-edit.
+  direct file edit. Opencode and Pi always use file-edit (Pi ships no native
+  `mcp add` CLI).
 - **TOML warning:** edits via `tomli`/`tomli-w` do not preserve comments or
   formatting in `config.toml` — the file is reformatted and comments are
   stripped.
@@ -691,10 +697,10 @@ It is read **once at process start** (`build_server(root, approval_phrase=...)`
 or `SOFER_MCP_APPROVAL_PHRASE`) and stays immutable for that process — change
 the value in the launcher, then fully restart the agent host. Configure it the
 way each agent persists MCP env (see
-[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini)):
-codex `env_vars` and gemini `env` persist the env **name** only, never the
-secret; opencode receives no env from `sofer mcp add`, so use the launcher
-environment or an explicit `environment` literal (plaintext on disk).
+[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini-pi)):
+codex `env_vars`, and gemini and pi `env`, persist the env **name** only,
+never the secret; opencode receives no env from `sofer mcp add`, so use the
+launcher environment or an explicit `environment` literal (plaintext on disk).
 
 On Windows, generate the same 32-hex-char phrase without `openssl`, using the
 .NET crypto RNG, and set it for the current session only:

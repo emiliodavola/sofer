@@ -652,10 +652,11 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
         Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
         from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
-        receives an ``env`` name list (NAMES only — values are never persisted),
-        opencode receives no env. When opencode (or the opencode member of
-        ``all``) is chosen with known env keys present, the step-3 warning is
-        printed once per run and names the variables that cannot be forwarded.
+        and Pi receive an ``env`` name list (NAMES only — values are never
+        persisted; Pi uses the ``${KEY}`` form it interpolates), opencode
+        receives no env. When opencode (or the opencode member of ``all``) is
+        chosen with known env keys present, the step-3 warning is printed once
+        per run and names the variables that cannot be forwarded.
     """
     # Expand agent
     raw_agent: str = getattr(args, "agent")
@@ -1482,13 +1483,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── mcp ───────────────────────────────────────────────────────
     mcp = sub.add_parser(
         "mcp",
-        help="Register sofer-mcp with AI agents (opencode, codex, gemini).",
+        help="Register sofer-mcp with AI agents (opencode, codex, gemini, pi).",
         description=(
             "Register or remove the ``sofer-mcp`` MCP server from AI agent "
             "configurations. Supports ``opencode`` (opencode.json), ``codex`` "
-            "(config.toml), and ``gemini`` (settings.json) with idempotent "
-            "merge, backup to ``.bak``, atomic write, and per-agent env "
-            "forwarding. Use ``--agent all`` to target every agent."
+            "(config.toml), ``gemini`` (settings.json), and ``pi`` (mcp.json) "
+            "with idempotent merge, backup to ``.bak``, atomic write, and "
+            "per-agent env forwarding. Use ``--agent all`` to target every agent."
         ),
     )
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1503,10 +1504,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "overwrites), and writes atomically via tmp+os.replace. "
             "``--cwd`` sets the server's working directory (absolute, "
             "contained under the scope root). TOML edits may strip comments. "
-            "Env: codex and gemini receive env forwarding (names only, values never "
-            "written); opencode entries carry no environment, and a warning is printed "
-            "on stderr when HF_TOKEN or SOFER_MCP_APPROVAL_PHRASE are set with "
-            "--agent opencode (or all)."
+            "Env: codex, gemini and pi receive env forwarding (names only, values "
+            "never written; pi uses ${KEY} references); opencode entries carry no "
+            "environment, and a warning is printed on stderr when HF_TOKEN or "
+            "SOFER_MCP_APPROVAL_PHRASE are set with --agent opencode (or all)."
         ),
     )
     mcp_add.add_argument(

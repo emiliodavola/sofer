@@ -2,27 +2,28 @@
 
 ## Purpose
 
-Register `sofer-mcp` in opencode/codex/gemini agent configs via the `sofer mcp add/remove` subcommands. Registration edits the agent's on-disk config idempotently: unrelated keys are preserved, a single `.bak` backup precedes the first mutation, writes are atomic, and the agent process (or file merge fallback) is preferred over direct file surgery. Env forwarding persists **names only** — secret values are never written to disk.
+Register `sofer-mcp` in opencode/codex/gemini/pi agent configs via the `sofer mcp add/remove` subcommands. Registration edits the agent's on-disk config idempotently: unrelated keys are preserved, a single `.bak` backup precedes the first mutation, writes are atomic, and the agent process (or file merge fallback) is preferred over direct file surgery. Env forwarding persists **names only** — secret values are never written to disk.
 
 ## Requirements
 
 ### Requirement: MCP add idempotent and safe (MCP-REG-01)
 
-`sofer mcp add --agent <opencode|codex|gemini|all> [--scope user|project] [--cwd PATH] [--dry-run]` MUST be idempotent, MUST preserve unrelated keys, MUST back up `.bak` before edit, MUST set `command=sofer-mcp` with absolute anchored `cwd`, MUST use atomic write, MUST exit 1 with no backup/write on an unreadable config, MUST enforce Gemini `sofer` with explicit `env` mapping known keys to `$KEY` references — never secret values — and Codex `env_vars` as an allow-list of known env NAMES present in the environment, MUST normalize Codex `command` variations, MUST prefer native registration else file merge.
+`sofer mcp add --agent <opencode|codex|gemini|pi|all> [--scope user|project] [--cwd PATH] [--dry-run]` MUST be idempotent, MUST preserve unrelated keys, MUST back up `.bak` before edit, MUST set `command=sofer-mcp` with absolute anchored `cwd`, MUST use atomic write, MUST exit 1 with no backup/write on an unreadable config, MUST enforce Gemini `sofer` with explicit `env` mapping known keys to `$KEY` references — never secret values — MUST enforce Pi `sofer` with explicit `env` mapping known keys to `${KEY}` references — never secret values — and Codex `env_vars` as an allow-list of known env NAMES present in the environment, MUST normalize Codex `command` variations, MUST prefer native registration else file merge.
 
 | Agent | File | Entry |
 |-------|------|-------|
 | opencode | `opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
 | codex | `config.toml` | `[mcp_servers.sofer] command,cwd,env_vars=[HF_TOKEN,...]` (env NAMES only) |
 | gemini | `settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"$HF_TOKEN",...}}` |
+| pi | `mcp.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",...}}` |
 
-Both Gemini `env` and Codex `env_vars` persist env NAMES only (an allow-list of keys present in the environment); secret values (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) are never written to disk. Gemini's CLI expands the `$KEY` references from the host environment at runtime.
+Both Gemini and Pi `env` and Codex `env_vars` persist env NAMES only (an allow-list of keys present in the environment); secret values (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) are never written to disk. Gemini's CLI expands the `$KEY` references from the host environment at runtime; Pi's `pi-mcp-adapter` interpolates only the braced `${KEY}` form and MUST never receive a bare `$KEY`. The Pi user-scope file is `$PI_CODING_AGENT_DIR/mcp.json` when that variable is set to a non-empty value, else `~/.pi/agent/mcp.json`; the project-scope file is `<cwd>/.pi/mcp.json`. Pi entries MUST NOT carry an array `command`, `type`, or `enabled` field, and Pi MUST be file-edit only (no native CLI to delegate to).
 
 #### Scenario: Add all
 
 - GIVEN no `sofer` in any config
 - WHEN add all runs
-- THEN 3 configs SHALL contain correct `sofer` entry
+- THEN 4 configs SHALL contain correct `sofer` entry
 
 #### Scenario: Add single
 
@@ -85,11 +86,38 @@ Both Gemini `env` and Codex `env_vars` persist env NAMES only (an allow-list of 
 - WHEN add codex runs
 - THEN native tried first; fallback to file merge on miss/fail
 
+#### Scenario: Add Pi user
+
+- GIVEN `--scope user`, with `PI_CODING_AGENT_DIR` set to a directory and unset
+- WHEN add pi runs
+- THEN the file SHALL be `$PI_CODING_AGENT_DIR/mcp.json` when set, else `~/.pi/agent/mcp.json`
+- AND `mcpServers.sofer` SHALL be `{command:"sofer-mcp",cwd:<abs>,env:{KEY:"${KEY}",...}}` for env keys present
+
+#### Scenario: Add Pi project
+
+- GIVEN `--scope project` and a cwd
+- WHEN add pi runs
+- THEN the file SHALL be `<cwd>/.pi/mcp.json` and the stored `cwd` SHALL be the resolved absolute cwd
+
+#### Scenario: Pi entry shape
+
+- GIVEN add pi runs
+- WHEN the entry is inspected
+- THEN `command` SHALL be the string `"sofer-mcp"` (never an array)
+- AND the entry SHALL NOT contain `type`, `enabled`, or `args`
+
+#### Scenario: Pi env braced references only
+
+- GIVEN `HF_TOKEN` set and `SOFER_MCP_APPROVAL_PHRASE` absent
+- WHEN add pi runs
+- THEN `mcpServers.sofer.env` SHALL be `{HF_TOKEN:"${HF_TOKEN}"}` and SHALL NOT contain the bare form `$HF_TOKEN`
+- AND the secret value SHALL NOT appear on disk
+
 ---
 
 ### Requirement: MCP remove idempotent and safe (MCP-REG-02)
 
-`sofer mcp remove --agent <opencode|codex|gemini|all> [--scope user|project] [--dry-run]` MUST remove `sofer` idempotently, MUST backup before edit, MUST preserve others, MUST do no write if absent, MUST prefer native else file edit, MUST not mutate on --dry-run, MUST exit 1 on unreadable.
+`sofer mcp remove --agent <opencode|codex|gemini|pi|all> [--scope user|project] [--dry-run]` MUST remove `sofer` idempotently, MUST backup before edit, MUST preserve others, MUST do no write if absent, MUST prefer native else file edit, MUST not mutate on --dry-run, MUST exit 1 on unreadable.
 
 #### Scenario: Remove single
 
@@ -99,7 +127,7 @@ Both Gemini `env` and Codex `env_vars` persist env NAMES only (an allow-list of 
 
 #### Scenario: Remove all
 
-- GIVEN `sofer` in 3 configs
+- GIVEN `sofer` in 4 configs
 - WHEN remove all runs
 - THEN each SHALL have `sofer` removed
 
@@ -121,14 +149,20 @@ Both Gemini `env` and Codex `env_vars` persist env NAMES only (an allow-list of 
 - WHEN remove codex edits
 - THEN `.bak` exists and `other` preserved
 
+#### Scenario: Remove Pi preserves others
+
+- GIVEN `.pi/mcp.json` with `mcpServers.sofer` and `mcpServers.other`
+- WHEN remove pi runs
+- THEN only `sofer` SHALL be removed and `other` SHALL be preserved
+- AND re-running SHALL exit 0 with no write
+
 ---
 
 ### Requirement: OpenCode env-drop warning (MCP-REG-03)
 
 > Added by change `2026-09-12-fix-mcp-opencode-env` (closes #147).
-> Extends the `sofer mcp add` flow of MCP-REG-01 without altering its contract:
-> registration for opencode remains env-less, idempotent, safe, and
-> entry-shape-identical.
+> Extended by change `2026-09-25-feat-pi-mcp-agent` (#142) — `--agent all` now
+> expands to four agents and Pi is a name-forwarding agent.
 
 `sofer mcp add --agent opencode` (and the opencode member of `--agent all`)
 MUST emit an informational warning on **stderr** when `collect_env()` returns at
@@ -145,11 +179,11 @@ The generated opencode entry MUST remain exactly
 `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}`. No env name or value
 (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) SHALL ever be written into
 `opencode.json`, and no other format change that would start persisting secret
-values is permitted. `--agent all` SHALL keep expanding to exactly the three
-agents `opencode`, `codex`, `gemini`; the warning fires for the opencode member
-only, while codex/gemini members continue to persist names only (`env_vars`
-allow-list of keys present / `env` `$KEY` references) and MUST NOT emit the
-warning.
+values is permitted. `--agent all` SHALL expand to exactly the four registered
+agents `opencode`, `codex`, `gemini`, `pi`; the warning fires for the opencode
+member only, while codex/gemini/pi members continue to persist names only
+(`env_vars` allow-list of keys present / `env` `$KEY` references / `env` `${KEY}`
+references) and MUST NOT emit the warning.
 
 The warning MUST also appear in `--dry-run` output (emitted on the dry-run path,
 before the preview branch), so a preview surfaces the drop instead of hiding it.
@@ -176,15 +210,15 @@ before the preview branch), so a preview surfaces the drop instead of hiding it.
 - GIVEN env keys present
 - WHEN `sofer mcp add --agent all` runs
 - THEN exactly ONE warning SHALL be emitted (for the opencode member)
-- AND codex and gemini members SHALL NOT emit the warning
-- AND `all` SHALL still expand to exactly `opencode`, `codex`, `gemini`
+- AND codex, gemini and pi members SHALL NOT emit the warning
+- AND `all` SHALL expand to exactly `opencode`, `codex`, `gemini`, `pi`
 
 #### Scenario: No warning without env or for forwarding agents
 
-- GIVEN no known env key present, or `--agent codex` / `--agent gemini` with env keys present
+- GIVEN no known env key present, or `--agent codex` / `--agent gemini` / `--agent pi` with env keys present
 - WHEN `sofer mcp add` runs
 - THEN no opencode warning SHALL be emitted
-- AND codex SHALL persist `env_vars` as an allow-list of env NAMES present and gemini SHALL persist `env` `$KEY` references — values never on disk
+- AND codex SHALL persist `env_vars` as an allow-list of env NAMES present, gemini SHALL persist `env` `$KEY` references, and pi SHALL persist `env` `${KEY}` references — values never on disk
 
 #### Scenario: Values never leak into output or written file
 

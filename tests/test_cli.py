@@ -1231,7 +1231,7 @@ class TestMcpCliHelp:
         # help sentence renders "(names only, values never written)", so the
         # stable substring is the prefix ending at "(names only".
         flat = re.sub(r"\s+", " ", out)
-        assert "codex and gemini receive env forwarding (names only" in flat
+        assert "codex, gemini and pi receive env forwarding (names only" in flat
         assert "opencode entries carry no environment" in flat
 
 
