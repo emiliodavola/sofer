@@ -17,10 +17,10 @@
 $ uv run pytest tests/ -q
 ... NNN passed ...
 
-$ uv run ruff check src/ tests/
+$ uv run ruff check src/ tests/ scripts/
 All checks passed!
 
-$ uv run mypy src/
+$ uv run mypy src/ scripts/
 Success: no issues found
 
 $ uv run pyright
@@ -43,9 +43,9 @@ Specs updated: `openspec/specs/<domain>/spec.md`
 ## Checklist
 
 - [ ] `uv run pytest tests/ -q` — all passing
-- [ ] `uv run ruff check src/ tests/` — clean
+- [ ] `uv run ruff check src/ tests/ scripts/` — clean
 - [ ] `uv run ruff format --check src/ tests/` — clean
-- [ ] `uv run mypy src/` — clean
+- [ ] `uv run mypy src/ scripts/` — clean
 - [ ] `uv run pyright` — clean (pyright gate, `[tool.pyright]`)
 - [ ] New behaviour covered by tests
 - [ ] Coverage gate met — `uv run coverage report -m` ≥ 90% (CI enforces `fail_under = 90`)
