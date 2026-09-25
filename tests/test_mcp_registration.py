@@ -1418,7 +1418,8 @@ class TestNativeDelegationFidelity:
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(subprocess, "run", _run)
-        assert mcp_registration.delegate_add("gemini", Path("/proj"), [], "project") is True
+        project = Path("/proj")
+        assert mcp_registration.delegate_add("gemini", project, [], "project") is True
         assert seen["cmd"] == [
             "/fake/gemini",
             "mcp",
@@ -1429,7 +1430,7 @@ class TestNativeDelegationFidelity:
             "--command",
             "sofer-mcp",
             "--cwd",
-            "/proj",
+            str(project),
         ]
 
     def test_delegate_add_codex_user_is_scope_less(self, monkeypatch) -> None:
