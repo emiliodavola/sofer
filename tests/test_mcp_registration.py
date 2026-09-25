@@ -352,7 +352,7 @@ class TestDryRun:
         proj.mkdir()
         rc = cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=True))
         assert rc == 0
-        agents: list[mcp_registration.AgentName] = ["opencode", "codex", "gemini"]
+        agents: list[mcp_registration.AgentName] = list(mcp_registration.AGENT_NAMES)
         for agent in agents:
             path = mcp_registration.resolve_config_path(agent, "project", proj)
             assert not path.exists()
@@ -537,10 +537,11 @@ class TestEnvForwarding:
         err = capsys.readouterr().err
         # exactly one warning, for the opencode member only
         assert err.count("receives no env") == 1
-        # all still expands to exactly the three agents
+        # all still expands to every registered agent (four)
         assert (proj / "opencode.json").exists()
         assert (proj / ".codex" / "config.toml").exists()
         assert (proj / ".gemini" / "settings.json").exists()
+        assert (proj / ".pi" / "mcp.json").exists()
         # codex/gemini persist names only, values absent
         _tomli2 = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
@@ -579,14 +580,14 @@ class TestEnvForwarding:
         proj.mkdir()
         monkeypatch.setenv("HF_TOKEN", "hf123")
         monkeypatch.setenv("SOFER_MCP_APPROVAL_PHRASE", "phrase123")
-        for agent in ("codex", "gemini"):
+        for agent in ("codex", "gemini", "pi"):
             rc = cli._cmd_mcp_add(
                 Namespace(agent=agent, scope="project", cwd=str(proj), dry_run=False)
             )
             assert rc == 0
         # no warning for forwarding agents
         assert "receives no env" not in capsys.readouterr().err
-        # codex allow-list of names present, gemini $KEY refs; values absent
+        # codex allow-list of names present, gemini $KEY refs, pi ${KEY} refs; values absent
         _tomli3 = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
         codex_path = proj / ".codex" / "config.toml"
@@ -602,6 +603,14 @@ class TestEnvForwarding:
             "SOFER_MCP_APPROVAL_PHRASE": "$SOFER_MCP_APPROVAL_PHRASE",
         }
         assert "hf123" not in gemini_path.read_text(encoding="utf-8")
+        # pi is a name-forwarding agent too: braced ${KEY} refs, no warning
+        pi_path = proj / ".pi" / "mcp.json"
+        pi_data = json.loads(pi_path.read_text(encoding="utf-8"))
+        assert pi_data["mcpServers"]["sofer"]["env"] == {
+            "HF_TOKEN": "${HF_TOKEN}",
+            "SOFER_MCP_APPROVAL_PHRASE": "${SOFER_MCP_APPROVAL_PHRASE}",
+        }
+        assert "hf123" not in pi_path.read_text(encoding="utf-8")
 
     def test_warning_values_never_leak(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
@@ -724,7 +733,7 @@ class TestRemove:
         cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=False))
         rc = cli._cmd_mcp_remove(Namespace(agent="all", scope="project", dry_run=False))
         assert rc == 0
-        agents: list[mcp_registration.AgentName] = ["opencode", "codex", "gemini"]
+        agents: list[mcp_registration.AgentName] = list(mcp_registration.AGENT_NAMES)
         for agent in agents:
             path = mcp_registration.resolve_config_path(agent, "project", proj)
             if path.exists():
@@ -1062,13 +1071,14 @@ class TestSingleSourceRegistry:
             "adds_type_local",
             "env",
             "delegates",
+            "user_env_dir",
         }
         for agent in mcp_registration.AGENT_NAMES:
             spec = mcp_registration.ADAPTERS[agent]
             assert set(spec) == required, agent
             assert spec["fmt"] in {"json", "toml"}
             assert spec["command"] in {"array", "string"}
-            assert spec["env"] in {"none", "allow_list", "refs"}
+            assert spec["env"] in {"none", "allow_list", "refs", "refs_braced"}
 
     def test_resolve_config_path_matches_registry_for_every_agent(
         self, tmp_path, monkeypatch
@@ -1080,6 +1090,9 @@ class TestSingleSourceRegistry:
         proj.mkdir()
         for agent in mcp_registration.AGENT_NAMES:
             spec = mcp_registration.ADAPTERS[agent]
+            env_dir = spec["user_env_dir"]
+            if env_dir:
+                monkeypatch.delenv(env_dir, raising=False)
             assert mcp_registration.resolve_config_path(agent, "user") == home.joinpath(
                 *spec["user_parts"]
             )
@@ -1108,6 +1121,7 @@ class TestSingleSourceRegistry:
             "adds_type_local": False,
             "env": "none",
             "delegates": False,
+            "user_env_dir": None,
         }
         patched = {**mcp_registration.ADAPTERS, "sentinel": sentinel}
         monkeypatch.setattr(mcp_registration, "ADAPTERS", patched)
@@ -1125,6 +1139,7 @@ class TestSingleSourceRegistry:
         assert (proj / "opencode.json").exists()
         assert (proj / ".codex" / "config.toml").exists()
         assert (proj / ".gemini" / "settings.json").exists()
+        assert (proj / ".pi" / "mcp.json").exists()
 
 
 class TestRefactorParity:
@@ -1155,3 +1170,189 @@ class TestRefactorParity:
         assert mcp_registration.delegate_add("ghost", Path("/tmp"), []) is True
         assert mcp_registration.delegate_remove("ghost") is True
         assert mcp_registration.dropped_env_keys("ghost", {"HF_TOKEN": "x"}) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Pi agent (#142) — pi-mcp-adapter: file-edit only, ${KEY} env references.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPiAdapter:
+    def test_agent_names_includes_pi_last(self) -> None:
+        assert mcp_registration.AGENT_NAMES == ("opencode", "codex", "gemini", "pi")
+
+    def test_pi_registry_entry_is_complete(self) -> None:
+        assert mcp_registration.ADAPTERS["pi"] == {
+            "fmt": "json",
+            "key": "mcpServers",
+            "user_parts": (".pi", "agent", "mcp.json"),
+            "project_parts": (".pi", "mcp.json"),
+            "command": "string",
+            "adds_type_local": False,
+            "env": "refs_braced",
+            "delegates": False,
+            "user_env_dir": "PI_CODING_AGENT_DIR",
+        }
+
+    def test_pi_entry_shape_string_command_no_type_or_enabled(self, tmp_path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("pi", cwd, {"HF_TOKEN": "hf123"})
+        assert entry == {
+            "command": "sofer-mcp",
+            "cwd": str(cwd.resolve()),
+            "env": {"HF_TOKEN": "${HF_TOKEN}"},
+        }
+        assert isinstance(entry["command"], str)
+        assert "args" not in entry
+        assert "type" not in entry
+        assert "enabled" not in entry
+        assert "hf123" not in str(entry)
+
+    def test_pi_env_braced_refs_and_omits_absent_keys(self, tmp_path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("pi", cwd, {"HF_TOKEN": "hf123"})
+        assert entry["env"] == {"HF_TOKEN": "${HF_TOKEN}"}
+        assert "SOFER_MCP_APPROVAL_PHRASE" not in entry["env"]
+        # The bare ``$KEY`` form Pi does not interpolate must not be used.
+        assert "$HF_TOKEN" not in str(entry)
+
+    def test_pi_user_path_defaults_under_home(self, tmp_path, monkeypatch) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+        assert mcp_registration.resolve_config_path("pi", "user") == (
+            home / ".pi" / "agent" / "mcp.json"
+        )
+
+    def test_pi_user_path_honours_env_dir_override(self, tmp_path, monkeypatch) -> None:
+        agent_dir = tmp_path / "custom-agent"
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+        assert mcp_registration.resolve_config_path("pi", "user") == agent_dir / "mcp.json"
+
+    def test_pi_empty_env_dir_falls_back_to_home(self, tmp_path, monkeypatch) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", "")
+        assert mcp_registration.resolve_config_path("pi", "user") == (
+            home / ".pi" / "agent" / "mcp.json"
+        )
+
+    def test_pi_project_path_is_dot_pi(self, tmp_path) -> None:
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        assert mcp_registration.resolve_config_path("pi", "project", proj) == (
+            proj.resolve() / ".pi" / "mcp.json"
+        )
+
+    def test_pi_never_delegates(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/pi" if x == "pi" else None)
+        assert mcp_registration.probe_native("pi") is False
+        assert mcp_registration.delegate_add("pi", Path("/tmp"), []) is False
+        assert mcp_registration.delegate_remove("pi") is False
+
+    def test_pi_entries_equal_compares_string_command_and_env(self) -> None:
+        entry = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "${HF_TOKEN}"}}
+        assert mcp_registration._entries_equal("pi", entry, {**entry}) is True
+        assert mcp_registration._entries_equal("pi", entry, {**entry, "cwd": "/x"}) is False
+        assert mcp_registration._entries_equal("pi", entry, {**entry, "env": {}}) is False
+        array_cmd = {**entry, "command": ["sofer-mcp"]}
+        assert mcp_registration._entries_equal("pi", entry, array_cmd) is False
+
+
+class TestPiCli:
+    def test_pi_add_user_writes_env_dir_override(self, tmp_path, monkeypatch) -> None:
+        agent_dir = tmp_path / "agentdir"
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(Namespace(agent="pi", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        path = agent_dir / "mcp.json"
+        assert path.exists()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["sofer"]["command"] == "sofer-mcp"
+
+    def test_pi_add_project_writes_dot_pi_and_env(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="pi", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        path = tmp_path / ".pi" / "mcp.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["sofer"] == {
+            "command": "sofer-mcp",
+            "cwd": str(tmp_path.resolve()),
+            "env": {"HF_TOKEN": "${HF_TOKEN}"},
+        }
+        assert "hf123" not in path.read_text(encoding="utf-8")
+
+    def test_pi_add_is_idempotent_no_backup_no_write(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        args = Namespace(agent="pi", scope="project", cwd=str(tmp_path), dry_run=False)
+        assert cli._cmd_mcp_add(args) == 0
+        path = tmp_path / ".pi" / "mcp.json"
+        first = path.read_bytes()
+        assert cli._cmd_mcp_add(args) == 0
+        assert path.read_bytes() == first
+        assert not Path(str(path) + ".bak").exists()
+
+    def test_pi_dry_run_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="pi", scope="project", cwd=str(tmp_path), dry_run=True)
+        )
+        assert rc == 0
+        path = tmp_path / ".pi" / "mcp.json"
+        assert not path.exists()
+        assert not Path(str(path) + ".bak").exists()
+
+    def test_pi_add_unreadable_exits_1_no_backup(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        path = tmp_path / ".pi" / "mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{ not json", encoding="utf-8")
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="pi", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 1
+        assert path.read_text(encoding="utf-8") == "{ not json"
+        assert not Path(str(path) + ".bak").exists()
+
+    def test_pi_remove_preserves_other_servers(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / ".pi" / "mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "sofer": {"command": "sofer-mcp", "cwd": str(tmp_path)},
+                        "other": {"command": "other"},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        rc = cli._cmd_mcp_remove(Namespace(agent="pi", scope="project", dry_run=False))
+        assert rc == 0
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["mcpServers"] == {"other": {"command": "other"}}
+
+    def test_pi_remove_idempotent_when_absent(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_remove(Namespace(agent="pi", scope="project", dry_run=False))
+        assert rc == 0
+        assert not (tmp_path / ".pi" / "mcp.json").exists()

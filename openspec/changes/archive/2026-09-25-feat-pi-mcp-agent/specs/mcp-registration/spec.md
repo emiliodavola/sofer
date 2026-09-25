@@ -1,10 +1,17 @@
-# mcp-registration Specification
+# Spec delta: feat-pi-mcp-agent
 
-## Purpose
+> **Change:** `2026-09-25-feat-pi-mcp-agent` (GitHub #142) · branch `feat/142-pi-mcp-agent`.
+>
+> Adds **Pi** (`pi-mcp-adapter`) as a fourth MCP agent. Pi-owned targets are
+> `$PI_CODING_AGENT_DIR/mcp.json` (default `~/.pi/agent/mcp.json`) at user scope
+> and `./.pi/mcp.json` at project scope; the entry is a **string** `command` with
+> an `env` mapping of known names to `${KEY}` references (the only form
+> `pi-mcp-adapter` interpolates), file-edit only (Pi ships no native `mcp add`).
+> The secret-names-never-values invariant is preserved. This delta MODIFIES
+> MCP-REG-01/02/03 because the supported set, the add/remove tables and the
+> `--agent all` expansion grow from three agents to four.
 
-Register `sofer-mcp` in opencode/codex/gemini/pi agent configs via the `sofer mcp add/remove` subcommands. Registration edits the agent's on-disk config idempotently: unrelated keys are preserved, a single `.bak` backup precedes the first mutation, writes are atomic, and the agent process (or file merge fallback) is preferred over direct file surgery. Env forwarding persists **names only** — secret values are never written to disk.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: MCP add idempotent and safe (MCP-REG-01)
 

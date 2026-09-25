@@ -1,5 +1,5 @@
 """
-MCP registration automation for opencode, codex, and gemini.
+MCP registration automation for opencode, codex, gemini, and pi.
 
 Provides per-agent adapters (path resolution, JSON/TOML I/O, merge,
 backup, atomic write, delegation probe) and entry builders. The CLI
@@ -9,24 +9,26 @@ The supported agent set and every per-agent capability live in the single
 :data:`ADAPTERS` registry: adding an agent is one entry there, and
 :data:`AGENT_NAMES` (CLI ``choices`` / ``all`` expansion), path
 resolution, entry building, merge/remove, native delegation and the
-env-drop probe all derive from it (#235).
+env-drop probe all derive from it (#235, #142).
 
 Each agent has a distinct on-disk shape:
 
 - opencode: ``opencode.json`` JSON ``mcp.sofer={type:"local",command:["sofer-mcp"],cwd}``
 - codex: ``config.toml`` TOML ``[mcp_servers.sofer] command,cwd,env_vars``
 - gemini: ``settings.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
+- pi: ``mcp.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
 
 All writes are idempotent, preserve unrelated keys, create a single
 ``.bak`` backup before the first mutation, and use an atomic
-``tmp+os.replace`` commit. Both Gemini ``env`` and Codex ``env_vars``
-persist env NAMES only (an allow-list of keys present in the environment) —
-secret values (``HF_TOKEN``, ``SOFER_MCP_APPROVAL_PHRASE``) are never
-written to disk. ``command``
-string/array variations are normalized before comparison. Native
-delegation (``codex``/``gemini``) is probed via ``shutil.which`` +
-``--help`` with a timeout and falls back to file-edit; opencode
-always uses file-edit.
+``tmp+os.replace`` commit. Codex ``env_vars`` and the ``env`` mappings of
+Gemini/Pi persist env NAMES only (an allow-list of keys present in the
+environment) — secret values (``HF_TOKEN``, ``SOFER_MCP_APPROVAL_PHRASE``)
+are never written to disk. Codex/Gemini use a bare ``$KEY`` reference; Pi's
+``pi-mcp-adapter`` only interpolates braced ``${KEY}`` references, so Pi
+entries use that form. ``command`` string/array variations are normalized
+before comparison. Native delegation (``codex``/``gemini``) is probed via
+``shutil.which`` + ``--help`` with a timeout and falls back to file-edit;
+opencode and pi always use file-edit.
 """
 
 from __future__ import annotations
@@ -65,13 +67,18 @@ class Adapter(TypedDict):
     Attributes:
         fmt: Config serialization format consumed by ``cli.py`` atomic writes.
         key: Config table that holds the servers mapping.
-        user_parts: Path components under ``Path.home()``.
+        user_parts: Path components under ``Path.home()``, also the fallback
+            when ``user_env_dir`` is set but its variable is absent.
         project_parts: Path components under the project root.
         command: ``"array"`` for ``["sofer-mcp"]``, ``"string"`` for ``"sofer-mcp"``.
         adds_type_local: Whether the entry carries ``type="local"`` (opencode).
-        env: ``"none"`` (dropped), ``"allow_list"`` (``env_vars``) or
-            ``"refs"`` (``env`` ``$KEY`` references).
+        env: ``"none"`` (dropped), ``"allow_list"`` (``env_vars``), ``"refs"``
+            (``env`` ``$KEY`` references) or ``"refs_braced"`` (``env`` ``${KEY}``
+            references, Pi's interpolation form).
         delegates: Whether a native ``<agent> mcp add/remove`` is attempted.
+        user_env_dir: Environment variable naming a directory that overrides
+            the user-scope config directory (the file name is
+            ``user_parts[-1]``); ``None`` for agents without such an override.
     """
 
     fmt: Literal["json", "toml"]
@@ -80,8 +87,9 @@ class Adapter(TypedDict):
     project_parts: tuple[str, ...]
     command: Literal["array", "string"]
     adds_type_local: bool
-    env: Literal["none", "allow_list", "refs"]
+    env: Literal["none", "allow_list", "refs", "refs_braced"]
     delegates: bool
+    user_env_dir: str | None
 
 
 ADAPTERS: dict[AgentName, Adapter] = {
@@ -94,6 +102,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": True,
         "env": "none",
         "delegates": False,
+        "user_env_dir": None,
     },
     "codex": {
         "fmt": "toml",
@@ -104,6 +113,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": False,
         "env": "allow_list",
         "delegates": True,
+        "user_env_dir": None,
     },
     "gemini": {
         "fmt": "json",
@@ -114,6 +124,18 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "adds_type_local": False,
         "env": "refs",
         "delegates": True,
+        "user_env_dir": None,
+    },
+    "pi": {
+        "fmt": "json",
+        "key": "mcpServers",
+        "user_parts": (".pi", "agent", "mcp.json"),
+        "project_parts": (".pi", "mcp.json"),
+        "command": "string",
+        "adds_type_local": False,
+        "env": "refs_braced",
+        "delegates": False,
+        "user_env_dir": "PI_CODING_AGENT_DIR",
     },
 }
 
@@ -164,8 +186,11 @@ def resolve_config_path(
     """Resolve the config file path for *agent* and *scope*.
 
     User scope resolves under ``Path.home()`` (Windows-aware via
-    ``Path.home()``). Project scope resolves under *cwd* (or
-    ``Path.cwd()`` when ``None``).
+    ``Path.home()``), unless the adapter declares a ``user_env_dir`` whose
+    environment variable is set to a non-empty value — then the directory
+    it names replaces the home prefix and the file name is
+    ``user_parts[-1]`` (Pi's ``$PI_CODING_AGENT_DIR/mcp.json``). Project
+    scope resolves under *cwd* (or ``Path.cwd()`` when ``None``).
 
     Args:
         agent: Target agent name.
@@ -178,6 +203,10 @@ def resolve_config_path(
     """
     spec = _adapter(agent)
     if scope == "user":
+        env_dir = spec["user_env_dir"]
+        override = os.environ.get(env_dir) if env_dir else None
+        if override:
+            return Path(override).joinpath(spec["user_parts"][-1])
         return Path.home().joinpath(*spec["user_parts"])
     base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
     return base.joinpath(*spec["project_parts"])
@@ -229,6 +258,9 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
     - gemini: ``env`` is a mapping of known key -> ``$KEY`` reference (Gemini
       CLI expands host environment variables at runtime, so the secret values
       are never persisted to settings.json)
+    - pi: ``env`` is a mapping of known key -> ``${KEY}`` reference — Pi's
+      ``pi-mcp-adapter`` only interpolates the braced form, so the bare
+      ``$KEY`` used by Gemini would be persisted literally
     - opencode: no env forwarding (returns minimal entry); the entry stays
       env-less and the selection-time warning when env would be dropped is
       the CLI's responsibility
@@ -253,6 +285,8 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
         entry["env_vars"] = _present_env_keys(env)
     elif spec["env"] == "refs":
         entry["env"] = {k: f"${k}" for k in _present_env_keys(env)}
+    elif spec["env"] == "refs_braced":
+        entry["env"] = {k: f"${{{k}}}" for k in _present_env_keys(env)}
     return entry
 
 
@@ -267,23 +301,28 @@ def _normalize_command(value: object) -> list[str]:
 def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Return True when *a* and *b* are the same entry for *agent*.
 
-    Codex command string/array variations are normalized before comparison
-    (Codex accepts either form); gemini and opencode compare their shape
-    directly, preserving each agent's on-disk idempotency contract.
+    The comparison follows the adapter's ``env`` capability, so it stays
+    single-sourced: the ``allow_list`` agents (codex) normalize command
+    string/array variations and compare sorted ``env_vars``; the ``refs`` /
+    ``refs_braced`` agents (gemini, pi) compare raw command, ``cwd`` and the
+    ``env`` mapping; the ``none`` agents (opencode) compare full structural
+    equality. Unregistered names also fall back to full equality.
     """
-    if agent == "codex":
+    spec = ADAPTERS.get(agent)
+    env_kind = spec["env"] if spec is not None else None
+    if env_kind == "allow_list":
         if _normalize_command(a.get("command")) != _normalize_command(b.get("command")):
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
         return sorted(a.get("env_vars", [])) == sorted(b.get("env_vars", []))
-    if agent == "gemini":
+    if env_kind in ("refs", "refs_braced"):
         if a.get("command") != b.get("command"):
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
         return a.get("env") == b.get("env")
-    # opencode — no env capability: full structural equality.
+    # opencode (env "none") and unregistered names: full structural equality.
     return a == b
 
 
@@ -389,9 +428,9 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
 def probe_native(agent: AgentName, timeout: float = 3.0) -> bool:
     """Probe whether native ``agent mcp add`` delegation is available.
 
-    Opencode always returns ``False`` (file-edit only). For codex/gemini,
-    checks ``shutil.which`` and runs ``<agent> mcp --help`` with a timeout.
-    Whether an agent delegates comes from :data:`ADAPTERS`.
+    opencode and pi always return ``False`` (file-edit only). For
+    codex/gemini, checks ``shutil.which`` and runs ``<agent> mcp --help``
+    with a timeout. Whether an agent delegates comes from :data:`ADAPTERS`.
 
     Args:
         agent: Agent to probe.
@@ -423,7 +462,7 @@ def delegate_add(agent: AgentName, cwd: Path, env_keys: list[str]) -> bool:
     """Attempt native ``add`` delegation for *agent*.
 
     Only agents whose adapter declares ``delegates=True`` are delegated;
-    the rest (opencode) return ``False``. A single native shape is used —
+    the rest (opencode, pi) return ``False``. A single native shape is used —
     ``<agent> mcp add sofer --command sofer-mcp --cwd <cwd>`` — and a
     non-zero exit falls back to the caller's file edit (no shape retry).
 
@@ -454,7 +493,7 @@ def delegate_remove(agent: AgentName) -> bool:
     """Attempt native ``remove`` delegation for *agent*.
 
     Only agents whose adapter declares ``delegates=True`` are delegated;
-    the rest (opencode) return ``False``.
+    the rest (opencode, pi) return ``False``.
 
     Args:
         agent: Target agent.
