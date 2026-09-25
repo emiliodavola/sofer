@@ -95,7 +95,7 @@ Stdout is never modified, so piping/redirecting output stays byte-identical.
 
 | Key | Default | What it does |
 |---|---|---|
-| `convert_to_parquet` (per `[[file]]`) | `true` | When `true`, `csv/tsv/xlsx/jsonl` are converted to normalized Parquet (`data/GÖT Año.XLSX` → `data/got_ano.parquet`; Excel multi-sheet → `stem__sheet.parquet`). Set `false` to keep the original. `upload_as_csv = true` is a deprecated alias for CSV only. |
+| `convert_to_parquet` (per `[[file]]`) | `true` | When `true`, `csv/tsv/xlsx/jsonl` are converted to normalized Parquet (`raw/GÖT Año.XLSX` → `build/got_ano.parquet`; Excel multi-sheet → `stem__sheet.parquet`). Set `false` to keep the original. `upload_as_csv = true` is a deprecated alias for CSV only. |
 | `parquet_compression` | `zstd` | Parquet compression (`[tool.sofer]`). |
 | `parquet_row_group_size` | `100000` | Parquet row group size. |
 | `parquet_shard_warning_mb` | `500` | Warn when a shard exceeds this MB. |

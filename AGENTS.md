@@ -30,7 +30,7 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 
 ### 4. No duplicated logic
 - If you find yourself copy-pasting a function (even with a different name), extract it to a shared module.
-- Example: `_parquet_to_hf_dtype` was duplicated in `repo_compliance.py` and `uploader.py` — now in `_parquet_helpers.py`.
+- Example: `_parquet_to_hf_dtype` was duplicated in `repo_compliance.py` and `prepare.py` — now in `_parquet_helpers.py`.
 - Example: quality check names were hardcoded in 4 places — now in `quality.QUALITY_CHECK_NAMES`.
 
 ### 5. Pre-commit hooks run automatically
@@ -76,7 +76,9 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Tool config defaults: `config.py` (discovery + reload, profile_dir/render_dir)
 - Format registry: `_formats.py`
 - Each command gets its own domain module: `scanner.py`, `codebook.py`, `prepare.py`, `publish.py`, `profile.py`, `render.py`, `mcp_registration.py`, `mcp_server.py`
-- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`
+- Supporting domains: `checks.py`, `quality.py`, `metadata.py`, `semantic.py`, `pii.py`, `repo_compliance.py`, `splits.py`, `verification.py`, `execution_context.py`, `manifest.py`, `workflow.py`
+- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`, `_patterns.py`, `_toml.py`, `_version.py`
+- The module set is whatever `ls src/sofer/` reports — the directory is the source of truth; the groups above are a reading aid, not an exhaustive list. `__init__.py` is the package docstring + public API.
 - Windows safety: placeholders use `raw/example.csv` (NTFS-valid, `:` reserved — old `TODO: raw/...` was invalid); MCP `sofer_init(cwd=...)` resolves per-call via `_contained_path` + `is_relative_to` as `effective_root` under server root, never mutating global `_SERVER_ROOT`; TOML paths use forward slashes (`raw/`, `cache/`).
 
 ### 11. PR template
