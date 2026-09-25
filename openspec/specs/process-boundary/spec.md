@@ -147,14 +147,14 @@ The suite SHALL cover empty config, existing config, greenfield, triage, nested 
 #### Scenario: Real-process parent-root launch, cwd omitted fails closed
 
 - GIVEN the second module-scoped stdio fixture (PB-09-compliant) spawning the real `sofer-mcp` process with server root = parent dir and an existing child dataset dir, and a live CWD at the parent root
-- WHEN `sofer_init(name="test", user="emiliodavola")` runs over stdio with `cwd` omitted
+- WHEN `sofer_init(name="test", user="<hf-user>")` runs over stdio with `cwd` omitted
 - THEN the call SHALL be refused with an input-required error naming the `cwd` argument
 - AND NO `parent/test.toml` SHALL be written and no `raw/` SHALL be created at the parent
 
 #### Scenario: Real-process parent-root launch, cwd=child anchors identity
 
 - GIVEN the same parent-root stdio fixture and the intended child dataset dir `child/`
-- WHEN `sofer_init(name="test", user="emiliodavola", cwd="child")` runs over stdio
+- WHEN `sofer_init(name="test", user="<hf-user>", cwd="child")` runs over stdio
 - THEN `child/test.toml` and `child/raw/` SHALL exist, `parent/test.toml` SHALL NOT
 - AND the envelope SHALL report absolute `config_path` `child/test.toml` and `dataset_root` `child`
 
