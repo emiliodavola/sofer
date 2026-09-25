@@ -25,6 +25,7 @@ The checker is deterministic, runs offline, and modifies no repository file
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
@@ -638,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     if not registry_path.is_absolute():
         registry_path = repo_root / registry_path
     base_cmd = (
-        shlex.split(args.collect_only_cmd)
+        shlex.split(args.collect_only_cmd, posix=(os.name != "nt"))
         if args.collect_only_cmd
         else [sys.executable, "-m", "pytest"]
     )
