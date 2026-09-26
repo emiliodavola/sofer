@@ -2686,3 +2686,216 @@ class TestInitMoveExistingCoverage:
         assert (tmp_path / "raw").is_dir()
         assert (tmp_path / "a.csv").exists()  # never moved
         assert not (tmp_path / "raw" / "a.csv").exists()
+
+
+class TestExplicitCsvDialectOverride:
+    """Issue #204 — explicit --delimiter/--encoding wins over config (CB-R12/PRF-07).
+
+    In-process carriers keep ``src/sofer/cli.py`` at 100.00% (AGENTS.md rule 14);
+    the subprocess twins prove the user-visible behaviour and the stderr echo.
+    """
+
+    def test_echo_helper_lists_only_supplied_keys(self, capsys) -> None:
+        """The echo names only the supplied keys (never an omitted one)."""
+        cli._echo_explicit_dialect(Namespace())  # neither attribute present
+        assert capsys.readouterr().err == ""
+
+        cli._echo_explicit_dialect(Namespace(delimiter=",", encoding=None))
+        only_delim = capsys.readouterr().err
+        assert "delimiter=','" in only_delim
+        assert "encoding=" not in only_delim
+
+        cli._echo_explicit_dialect(Namespace(delimiter=None, encoding="utf-8"))
+        only_enc = capsys.readouterr().err
+        assert "encoding='utf-8'" in only_enc
+        assert "delimiter=" not in only_enc
+
+        cli._echo_explicit_dialect(Namespace(delimiter=",", encoding="utf-8"))
+        both = capsys.readouterr().err
+        assert "delimiter=','" in both and "encoding='utf-8'" in both
+
+    def test_codebook_explicit_delimiter_wins_in_process(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The explicit ``,`` overrides a disagreeing configured ``;``."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8-sig")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="d.toml",
+                csv=str(csv_path),
+                output=None,
+                max_sample=None,
+                delimiter=",",
+                encoding=None,
+            )
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "| 1 | `name`" in captured.out, captured.out
+        assert "| 2 | `age`" in captured.out, captured.out
+        assert "delimiter=','" in captured.err
+
+    def test_codebook_omitted_is_unchanged_in_process(self, tmp_path, monkeypatch, capsys) -> None:
+        """Omitting the flags reproduces the config path byte-for-byte, no echo."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ",")
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8-sig")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+        base = dict(
+            all_files=False, config="d.toml", csv=str(csv_path), output=None, max_sample=None
+        )
+
+        # Namespace without delimiter/encoding: the pre-change expression runs.
+        rc = cli._cmd_codebook(Namespace(**base))
+        omitted = capsys.readouterr()
+        assert rc == 0
+        assert omitted.err == ""
+        assert "| 1 | `name`" in omitted.out and "| 2 | `age`" in omitted.out
+
+        # Explicitly passing the configured value must produce the same stdout.
+        rc = cli._cmd_codebook(Namespace(**base, delimiter=",", encoding="utf-8-sig"))
+        explicit = capsys.readouterr()
+        assert rc == 0
+        assert explicit.out == omitted.out
+        assert "delimiter=','" in explicit.err and "encoding='utf-8-sig'" in explicit.err
+
+    def test_codebook_all_files_passes_explicit_flags(self, tmp_path, monkeypatch) -> None:
+        """``--all-files`` forwards the explicit pair into ``generate_all``."""
+        (tmp_path / "data.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        seen: dict[str, object] = {}
+
+        def _spy(cfg, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(cli, "generate_all_codebooks", _spy)
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=True,
+                config=str(toml),
+                csv=None,
+                output=None,
+                max_sample=None,
+                delimiter=",",
+                encoding="cp1252",
+            )
+        )
+        assert rc == 0
+        assert seen["delimiter"] == ","
+        assert seen["encoding"] == "cp1252"
+
+    def test_profile_single_passes_explicit_flags(self, tmp_path, monkeypatch, capsys) -> None:
+        """The single-file profile run receives the explicit pair."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8-sig")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("col_a,col_b\n1,2\n", encoding="utf-8-sig")
+        seen: dict[str, object] = {}
+        real_run_profile = cli.run_profile
+
+        def _spy(dataset_path, **kwargs):
+            seen.update(kwargs)
+            return real_run_profile(dataset_path, **kwargs)
+
+        monkeypatch.setattr(cli, "run_profile", _spy)
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=str(csv_path),
+                output=None,
+                all_files=False,
+                force=False,
+                delimiter=",",
+                encoding=None,
+            )
+        )
+        assert rc == 0
+        assert seen["delimiter"] == ","
+        assert seen["encoding"] is None
+        assert "delimiter=','" in capsys.readouterr().err
+
+    def test_profile_all_files_passes_explicit_flags(self, tmp_path, monkeypatch) -> None:
+        """``--all-files`` forwards the explicit pair into ``generate_all_profiles``."""
+        import sofer.profile as profile_mod
+
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        seen: dict[str, object] = {}
+
+        def _spy(cfg, output_dir=None, delimiter=None, encoding=None):
+            seen.update(output_dir=output_dir, delimiter=delimiter, encoding=encoding)
+            return []
+
+        monkeypatch.setattr(profile_mod, "generate_all_profiles", _spy)
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=None,
+                output=None,
+                all_files=True,
+                force=False,
+                config=str(toml),
+                delimiter=",",
+                encoding="cp1252",
+            )
+        )
+        assert rc == 0
+        assert seen["delimiter"] == ","
+        assert seen["encoding"] == "cp1252"
+
+    def test_codebook_help_lists_dialect_flags(self, capsys) -> None:
+        with _pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["codebook", "--help"])
+        codebook_help = capsys.readouterr().out
+        assert "--delimiter" in codebook_help
+        assert "--encoding" in codebook_help
+
+    def test_profile_help_lists_dialect_flags(self, capsys) -> None:
+        with _pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["profile", "--help"])
+        profile_help = capsys.readouterr().out
+        assert "--delimiter" in profile_help
+        assert "--encoding" in profile_help
+
+    def test_subprocess_explicit_delimiter_wins_and_echoes(self, tmp_path) -> None:
+        """End-to-end: explicit wins over config and is echoed on stderr."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\ncsv_delimiter = ";"\n', encoding="utf-8"
+        )
+        (tmp_path / "data.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+
+        result = run_cli(
+            ["codebook", "data.csv", "--delimiter", ","],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "utf-8"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "| 1 | `name`" in result.stdout, result.stdout
+        assert "| 2 | `age`" in result.stdout, result.stdout
+        assert "delimiter=','" in result.stderr, result.stderr
+
+    def test_subprocess_omitted_emits_no_echo(self, tmp_path) -> None:
+        """End-to-end: omitting the flags leaves stderr free of the echo."""
+        (tmp_path / "data.csv").write_text("col_a;col_b\n1;2\n", encoding="utf-8-sig")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env={"PYTHONIOENCODING": "utf-8"})
+
+        assert result.returncode == 0, result.stderr
+        assert "Explicit dialect" not in result.stderr, result.stderr

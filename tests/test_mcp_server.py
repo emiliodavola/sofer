@@ -5381,3 +5381,95 @@ class TestCodebookAllMaxSample:
         cb = tmp_path / "build" / "codebooks" / "data.md"
         assert cb.is_file(), envelope
         assert "Analysed rows:** 2 (full scan)" in cb.read_text(encoding="utf-8")
+
+
+class TestExplicitCsvDialectOverrideMcp:
+    """Issue #204 — explicit delimiter/encoding on the CSV-reading MCP tools (MSP-R18)."""
+
+    def test_codebook_explicit_delimiter_wins_and_echoes(self, tmp_path, restore_tool_config):
+        (tmp_path / "comma.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_codebook", {"path": "comma.csv", "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert "| 1 | `name`" in envelope["output"], envelope["output"]
+        assert "| 2 | `age`" in envelope["output"], envelope["output"]
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+
+    def test_codebook_omitted_dialect_is_none(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)  # ';'-delimited data.csv
+        server = build_server(root=tmp_path)
+
+        omitted = _call(server, "sofer_codebook", {"path": "data.csv"}).data
+        assert omitted["ok"] is True, omitted
+        assert omitted["dialect"] is None
+
+        explicit = _call(server, "sofer_codebook", {"path": "data.csv", "delimiter": ";"}).data
+        assert explicit["output"] == omitted["output"]
+        assert explicit["dialect"] == {"delimiter": ";", "encoding": None}
+
+    def test_profile_explicit_delimiter_wins_and_echoes(self, tmp_path, restore_tool_config):
+        import yaml
+
+        (tmp_path / "comma.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile", {"dataset": "comma.csv", "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+        data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+    def test_profile_omitted_dialect_is_none(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile", {"dataset": "data.csv"}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] is None
+
+    @staticmethod
+    def _comma_dataset(tmp_path: Path) -> Path:
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "comma.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8-sig")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[meta]\ncsv_delimiter = ";"\n\n'
+            '[[file]]\nlocal = "cache/comma.csv"\nremote = "comma.csv"\n',
+            encoding="utf-8",
+        )
+        return toml
+
+    def test_codebook_all_explicit_delimiter_wins_over_meta(self, tmp_path, restore_tool_config):
+        toml = self._comma_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_codebook_all", {"config": str(toml), "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+        cb = tmp_path / "build" / "codebooks" / "comma.md"
+        assert cb.is_file(), envelope
+        text = cb.read_text(encoding="utf-8")
+        assert "| 1 | `col_a`" in text and "| 2 | `col_b`" in text
+
+    def test_profile_all_explicit_delimiter_wins(self, tmp_path, restore_tool_config):
+        import yaml
+
+        toml = self._comma_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile_all", {"config": str(toml), "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+        out = tmp_path / "cache" / "profiles" / "comma.metadata.yaml"
+        assert out.is_file(), envelope
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]

@@ -1026,3 +1026,92 @@ class TestProfileBatchPrf05Next:
         err = capsys.readouterr().err
         assert "Collision:" in err
         assert "x.csv" in err and "x.parquet" in err
+
+
+class TestProfileExplicitDialectPrf07:
+    """PRF-07 — an explicit delimiter/encoding wins over the resolved config."""
+
+    def test_explicit_delimiter_wins_over_config(self, tmp_path, restore_tool_config):
+        """A comma CSV read with an explicit ``,`` splits into two columns."""
+        import sofer.config as cfg
+
+        cfg.reload(tmp_path)  # default csv_delimiter is ";"
+        csv_path = tmp_path / "comma.csv"
+        _write_csv(csv_path, [["col_a", "col_b"], ["1", "2"]], delimiter=",")
+
+        assert profile(csv_path, delimiter=",") == 0
+
+        data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+    def test_tsv_stays_tab_delimited_with_explicit_delimiter(self, tmp_path, restore_tool_config):
+        """`.tsv` is tab-delimited by format; the explicit delimiter does not apply."""
+        import sofer.config as cfg
+
+        cfg.reload(tmp_path)
+        tsv_path = tmp_path / "data.tsv"
+        tsv_path.write_text("col_a\tcol_b\n1\t2\n", encoding="utf-8")
+
+        assert profile(tsv_path, delimiter=",") == 0
+
+        data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == "\t"
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+    def test_explicit_encoding_wins_over_config(self, tmp_path, restore_tool_config):
+        """A cp1252-only byte decodes under the explicit encoding."""
+        import sofer.config as cfg
+
+        cfg.reload(tmp_path)  # default csv_encoding is utf-8-sig
+        csv_path = tmp_path / "latin.csv"
+        csv_path.write_bytes(b"col_a,col_b\nAna,M\xe1laga\n")
+
+        assert profile(csv_path, delimiter=",", encoding="cp1252") == 0
+
+        data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert data["file"]["encoding"] == "cp1252"
+
+    def test_omitted_matches_explicit_configured_values(
+        self, tmp_path, restore_tool_config, monkeypatch
+    ):
+        """Omitting the pair is byte-identical to passing the configured values."""
+        import sofer.config as cfg
+
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+        cfg.reload(tmp_path)
+        csv_path = tmp_path / "data.csv"
+        _write_csv(csv_path, [["col_a", "col_b"], ["1", "2"]], delimiter=";")
+
+        assert profile(csv_path) == 0
+        baseline = (tmp_path / "metadata.yaml").read_bytes()
+
+        assert (
+            profile(
+                csv_path,
+                force=True,
+                delimiter=cfg.CSV_DELIMITER,
+                encoding=cfg.CSV_ENCODING,
+            )
+            == 0
+        )
+        assert (tmp_path / "metadata.yaml").read_bytes() == baseline
+
+    def test_batch_explicit_delimiter_wins(self, tmp_path, restore_tool_config):
+        """`generate_all_profiles` forwards the explicit pair to the streamed read."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = _write_dataset_toml(tmp_path, ["cache/a.csv"])
+        dataset_cfg = DatasetConfig.from_toml(toml)
+
+        generate_all_profiles(dataset_cfg, delimiter=",")
+
+        out = tmp_path / "cache" / "profiles" / "a.metadata.yaml"
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]

@@ -125,6 +125,8 @@ AREAS: list[AreaParity] = [
         flag_map={
             "output": "output_file",
             "max_sample": "max_sample",
+            "delimiter": "delimiter",  # #204: explicit dialect override on both surfaces
+            "encoding": "encoding",  # #204
         },
         positionals={"csv": "path"},  # CLI positional FILE (dest csv) → sofer_codebook.path
         exempt_flags={
@@ -139,7 +141,12 @@ AREAS: list[AreaParity] = [
     AreaParity(
         cli_command="profile",
         mcp_tools=("sofer_profile", "sofer_profile_all"),
-        flag_map={"output": "output_dir", "force": "force"},
+        flag_map={
+            "output": "output_dir",
+            "force": "force",
+            "delimiter": "delimiter",  # #204: explicit dialect override on both surfaces
+            "encoding": "encoding",  # #204
+        },
         positionals={"dataset": "dataset"},
         exempt_flags={
             "all_files": "redesign: batch moved to sofer_profile_all tool (spec 10.6)",
