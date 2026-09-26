@@ -45,19 +45,20 @@ no reference is resolved.
 
 ```text
 $ uv run pytest tests/test_test_mapping_checker.py tests/test_ci_workflows.py -q
-68 passed
+67 passed
 
 $ uv run pytest \
     tests/test_test_mapping_checker.py::test_scenario_regex_matches_only_four_hash_headings \
-    tests/test_test_mapping_checker.py::test_indented_four_hash_heading_is_enumerated \
     tests/test_test_mapping_checker.py::test_verify_rows_reported_as_declared_escape_hatch \
     tests/test_ci_workflows.py::test_verify_escape_hatch_has_owner_and_review_trigger -v
-4 passed
+3 passed
 ```
 
 The `SCENARIO_RE` pin proves a `###`/`#####`/`###### Scenario:` heading is **not** enumerated (a row
-naming it fails as a non-existent scenario) while an indented four-hash heading **is**. The
-`process-boundary` bijection (52 scenarios / 52 rows) is enforced by the checker exit 0 above.
+naming it fails as a non-existent scenario) while an indented four-hash heading **is** — both clauses
+in the single referenced node `test_scenario_regex_matches_only_four_hash_headings`, so the PB-15
+scenario is fully covered by its mapping row. The `process-boundary` bijection (52 scenarios / 52
+rows) is enforced by the checker exit 0 above.
 
 ## 5. Full suite (tally re-derived on this branch, never quoted)
 
