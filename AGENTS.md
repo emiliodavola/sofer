@@ -73,6 +73,11 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Check if a dependency is already transitive before adding it (pyarrow comes via huggingface-hub).
 - New dependencies go in `pyproject.toml` `dependencies`, not `dev-dependencies`, unless they're test-only.
 - Prefer format-native readers over heavy dependencies (openpyxl over pandas for Excel).
+- Dependency bumps (spec `ci` CI-13/CI-14): minor/patch are grouped and automatic; majors stay
+  ungrouped and require explicit adaptation review. `ruff` is a coordinated multi-home pin and
+  `fastmcp` majors are ignored in `.github/dependabot.yml`; see CONTRIBUTING → Dependency updates
+  for the manual bump procedure. Version declarations live in more than one home — move every home
+  together, and let the guards in `tests/test_ci_workflows.py` catch the drift.
 
 ### 10. Architecture: one module per concern
 - CLI dispatch: `cli.py` (10 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)

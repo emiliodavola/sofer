@@ -5,6 +5,19 @@
 # scanning needs GitHub Code Security there); it keeps working unchanged once
 # the repository is public. Alerts themselves are toggled in
 # Settings → Code security; this file drives the update pull requests.
+#
+# Bump policy (CI-14, GitHub #251/#252/#253):
+#   * Minor/patch updates are grouped and automatic.
+#   * Major updates are deliberately NOT included in any group (`update-types`
+#     is minor/patch only), so each arrives as its own PR for explicit review.
+#   * `ruff` is ignored entirely: its single version is coordinated across the
+#     pyproject dev pin AND `[tool.ruff] required-version`, the
+#     `astral-sh/ruff-pre-commit` rev, and CONTRIBUTING.md, forced to agree by
+#     CI-08; the `uv` ecosystem can move only the first, so every PR it would
+#     open is red (#252). Bump all homes together — see CONTRIBUTING.md.
+#   * `fastmcp` majors are ignored: a major changes the MCP SDK API and needs a
+#     code-adapting change, and Dependabot otherwise rewrites the declared `<4`
+#     cap itself (#253). Minor/patch fastmcp updates remain enabled.
 version: 2
 updates:
   - package-ecosystem: "uv"
@@ -15,6 +28,10 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "ruff"
+      - dependency-name: "fastmcp"
+        update-types: ["version-update:semver-major"]
     groups:
       python-minor-and-patch:
         patterns: ["*"]
