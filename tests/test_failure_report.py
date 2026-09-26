@@ -59,6 +59,103 @@ class TestAnonymize:
         assert "~" in out
 
 
+class TestContextFromParts:
+    def test_error_type_detected_and_command_anonymized(self) -> None:
+        ctx = failure_report.context_from_parts(
+            "sofer_validate",
+            "ValueError: bad at /home/alice/x.csv",
+            "Trace /home/alice/x.csv",
+            home=Path("/home/alice"),
+        )
+        assert ctx.command == "sofer_validate"
+        assert ctx.argv == ("sofer_validate",)
+        assert ctx.error_type == "ValueError"
+        assert ctx.error_message == "ValueError: bad at ~/x.csv"
+        assert "/home/alice" not in ctx.traceback_text
+
+    def test_error_type_falls_back_to_failure(self) -> None:
+        ctx = failure_report.context_from_parts("", "something went wrong")
+        assert ctx.command == "sofer"
+        assert ctx.error_type == "Failure"
+        assert ctx.argv == ()
+
+    def test_lowercase_data_token_is_not_promoted_to_error_type(self) -> None:
+        ctx = failure_report.context_from_parts(
+            "sofer_validate", "Column not found: temperatureError in /home/alice/data.csv"
+        )
+        assert ctx.error_type == "Failure"
+
+
+class TestDuplicateSearch:
+    def test_query_uses_only_command_and_error_type(self) -> None:
+        query = failure_report.duplicate_query("sofer_validate", "ValueError")
+        assert query == "sofer_validate ValueError"
+
+    def test_query_token_cap_is_config_driven(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "FAILURE_REPORT_DUPLICATE_QUERY_TOKENS", 2)
+        assert failure_report.duplicate_query("a_b c_d e_f", "ValueError") == "a_b c_d"
+
+    def test_search_missing_gh_returns_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(failure_report.shutil, "which", lambda _name: None)
+        matches, reason = failure_report.search_open_issues("o/r", "q")
+        assert matches == []
+        assert reason == "gh CLI not found"
+
+    def test_search_unauthenticated_returns_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(failure_report.shutil, "which", lambda _name: "/usr/bin/gh")
+        monkeypatch.setattr(
+            failure_report.subprocess, "run", _fake_run({"auth status": (1, "", "no")})
+        )
+        matches, reason = failure_report.search_open_issues("o/r", "q")
+        assert matches == []
+        assert reason == "gh is not authenticated"
+
+    def test_search_parses_open_issues(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(failure_report.shutil, "which", lambda _name: "/usr/bin/gh")
+        payload = json.dumps([{"number": 1, "title": "dup", "url": "u"}])
+        monkeypatch.setattr(
+            failure_report.subprocess,
+            "run",
+            _fake_run({"auth status": (0, "", ""), "issue list": (0, payload, "")}),
+        )
+        matches, reason = failure_report.search_open_issues("o/r", "q")
+        assert matches == [{"number": 1, "title": "dup", "url": "u"}]
+        assert reason is None
+
+    def test_search_gh_failure_returns_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(failure_report.shutil, "which", lambda _name: "/usr/bin/gh")
+        monkeypatch.setattr(
+            failure_report.subprocess,
+            "run",
+            _fake_run({"auth status": (0, "", ""), "issue list": (1, "", "boom")}),
+        )
+        matches, reason = failure_report.search_open_issues("o/r", "q")
+        assert matches == []
+        assert reason == "gh issue list failed"
+
+    def test_search_bad_json_returns_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(failure_report.shutil, "which", lambda _name: "/usr/bin/gh")
+        monkeypatch.setattr(
+            failure_report.subprocess,
+            "run",
+            _fake_run({"auth status": (0, "", ""), "issue list": (0, "not json", "")}),
+        )
+        matches, reason = failure_report.search_open_issues("o/r", "q")
+        assert matches == []
+        assert reason == "could not parse gh output"
+
+    def test_search_non_list_json_returns_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(failure_report.shutil, "which", lambda _name: "/usr/bin/gh")
+        monkeypatch.setattr(
+            failure_report.subprocess,
+            "run",
+            _fake_run({"auth status": (0, "", ""), "issue list": (0, '{"a": 1}', "")}),
+        )
+        matches, reason = failure_report.search_open_issues("o/r", "q")
+        assert matches == []
+        assert reason == "unexpected gh output"
+
+
 class TestStateHome:
     def test_override_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SOFER_STATE_HOME", str(tmp_path / "s"))

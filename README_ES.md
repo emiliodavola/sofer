@@ -343,7 +343,7 @@ canalización.
 | `validate <config.toml>` | Verifica la configuración, la integridad de los datos y los controles de calidad. Nunca contacta con HF. |
 | `report-failure <file>` | Reintenta el envío de un reporte de fallo persistido por el reportero asistido (JSON bajo el directorio de estado de sofer). Imprime la URL del issue creado en caso de éxito, o la ruta guardada, el comando de reintento, la URL manual `github.com/<repo>/issues/new` y `gh auth login` cuando `gh` falta, no está autenticado o no hay red. |
 | `--help` | Ayuda detallada para cualquier comando. |
-| `sofer-mcp` | Lanza el servidor MCP por stdio (14 herramientas, 4 recursos, 3 prompts). Requiere el extra mcp — ver AI and MCP server. |
+| `sofer-mcp` | Lanza el servidor MCP por stdio (15 herramientas, 4 recursos, 3 prompts). Requiere el extra mcp — ver AI and MCP server. |
 
 > `sofer upload` se eliminó en favor de `prepare` + `publish` — la mitad de
 > generación (sin conexión, inspeccionable) y la mitad de entrega (red).
@@ -401,7 +401,8 @@ La ubicación del estado se puede sobrescribir con `SOFER_STATE_HOME`; el
 repositorio destino y los límites del reporte son claves de `[tool.sofer]`
 (`failure_report_repo`, `failure_report_dir`,
 `failure_report_traceback_max_chars`, `failure_report_manual_url_max_chars`,
-`failure_report_gh_timeout_seconds`).
+`failure_report_gh_timeout_seconds`, `failure_report_duplicate_limit`,
+`failure_report_duplicate_query_tokens`).
 
 ## Formatos de datos soportados
 
@@ -583,11 +584,11 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 14 callables de herramientas (`sofer_validate`,
+El servidor expone 15 callables de herramientas (`sofer_validate`,
 `sofer_prepare`, `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`), 4 recursos (`sofer://dataset/{config}`,
+`sofer_auth_status`, `sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
 `sofer://codebook/{data_file}`, `sofer://metadata/{data_file}` y el recurso
 estático `sofer://status`) y 3 prompts
 (`prepare_dataset`, `assess_dataset`, `finalize_and_publish`). No se expone
@@ -630,6 +631,13 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Solo tras aprobación humana. |
 | * | `sofer_auth_status` | `config` | Preflight sin publicar; `readOnlyHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Codebook de un archivo. |
+| * | `sofer_report_failure` | `error`, `command`, `trace`, `confirm`, `force` | Prepara un reporte de fallo confidencial y (solo con `confirm=true`) lo envía vía `gh`; antes busca issues abiertos duplicados. `openWorldHint:true`. |
+
+`sofer_report_failure` nunca incluye contenido del dataset ni valores de variables de entorno y
+anonimiza las rutas home a `~`. Con el default `confirm=false` devuelve el cuerpo, el título, la
+URL manual y los issues abiertos que coincidan sin crear nada; `confirm=true` envía el issue (o lo
+persiste localmente cuando `gh` falta, no está autenticado o no hay red). Ver
+[Reporte asistido de fallos](#reporte-asistido-de-fallos).
 
 Los prompts `prepare_dataset`, `assess_dataset` y `finalize_and_publish` codifican esta cadena con args por paso y ejemplos copy-paste; `assess_dataset` usa el subconjunto `sofer_validate → sofer_profile(dataset) → sofer_render(package)` para triage de un solo archivo.
 

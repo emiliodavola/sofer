@@ -191,6 +191,8 @@ failure_report_repo = "emiliodavola/sofer"
 failure_report_traceback_max_chars = 20_000
 failure_report_manual_url_max_chars = 6_000
 failure_report_gh_timeout_seconds = 30
+failure_report_duplicate_limit = 5
+failure_report_duplicate_query_tokens = 8
 
 # ── Schema report ──
 # Rows sampled per file for schema inference (schema report + card footnote).

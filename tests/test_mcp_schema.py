@@ -1,7 +1,7 @@
 """MCP DX audit — schema and affordance tests (10.1-10.12).
 
 Offline asserts via build_server()._list_tools() without network or LLM.
-Covers: 14 tools, enum, no legacy params, annotations, output_schema,
+Covers: 15 tools, enum, no legacy params, annotations, output_schema,
 single UNTRUSTED, Bootstrap wording, envelope, and happy path fixtures.
 """
 
@@ -62,9 +62,9 @@ def _schema_has_description(schema: Any) -> bool:
 
 
 class TestToolCount:
-    def test_fourteen_tools(self, tmp_path: Path):
+    def test_fifteen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 14, sorted(tools.keys())
+        assert len(tools) == 15, sorted(tools.keys())
         expected = {
             "sofer_validate",
             "sofer_prepare",
@@ -80,6 +80,7 @@ class TestToolCount:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_report_failure",
         }
         assert set(tools.keys()) == expected
 
@@ -212,6 +213,7 @@ class TestAnnotations:
             "sofer_render_all",
             "sofer_scan_apply",
             "sofer_init",
+            "sofer_report_failure",
         }
     )
 
@@ -221,7 +223,7 @@ class TestAnnotations:
         Every tool that writes files (codebooks, metadata profiles, README
         renders, scan_apply registration, init scaffolding, prepare, publish)
         must report readOnlyHint False so agents treat it as side-effecting.
-        The roster partition covers all 14 tools.
+        The roster partition covers all 15 tools.
         """
         tools = _tools_dict(tmp_path)
         assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS

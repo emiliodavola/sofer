@@ -148,7 +148,9 @@ The state directory and the target repository of the assisted failure reporter
 | `failure_report_dir` | `failure-reports` | Subdirectory of sofer's state home (`~/.local/state/sofer`, `%LOCALAPPDATA%\sofer` on Windows, overridable with `SOFER_STATE_HOME`) holding one timestamped JSON report per unsent failure. |
 | `failure_report_traceback_max_chars` | `20000` | Cap on the traceback embedded in a report; the head and tail are kept with a truncation marker. |
 | `failure_report_manual_url_max_chars` | `6000` | Body length above which the manual `issues/new` URL prefills only the title; the body stays in the saved file for copy/paste. |
-| `failure_report_gh_timeout_seconds` | `30` | Timeout for each `gh` subprocess call (`auth status`, `issue create`). |
+| `failure_report_gh_timeout_seconds` | `30` | Timeout for each `gh` subprocess call (`auth status`, `issue list`, `issue create`). |
+| `failure_report_duplicate_limit` | `5` | Maximum open issues returned by the MCP duplicate search (`sofer_report_failure`). |
+| `failure_report_duplicate_query_tokens` | `8` | Identifier tokens kept from the anonymized command + error TYPE when building the duplicate-search query (message text is never searched). |
 
 Reports never contain dataset contents, environment-variable values, or
 un-anonymized home paths, and nothing is filed without explicit consent.
