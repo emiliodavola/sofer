@@ -421,12 +421,59 @@ NOT be asserted from pytest (the suite spawns no `pre-commit`).
 - AND `uv run pre-commit run ruff-format --all-files` SHALL show no Markdown batch — no `files were modified by this hook` — listing only `python` / `pyi` / `jupyter` inputs
 - AND `git diff --stat -- README.md README_ES.md` SHALL be empty afterwards
 - AND the hook's **file-list output**, not its exit code, SHALL be the discriminating evidence: the entry is the fixing command `ruff format --force-exclude`, which exits 0 after rewriting (the #195 trap)
-- AND this evidence is **verify-phase runtime evidence** — the commands above pasted with their exit codes into the verify report (PB-10 / CI-08 S4 precedent)
+- AND this evidence is **verify-phase runtime evidence** — the commands above pasted with their exit
+  codes into the verify report (PB-10 / CI-08 S4 precedent)
+
+### Requirement: Declared, non-verifiable `verify:` escape hatch with an owner and a review trigger (PB-15)
+
+> Added by change `2026-09-26-chore-234-verify-escape-hatch` (issue #234).
+
+`AGENTS.md` rule 6 SHALL state plainly that a `verify:` row is a **declared, non-verifiable** escape
+hatch: it names an evidence class, it does **not** prove its scenario, and no mechanism re-checks it.
+Rule 6 SHALL name the escape hatch's **owner** (the repository maintainer) and its **review trigger**
+(any change to a `verify:` row or to a spec's evidence class, and each release review). The
+`openspec/config.yaml` `rules.specs` bullet SHALL state the same, so the two normative homes agree.
+The checker `scripts/check_test_mapping.py` SHALL state the same policy in its module docstring and
+SHALL report, on every run, the number of `verify:` rows it accepted as declared evidence, labelled
+non-verifiable and naming the owner and review trigger. The checker SHALL NOT resolve, execute, or
+otherwise verify a `verify:` reference (that would be the rejected option (a) of issue #234). The
+unmapped specs in `openspec/test-mapping-registry.md` SHALL be recorded as a **permanent declared
+backlog** — not pending work — with the same owner and review trigger. The checker's scenario grammar
+`SCENARIO_RE` SHALL be documented as matching exactly the four-hash `#### Scenario:` level and SHALL be
+pinned by tests.
+
+#### Scenario: Rule 6 and the config state the escape hatch is non-verifiable with owner and trigger
+
+- GIVEN `AGENTS.md` rule 6 and `openspec/config.yaml` `rules.specs` after the change
+- WHEN the two normative homes are inspected
+- THEN each SHALL state that a `verify:` row is declared and non-verifiable (not proof)
+- AND each SHALL name the owner (the repository maintainer) and the review trigger
+
+#### Scenario: The checker reports accepted verify rows as declared, non-verifiable evidence
+
+- GIVEN a mapped spec carrying at least one `verify:` row
+- WHEN the checker runs
+- THEN its output SHALL report the number of accepted `verify:` rows as declared evidence
+- AND the report SHALL label them non-verifiable and name the owner and the review trigger
+- AND the checker SHALL NOT resolve or execute any `verify:` reference
+
+#### Scenario: The registry records the permanent declared-backlog decision
+
+- GIVEN `openspec/test-mapping-registry.md` after the change
+- WHEN it is inspected for the policy on the unmapped specs
+- THEN it SHALL state that they are a permanent declared backlog, not pending work
+- AND it SHALL name the owner and the review trigger
+
+#### Scenario: SCENARIO_RE matches exactly the four-hash level
+
+- GIVEN a spec whose only scenario headings are `### Scenario:` or `##### Scenario:`
+- WHEN the checker enumerates scenarios
+- THEN those headings SHALL NOT be enumerated (a row naming them fails as a non-existent scenario)
+- AND an indented `#### Scenario:` heading SHALL be enumerated
 
 ---
 
 ## Test Mapping
-
 Every `#### Scenario:` in this spec appears in exactly one row below — the full scenario↔row bijection
 (`mapping-checker` MC-02; AGENTS.md rule 6; rules.specs). Static config assertions live in
 `tests/test_ci_workflows.py`; the remaining rows route to declared verify-phase evidence (`verify:`),
@@ -484,3 +531,7 @@ not a machine-verified claim that a test exercises the scenario.
 | PB-13 | No test leaks a token to a later test (issue #176) | verify:Verify-phase runtime evidence — same-process ordering of `tests/test_mcp_server.py:3168` before `tests/test_mcp_registration.py::TestMerge::test_codex_normalize_string_vs_array`; the victim observes no `HF_TOKEN` and passes |
 | PB-14 | The hook declares its own scope and excludes Markdown | test:tests/test_ci_workflows.py::test_ruff_format_hook_excludes_markdown — YAML inspection of the `ruff-format` hook entry in `.pre-commit-config.yaml` |
 | PB-14 | The hook no longer receives Markdown and leaves the READMEs untouched | verify:Verify-phase runtime evidence — `uv run pre-commit run ruff-format --files README.md` and `--all-files`, plus an empty `git diff --stat -- README.md README_ES.md` |
+| PB-15 | Rule 6 and the config state the escape hatch is non-verifiable with owner and trigger | test:tests/test_ci_workflows.py::test_verify_escape_hatch_has_owner_and_review_trigger — text inspection of `AGENTS.md` rule 6, `openspec/config.yaml` `rules.specs`, and the registry |
+| PB-15 | The checker reports accepted verify rows as declared, non-verifiable evidence | test:tests/test_test_mapping_checker.py::test_verify_rows_reported_as_declared_escape_hatch — stdout of a fixture run |
+| PB-15 | The registry records the permanent declared-backlog decision | test:tests/test_ci_workflows.py::test_verify_escape_hatch_has_owner_and_review_trigger — registry text inspection |
+| PB-15 | SCENARIO_RE matches exactly the four-hash level | test:tests/test_test_mapping_checker.py::test_scenario_regex_matches_only_four_hash_headings — fixture runs |

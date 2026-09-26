@@ -386,3 +386,74 @@ def test_real_repository_tree_is_compliant() -> None:
         check=False,
     )
     assert result.returncode == 0, _combined(result)
+
+
+# ── Issue #234: escape-hatch honesty, registry policy, SCENARIO_RE pin ────────
+
+
+def _spec_with_heading(heading_line: str, scenario: str) -> str:
+    """Build a one-scenario mapped spec whose scenario heading is ``heading_line``."""
+    return (
+        "# alpha Specification\n\n"
+        "## Requirements\n\n"
+        f"{heading_line}\n\n"
+        "- GIVEN a thing\n- WHEN it runs\n- THEN it works\n\n"
+        "## Test Mapping\n\n"
+        "| Req | Scenario | Verification |\n"
+        "| --- | --- | --- |\n"
+        f"| X-01 | {scenario} | verify:declared evidence |\n"
+    )
+
+
+def test_scenario_regex_matches_only_four_hash_headings(tmp_path: Path) -> None:
+    """SCENARIO_RE pin: only the four-hash ``#### Scenario:`` level is a scenario heading.
+
+    A row naming a scenario whose heading uses a different level (``###`` or
+    ``#####``/``######``) must fail as a non-existent scenario, proving the
+    heading is not enumerated. Symmetrically, an indented four-hash heading IS
+    enumerated (issue #234 AC-3).
+    """
+    for heading in ("### Scenario: Alpha", "##### Scenario: Alpha", "###### Scenario: Alpha"):
+        case = tmp_path / f"case{heading.count('#')}"
+        _write(case, "openspec/specs/alpha/spec.md", _spec_with_heading(heading, "Alpha"))
+        _write(case, "openspec/specs/beta/spec.md", _unmapped_spec())
+        _registry(case, [("beta", "declared backlog")])
+        result = _run_checker(case)
+        assert result.returncode != 0, f"{heading!r} must not be enumerated"
+        assert "does not exist" in _combined(result)
+
+    indented = tmp_path / "case-indented"
+    _write(
+        indented,
+        "openspec/specs/alpha/spec.md",
+        _spec_with_heading("    #### Scenario: Alpha", "Alpha"),
+    )
+    _write(indented, "openspec/specs/beta/spec.md", _unmapped_spec())
+    _registry(indented, [("beta", "declared backlog")])
+    positive = _run_checker(indented)
+    assert positive.returncode == 0, _combined(positive)
+
+
+def test_verify_rows_reported_as_declared_escape_hatch(tmp_path: Path) -> None:
+    """PB-15 / issue #234: accepted ``verify:`` rows are reported as declared, non-verifiable.
+
+    The checker must name the count, label the rows non-verifiable, and state the
+    owner and review trigger — without resolving the reference.
+    """
+    _write(
+        tmp_path,
+        "openspec/specs/alpha/spec.md",
+        _spec_with_rows(
+            "Alpha scenario",
+            ["| X-01 | Alpha scenario | verify:Verify-phase runtime evidence |"],
+        ),
+    )
+    _write(tmp_path, "openspec/specs/beta/spec.md", _unmapped_spec())
+    _registry(tmp_path, [("beta", "declared backlog")])
+    result = _run_checker(tmp_path)
+    assert result.returncode == 0, _combined(result)
+    output = _combined(result)
+    assert "verify: 1 declared evidence row(s)" in output
+    assert "non-verifiable escape hatch" in output
+    assert "the repository maintainer" in output
+    assert "each release review" in output

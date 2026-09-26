@@ -41,7 +41,11 @@ rules:
       (verify:); every data row of a `## Test Mapping` table begins with exactly one such prefix.
     - The test-mapping checker (scripts/check_test_mapping.py) verifies that a `test:` reference exists
       and is collected by pytest — existence/collection, not exercise. Specs without a table are
-      recorded in openspec/test-mapping-registry.md and stay outside the gate until they adopt one.
+      recorded in openspec/test-mapping-registry.md as a permanent declared backlog, not pending work.
+    - A `verify:` row is a declared, non-verifiable escape hatch — it names an evidence class, it does
+      not prove its scenario, and no mechanism re-checks it. Owner is the repository maintainer.
+      Review trigger is any change to a `verify:` row or to a spec's evidence class, and each release
+      review. The checker reports the accepted `verify:` count on every run.
   design:
     - Follow the one-module-per-concern layout; document orchestration flow for _cmd_* handlers.
     - Document architecture decisions with rationale; update CLI help= and README in the same change.

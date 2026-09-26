@@ -46,10 +46,14 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
   class). The contract of record is the `test-mapping-contract` capability.
 - The gate (`scripts/check_test_mapping.py`, run in CI's `lint` job) verifies that a `test:` reference
   **exists and is collected by pytest**. That is an existence/collection check, not proof that the
-  referenced test exercises the scenario; a `verify:` row is the declared escape hatch, never proof.
-- Specs without a `## Test Mapping` table are recorded in `openspec/test-mapping-registry.md` and stay
-  outside the gate until they adopt one. The checker enforces the registry↔tree bijection, so no spec
-  can silently fall outside the gate.
+  referenced test exercises the scenario. A `verify:` row is the **declared, non-verifiable**
+  **escape hatch**: it names an evidence class, it does not prove its scenario, and no mechanism
+  re-checks it. Owner: the repository maintainer. Review trigger: any change to a `verify:` row or to
+  a spec's evidence class, and each release review. The checker reports the accepted `verify:` count
+  on every run so the hatch's size is visible.
+- Specs without a `## Test Mapping` table are recorded in `openspec/test-mapping-registry.md` as a
+  **permanent declared backlog** — not pending work — and stay outside the gate. The checker enforces
+  the registry↔tree bijection, so no spec can silently fall outside the gate.
 - When implementing, run `uv run pytest tests/ -q` after every change batch. Never reduce coverage: the
   authoritative tally is what `uv run pytest tests/ -q` reports on your branch — re-derive it, never
   trust a figure written here.

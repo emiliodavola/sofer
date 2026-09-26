@@ -1000,6 +1000,37 @@ def test_rule6_and_config_agree_on_contract_terms() -> None:
     )
 
 
+def test_verify_escape_hatch_has_owner_and_review_trigger() -> None:
+    """PB-15 / issue #234: the escape hatch is non-verifiable with an owner and a trigger.
+
+    Rule 6, ``openspec/config.yaml`` ``rules.specs``, the checker source, and the
+    registry must agree: ``verify:`` is a declared, non-verifiable escape hatch
+    owned by the repository maintainer and reviewed on every change to a
+    ``verify:`` row / evidence class and at each release.
+    """
+    match = _RULE6_RE.search(_read_text("AGENTS.md"))
+    assert match is not None, "AGENTS.md rule 6 not found"
+    rule6 = match.group(0)
+    specs_rules = " ".join(str(entry) for entry in _openspec_config()["rules"]["specs"])
+    checker = _read_text("scripts/check_test_mapping.py")
+    registry = _read_text("openspec/test-mapping-registry.md")
+    policy_terms = (
+        "non-verifiable",
+        "escape hatch",
+        "the repository maintainer",
+        "each release review",
+    )
+    for label, source in (
+        ("AGENTS.md rule 6", rule6),
+        ("config rules.specs", specs_rules),
+        ("checker docstring/constants", checker),
+    ):
+        for term in policy_terms:
+            assert term in source, f"{label} must state {term!r} (issue #234 PB-15)"
+    for term in ("permanent declared backlog", "the repository maintainer", "each release review"):
+        assert term in registry, f"registry must state {term!r} (issue #234 PB-15)"
+
+
 def test_config_context_has_no_stale_tally() -> None:
     """R6-06: config ``context`` carries no stale count and keeps the test command."""
     config = _openspec_config()
