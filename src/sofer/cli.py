@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from . import _toml, config, mcp_registration
+from . import _toml, config, failure_report, mcp_registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
@@ -447,6 +447,24 @@ def _cmd_render(args: argparse.Namespace) -> int:
     except FileExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _cmd_report_failure(args: argparse.Namespace) -> int:
+    """Send a persisted failure report through ``gh`` (CLI-R14, issue #244).
+
+    Reads the JSON document written by the assisted failure reporter, retries
+    the same delivery path, and prints the created issue URL on success. When
+    ``gh`` is still missing, unauthenticated, or offline it re-emits the triple
+    safety net (saved path, retry command, manual URL, ``gh auth login``) and
+    keeps the file, so no reportable failure is ever lost.
+
+    Args:
+        args: Parsed CLI arguments (must expose ``file``).
+
+    Returns:
+        ``0`` when the issue was created, ``1`` otherwise.
+    """
+    return failure_report.send_persisted_report(Path(args.file))
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -1702,6 +1720,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_remove.set_defaults(func=_cmd_mcp_remove)
 
+    # ── report-failure ────────────────────────────────────────────
+    rf = sub.add_parser(
+        "report-failure",
+        help="Retry sending a previously saved failure report through gh.",
+        description=(
+            "Send a failure report that the assisted reporter persisted to "
+            "disk (one JSON file per failure under the sofer state directory, "
+            "e.g. ~/.local/state/sofer/failure-reports/).  The report captures "
+            "the command, its arguments, the error and traceback, and the "
+            "sofer/Python/platform versions - never dataset contents, secret "
+            "values, or un-anonymized home paths.  On success this prints the "
+            "created GitHub issue URL.  If gh is still missing, unauthenticated, "
+            "or offline it prints the saved path, this retry command, the "
+            "manual github.com/<repo>/issues/new URL, and 'gh auth login'."
+        ),
+    )
+    rf.add_argument(
+        "file",
+        help="Path to a persisted failure report (JSON) to send.",
+    )
+    rf.set_defaults(func=_cmd_report_failure)
+
     return parser
 
 
@@ -1753,12 +1793,23 @@ def main() -> None:
            overrides before the parser is built (TC-07).
         2. Build the parser and dispatch; dataset commands re-resolve via
            ``DatasetConfig.from_toml`` (dataset-dir anchor, TC-04/TC-05).
+        3. An uncaught command exception is handed to
+           :func:`sofer.failure_report.report_cli_failure`, which re-prints the
+           traceback and, on an interactive terminal only, offers to file a
+           confidential GitHub issue (CLI-R13). The process still exits ``1``.
+
+    ``SystemExit`` (argparse) and ``KeyboardInterrupt`` are never intercepted.
     """
     _configure_console_streams()
     config.reload(None)
     parser = _build_parser()
     args = parser.parse_args()
-    sys.exit(args.func(args))
+    try:
+        exit_code = args.func(args)
+    except Exception as exc:
+        failure_report.report_cli_failure(sys.argv[1:], exc)
+        exit_code = 1
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

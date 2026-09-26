@@ -51,7 +51,7 @@ src/sofer/
 ├── _converters.py       # Format-specific Parquet conversion
 ├── _parquet_helpers.py  # Shared Parquet dtype helpers
 ├── _toml.py             # TOML parser selection (tomllib/tomli fallback)
-├── cli.py               # argparse CLI with 9 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp)
+├── cli.py               # argparse CLI with 10 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
 ├── config.py            # Tool-wide defaults from [tool.sofer] (discovery + reload)
 ├── model.py             # DatasetConfig + InferenceStatus
 ├── checks.py            # DatasetValidator — data integrity checks
@@ -71,6 +71,7 @@ src/sofer/
 ├── execution_context.py # Shared dataset-identity contract (CLI init + MCP sofer_init)
 ├── manifest.py          # Package artifact manifest (publishable vs intermediate)
 ├── workflow.py          # Typed workflow metadata + result envelopes for adapters
+├── failure_report.py    # Assisted failure reporting: context, anonymization, gh send, persistence
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
 └── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini)
 ```
@@ -136,6 +137,15 @@ Use the issue template and include:
 - Expected vs actual behaviour
 - `sofer --version` output
 - Relevant TOML config (sanitised)
+
+When a CLI command crashes with an uncaught error, sofer offers to file the issue
+for you on an interactive terminal: it collects the command, the traceback, and the
+environment versions, anonymizes home paths, and shows the full body before sending.
+If `gh` is missing, unauthenticated, or offline, the report is persisted under the
+sofer state directory (`~/.local/state/sofer/failure-reports/`) and
+`sofer report-failure <file>` retries it later. See
+[README → Assisted failure reporting](README.md#assisted-failure-reporting). Never
+paste dataset rows or secret values into an issue.
 
 ## Questions?
 

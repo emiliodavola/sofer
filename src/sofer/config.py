@@ -101,6 +101,15 @@ _DEFAULTS: dict[str, Any] = {
     # Card collapse threshold: columns per table above which Data Fields
     # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
     "card_collapse_threshold": 15,
+    # Assisted failure reporting (issue #244). ``failure_report_dir`` is the
+    # subdirectory under sofer's state home that holds one JSON file per
+    # unsent failure; ``failure_report_repo`` is the ``owner/repo`` issues are
+    # filed against; the last two bound the report size and the ``gh`` call.
+    "failure_report_dir": "failure-reports",
+    "failure_report_repo": "emiliodavola/sofer",
+    "failure_report_traceback_max_chars": 20_000,
+    "failure_report_manual_url_max_chars": 6_000,
+    "failure_report_gh_timeout_seconds": 30,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -230,8 +239,10 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
 
     # ``profile_dir`` / ``render_dir`` must be non-empty strings — an empty
     # value would resolve output writes to the write root itself and silently
-    # collide.
-    for _key in ("profile_dir", "render_dir"):
+    # collide. ``failure_report_dir`` and ``failure_report_repo`` are likewise
+    # non-empty: an empty directory would scatter report files in the state
+    # home, and an empty repo would produce an unusable issue URL.
+    for _key in ("profile_dir", "render_dir", "failure_report_dir", "failure_report_repo"):
         _val = merged.get(_key, "")
         if not isinstance(_val, str) or not _val.strip():
             raise ValueError(f"'{_key}' in [tool.sofer] must be a non-empty string")
@@ -241,6 +252,18 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     _thr = merged.get("card_collapse_threshold")
     if not isinstance(_thr, int) or isinstance(_thr, bool) or _thr < 0:
         raise ValueError("'card_collapse_threshold' in [tool.sofer] must be a non-negative integer")
+
+    # Failure-report bounds must be positive: a non-positive traceback cap
+    # would truncate every report to nothing, and a non-positive gh timeout is
+    # meaningless (subprocess would reject it).
+    for _key in (
+        "failure_report_traceback_max_chars",
+        "failure_report_manual_url_max_chars",
+        "failure_report_gh_timeout_seconds",
+    ):
+        _val = merged.get(_key)
+        if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
+            raise ValueError(f"'{_key}' in [tool.sofer] must be a positive integer")
 
     return merged
 
@@ -394,3 +417,11 @@ AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
 OUTPUT_MAX_BYTES: int = _DEFAULTS["output_max_bytes"]
 
 CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]
+
+# Assisted failure reporting (issue #244): state subdirectory, target repo,
+# traceback cap, and gh timeout — read live through attribute access.
+FAILURE_REPORT_DIR: str = _DEFAULTS["failure_report_dir"]
+FAILURE_REPORT_REPO: str = _DEFAULTS["failure_report_repo"]
+FAILURE_REPORT_TRACEBACK_MAX_CHARS: int = _DEFAULTS["failure_report_traceback_max_chars"]
+FAILURE_REPORT_MANUAL_URL_MAX_CHARS: int = _DEFAULTS["failure_report_manual_url_max_chars"]
+FAILURE_REPORT_GH_TIMEOUT_SECONDS: int = _DEFAULTS["failure_report_gh_timeout_seconds"]

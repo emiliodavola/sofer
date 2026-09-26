@@ -162,6 +162,18 @@ class TestSemanticPriorsValidation:
         cfg = self._load_with_toml(monkeypatch, tmp_path, toml)
         assert cfg["card_modality_tags"] == ["tabular"]
 
+    def test_tool_config_rejects_empty_failure_report_dir(self, monkeypatch, tmp_path):
+        """An empty failure_report_dir would scatter reports in the state home."""
+        toml = '[tool.sofer]\nfailure_report_dir = "   "\n'
+        with pytest.raises(ValueError, match=r"failure_report_dir.*non-empty"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
+    def test_tool_config_rejects_non_positive_failure_report_bound(self, monkeypatch, tmp_path):
+        """A non-positive gh timeout is meaningless and must be rejected."""
+        toml = "[tool.sofer]\nfailure_report_gh_timeout_seconds = 0\n"
+        with pytest.raises(ValueError, match=r"failure_report_gh_timeout_seconds.*positive"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
 
 class TestImportTimeIsolation:
     """Import binds constants from _DEFAULTS only — no filesystem access."""

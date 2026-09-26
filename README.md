@@ -24,6 +24,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Profiling and rendering](#profiling-and-rendering)
 - [Command reference](#command-reference)
 - [Flags at a glance](#flags-at-a-glance)
+- [Assisted failure reporting](#assisted-failure-reporting)
 - [Data format support](#data-format-support)
 - [Parquet conversion limitations](#parquet-conversion-limitations)
 - [Split detection](#split-detection)
@@ -328,6 +329,7 @@ detector class, no changes to the pipeline.
 | `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Orphan pruning: with `--force` removes stale files not in `expanded_planned_remotes` plus `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotent; `--force` off leaves orphans). |
 | `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (delete build after successful `hf` upload only when `fail==0`, quality passed, not `--dry-run`; `--output` anchoring via `resolve_output_dir`), `--clean-cache`/`--all` (also delete `cache/` at `cfg._base_dir/cache`, shared tool-wide — sibling datasets may be affected; requires `--clean`). For `--target local`, `--clean` deletes the resolved destination only. |
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
+| `report-failure <file>` | Retry sending a failure report persisted by the assisted failure reporter (JSON under the sofer state directory). Prints the created issue URL on success, or the saved path, retry command, manual `github.com/<repo>/issues/new` URL and `gh auth login` when `gh` is missing, unauthenticated, or offline. |
 | `--help` | Detailed help for any command. |
 | `sofer-mcp` | Launch the MCP server over stdio (14 tools, 4 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
@@ -353,6 +355,40 @@ detector class, no changes to the pipeline.
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
 | `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
+
+## Assisted failure reporting
+
+When a CLI command fails with an uncaught error, sofer prints the traceback and —
+on an interactive terminal only — offers to file a GitHub issue in the repository
+configured by `failure_report_repo`. Nothing is ever filed without your explicit
+consent, and you review the complete body before it is sent.
+
+The report contains only the command and its arguments, the error and traceback,
+and the `sofer` / Python / platform versions. It never contains dataset contents,
+never contains environment-variable or secret values, and replaces your home
+directory with `~` in every path inside the report.
+
+```bash
+# interactive: answer "y" at the prompt to review and send the report
+sofer validate my-dataset.toml
+```
+
+If `gh` is missing, unauthenticated, or the network is down, the report is written
+to one timestamped JSON file per failure under the sofer state directory
+(`~/.local/state/sofer/failure-reports/`; `%LOCALAPPDATA%\sofer\failure-reports`
+on Windows) and sofer prints the triple safety net: the saved path, the retry
+command, the manual `github.com/<repo>/issues/new` URL, and the permanent fix
+`gh auth login`.
+
+```bash
+# retry a persisted report once gh is authenticated / online
+sofer report-failure ~/.local/state/sofer/failure-reports/failure-20260925T101112000000Z-12345.json
+```
+
+The state location can be overridden with `SOFER_STATE_HOME`; the target repo and
+the report bounds are `[tool.sofer]` keys (`failure_report_repo`,
+`failure_report_dir`, `failure_report_traceback_max_chars`,
+`failure_report_manual_url_max_chars`, `failure_report_gh_timeout_seconds`).
 
 ## Data format support
 
@@ -763,7 +799,7 @@ full explanation in
 ## Architecture summary
 
 sofer is a single Python package (`src/sofer/`) with one module per concern:
-CLI dispatch in `cli.py` (9 subcommands), dataset configuration in `model.py`,
+CLI dispatch in `cli.py` (10 subcommands), dataset configuration in `model.py`,
 tool-wide defaults in `config.py` (`[tool.sofer]` discovery), and each command
 owning its domain module (scanner, codebook, prepare, publish, profile, render,
 mcp_registration). The annotated module tree lives in

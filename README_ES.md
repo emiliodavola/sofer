@@ -26,6 +26,7 @@ Hugging Face Hub o en cualquier directorio local.**
 - [Perfilado y renderizado](#perfilado-y-renderizado)
 - [Referencia de comandos](#referencia-de-comandos)
 - [Banderas rápidas](#banderas-rapidas)
+- [Reporte asistido de fallos](#reporte-asistido-de-fallos)
 - [Formatos de datos soportados](#formatos-de-datos-soportados)
 - [Limitaciones de conversión a Parquet](#limitaciones-de-conversion-a-parquet)
 - [Detección de splits](#deteccion-de-splits)
@@ -340,6 +341,7 @@ canalización.
 | `prepare <config.toml>` | Genera el paquete de datos completo localmente: conversión CSV→Parquet, comprobaciones de esquema entre archivos, informe de esquema, Dataset Card (`README.md`), `LICENSE` y — con `--all-files` — codebooks por archivo. Nunca contacta con HF. Flags: `--output DIR` (por defecto `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Limpieza de huérfanos: con `--force` elimina archivos huérfanos que no están en `expanded_planned_remotes` más `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotente; sin `--force` los huérfanos permanecen). |
 | `publish <config.toml>` | Entrega el paquete preparado: `--target hf` (por defecto) garantiza el repositorio HF, aplica el control del informe de calidad y sube el paquete en una sola llamada `upload_folder`; `--target local` copia el paquete a `--output` sin red. Prepara automáticamente cuando los artefactos faltan o están desactualizados. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (elimina `build` tras un `hf` exitoso solo si `fail==0`, calidad aprobada y no `--dry-run`; anclaje de `--output` vía `resolve_output_dir`), `--clean-cache`/`--all` (también elimina `cache/` en `cfg._base_dir/cache`, compartido entre datasets — requiere `--clean`). Para `--target local`, `--clean` elimina solo el destino resuelto. |
 | `validate <config.toml>` | Verifica la configuración, la integridad de los datos y los controles de calidad. Nunca contacta con HF. |
+| `report-failure <file>` | Reintenta el envío de un reporte de fallo persistido por el reportero asistido (JSON bajo el directorio de estado de sofer). Imprime la URL del issue creado en caso de éxito, o la ruta guardada, el comando de reintento, la URL manual `github.com/<repo>/issues/new` y `gh auth login` cuando `gh` falta, no está autenticado o no hay red. |
 | `--help` | Ayuda detallada para cualquier comando. |
 | `sofer-mcp` | Lanza el servidor MCP por stdio (14 herramientas, 4 recursos, 3 prompts). Requiere el extra mcp — ver AI and MCP server. |
 
@@ -365,6 +367,41 @@ canalización.
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
 | `--cwd PATH` | `mcp add` | `cwd` absoluto contenido para el servidor; falla con la ruta cuando está fuera de la raíz del scope. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
+
+## Reporte asistido de fallos
+
+Cuando un comando de la CLI falla con un error no capturado, sofer imprime el
+traceback y — solo en una terminal interactiva — ofrece abrir un issue en GitHub
+en el repositorio configurado por `failure_report_repo`. Nada se envía sin tu
+consentimiento explícito, y revisás el cuerpo completo antes de enviarlo.
+
+El reporte contiene únicamente el comando y sus argumentos, el error y el
+traceback, y las versiones de `sofer` / Python / plataforma. Nunca contiene
+contenido del dataset, nunca contiene valores de variables de entorno ni
+secretos, y reemplaza tu directorio home por `~` en cada ruta del reporte.
+
+```bash
+# interactivo: respondé "y" en el prompt para revisar y enviar el reporte
+sofer validate my-dataset.toml
+```
+
+Si `gh` falta, no está autenticado o no hay red, el reporte se escribe en un
+archivo JSON por fallo, con timestamp, bajo el directorio de estado de sofer
+(`~/.local/state/sofer/failure-reports/`; `%LOCALAPPDATA%\sofer\failure-reports`
+en Windows) y sofer imprime la triple red de seguridad: la ruta guardada, el
+comando de reintento, la URL manual `github.com/<repo>/issues/new` y la solución
+definitiva `gh auth login`.
+
+```bash
+# reintentá un reporte persistido cuando gh esté autenticado / haya red
+sofer report-failure ~/.local/state/sofer/failure-reports/failure-20260925T101112000000Z-12345.json
+```
+
+La ubicación del estado se puede sobrescribir con `SOFER_STATE_HOME`; el
+repositorio destino y los límites del reporte son claves de `[tool.sofer]`
+(`failure_report_repo`, `failure_report_dir`,
+`failure_report_traceback_max_chars`, `failure_report_manual_url_max_chars`,
+`failure_report_gh_timeout_seconds`).
 
 ## Formatos de datos soportados
 
@@ -801,7 +838,7 @@ herramienta — explicación completa en
 ## Resumen de arquitectura
 
 sofer es un único paquete Python (`src/sofer/`) con un módulo por
-responsabilidad: el despacho de la CLI en `cli.py` (9 subcomandos), la
+responsabilidad: el despacho de la CLI en `cli.py` (10 subcomandos), la
 configuración del dataset en `model.py`, los valores por defecto globales en
 `config.py` (`[tool.sofer]` discovery) y cada comando con su propio módulo de
 dominio (scanner, codebook, prepare, publish, profile, render,
