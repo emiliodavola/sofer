@@ -410,7 +410,8 @@ def test_scenario_regex_matches_only_four_hash_headings(tmp_path: Path) -> None:
 
     A row naming a scenario whose heading uses a different level (``###`` or
     ``#####``/``######``) must fail as a non-existent scenario, proving the
-    heading is not enumerated (issue #234 AC-3).
+    heading is not enumerated. Symmetrically, an indented four-hash heading IS
+    enumerated (issue #234 AC-3).
     """
     for heading in ("### Scenario: Alpha", "##### Scenario: Alpha", "###### Scenario: Alpha"):
         case = tmp_path / f"case{heading.count('#')}"
@@ -421,18 +422,16 @@ def test_scenario_regex_matches_only_four_hash_headings(tmp_path: Path) -> None:
         assert result.returncode != 0, f"{heading!r} must not be enumerated"
         assert "does not exist" in _combined(result)
 
-
-def test_indented_four_hash_heading_is_enumerated(tmp_path: Path) -> None:
-    """SCENARIO_RE allows leading whitespace (the coverage spec indents one heading)."""
+    indented = tmp_path / "case-indented"
     _write(
-        tmp_path,
+        indented,
         "openspec/specs/alpha/spec.md",
         _spec_with_heading("    #### Scenario: Alpha", "Alpha"),
     )
-    _write(tmp_path, "openspec/specs/beta/spec.md", _unmapped_spec())
-    _registry(tmp_path, [("beta", "declared backlog")])
-    result = _run_checker(tmp_path)
-    assert result.returncode == 0, _combined(result)
+    _write(indented, "openspec/specs/beta/spec.md", _unmapped_spec())
+    _registry(indented, [("beta", "declared backlog")])
+    positive = _run_checker(indented)
+    assert positive.returncode == 0, _combined(positive)
 
 
 def test_verify_rows_reported_as_declared_escape_hatch(tmp_path: Path) -> None:
