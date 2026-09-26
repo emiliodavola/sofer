@@ -80,7 +80,7 @@ src/sofer/
 
 ### Code style
 
-This project uses **ruff** 0.16.7 for linting and formatting. Configuration lives in `pyproject.toml` under `[tool.ruff]` (`target-version = "py310"`, `line-length = 100`, `extend-exclude = ["openspec"]`). Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
+This project uses **ruff** 0.16.8 for linting and formatting. Configuration lives in `pyproject.toml` under `[tool.ruff]` (`target-version = "py310"`, `line-length = 100`, `extend-exclude = ["openspec"]`). Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
 
 ### Type checking
 
