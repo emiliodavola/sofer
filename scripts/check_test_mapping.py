@@ -17,6 +17,14 @@ repository root (or pass ``--repo-root`` for a fixture tree). The checker:
    bijection: the mapped and registered sets are disjoint and together equal
    the full spec set (MC-05).
 
+The ``verify:`` prefix is the **declared, non-verifiable escape hatch** (issue
+#234, option b): a ``verify:`` reference names an evidence class, it is never
+resolved or executed, and neither this checker nor the gate asserts that it
+proves its scenario. Every run reports how many ``verify:`` rows it accepted as
+declared evidence so the size of the escape hatch is visible. Owner: the
+repository maintainer. Review trigger: any change to a ``verify:`` row or to a
+spec's evidence class, and each release review.
+
 Exit code 0 on a clean tree, non-zero with the full offender list otherwise.
 The checker is deterministic, runs offline, and modifies no repository file
 (MC-06).
@@ -43,6 +51,11 @@ TEST_MAPPING_HEADING = "## Test Mapping"
 SPEC_TABLE_HEADER = ("Req", "Scenario", "Verification")
 REGISTRY_TABLE_HEADER = ("Spec", "Reason")
 
+# Scenario grammar: exactly the four-hash ``#### Scenario:`` heading, with
+# optional leading whitespace (the coverage spec indents one heading). The
+# mapped specs are enumerated and counted at this exact level; ``###`` and
+# ``#####`` are NOT scenario headings. Pinned by
+# tests/test_test_mapping_checker.py::test_scenario_regex_matches_only_four_hash_headings.
 SCENARIO_RE = re.compile(r"^\s*####\s+Scenario:\s*(?P<name>.+?)\s*$")
 SEPARATOR_CELL_RE = re.compile(r"^:?-{2,}:?$")
 WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -54,6 +67,15 @@ PREFIX_TEST = "test:"
 PREFIX_VERIFY = "verify:"
 PREFIXES = (PREFIX_TEST, PREFIX_VERIFY)
 NODE_SEPARATOR = "::"
+
+# ``verify:`` is the declared, non-verifiable escape hatch (issue #234). These
+# strings are the contract of record, restated by AGENTS.md rule 6,
+# openspec/config.yaml rules.specs, and openspec/test-mapping-registry.md, and
+# pinned by tests/test_ci_workflows.py::test_verify_escape_hatch_has_owner_and_review_trigger.
+VERIFY_ESCAPE_HATCH_OWNER = "the repository maintainer"
+VERIFY_ESCAPE_HATCH_REVIEW_TRIGGER = (
+    "any change to a verify: row or to a spec's evidence class, and each release review"
+)
 
 SCENARIO_COLUMN = 1
 VERIFICATION_COLUMN = 2
@@ -566,6 +588,31 @@ def _validate_registry(
             failures.append(f"registry lists an unknown spec: {spec}")
 
 
+def _count_verify_rows(records: list[SpecRecord]) -> int:
+    """Count the accepted ``verify:`` rows across the mapped specs (issue #234).
+
+    The count is the visible size of the declared, non-verifiable escape hatch.
+    It is reported, never resolved: no ``verify:`` reference is inspected beyond
+    its non-emptiness.
+
+    Args:
+        records: Every spec record under ``openspec/specs``.
+
+    Returns:
+        The number of data rows whose Verification cell begins with ``verify:``.
+    """
+    total = 0
+    for record in records:
+        if record.table is None:
+            continue
+        for row in record.table.rows:
+            if len(row.cells) == EXPECTED_SPEC_COLUMNS and row.cells[
+                VERIFICATION_COLUMN
+            ].strip().startswith(PREFIX_VERIFY):
+                total += 1
+    return total
+
+
 def _report(records: list[SpecRecord], failures: list[str]) -> int:
     """Print the re-derived scenario inventory and the failure list.
 
@@ -580,6 +627,12 @@ def _report(records: list[SpecRecord], failures: list[str]) -> int:
         count = len(_scenario_headings(record.text.splitlines()))
         state = "mapped" if record.mapped else "unmapped"
         print(f"{INFO_MARKER}: {record.name}: {count} scenario(s), {state}")
+    verify_rows = _count_verify_rows(records)
+    print(
+        f"{INFO_MARKER}: verify: {verify_rows} declared evidence row(s) — declared, "
+        f"non-verifiable escape hatch; owner: {VERIFY_ESCAPE_HATCH_OWNER}; "
+        f"review: {VERIFY_ESCAPE_HATCH_REVIEW_TRIGGER}"
+    )
     if not failures:
         print("OK: test-mapping contract holds")
         return 0
