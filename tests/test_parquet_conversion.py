@@ -539,6 +539,7 @@ class TestDelimiterPlumbing:
         """
         (tmp_path / "data.csv").write_text("col1|col2\nval1|val2", encoding="utf-8-sig")
         cfg = _declared_cfg(tmp_path, 'csv_delimiter = "|"\n')
+        assert "csv_delimiter" in cfg.declared_meta_keys
 
         _mock_hf_api(monkeypatch)
         td = _fixed_staging(tmp_path, monkeypatch)
