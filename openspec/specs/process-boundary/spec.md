@@ -15,7 +15,7 @@ The suite SHALL exercise registered MCP tools through `fastmcp.Client(server)` (
 
 - GIVEN `build_server()` and an in-process `Client(server)`
 - WHEN `tools/list` and one `tools/call` execute
-- THEN 14 callables SHALL be listed and the call SHALL return the documented envelope
+- THEN 15 callables SHALL be listed and the call SHALL return the documented envelope
 
 #### Scenario: Seven publish/scan_apply conversions through the client
 
@@ -483,7 +483,7 @@ not a machine-verified claim that a test exercises the scenario.
 
 | Req | Scenario | Verification |
 | --- | -------- | ------------ |
-| PB-01 | tools/list and call via in-process client | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` in-process `Client(server)`: `tools/list` lists the 14 callables and one `tools/call` returns the documented envelope |
+| PB-01 | tools/list and call via in-process client | verify:Verify-phase runtime evidence — `tests/test_mcp_server.py` in-process `Client(server)`: `tools/list` lists the 15 callables and one `tools/call` returns the documented envelope |
 | PB-01 | Seven publish/scan_apply conversions through the client | verify:Verify-phase runtime evidence — the seven conversion sites in `tests/test_mcp_server.py` run via `_call(...)` through `Client(server)`; valid-input sites return the documented envelope shape |
 | PB-01 | Stdio transport with clean framing | verify:Verify-phase runtime evidence — `tests/test_mcp_process.py` stdio subprocess `initialize → tools/list → tools/call`; every response is valid JSON-RPC with no stray stdout bytes |
 | PB-01 | No remaining direct-call proofs | verify:Verify-phase static evidence — enumeration of direct-call sites across `tests/test_mcp_server.py` and `tests/test_mcp_schema.py`: zero registered tool imported and called directly |

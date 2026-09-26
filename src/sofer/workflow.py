@@ -391,6 +391,12 @@ _WORKFLOW_METADATA = {
     "sofer_publish_confirm": WorkflowMetadata(
         "sofer_publish_confirm", PHASE_PUBLISH, ("human approval",), "delivery"
     ),
+    "sofer_report_failure": WorkflowMetadata(
+        "sofer_report_failure",
+        PHASE_TRIAGE,
+        ("failure context",),
+        "triage",
+    ),
 }
 WORKFLOW_METADATA: Mapping[str, WorkflowMetadata] = MappingProxyType(_WORKFLOW_METADATA)
 

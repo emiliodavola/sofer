@@ -331,7 +331,7 @@ detector class, no changes to the pipeline.
 | `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
 | `report-failure <file>` | Retry sending a failure report persisted by the assisted failure reporter (JSON under the sofer state directory). Prints the created issue URL on success, or the saved path, retry command, manual `github.com/<repo>/issues/new` URL and `gh auth login` when `gh` is missing, unauthenticated, or offline. |
 | `--help` | Detailed help for any command. |
-| `sofer-mcp` | Launch the MCP server over stdio (14 tools, 4 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
+| `sofer-mcp` | Launch the MCP server over stdio (15 tools, 4 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
 
 > `sofer upload` was removed in favor of `prepare` + `publish` — the
 > generation half (offline, inspectable) and the delivery half (network).
@@ -388,7 +388,8 @@ sofer report-failure ~/.local/state/sofer/failure-reports/failure-20260925T10111
 The state location can be overridden with `SOFER_STATE_HOME`; the target repo and
 the report bounds are `[tool.sofer]` keys (`failure_report_repo`,
 `failure_report_dir`, `failure_report_traceback_max_chars`,
-`failure_report_manual_url_max_chars`, `failure_report_gh_timeout_seconds`).
+`failure_report_manual_url_max_chars`, `failure_report_gh_timeout_seconds`,
+`failure_report_duplicate_limit`, `failure_report_duplicate_query_tokens`).
 
 ## Data format support
 
@@ -547,11 +548,11 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 14 tool callables (`sofer_validate`, `sofer_prepare`,
+The server exposes 15 tool callables (`sofer_validate`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`), 4 resources (`sofer://dataset/{config}`,
+`sofer_auth_status`, `sofer_report_failure`), 4 resources (`sofer://dataset/{config}`,
 `sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`, and the
 static `sofer://status`), and 3 prompts (`prepare_dataset`,
 `assess_dataset`, `finalize_and_publish`). No remote/streamable-http
@@ -594,6 +595,13 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 | 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval. |
 | * | `sofer_auth_status` | `config` | Preflight without publish; `readOnlyHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Single-file codebook. |
+| * | `sofer_report_failure` | `error`, `command`, `trace`, `confirm`, `force` | Prepare a confidential failure report and (only with `confirm=true`) file it via `gh`; searches open issues for duplicates first. `openWorldHint:true`. |
+
+`sofer_report_failure` never includes dataset contents or environment-variable values and
+anonymizes home paths to `~`. With the default `confirm=false` it returns the prepared body,
+title, manual URL and any matching open issues without creating anything; `confirm=true` files
+the issue (or persists it locally when `gh` is missing, unauthenticated, or offline). See
+[Assisted failure reporting](#assisted-failure-reporting).
 
 Prompts `prepare_dataset`, `assess_dataset`, `finalize_and_publish` encode this chain with per-step args and copy-paste examples; `assess_dataset` uses the subset `sofer_validate → sofer_profile(dataset) → sofer_render(package)` for single-file triage.
 

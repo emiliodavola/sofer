@@ -427,10 +427,11 @@ class TestToolRoster:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_report_failure",
         }
     )
 
-    def test_exactly_fourteen_callables(self, server):
+    def test_exactly_fifteen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -651,7 +652,7 @@ class TestAuthStatusPosture:
 
     def test_posture_fields_confined_to_auth_status(self, tmp_path, monkeypatch) -> None:
         """Roster-wide scan: no other tool's output_schema gains any of the 4
-        posture keys; the roster stays at 14 callables."""
+        posture keys; the roster stays at 15 callables."""
         self._clean_hf(monkeypatch)
         _make_dataset(tmp_path)
         server = build_server(root=tmp_path, approval_phrase="x")
@@ -661,7 +662,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 14, [t.name for t in tools]
+        assert len(tools) == 15, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -847,7 +848,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 14
+                    assert len(tools.tools) == 15
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -4793,9 +4794,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 14 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 15 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_fourteen(self, tmp_path):
+    def test_tool_roster_still_fifteen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4804,7 +4805,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 14
+        assert len(names) == 15
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):

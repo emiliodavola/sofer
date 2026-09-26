@@ -1,11 +1,12 @@
 # ruff: noqa: E501
 """MCP server exposing sofer's deterministic dataset pipeline to agents.
 
-Serves the pipeline as 14 MCP callables (10 logical tools), 3 resources, and
+Serves the pipeline as 15 MCP callables (10 logical tools), 3 resources, and
 3 prompts over stdio (fastmcp v3.4.x, optional ``mcp`` extra). Thin adapter
 over domain modules — never re-implements logic, never calls an LLM, and ships
-no remote/streamable-http transport in v1. Its only network access is the HF
-upload path inside ``sofer_publish_confirm``.
+no remote/streamable-http transport in v1. Its network access is the HF upload
+path inside ``sofer_publish_confirm`` and the ``gh`` calls of
+``sofer_report_failure`` (which only file an explicitly confirmed bug report).
 
 Phased canonical chain (visible from ``tools/list`` without prompts):
 
@@ -82,7 +83,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
-from . import _toml, workflow
+from . import _toml, failure_report, workflow
 from . import config as sofer_config
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
@@ -174,6 +175,8 @@ _ERROR_CODES: tuple[str, ...] = (
     "PUBLISH_APPROVAL_REQUIRED",
     "PUBLISH_APPROVAL_NOT_CONFIGURED",
     "TARGET_INVALID",
+    "DUPLICATE_REPORT",
+    "REPORT_PERSISTED",
 )
 
 _PHASED_INSTRUCTIONS: str = (
@@ -1055,7 +1058,7 @@ def _refusal(
 
 
 # ---------------------------------------------------------------------------
-#  Tool callables — 14 callables
+#  Tool callables — 15 callables
 # ---------------------------------------------------------------------------
 
 
@@ -2634,8 +2637,138 @@ def sofer_init(
         }
 
 
+def sofer_report_failure(
+    error: Annotated[
+        str,
+        Field(
+            description=(
+                "The error message or exception summary to report. Never include dataset "
+                "contents or secret values; home paths are anonymized automatically."
+            )
+        ),
+    ],
+    command: Annotated[
+        str,
+        Field(
+            description=(
+                "The sofer command or MCP tool that failed, e.g. 'sofer_validate'. "
+                "Shown in the issue title and body."
+            )
+        ),
+    ] = "",
+    trace: Annotated[
+        str,
+        Field(
+            description=(
+                "Optional traceback text for the failure; anonymized and truncated before it "
+                "is embedded in the report."
+            )
+        ),
+    ] = "",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "Set true to actually file the issue. When false (default) the tool only "
+                "prepares the report and returns possible duplicates; nothing is created."
+            )
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        Field(
+            description=(
+                "With confirm=true, file even when open issues match. Without it, matching "
+                "open issues are surfaced instead of filing a redundant report."
+            )
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Prepare and (on explicit confirm) file a confidential failure report via gh.
+
+    Side effects: may create a GitHub issue (network) or write one local report file.
+    Network usage: gh auth status + issue list + issue create; never uploads data.
+
+    When to use: after a sofer tool or CLI command failed and the agent wants to file a
+    bug report. Example: sofer_report_failure(error="ValueError: bad column", command="sofer_validate").
+    Requires: gh available and authenticated to file; never dataset contents or secret values.
+    Next: call again with confirm=true after reviewing the returned body and duplicates.
+    """
+    repo = sofer_config.FAILURE_REPORT_REPO
+    ctx = failure_report.context_from_parts(command or "sofer-mcp", error, trace)
+    title = failure_report.build_issue_title(ctx)
+    body = failure_report.build_issue_body(ctx, repo=repo)
+    manual_url = failure_report.manual_issue_url(repo, title, body)
+    duplicates, search_reason = failure_report.search_open_issues(
+        repo, failure_report.duplicate_query(ctx.command, ctx.error_type)
+    )
+
+    if not confirm:
+        suffix = f" Duplicate search: {search_reason}." if search_reason else ""
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": (
+                "Report prepared but not filed (confirm=false). "
+                f"{len(duplicates)} matching open issue(s).{suffix} "
+                "Review the body, then re-call with confirm=true to file."
+            ),
+            "created": False,
+            "duplicates": duplicates,
+            "title": title,
+            "body": body,
+            "manual_url": manual_url,
+            "next": {},
+            "hints": {"action": "confirm_report_failure"},
+        }
+
+    if duplicates and not force:
+        return _error_envelope(
+            "DUPLICATE_REPORT",
+            f"{len(duplicates)} matching open issue(s) found; not filing a duplicate report.",
+            next_hint={"action": "comment_on_existing_or_force"},
+            extra={
+                "created": False,
+                "duplicates": duplicates,
+                "title": title,
+                "body": body,
+                "manual_url": manual_url,
+            },
+        )
+
+    url, _reason = failure_report.attempt_send(repo, title, body)
+    if url is not None:
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": f"Report filed: {url}",
+            "created": True,
+            "issue_url": url,
+            "duplicates": duplicates,
+            "title": title,
+            "manual_url": manual_url,
+            "next": {},
+            "hints": {},
+        }
+
+    path = failure_report.persist_report(repo, title, body)
+    return _error_envelope(
+        "REPORT_PERSISTED",
+        "Could not send the report automatically; saved it locally.",
+        next_hint={"action": "gh_auth_login"},
+        extra={
+            "created": False,
+            "duplicates": duplicates,
+            "title": title,
+            "persisted_path": str(path),
+            "retry_command": failure_report.retry_command(path),
+            "manual_url": manual_url,
+        },
+    )
+
+
 def _register_tools(server: _FastMCP) -> None:
-    """Register the 14 tool callables on *server*."""
+    """Register the 15 tool callables on *server*."""
     server.tool(
         sofer_validate,
         description=_workflow_description(sofer_validate),
@@ -2977,6 +3110,34 @@ def _register_tools(server: _FastMCP) -> None:
                     "description": "Package version from installed metadata (_version.get_version()), non-empty, never raises.",
                 },
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_report_failure,
+        description=_workflow_description(sofer_report_failure),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "created": {"type": "boolean"},
+                "duplicates": {"type": "array"},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "manual_url": {"type": "string"},
+                "issue_url": {"type": "string"},
+                "persisted_path": {"type": "string"},
+                "retry_command": {"type": "string"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],

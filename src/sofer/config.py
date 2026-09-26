@@ -110,6 +110,8 @@ _DEFAULTS: dict[str, Any] = {
     "failure_report_traceback_max_chars": 20_000,
     "failure_report_manual_url_max_chars": 6_000,
     "failure_report_gh_timeout_seconds": 30,
+    "failure_report_duplicate_limit": 5,
+    "failure_report_duplicate_query_tokens": 8,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -260,6 +262,8 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
         "failure_report_traceback_max_chars",
         "failure_report_manual_url_max_chars",
         "failure_report_gh_timeout_seconds",
+        "failure_report_duplicate_limit",
+        "failure_report_duplicate_query_tokens",
     ):
         _val = merged.get(_key)
         if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
@@ -425,3 +429,5 @@ FAILURE_REPORT_REPO: str = _DEFAULTS["failure_report_repo"]
 FAILURE_REPORT_TRACEBACK_MAX_CHARS: int = _DEFAULTS["failure_report_traceback_max_chars"]
 FAILURE_REPORT_MANUAL_URL_MAX_CHARS: int = _DEFAULTS["failure_report_manual_url_max_chars"]
 FAILURE_REPORT_GH_TIMEOUT_SECONDS: int = _DEFAULTS["failure_report_gh_timeout_seconds"]
+FAILURE_REPORT_DUPLICATE_LIMIT: int = _DEFAULTS["failure_report_duplicate_limit"]
+FAILURE_REPORT_DUPLICATE_QUERY_TOKENS: int = _DEFAULTS["failure_report_duplicate_query_tokens"]

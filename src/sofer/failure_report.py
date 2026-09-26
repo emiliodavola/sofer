@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import platform as _platform
+import re
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,13 @@ _AFFIRMATIVE_ANSWERS = frozenset({"y", "yes"})
 
 #: Truncation marker inserted when a traceback exceeds the configured cap.
 _TRUNCATION_MARKER = "\n... [traceback truncated: {omitted} characters omitted] ...\n"
+
+#: Matches a plausible Python exception class name: a capitalized identifier
+#: ending in ``Error``/``Exception``, not embedded in a longer identifier. The
+#: capitalization + boundary requirement rejects lowercase data-derived tokens
+#: such as ``temperatureError``, so the MCP duplicate-search query stays bounded
+#: to a class-like token.
+_ERROR_TYPE_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Za-z0-9_]*(?:Error|Exception)\b")
 
 
 @dataclass(frozen=True)
@@ -176,6 +184,49 @@ def collect_failure_context(
         platform=anonymize_paths(_platform.platform(), home=home),
         timestamp=_utc_now(),
     )
+
+
+def context_from_parts(
+    command: str,
+    error: str,
+    trace: str = "",
+    *,
+    home: Path | None = None,
+) -> FailureContext:
+    """Build a :class:`FailureContext` from agent-supplied strings (MCP path).
+
+    The MCP adapter has no live exception object: the agent passes the failed
+    command/tool and the error text it observed. The same anonymization and
+    truncation as :func:`collect_failure_context` applies, and the command is
+    carried as the sole argument so the body shows ``sofer <command>``.
+
+    Args:
+        command: The command or MCP tool that failed.
+        error: The error message or summary.
+        trace: Optional traceback text.
+        home: Override for the home directory (tests).
+
+    Returns:
+        A populated :class:`FailureContext`.
+    """
+    clean_command = anonymize_paths(command, home=home)
+    return FailureContext(
+        command=clean_command or _STATE_APP_DIR,
+        argv=(clean_command,) if clean_command else (),
+        error_type=_error_type_from(error),
+        error_message=anonymize_paths(error, home=home),
+        traceback_text=_truncate(anonymize_paths(trace, home=home)),
+        sofer_version=get_version(),
+        python_version=_platform.python_version(),
+        platform=anonymize_paths(_platform.platform(), home=home),
+        timestamp=_utc_now(),
+    )
+
+
+def _error_type_from(error: str) -> str:
+    """Return the first plausible ``*Error``/``*Exception`` class token, else ``Failure``."""
+    match = _ERROR_TYPE_RE.search(error)
+    return match.group(0) if match else "Failure"
 
 
 def build_issue_title(ctx: FailureContext) -> str:
@@ -412,6 +463,65 @@ def attempt_send(repo: str, title: str, body: str) -> tuple[str | None, str | No
         return None, "gh is not authenticated"
     ok, detail = create_issue(repo, title, body)
     return (detail, None) if ok else (None, detail)
+
+
+def duplicate_query(command: str, error_type: str) -> str:
+    """Build a ``gh issue list --search`` query from a failure's identifiers.
+
+    Callers MUST pass only the anonymized command and the error TYPE (never the
+    error message, a path, or any dataset-derived text): the query is sent to
+    GitHub, so it must be free of user data. The first
+    ``failure_report_duplicate_query_tokens`` identifier tokens are kept; the
+    result falls back to the command or the error type when no token is found.
+    """
+    words = re.findall(r"[A-Za-z_][A-Za-z0-9_]+", f"{command} {error_type}")
+    limit = config.FAILURE_REPORT_DUPLICATE_QUERY_TOKENS
+    return " ".join(words[:limit]) or command or error_type
+
+
+def search_open_issues(repo: str, query: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Search *repo*'s open issues for a possible duplicate of *query*.
+
+    Args:
+        repo: Target ``owner/repo``.
+        query: Search terms (see :func:`duplicate_query`).
+
+    Returns:
+        ``(matches, reason)`` — ``matches`` is the parsed ``gh issue list``
+        JSON (``number``/``title``/``url``), and ``reason`` is ``None`` on a
+        clean search or a short explanation when ``gh`` is unavailable,
+        unauthenticated, offline, or returned unparseable output. An empty
+        search never blocks filing.
+    """
+    if not gh_available():
+        return [], "gh CLI not found"
+    if not gh_authenticated():
+        return [], "gh is not authenticated"
+    proc = _run_gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--search",
+            query,
+            "--json",
+            "number,title,url",
+            "--limit",
+            str(config.FAILURE_REPORT_DUPLICATE_LIMIT),
+        ]
+    )
+    if proc is None or proc.returncode != 0:
+        return [], "gh issue list failed"
+    try:
+        parsed = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return [], "could not parse gh output"
+    if not isinstance(parsed, list):
+        return [], "unexpected gh output"
+    return [item for item in parsed if isinstance(item, dict)], None
 
 
 def _print_recovery(repo: str, title: str, body: str, path: Path) -> None:
