@@ -73,6 +73,7 @@ from pydantic import Field
 
 try:
     from fastmcp import FastMCP as _FastMCP
+    from fastmcp.resources import ResourceSecurity as _ResourceSecurity
 except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monkeypatch
     raise ImportError(
         "sofer's MCP server requires 'fastmcp' — install with: "
@@ -3252,6 +3253,14 @@ def _register_resources(server: _FastMCP) -> None:
     outside the root, so no leading-slash stripping is needed (lstripping
     would corrupt the absolute-inside-root case, whose parent *is* the root).
 
+    fastmcp 4 screens every templated resource parameter with
+    ``ResourceSecurity`` by default, rejecting absolute paths *before* the
+    handler runs. ``_contained_path`` is sofer's single containment authority
+    and absolute-inside-root is a supported, CI-pinned contract, so the
+    framework's absolute-path pre-screen is disabled for these templates:
+    containment (and traversal escape) stays centralized in
+    ``_contained_path``.
+
     The static ``sofer://status`` resource is registered AFTER the templates
     for one structural reason: its URI has no ``{name}``/``{name*}`` path
     variables and its handler takes no arguments, so fastmcp classifies it as
@@ -3260,9 +3269,10 @@ def _register_resources(server: _FastMCP) -> None:
     Before it, every registered resource was a template and ``resources/list``
     was empty by design (issue #146).
     """
-    server.resource("sofer://dataset/{config_path*}")(_resource_dataset)
-    server.resource("sofer://codebook/{data_file*}")(_resource_codebook)
-    server.resource("sofer://metadata/{data_file*}")(_resource_metadata)
+    security = _ResourceSecurity(reject_absolute_paths=False)
+    server.resource("sofer://dataset/{config_path*}", security=security)(_resource_dataset)
+    server.resource("sofer://codebook/{data_file*}", security=security)(_resource_codebook)
+    server.resource("sofer://metadata/{data_file*}", security=security)(_resource_metadata)
     # Static (no path variables): fastmcp lists ``sofer://status`` under
     # resources/list, NOT resources/templates/list — the three templates above
     # live under templates; the issue's empty-list surprise is exactly that gap.

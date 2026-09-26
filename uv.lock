@@ -3346,8 +3346,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "datasets", specifier = ">=5.0.1" },
-    { name = "fastmcp", specifier = ">=3.4,<5" },
-    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3.4,<5" },
+    { name = "fastmcp", specifier = ">=4,<5" },
+    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=4,<5" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "numpy", marker = "python_full_version < '3.14'", specifier = "<2.3" },
     { name = "numpy", marker = "python_full_version >= '3.14'", specifier = ">=2.3" },
@@ -3363,7 +3363,7 @@ provides-extras = ["mcp"]
 [package.metadata.requires-dev]
 dev = [
     { name = "coverage", specifier = ">=7.16.0" },
-    { name = "fastmcp", specifier = ">=3.4,<5" },
+    { name = "fastmcp", specifier = ">=4,<5" },
     { name = "mypy", specifier = "==2.3.0" },
     { name = "pre-commit", specifier = ">=4.0.0" },
     { name = "pyright", specifier = "==1.1.414" },
