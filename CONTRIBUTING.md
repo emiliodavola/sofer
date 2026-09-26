@@ -101,6 +101,29 @@ floating range would let the gate's behaviour move under CI with no diff (the ru
 for ruff). pyright must be run through `uv run`: it resolves third-party imports against the project
 environment, so running it any other way (bare, `npx`, `uvx`) can report phantom missing imports.
 
+### Dependency updates
+
+Automated dependency updates are driven by `.github/dependabot.yml`. Minor and patch
+updates are grouped and opened automatically; **major** updates are deliberately left out
+of every group so each arrives as its own PR for explicit review and code adaptation.
+
+Two bumps are intentionally not automated:
+
+- **ruff** — its single version is declared in four homes that must move together: the
+  `[dependency-groups] dev` pin and `[tool.ruff] required-version` in `pyproject.toml`, the
+  `astral-sh/ruff-pre-commit` `rev` in `.pre-commit-config.yaml`, and the version named in
+  this file's Code style section. CI-08 forces them to agree, and Dependabot's `uv`
+  ecosystem can move only the first, so the bot ignores `ruff`. To bump it, edit all four
+  declarations plus `uv.lock`, then run the CI-08 guard row and the full suite.
+- **fastmcp majors** — the MCP SDK API changes across majors, so adoption needs a
+  code-adapting change rather than a bot PR. Minor and patch updates stay automatic; the
+  declared `<4` cap is a real boundary because majors are ignored.
+
+When a bump still breaks CI, the failure is a guard, not a missing manual edit: the fix is
+to move the declaration that drifted. The guards live in `tests/test_ci_workflows.py` —
+action-ref consistency across every workflow, the setup-uv release parity derived from
+`ci.yml`, the `.python-version` ↔ gate-job interpreter pin, and the Dependabot policy above.
+
 ### Commit messages
 
 Use [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/):
