@@ -33,7 +33,6 @@ import asyncio
 import json
 import shutil
 import tempfile
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -96,11 +95,12 @@ class TestStdioFraming:
             from mcp.client.stdio import stdio_client
 
             async with stdio_client(params) as (read, write):
-                # read_timeout_seconds (mcp 1.29.1 ClientSession kwarg) makes a
-                # server that never responds fail this test loudly via a
-                # timeout instead of hanging CI indefinitely (R4 hardening).
+                # read_timeout_seconds (mcp 2.x ClientSession kwarg, seconds as
+                # float) makes a server that never responds fail this test
+                # loudly via a timeout instead of hanging CI indefinitely
+                # (R4 hardening).
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                    read, write, read_timeout_seconds=PROCESS_TIMEOUT_SECONDS
                 ) as session:
                     init = await session.initialize()
                     assert init is not None
@@ -170,7 +170,7 @@ class TestParentRootIdentity:
 
             async with stdio_client(params) as (read, write):
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                    read, write, read_timeout_seconds=PROCESS_TIMEOUT_SECONDS
                 ) as session:
                     await session.initialize()
 
@@ -244,7 +244,7 @@ class TestInstalledBinary:
 
             async with stdio_client(params) as (read, write):
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                    read, write, read_timeout_seconds=PROCESS_TIMEOUT_SECONDS
                 ) as session:
                     await session.initialize()
                     result = await session.call_tool(
@@ -292,7 +292,7 @@ class TestStdioGroundTruthChain:
 
             async with stdio_client(params) as (read, write):
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                    read, write, read_timeout_seconds=PROCESS_TIMEOUT_SECONDS
                 ) as session:
                     await session.initialize()
 

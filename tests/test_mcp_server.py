@@ -18,7 +18,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -839,11 +838,12 @@ class TestStdioSmoke:
                 cwd=str(tmp_path),
             )
             async with stdio_client(params) as (read, write):
-                # read_timeout_seconds (mcp 1.29.x ClientSession kwarg) makes a
-                # server that never responds fail this test loudly via a
-                # timeout instead of hanging CI indefinitely (R4 hardening).
+                # read_timeout_seconds (mcp 2.x ClientSession kwarg, seconds as
+                # float) makes a server that never responds fail this test
+                # loudly via a timeout instead of hanging CI indefinitely
+                # (R4 hardening).
                 async with ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=PROCESS_TIMEOUT_SECONDS)
+                    read, write, read_timeout_seconds=PROCESS_TIMEOUT_SECONDS
                 ) as session:
                     init = await session.initialize()
                     assert init is not None
@@ -1543,9 +1543,9 @@ class TestResources:
             async with Client(server) as client:
                 await client.read_resource("sofer://metadata/absent.yaml")
 
-        from mcp import McpError
+        from mcp import MCPError
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             _run(_go())
         assert "metadata not found" in str(excinfo.value)
         assert "absent.yaml" in str(excinfo.value)
@@ -1563,9 +1563,9 @@ class TestResources:
             async with Client(server) as client:
                 await client.read_resource(f"sofer://dataset/{outside / 'evil.toml'}")
 
-        from mcp import McpError
+        from mcp import MCPError
 
-        with pytest.raises(McpError, match="outside the server root"):
+        with pytest.raises(MCPError, match="outside the server root"):
             _run(_go())
 
     def test_resource_extension_allowlist(self, tmp_path):
@@ -1577,9 +1577,9 @@ class TestResources:
             async with Client(server) as client:
                 await client.read_resource("sofer://dataset/notes.txt")
 
-        from mcp import McpError
+        from mcp import MCPError
 
-        with pytest.raises(McpError, match="one of these extensions"):
+        with pytest.raises(MCPError, match="one of these extensions"):
             _run(_go())
 
     def test_resource_size_guard(self, tmp_path, monkeypatch, restore_tool_config):
@@ -1591,9 +1591,9 @@ class TestResources:
             async with Client(server) as client:
                 await client.read_resource("sofer://dataset/dataset.toml")
 
-        from mcp import McpError
+        from mcp import MCPError
 
-        with pytest.raises(McpError, match="resource size limit"):
+        with pytest.raises(MCPError, match="resource size limit"):
             _run(_go())
 
     def test_absolute_posix_uri_resolves_inside_root(self, tmp_path):
@@ -1647,9 +1647,9 @@ class TestResources:
             async with Client(server) as client:
                 await client.read_resource(uri)
 
-        from mcp import McpError
+        from mcp import MCPError
 
-        with pytest.raises(McpError, match="outside the server root"):
+        with pytest.raises(MCPError, match="outside the server root"):
             _run(_go())
 
 
@@ -2831,10 +2831,10 @@ class TestWheelPackaging:
             meta = zf.read(metadata[0]).decode("utf-8")
             assert "Provides-Extra: mcp" in meta
             # unconditional Requires-Dist (no extra marker) + alias with marker
-            assert "Requires-Dist: fastmcp>=3.4,<4" in meta
+            assert "Requires-Dist: fastmcp<5,>=4" in meta
             alias_present = (
-                'Requires-Dist: fastmcp>=3.4,<4; extra == "mcp"' in meta
-                or "Requires-Dist: fastmcp>=3.4,<4; extra == 'mcp'" in meta
+                "Requires-Dist: fastmcp<5,>=4; extra == 'mcp'" in meta
+                or 'Requires-Dist: fastmcp<5,>=4; extra == "mcp"' in meta
             )
             assert alias_present
             # ensure at least one unconditional line exists (without extra ==)

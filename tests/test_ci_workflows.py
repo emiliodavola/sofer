@@ -931,7 +931,7 @@ def test_release_lint_job_runs_the_ci_lint_gates() -> None:
             f"the release `lint` job must run exactly {command!r} (CI-12)"
         )
     assert lint.get("runs-on") == "ubuntu-latest", "the release `lint` job keeps its single OS axis"
-    uv_step = _find_step(lint, uses="astral-sh/setup-uv@v10.1.0")
+    uv_step = _find_step(lint, uses="astral-sh/setup-uv@v10.2.0")
     assert uv_step is not None and uv_step.get("with", {}).get("python-version") == "3.13", (
         "the release `lint` job must keep its single Python axis (3.13), matching ci.yml (CI-12)"
     )
