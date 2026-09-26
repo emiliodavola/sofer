@@ -17,7 +17,9 @@ which re-enforces an existing CI-07 row rather than adding one, the three
 context tally, and the lint-job checker step), the three CI-12 release
 lint-job parity guards, and the CI-13/CI-14 dependency-bump hardening guards
 (workflow action-ref consistency, the derived setup-uv parity, the interpreter
-pin equality, and the Dependabot update policy). Runtime
+pin equality, and the Dependabot update policy), and the four issue #258
+SDD-context drift guards (the project.md subcommand inventory, the enforced
+tool versions, the pyright gate, and the config.yaml quality commands). Runtime
 gate exit-code evidence (CI-01 S2's local gate run, CI-08 S4's required-version
 mismatch probe, and CI-09 S2's pyright gate run) is recorded in the SDD verify
 report, not asserted here.
@@ -1368,3 +1370,102 @@ def test_lint_job_runs_the_test_mapping_checker() -> None:
         "the checker must not add a new job or matrix axis — one step in the existing "
         f"`lint` job only (MC-07 S1), got {sorted(jobs)}"
     )
+
+
+# ── SDD-context drift guards (issue #258) ───────────────────────────────────
+# `openspec/project.md` and `openspec/config.yaml` are the SDD context every
+# future change reads; they carried stale facts that contradicted the enforced
+# configuration (the mypy strict posture, the CLI subcommand count, the pinned
+# tool versions, the pyright gate, and the quality commands). These supporting
+# guards derive every expected value from a declaration home (`pyproject.toml`,
+# `src/sofer/cli.py`, the CI lint contract in this module) so the context files
+# cannot drift again without a test failing.
+
+# Top-level argparse subparsers are registered on the bare ``sub`` object; the
+# nested ``mcp_sub.add_parser(...)`` calls do not match because the ``\b``
+# before ``sub`` fails inside ``mcp_sub`` (``_`` is a word character).
+_CLI_TOP_LEVEL_SUBPARSER_RE = re.compile(r"\bsub\.add_parser\(\s*[\"'](?P<name>[a-z0-9-]+)[\"']")
+_PROJECT_MD_SUBCOMMAND_RE = re.compile(
+    r"argparse CLI, (?P<count>\d+) subcommands:\s*(?P<names>[a-z0-9, -]+)"
+)
+
+
+def _cli_top_level_subcommands() -> list[str]:
+    """Derive the CLI's top-level subcommand names from ``cli.py`` source.
+
+    Returns:
+        The subcommand names registered on the bare ``sub`` subparsers object,
+        in declaration order (nested ``mcp_sub`` subcommands are excluded).
+    """
+    return _CLI_TOP_LEVEL_SUBPARSER_RE.findall(_read_text("src/sofer/cli.py"))
+
+
+def test_openspec_project_md_declares_the_shipped_subcommands() -> None:
+    """Issue #258: project.md's CLI inventory equals cli.py's top-level subparsers."""
+    declared = _cli_top_level_subcommands()
+    assert declared, "no top-level subparsers found in src/sofer/cli.py"
+    match = _PROJECT_MD_SUBCOMMAND_RE.search(_read_text("openspec/project.md"))
+    assert match is not None, "openspec/project.md carries no CLI subcommand inventory line"
+    names = [name.strip() for name in match.group("names").split(",")]
+    assert set(names) == set(declared), (
+        f"openspec/project.md must list exactly the shipped subcommands: declared "
+        f"{sorted(names)}, cli.py registers {sorted(declared)}"
+    )
+    assert int(match.group("count")) == len(declared), (
+        f"openspec/project.md declares {match.group('count')} subcommands but cli.py "
+        f"registers {len(declared)} (issue #258)"
+    )
+
+
+def test_openspec_context_declares_the_enforced_tool_versions() -> None:
+    """Issue #258: the tool versions in the SDD context match the enforced pins.
+
+    Both tool pins are derived — ruff from its dev pin, mypy and pyright from
+    their exact dev pins — so bumping a tool edits declarations only.
+    """
+    versions = {
+        "ruff": _declared_ruff_version(),
+        "mypy": _declared_exact_dev_pin("mypy"),
+        "pyright": _declared_pyright_version(),
+    }
+    for rel in ("openspec/project.md", "openspec/config.yaml"):
+        text = _read_text(rel)
+        for tool, version in versions.items():
+            pattern = rf"(?<![\d.]){re.escape(tool)} {re.escape(version)}(?!\d)(?!\.\d)"
+            assert re.search(pattern, text), (
+                f"{rel} must name the enforced {tool} {version} (issue #258)"
+            )
+
+
+def test_openspec_context_names_the_pyright_gate() -> None:
+    """Issue #258: the pyright gate is named in both SDD context files."""
+    for rel in ("openspec/project.md", "openspec/config.yaml"):
+        assert "uv run pyright" in _read_text(rel), (
+            f"{rel} must name the enforced `uv run pyright` gate (CI-09, issue #258)"
+        )
+
+
+def test_openspec_config_quality_commands_match_the_ci_lint_gates() -> None:
+    """Issue #258: config.yaml's quality commands equal the CI lint-job commands.
+
+    Each expected command is checked against the shared ``_CI_LINT_GATE_RUNS``
+    contract before it is compared to the config, so the SDD config and the CI
+    lint job cannot diverge: a CI command drift breaks the shared contract first,
+    and then this guard.
+    """
+    quality = _openspec_config()["testing"]["quality"]
+    expected = {
+        "linter": "uv run ruff check src/ tests/ scripts/",
+        "type_checker": "uv run mypy src/ scripts/",
+        "second_type_checker": "uv run pyright",
+        "formatter": "uv run ruff format --check src/ tests/",
+    }
+    for key, command in expected.items():
+        assert command in _CI_LINT_GATE_RUNS, (
+            f"the expected {key} command {command!r} is not a CI lint gate — update the "
+            "shared contract in this module (issue #258)"
+        )
+        assert quality[key]["command"] == command, (
+            f"openspec/config.yaml {key} command must be {command!r}, got "
+            f"{quality[key]['command']!r} (issue #258)"
+        )
