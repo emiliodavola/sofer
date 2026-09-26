@@ -1,6 +1,5 @@
 """Tests for CSV-to-Parquet conversion, keep-csv, pipeline integration, and model."""
 
-import hashlib
 import shutil
 import tempfile
 from pathlib import Path
@@ -8,6 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from sofer import config
 from sofer import publish as publish_mod
 from sofer._converters import convert_file_to_parquet
 from sofer.model import DatasetConfig, FileEntry
@@ -116,12 +116,6 @@ remote = "c.parquet"
 
 # --- Byte-identity + declared-dialect coverage (PC-U01 / PC-U06, E1-E5) ---
 
-# Pre-change digest, captured on this branch before any edit: converting
-# col_a;col_b / 1;alpha / 2;beta (utf-8-sig) with an UNDECLARED dialect.
-# The new implementation must take the identical code path (no read_options,
-# tool-wide sniff) so the output Parquet stays byte-for-byte the same.
-_PRECHANGE_UNDECLARED_SHA256 = "5eb870dc0bc2832dadbd5a4d6b570dde6c53a2beec412081f229715fe92e648c"
-
 
 def _declared_cfg(tmp_path: Path, meta_lines: str):
     """Write a dataset TOML declaring *meta_lines* and load it via from_toml."""
@@ -148,14 +142,27 @@ class TestUndeclaredDialectByteIdentical:
     """No declared dialect => byte-identical to the pre-change output (E5)."""
 
     def test_undeclared_dialect_matches_prechange_bytes(self, tmp_path):
-        """The undeclared path adds no read_options, so bytes are unchanged."""
+        """The undeclared path adds no read_options, so bytes are unchanged.
+
+        The reference is recreated at test time from the pre-change read shape
+        (sniff + ``pyarrow.csv.read_csv`` with no ``read_options``, through the
+        same writer), so a permitted pyarrow upgrade moves both sides together
+        and cannot break the assertion for the wrong reason.
+        """
+        import pyarrow.csv as pc
+
+        from sofer._converters import _sniff_csv_delimiter, _write_parquet_table
+
         csv = tmp_path / "data.csv"
         csv.write_text("col_a;col_b\n1;alpha\n2;beta\n", encoding="utf-8-sig")
         cfg = _plain_cfg(tmp_path, [])
-        staging = tmp_path / "staging"
-        result = convert_file_to_parquet(csv, staging, cfg)
-        digest = hashlib.sha256(result["data"].read_bytes()).hexdigest()
-        assert digest == _PRECHANGE_UNDECLARED_SHA256
+        result = convert_file_to_parquet(csv, tmp_path / "staging", cfg)
+
+        delimiter = _sniff_csv_delimiter(csv, config.CSV_ENCODING)
+        reference_table = pc.read_csv(csv, parse_options=pc.ParseOptions(delimiter=delimiter))
+        reference = _write_parquet_table(reference_table, tmp_path / "reference", csv.stem)
+
+        assert result["data"].read_bytes() == reference.read_bytes()
 
 
 class TestDeclaredDialectWins:
@@ -522,17 +529,16 @@ class TestDelimiterPlumbing:
     """cfg.csv_delimiter is passed through to the conversion via prepare()."""
 
     def test_custom_delimiter_used_via_upload(self, tmp_path, monkeypatch):
-        """When cfg.csv_delimiter is set, the conversion uses it."""
-        csv = tmp_path / "data.csv"
-        csv.write_text("col1|col2\nval1|val2", encoding="utf-8-sig")
+        """A declared ``|`` survives the publish seam with its true columns.
 
-        cfg = DatasetConfig(
-            name="test",
-            repo_id="user/test",
-            csv_delimiter="|",
-            files=[FileEntry(local=csv, remote="data.csv")],
-            _base_dir=tmp_path,
-        )
+        The declared-TOML seam is required because ``declared_meta_keys`` — the
+        presence signal PC-U01 keys on — is populated only by
+        ``DatasetConfig.from_toml``. Asserting the column count, not the mere
+        presence of ``data.parquet``, is what makes a mis-split fail: a
+        one-column Parquet satisfies an existence-only check (issue #205 F1).
+        """
+        (tmp_path / "data.csv").write_text("col1|col2\nval1|val2", encoding="utf-8-sig")
+        cfg = _declared_cfg(tmp_path, 'csv_delimiter = "|"\n')
 
         _mock_hf_api(monkeypatch)
         td = _fixed_staging(tmp_path, monkeypatch)
@@ -540,7 +546,11 @@ class TestDelimiterPlumbing:
         publish(cfg, target="hf")
 
         staging_root = td / "repo"
-        assert (staging_root / "data.parquet").is_file()
+        parquet_path = staging_root / "data.parquet"
+        assert parquet_path.is_file()
+        table = pq.read_table(parquet_path)
+        assert table.num_columns == 2
+        assert table.column_names == ["col1", "col2"]
         assert not (staging_root / "data.csv").exists()
 
 

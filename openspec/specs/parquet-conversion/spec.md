@@ -669,3 +669,54 @@ System SHALL convert all eligible `.csv/.tsv/.xlsx/.jsonl` via `src/sofer/_conve
 - GIVEN `a.csv` and `b.xlsx` with `--keep-csv`
 - WHEN publish stages
 - THEN `a.csv` SHALL be kept alongside `a.parquet`; `b.xlsx` SHALL NOT
+
+### Requirement: Discriminating, version-stable evidence for the declared-dialect tier (PC-U07)
+
+> Added by change `2026-09-26-test-205-csv-tier-gaps` (issue #205). The behaviour requirement PC-U01
+> is unchanged; this requirement carries the **evidence** duty for the declared-dialect tier after the
+> parent change's verify phase (#181) recorded four test-quality gaps.
+
+The test suite for PC-U01's declared-dialect tier SHALL carry evidence that can fail. The integration
+test for the declared-wins path SHALL drive the dataset-TOML seam (`DatasetConfig.from_toml`, which
+alone populates `declared_meta_keys`) and SHALL assert the produced Parquet's true column count/names,
+not the mere presence of a `.parquet` file — a mis-detected delimiter collapses the header into one
+column and would satisfy an existence-only assertion. At least one declared-wins case SHALL use a
+delimiter outside `config.SNIFF_DELIMITERS` (`[";", ",", "\t"]`), so honouring the declaration is the
+only way to pass. The JSONL fallback path of `_convert_jsonl_to_parquet` SHALL be exercised by a test
+that forces the fast path to fail and asserts the fallback's measured behaviour, with the code comment
+describing that behaviour. The undeclared byte-identity evidence SHALL derive its reference at test
+time from the pre-change read shape and SHALL NOT depend on a frozen digest of
+pyarrow-version-dependent output bytes. The boundary around a programmatically constructed
+`DatasetConfig` SHALL be explicit: a dialect value supplied without the `declared_meta_keys` presence
+signal SHALL take the sniff fallback, the decision SHALL be recorded under the owning change's design,
+and the behaviour SHALL be pinned by a test.
+
+#### Scenario: The declared-wins integration test fails against a mis-split
+- GIVEN the CSV dialect plumbing test
+- WHEN the dataset declares `csv_delimiter = "|"` through the TOML seam and the file is `|`-separated
+- THEN the staged Parquet SHALL hold the file's true column count and column names
+- AND a one-column mis-split SHALL fail the assertion
+
+#### Scenario: A declared-wins case cannot pass by sniff coincidence
+- GIVEN a declared-wins unit test over a delimiter outside `config.SNIFF_DELIMITERS` (e.g. `|`)
+- WHEN the conversion runs with the declaration present
+- THEN it SHALL produce the file's true columns
+- AND without the declaration the same input would collapse to one column
+
+#### Scenario: The JSONL fallback is exercised and its real behaviour asserted
+- GIVEN a JSONL file whose later record carries a key absent from its first record, and a forced failure of `pyarrow.json.read_json`
+- WHEN `_convert_jsonl_to_parquet` runs the fallback
+- THEN it SHALL still write a Parquet file via `json` + `pa.Table.from_pylist`
+- AND the test SHALL assert the measured schema-from-first-record behaviour and the code comment SHALL match it
+
+#### Scenario: The undeclared byte-identity evidence is derived at test time
+- GIVEN the undeclared-dialect byte-identity test
+- WHEN it establishes its reference output
+- THEN the reference digest SHALL be computed from the recreated pre-change read shape with the installed pyarrow, not from a frozen literal
+- AND the emitted Parquet bytes SHALL equal that reference
+
+#### Scenario: The programmatic-config boundary is decided and pinned
+- GIVEN a programmatic `DatasetConfig(csv_delimiter="|")` with an empty `declared_meta_keys`
+- WHEN the conversion runs
+- THEN it SHALL take the sniff fallback
+- AND the decision SHALL be recorded in the owning change's design and pinned by a test

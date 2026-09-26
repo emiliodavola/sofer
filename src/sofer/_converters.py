@@ -693,7 +693,10 @@ def _convert_jsonl_to_parquet(
             if not rows:
                 table = pa.table({})
             else:
-                # from_pylist handles sparse keys (union)
+                # from_pylist infers the schema from the first record; keys that
+                # appear only in later records are not unioned in (measured on
+                # pyarrow 25), and the key-union parity check reports them as
+                # advisory rather than failing the conversion.
                 table = pa.Table.from_pylist(rows)
             # Parity: key-union vs columns
             union_keys: set[str] = set()
