@@ -64,7 +64,7 @@ rows) is enforced by the checker exit 0 above.
 
 ```text
 $ uv run coverage run -m pytest tests/ -q
-1918 passed, 1 skipped, 1 warning in 343.63s (0:05:43)
+1917 passed, 1 skipped, 1 warning in 331.36s (0:05:31)
 ```
 
 The single warning is the pre-existing `runpy` `RuntimeWarning` from
