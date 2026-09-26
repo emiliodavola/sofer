@@ -106,7 +106,9 @@ def anonymize_paths(text: str, *, home: Path | None = None) -> str:
     Covers the POSIX form (``/home/alice``), the Windows form
     (``C:\\Users\\alice``) and the forward-slash variant of the Windows form,
     so a traceback rendered on either platform is anonymized. The longest
-    candidate is replaced first to avoid a shorter prefix shadowing it.
+    candidate is replaced first to avoid a shorter prefix shadowing it, and a
+    candidate made only of separators (a filesystem root such as ``/``) is
+    skipped so a root home never rewrites unrelated path separators.
 
     Args:
         text: The string to anonymize.
@@ -127,7 +129,7 @@ def anonymize_paths(text: str, *, home: Path | None = None) -> str:
     }
     result = text
     for candidate in sorted(candidates, key=len, reverse=True):
-        if candidate and candidate != os.sep:
+        if candidate.strip("/\\"):
             result = result.replace(candidate, "~")
     return result
 

@@ -164,12 +164,18 @@ class TestStateHome:
     def test_posix_xdg(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SOFER_STATE_HOME", raising=False)
         monkeypatch.setenv("XDG_STATE_HOME", "/xdg")
+        monkeypatch.setattr(
+            failure_report, "os", types.SimpleNamespace(name="posix", environ=os.environ)
+        )
         assert failure_report.state_home() == Path("/xdg") / "sofer"
 
     def test_posix_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SOFER_STATE_HOME", raising=False)
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
         monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(
+            failure_report, "os", types.SimpleNamespace(name="posix", environ=os.environ)
+        )
         assert failure_report.state_home() == tmp_path / ".local" / "state" / "sofer"
 
     def test_windows_with_localappdata(self, monkeypatch: pytest.MonkeyPatch) -> None:
