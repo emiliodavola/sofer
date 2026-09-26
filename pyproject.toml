@@ -51,8 +51,8 @@ sofer-mcp = "sofer.mcp_server:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "ruff==0.16.7",
-    "mypy==2.3.0",
+    "ruff==0.16.8",
+    "mypy==2.3.1",
     "pre-commit>=4.0.0",
     "fastmcp>=3.4,<4",
     "coverage>=7.16.0",
