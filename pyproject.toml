@@ -51,8 +51,8 @@ sofer-mcp = "sofer.mcp_server:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "ruff==0.16.7",
-    "mypy==2.3.0",
+    "ruff==0.16.8",
+    "mypy==2.3.1",
     "pre-commit>=4.0.0",
     "fastmcp>=3.4,<4",
     "coverage>=7.16.0",
@@ -69,7 +69,7 @@ line-length = 100
 # Single authoritative ruff version: equal to the dev-group pin above and to the
 # `ruff-pre-commit` rev; the three declarations are forced to agree by CI-08's guards in
 # tests/test_ci_workflows.py. A drifting binary fails ruff here, at config load.
-required-version = "==0.16.7"
+required-version = "==0.16.8"
 # Design docs and specs under openspec/ embed Python snippets inside markdown;
 # the formatter rewrites those blocks, producing noise diffs on historical
 # SDD artifacts. They are documentation, not source — keep them out of scope.
