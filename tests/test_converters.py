@@ -285,6 +285,41 @@ class TestConvertFileToParquet:
         assert ".parquet" not in CONVERTIBLE_SUFFIXES
 
 
+class TestJsonlFallback:
+    """The JSONL fallback path is exercised and its real behaviour asserted."""
+
+    def test_from_pylist_fallback_uses_first_record_schema(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Forced fallback: the first record defines the schema; later-only keys drop.
+
+        ``pyarrow.json.read_json`` is forced to raise so the ``json`` +
+        ``pa.Table.from_pylist`` fallback runs. On the installed pyarrow,
+        ``from_pylist`` infers the schema from the first record, so a key that
+        appears only in a later record is not unioned in — the fallback's code
+        comment is corrected to match this. The key-union parity check is
+        advisory and the conversion still succeeds (issue #205 F2).
+        """
+
+        def _raise(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("forced fast-path failure")
+
+        import pyarrow.json as pj
+
+        monkeypatch.setattr(pj, "read_json", _raise)
+
+        j = tmp_path / "data.jsonl"
+        j.write_text('{"a": 1, "c": "first"}\n{"a": 2, "b": "later"}\n', encoding="utf-8")
+        staging = tmp_path / "staging"
+        result = convert_file_to_parquet(j, staging)
+        assert "data" in result
+        table = pq.read_table(result["data"])
+        assert table.num_rows == 2
+        assert table.column_names == ["a", "c"]
+        assert "b" not in table.column_names
+        assert "JSONL key mismatch" in capsys.readouterr().out
+
+
 class TestCsvDialectResolution:
     """Declared dialect vs fallback resolution (PC-U01, E2)."""
 
@@ -312,6 +347,21 @@ class TestCsvDialectResolution:
         assert result
         assert pq.read_table(result["data"]).column_names == ["a", "b"]
 
+    def test_declared_pipe_outside_sniff_set_wins(self, tmp_path: Path) -> None:
+        """A declared ``|`` is the only way to keep the true columns.
+
+        ``;`` and ``,`` are in ``config.SNIFF_DELIMITERS``, so the sniff picks
+        the same delimiter and those cases pass whether or not the declaration
+        is honoured. ``|`` is outside the sniff set, so a collapse to one column
+        is the only alternative — the case cannot pass by coincidence
+        (issue #205 F3).
+        """
+        csv = tmp_path / "data.csv"
+        csv.write_text("col1|col2|col3\nv1|v2|v3\n", encoding="utf-8-sig")
+        result = convert_file_to_parquet(csv, tmp_path / "staging", self._cfg_with_declared("|"))
+        assert result
+        assert pq.read_table(result["data"]).column_names == ["col1", "col2", "col3"]
+
     def test_nothing_declared_falls_back_to_sniff(self, tmp_path: Path) -> None:
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
@@ -320,6 +370,25 @@ class TestCsvDialectResolution:
         result = convert_file_to_parquet(csv, tmp_path / "staging", cfg)
         assert result
         assert pq.read_table(result["data"]).column_names == ["a", "b"]
+
+    def test_programmatic_value_without_presence_signal_falls_back_to_sniff(
+        self, tmp_path: Path
+    ) -> None:
+        """A programmatic dialect with no ``declared_meta_keys`` does not override.
+
+        The presence signal is the contract of record (issue #181 design D1;
+        issue #205 F5): ``from_toml`` alone populates ``declared_meta_keys``, so
+        a library consumer passing ``csv_delimiter=`` directly takes the sniff
+        fallback. This test pins that accepted boundary — a ``|`` file collapses
+        to one column because the declaration is not observed.
+        """
+        csv = tmp_path / "data.csv"
+        csv.write_text("col1|col2|col3\nv1|v2|v3\n", encoding="utf-8-sig")
+        cfg = DatasetConfig(name="t", repo_id="user/t", files=[], csv_delimiter="|")
+        assert "csv_delimiter" not in cfg.declared_meta_keys
+        result = convert_file_to_parquet(csv, tmp_path / "staging", cfg)
+        assert result
+        assert pq.read_table(result["data"]).num_columns == 1
 
     def test_declared_encoding_reaches_python_parity_read(self, tmp_path: Path) -> None:
         csv = tmp_path / "data.csv"
