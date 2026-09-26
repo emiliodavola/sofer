@@ -14,6 +14,7 @@ from sofer.repo_compliance import (
     _classify_parquet_read_failure,
     _csv_values_look_like_bool,
     _parquet_to_hf_dtype,
+    _read_csv_sample,
     _validate_size_category,
     build_dataset_card,
     build_license_file,
@@ -3368,3 +3369,101 @@ class TestCardCollapsible:
         monkeypatch.setattr(config, "CARD_COLLAPSE_THRESHOLD", 999)
         card2 = build_dataset_card(cfg, schema)
         assert "<details>" not in card2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Schema duplicate summary — REPORT_MAX_MODIFIED cap (issue #189)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDupSummaryRespectsReportMaxModified:
+    """The schema duplicate summary honours ``config.REPORT_MAX_MODIFIED``."""
+
+    def _six_shared_cfg(self, tmp_path):
+        files = []
+        for i in range(3):
+            f = tmp_path / f"f{i}.csv"
+            f.write_text(
+                f"col_a;col_b;col_c;col_d;col_e;col_f;unique_{i}\n1;2;3;4;5;6;{i}\n",
+                encoding="utf-8-sig",
+            )
+            files.append(FileEntry(local=f, remote=f"f{i}.csv"))
+        return DatasetConfig(
+            name="test",
+            repo_id="user/test",
+            files=files,
+            _base_dir=tmp_path,
+        )
+
+    def test_default_lists_five(self, tmp_path, capsys):
+        """Default cap (5) lists the five most duplicated columns."""
+        build_schema_report(self._six_shared_cfg(tmp_path))
+        captured = capsys.readouterr()
+        assert "Most duplicated: col_a, col_b, col_c, col_d, col_e." in captured.out
+        assert "col_f" not in captured.out
+
+    def test_override_changes_rendered_limit(self, tmp_path, monkeypatch, capsys):
+        """Overriding REPORT_MAX_MODIFIED changes the rendered summary."""
+        monkeypatch.setattr(config, "REPORT_MAX_MODIFIED", 2)
+        build_schema_report(self._six_shared_cfg(tmp_path))
+        captured = capsys.readouterr()
+        assert "Most duplicated: col_a, col_b." in captured.out
+        assert "col_c" not in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  _read_csv_sample — configured CSV fallback, no literals (issue #202)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReadCsvSampleConfiguredFallback:
+    """Sniffer failure falls back to configured values, never literals."""
+
+    def test_sniffer_failure_uses_configured_delimiter(self, tmp_path, monkeypatch):
+        """With Sniffer raising, the configured delimiter parses the file."""
+        import csv as _csv
+
+        f = tmp_path / "data.csv"
+        f.write_text("a,b\n1,2\n", encoding="utf-8")
+
+        def _raise(_self, _sample):
+            raise _csv.Error("could not determine delimiter")
+
+        monkeypatch.setattr(_csv.Sniffer, "sniff", _raise)
+        monkeypatch.setattr(config, "CSV_DELIMITER", ",")
+        headers, rows = _read_csv_sample(f)
+        assert headers == ["a", "b"]
+        assert rows == [["1", "2"]]
+
+    def test_sniffer_failure_default_delimiter_mis_splits(self, tmp_path, monkeypatch):
+        """Control: the stock ';' fallback would not split a comma file."""
+        import csv as _csv
+
+        f = tmp_path / "data.csv"
+        f.write_text("a,b\n1,2\n", encoding="utf-8")
+
+        def _raise(_self, _sample):
+            raise _csv.Error("could not determine delimiter")
+
+        monkeypatch.setattr(_csv.Sniffer, "sniff", _raise)
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        headers, _rows = _read_csv_sample(f)
+        assert headers == ["a,b"]
+
+    def test_default_encoding_comes_from_config(self, tmp_path, monkeypatch):
+        """Omitting encoding reads with the configured csv_encoding."""
+        f = tmp_path / "data.csv"
+        f.write_bytes(b"name\ncaf\xe9\n")  # latin-1 'é'
+        monkeypatch.setattr(config, "CSV_ENCODING", "latin-1")
+        headers, rows = _read_csv_sample(f, delimiter=",")
+        assert headers == ["name"]
+        assert rows == [["caf\u00e9"]]
+
+    def test_explicit_encoding_still_wins(self, tmp_path, monkeypatch):
+        """An explicit encoding parameter is not overridden by config."""
+        f = tmp_path / "data.csv"
+        f.write_bytes(b"name\ncaf\xe9\n")  # latin-1 'é'
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8")
+        headers, rows = _read_csv_sample(f, delimiter=",", encoding="latin-1")
+        assert headers == ["name"]
+        assert rows == [["caf\u00e9"]]

@@ -272,25 +272,29 @@ def build_license_file(license_id: str) -> str:
 def _read_csv_sample(
     path: Path,
     delimiter: str | None = None,
-    encoding: str = "utf-8-sig",
+    encoding: str | None = None,
 ) -> tuple[list[str], list[list[str]]] | None:
     """Read the header and a sample of rows from a CSV file.
 
     Returns ``(headers, rows)`` on success, or ``None`` if the file cannot
     be read.  When *delimiter* is ``None``, auto-detect with ``csv.Sniffer``
-    as a fallback after trying the default ``";"``.
+    with the configured ``csv_delimiter`` as fallback.  When *encoding* is
+    ``None``, the configured ``csv_encoding`` applies.  Neither default is
+    a literal (AGENTS.md rule 3, issue #202): the schema-report caller
+    passes the dataset ``cfg`` values explicitly, and direct callers inherit
+    the tool-wide ``[tool.sofer]`` configuration.
     """
+    effective_encoding = encoding if encoding is not None else config.CSV_ENCODING
     try:
-        with open(path, newline="", encoding=encoding) as fh:
+        with open(path, newline="", encoding=effective_encoding) as fh:
             if delimiter is None:
-                # First try ";", Sniffer fallback
                 try:
                     sample = fh.read(config.PROBE_CHUNK_BYTES)
                     fh.seek(0)
                     dialect = csv.Sniffer().sniff(sample)
                     delimiter = dialect.delimiter
                 except csv.Error:
-                    delimiter = ";"
+                    delimiter = config.CSV_DELIMITER
 
             reader = csv.reader(fh, delimiter=delimiter)
             headers = next(reader)
@@ -497,7 +501,7 @@ def _build_schema_report_impl(
         cfg:           Dataset configuration.
         csv_delimiter: Delimiter override (``None`` = use ``cfg.csv_delimiter``,
                        with Sniffer fallback).
-        csv_encoding:  File encoding (default ``"utf-8-sig"``).
+        csv_encoding:  File encoding (``None`` = use ``cfg.csv_encoding``).
         staging_dir:   Directory containing converted Parquet files.  When set,
                        the function checks for a ``.parquet`` file for each CSV
                        entry before falling back to CSV reading.
@@ -856,9 +860,11 @@ def _build_schema_report_impl(
                         f"using first occurrence."
                     )
         else:
-            # Sort by frequency (most duplicated first), take top 5
-            top5 = sorted(_dup_map, key=lambda k: len(_dup_map[k]), reverse=True)[:5]
-            top5_str = ", ".join(top5)
+            # Sort by frequency (most duplicated first), honouring the
+            # configured report cap shared with publish output (issue #189).
+            limit = config.REPORT_MAX_MODIFIED
+            top = sorted(_dup_map, key=lambda k: len(_dup_map[k]), reverse=True)[:limit]
+            top5_str = ", ".join(top)
             print(
                 f"  [i] {n_dups} columns appear in multiple files. "
                 f"Most duplicated: {top5_str}.\n"
@@ -888,7 +894,7 @@ def build_schema_report(
         cfg:           Dataset configuration.
         csv_delimiter: Delimiter override (``None`` = use ``cfg.csv_delimiter``,
                        with Sniffer fallback).
-        csv_encoding:  File encoding (default ``"utf-8-sig"``).
+        csv_encoding:  File encoding (``None`` = use ``cfg.csv_encoding``).
         staging_dir:   Directory containing converted Parquet files.  When set,
                        the function checks for a ``.parquet`` file for each CSV
                        entry before falling back to CSV reading.
@@ -916,7 +922,7 @@ def build_schema_report_with_rows(
         cfg:           Dataset configuration.
         csv_delimiter: Delimiter override (``None`` = use ``cfg.csv_delimiter``,
                        with Sniffer fallback).
-        csv_encoding:  File encoding (default ``"utf-8-sig"``).
+        csv_encoding:  File encoding (``None`` = use ``cfg.csv_encoding``).
         staging_dir:   Directory containing converted Parquet files (see
                        :func:`build_schema_report`).
 

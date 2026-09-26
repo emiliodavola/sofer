@@ -95,7 +95,7 @@ Stdout is never modified, so piping/redirecting output stays byte-identical.
 
 | Key | Default | What it does |
 |---|---|---|
-| `convert_to_parquet` (per `[[file]]`) | `true` | When `true`, `csv/tsv/xlsx/jsonl` are converted to normalized Parquet (`data/GÖT Año.XLSX` → `data/got_ano.parquet`; Excel multi-sheet → `stem__sheet.parquet`). Set `false` to keep the original. `upload_as_csv = true` is a deprecated alias for CSV only. |
+| `convert_to_parquet` (per `[[file]]`) | `true` | When `true`, `csv/tsv/xlsx/jsonl` are converted to normalized Parquet (`raw/GÖT Año.XLSX` → `build/got_ano.parquet`; Excel multi-sheet → `stem__sheet.parquet`). Set `false` to keep the original. `upload_as_csv = true` is a deprecated alias for CSV only. |
 | `parquet_compression` | `zstd` | Parquet compression (`[tool.sofer]`). |
 | `parquet_row_group_size` | `100000` | Parquet row group size. |
 | `parquet_shard_warning_mb` | `500` | Warn when a shard exceeds this MB. |
@@ -136,3 +136,21 @@ confidence_round_digits = 4
 profile_dir = "profiles"   # profiles/Labels/etiquetas_a.metadata.yaml
 render_dir = "renders"     # renders/Labels/etiquetas_a.README.md
 ```
+
+## Assisted failure reporting
+
+The state directory and the target repository of the assisted failure reporter
+(issue #244) are tool-wide `[tool.sofer]` keys:
+
+| Key | Default | What it does |
+|---|---|---|
+| `failure_report_repo` | `emiliodavola/sofer` | `owner/repo` the CLI/MCP failure reporter files issues against. |
+| `failure_report_dir` | `failure-reports` | Subdirectory of sofer's state home (`~/.local/state/sofer`, `%LOCALAPPDATA%\sofer` on Windows, overridable with `SOFER_STATE_HOME`) holding one timestamped JSON report per unsent failure. |
+| `failure_report_traceback_max_chars` | `20000` | Cap on the traceback embedded in a report; the head and tail are kept with a truncation marker. |
+| `failure_report_manual_url_max_chars` | `6000` | Body length above which the manual `issues/new` URL prefills only the title; the body stays in the saved file for copy/paste. |
+| `failure_report_gh_timeout_seconds` | `30` | Timeout for each `gh` subprocess call (`auth status`, `issue list`, `issue create`). |
+| `failure_report_duplicate_limit` | `5` | Maximum open issues returned by the MCP duplicate search (`sofer_report_failure`). |
+| `failure_report_duplicate_query_tokens` | `8` | Identifier tokens kept from the anonymized command + error TYPE when building the duplicate-search query (message text is never searched). |
+
+Reports never contain dataset contents, environment-variable values, or
+un-anonymized home paths, and nothing is filed without explicit consent.

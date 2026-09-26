@@ -318,12 +318,22 @@ SHALL fall back to a non-empty derived value.
 
 > Added by change `feat-mcp-registration-automation` (archived 2026-09-09).
 > Extended by change `2026-09-12-fix-mcp-opencode-env` (additive env-forwarding scenario).
+> Extended by change `2026-09-25-feat-pi-mcp-agent` (#142) — `pi` added to the agent set.
+> Extended by change `2026-09-25-fix-mcp-native-delegation` (#167/#232) — native
+> delegation fidelity sentence.
 
-`sofer` MUST expose `mcp` with `add`/`remove`. `add` MUST accept `--agent <opencode|codex|gemini|all> [--scope user|project] [--cwd PATH] [--dry-run]`; `remove` MUST accept `--agent <opencode|codex|gemini|all> [--scope user|project] [--dry-run]`. Help for `sofer --help` and `sofer mcp*` MUST list these.
+`sofer` MUST expose `mcp` with `add`/`remove`. `add` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--cwd PATH] [--dry-run]`; `remove` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--dry-run]`. Help for `sofer --help` and `sofer mcp*` MUST list these.
 
-The `sofer mcp add` help text SHALL additionally document env-forwarding behavior: codex and gemini receive env forwarding with names only, and opencode entries carry no environment, so a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode` (or `all`) is chosen.
+The `sofer mcp add` help text SHALL additionally document env-forwarding behavior: codex, gemini and pi receive env forwarding with names only, and opencode entries carry no environment, so a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode` (or `all`) is chosen.
 
-(Previously: CLI-R09 documented only the flag surface; env-forwarding behavior was not part of the help contract.)
+The `sofer mcp add` / `sofer mcp remove` help text SHALL also document native
+delegation fidelity: native `codex`/`gemini` delegation is used only when the
+native CLI can faithfully forward the same env NAMES and scope as the file edit,
+and when it cannot the config file is edited instead with a warning on stderr.
+
+(Previously: CLI-R09 documented only the flag surface and the env-forwarding
+behavior; native delegation fidelity was not part of the help contract. #167/#232
+add the fidelity sentence.)
 
 #### Scenario: mcp in top help
 
@@ -342,19 +352,28 @@ The `sofer mcp add` help text SHALL additionally document env-forwarding behavio
 - GIVEN `sofer mcp add --help`
 - WHEN rendered
 - THEN `--agent`, `--scope`, `--cwd`, `--dry-run` SHALL be listed
+- AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi` and `all`
 
 #### Scenario: remove help
 
 - GIVEN `sofer mcp remove --help`
 - WHEN rendered
 - THEN `--agent`, `--scope`, `--dry-run` SHALL be listed
+- AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi` and `all`
 
 #### Scenario: add help documents env forwarding
 
 - GIVEN `sofer mcp add --help`
 - WHEN rendered
-- THEN the description SHALL state that codex and gemini receive env forwarding (names only)
+- THEN the description SHALL state that codex, gemini and pi receive env forwarding (names only)
 - AND the description SHALL state that opencode entries carry no environment and that a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set with `--agent opencode` (or `all`)
+
+#### Scenario: help documents native delegation fidelity
+
+- GIVEN `sofer mcp add --help` (and `sofer mcp remove --help`)
+- WHEN rendered
+- THEN the description SHALL state that native delegation is used only when it can forward the same env NAMES and scope as the file edit
+- AND the description SHALL state that when it cannot, the config file is edited with a warning on stderr
 
 ### Requirement: Machine-readable status as stable JSON (CLI-R10)
 
@@ -372,3 +391,176 @@ CLI status output that is machine-readable SHALL be stable JSON, not a Python di
 
 - GIVEN a command that emits status
 - THEN `repr`-style Python literals (e.g. `{'ok': True}`) SHALL NOT appear; only JSON appears
+
+### Requirement: Console output survives an unencodable character (CLI-R11)
+
+> Added by change `2026-09-13-fix-cli-console-encoding` (archived 2026-09-13).
+
+The CLI SHALL NOT abort a command because a character it emits cannot be represented in the active console output encoding. When `sys.stdout` / `sys.stderr` are encoded with a codec that cannot represent an emitted character — cp1252 cannot represent, for example, U+2192, U+2191, U+26A0, U+2713, U+2717, or U+2265 — that character SHALL be substituted in the emitted stream rather than raising `UnicodeEncodeError`, and the command SHALL keep its documented exit code and its remaining output. Substitution SHALL be visible (a placeholder or an escape sequence); silent character loss (an `ignore` error handler) SHALL NOT be used.
+
+The invariant SHALL hold both for characters the CLI authors in its own literals and for characters that reach the console through interpolation: values read from the dataset TOML, resolved dataset/file paths, text from third-party exceptions, dataset-derived content echoed to the console, and argv that argparse echoes back in an error message. Help output (`--help` for every subcommand, including the nested `mcp add` / `mcp remove`) SHALL satisfy the same invariant, because argparse renders its help through the same streams. A stream that cannot be reconfigured in place (an in-memory capture object such as pytest's captured stdout or the MCP capture buffer) SHALL be left untouched rather than raising.
+
+This requirement constrains *emitted* console text only. Text written to files by sofer's own writers (quality report, codebook markdown, Dataset Card) and the CLI's own help/documentation sources SHALL retain their explicit UTF-8 encoding and SHALL NOT be re-encoded by this contract.
+
+#### Scenario: Runtime output with an unencodable character keeps the command's result
+
+- GIVEN a command run with `PYTHONIOENCODING=cp1252` whose ordinary stdout carries a character outside cp1252 (e.g. `validate` reporting configuration errors, or `scan --dry-run` previewing a copy)
+- WHEN the command completes
+- THEN it SHALL keep its documented exit code and stdout SHALL strict-decode as cp1252
+- AND the ASCII substring of the surrounding message SHALL still be present (`Configuration errors`, `DRY RUN`)
+- AND no `UnicodeEncodeError` traceback SHALL appear on stderr
+
+#### Scenario: ASCII literal with an unencodable interpolated value does not abort
+
+- GIVEN a command whose own literal text is ASCII and whose interpolated value carries a character outside cp1252 (e.g. a `repo_id`, or a declared local path, whose name contains such a character), and `PYTHONIOENCODING=cp1252` in the environment
+- WHEN the command reports that value
+- THEN the command SHALL NOT raise `UnicodeEncodeError` and SHALL keep its documented exit code
+- AND stdout SHALL strict-decode as cp1252 with the ASCII literal substring present
+
+#### Scenario: Console warning path carrying a glyph degrades instead of aborting
+
+- GIVEN `sofer codebook --all-files --config <toml>` whose TOML registers a file entry the codebook pass skips (an unsupported format, or a directory — both pass config validation, which only checks that the path exists), and `PYTHONIOENCODING=cp1252` in the environment
+- WHEN the command runs
+- THEN stderr SHALL strict-decode as cp1252 and the ASCII warning substring SHALL be present (`Unsupported format, skipping` or `Skipping directory`)
+- AND the command SHALL exit 0, with the skipped entry's warning neither dropped nor aborted
+
+### Requirement: Optional explicit CSV dialect flags (CLI-R12)
+
+> Added by change `2026-09-25-csv-dialect-override` (GitHub #204).
+
+`sofer codebook` and `sofer profile` SHALL accept optional `--delimiter` /
+`--encoding` arguments on both their single-file and `--all-files` forms, defaulting
+to `None` ("not supplied"). When supplied, the explicit value SHALL win over the
+applicable configured value (single-file: the post-reload tool-wide
+`config.CSV_DELIMITER` / `config.CSV_ENCODING`; `codebook --all-files`: the dataset
+`[meta]`). When omitted, behaviour SHALL be byte-identical to the pre-change
+command — no new line, no changed output.
+
+When at least one explicit value is supplied, the command SHALL echo the supplied
+override on **stderr** in a single informational line naming only the supplied
+keys (e.g. `  i  Explicit dialect: delimiter=',' encoding='utf-8'`), so the
+single-file codebook's stdout stays pure markdown. The `.tsv` format SHALL remain
+tab-delimited; the explicit delimiter SHALL apply to `.csv` only.
+
+The `codebook` and `profile` `help=` / `description=` strings SHALL document the new
+flags and their "explicit wins over config" precedence.
+
+#### Scenario: flags are listed in help
+
+- GIVEN `sofer codebook --help`
+- WHEN rendered
+- THEN `--delimiter` and `--encoding` SHALL be listed
+- AND the `profile` help SHALL likewise list both flags
+
+#### Scenario: explicit value wins over config
+
+- GIVEN `[tool.sofer] csv_delimiter = ";"` and a `.csv` using `,`
+- WHEN `sofer codebook FILE --delimiter ,` runs
+- THEN the codebook SHALL reflect the explicit `,`
+
+#### Scenario: omitted flags preserve behaviour
+
+- GIVEN the same invocation without `--delimiter` / `--encoding`
+- WHEN it runs
+- THEN the output SHALL be byte-identical to the pre-change command
+- AND stderr SHALL carry no explicit-dialect line
+
+#### Scenario: explicit dialect echoed on stderr
+
+- GIVEN an explicit `--delimiter` and/or `--encoding` is supplied
+- WHEN the command runs
+- THEN stderr SHALL carry one line naming the supplied key(s)
+- AND stdout SHALL NOT carry the echo
+
+#### Scenario: both commands accept the flags
+
+- GIVEN `sofer profile DATASET --delimiter , --encoding utf-8`
+- WHEN it runs
+- THEN both explicit values SHALL be applied to the CSV/TSV read
+
+### Requirement: Assisted CLI failure reporting with consent and confidentiality (CLI-R13)
+
+> Added by change `2026-09-25-feat-cli-failure-report` (issue #244).
+
+When an uncaught exception escapes a CLI command, the CLI MUST print the original traceback
+(preserving today's failure output) and, **only when `sys.stdin` is a TTY**, offer to open a
+GitHub issue in the configured repository. Nothing SHALL be created without explicit consent:
+the user MUST first confirm the offer, then review the complete issue body, then confirm the
+send. Declining either prompt MUST create nothing and MUST NOT change the exit code (`1`).
+
+The report context SHALL be a strict allowlist — the command and its arguments, the exception
+type and message, the traceback, the `sofer` version, the Python version, and the platform. The
+report MUST NEVER include dataset contents (no row, sample, cell value, or excerpt), MUST NEVER
+include the value of any environment variable (at most a variable NAME when it has diagnostic
+value, and this change includes none), and MUST anonymize local paths by replacing the user's
+home directory with `~` in POSIX and Windows forms. The body printed for review MUST be
+byte-identical to the body that is sent or persisted.
+
+#### Scenario: Non-interactive failure never prompts and never creates
+
+- GIVEN a command that raises an uncaught exception and `sys.stdin` is not a TTY
+- WHEN the CLI runs
+- THEN it SHALL print the traceback and exit `1`
+- AND it SHALL NOT create a GitHub issue, persist a report file, or prompt
+
+#### Scenario: Declining creates nothing
+
+- GIVEN an interactive failure and the user answers `N` to the "report?" prompt
+- WHEN the CLI runs
+- THEN no issue SHALL be created and no report file SHALL be written
+- AND the exit code SHALL remain `1`
+
+#### Scenario: Accepting reviews the exact body before sending
+
+- GIVEN an interactive failure and the user answers `y` to the "report?" prompt
+- WHEN the review prompt is shown
+- THEN the complete anonymized body SHALL be printed
+- AND the issue SHALL be created (or persisted on failure) only after the user answers `y` to the second prompt
+- AND the reviewed body SHALL equal the body sent/persisted
+
+#### Scenario: Report excludes data, secrets, and identifying paths
+
+- GIVEN a failure whose traceback and arguments embed a home-directory path and an environment variable value
+- WHEN the report body is built
+- THEN the home directory SHALL appear as `~` and the absolute home path SHALL be absent
+- AND no environment-variable value SHALL appear (only the documented allowlisted facts)
+- AND no dataset content SHALL appear
+
+### Requirement: Persisted-report retry and offline fallback (CLI-R14)
+
+> Added by change `2026-09-25-feat-cli-failure-report` (issue #244).
+
+Filing a report depends on `gh` being present, authenticated, and the network being reachable.
+When any of these fails, the flow MUST NOT lose the report. It SHALL persist **one** file per
+failure under sofer's state directory (`_state_home() / failure_report_dir`), named with a UTC
+timestamp and the process id, and MUST NOT overwrite an existing file. The persisted document
+SHALL carry the repository, title, body, and creation timestamp.
+
+When persisting, the CLI SHALL print the path, the retry command
+`sofer report-failure "<path>"`, the manual fallback URL
+`https://github.com/<repo>/issues/new` with the body pre-loadable for copy/paste, and the
+permanent fix `gh auth login`.
+
+The `sofer report-failure <file>` subcommand SHALL load a persisted report and re-run the send
+path through `gh`; on success it SHALL print the created issue URL, and on failure it SHALL
+re-emit the same recovery layers without losing the file.
+
+#### Scenario: Missing auth or network persists and prints the triple safety net
+
+- GIVEN an accepted report and `gh` missing, unauthenticated, or offline
+- WHEN the CLI attempts to send
+- THEN exactly one report file SHALL be written under the configured state directory with a timestamped name
+- AND the output SHALL name the file path, the `sofer report-failure` retry command, the manual `github.com/<repo>/issues/new` URL, and `gh auth login`
+
+#### Scenario: One file per failure, never overwritten
+
+- GIVEN two failures in the same second
+- WHEN both reports are persisted
+- THEN two distinct files SHALL exist and neither SHALL be overwritten
+
+#### Scenario: Retry sends a persisted report
+
+- GIVEN a persisted report file and a working authenticated `gh`
+- WHEN `sofer report-failure <file>` runs
+- THEN the issue SHALL be created and its URL printed
+- AND the command SHALL exit `0`

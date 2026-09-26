@@ -162,6 +162,18 @@ class TestSemanticPriorsValidation:
         cfg = self._load_with_toml(monkeypatch, tmp_path, toml)
         assert cfg["card_modality_tags"] == ["tabular"]
 
+    def test_tool_config_rejects_empty_failure_report_dir(self, monkeypatch, tmp_path):
+        """An empty failure_report_dir would scatter reports in the state home."""
+        toml = '[tool.sofer]\nfailure_report_dir = "   "\n'
+        with pytest.raises(ValueError, match=r"failure_report_dir.*non-empty"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
+    def test_tool_config_rejects_non_positive_failure_report_bound(self, monkeypatch, tmp_path):
+        """A non-positive gh timeout is meaningless and must be rejected."""
+        toml = "[tool.sofer]\nfailure_report_gh_timeout_seconds = 0\n"
+        with pytest.raises(ValueError, match=r"failure_report_gh_timeout_seconds.*positive"):
+            self._load_with_toml(monkeypatch, tmp_path, toml)
+
 
 class TestImportTimeIsolation:
     """Import binds constants from _DEFAULTS only — no filesystem access."""
@@ -594,8 +606,14 @@ class TestTc10RawDirBootstrap:
         assert "default_config_name" in docs
         assert "output_dir" in docs or "OUTPUT_DIR" in docs
 
-    def test_pyproject_has_raw_dir_key(self):
-        """Repository pyproject.toml declares raw_dir under [tool.sofer]."""
+    def test_pyproject_declares_full_default_surface(self):
+        """Repo pyproject.toml [tool.sofer] matches config._DEFAULTS exactly.
+
+        Set parity both ways plus value parity: every tunable default must
+        be declared (AGENTS.md rule 1, #213) and no declared key may drift
+        from its default. A new _DEFAULTS entry without a [tool.sofer]
+        declaration fails here by construction.
+        """
         try:
             import tomli as _tomli
         except ImportError:
@@ -603,7 +621,13 @@ class TestTc10RawDirBootstrap:
 
         with open("pyproject.toml", "rb") as fh:
             data = _tomli.load(fh)
-        assert data["tool"]["sofer"]["raw_dir"] == "raw"
+        declared = data["tool"]["sofer"]
+        assert set(declared) == set(config._DEFAULTS), (
+            f"undeclared={sorted(set(config._DEFAULTS) - set(declared))} "
+            f"unknown={sorted(set(declared) - set(config._DEFAULTS))}"
+        )
+        for key, default in config._DEFAULTS.items():
+            assert declared[key] == default, f"{key}: {declared[key]!r} != {default!r}"
 
 
 class TestTc08SourceVisibility:
@@ -752,3 +776,52 @@ class TestTc11ProfileRenderDir:
         config.reload(root, stop_at=root)
         errors = _validate_output_targets(None, root=root, base=root)
         assert any("render_dir" in e and "outside" in e for e in errors)
+
+
+class TestReportTruncationLimitsConfig:
+    """Issue #189 — quality/splits truncation caps are ``[tool.sofer]`` keys."""
+
+    def test_quality_value_preview_len_default(self):
+        """Distinct quality values truncate to 50 chars by default."""
+        assert config._DEFAULTS["quality_value_preview_len"] == 50
+        assert config.QUALITY_VALUE_PREVIEW_LEN == 50
+
+    def test_splits_max_unclassified_names_default(self):
+        """validate_layout lists 5 unclassified names by default."""
+        assert config._DEFAULTS["splits_max_unclassified_names"] == 5
+        assert config.SPLITS_MAX_UNCLASSIFIED_NAMES == 5
+
+    def test_toml_overrides_new_keys(self, monkeypatch, tmp_path):
+        """Both caps are overridable from ``[tool.sofer]``."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.sofer]\nquality_value_preview_len = 12\nsplits_max_unclassified_names = 2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
+        merged = config._load_tool_config()
+        assert merged["quality_value_preview_len"] == 12
+        assert merged["splits_max_unclassified_names"] == 2
+
+    def test_reload_rebinds_new_keys(self, restore_tool_config, pytree):
+        """reload() rebinds both caps as module constants."""
+        root = pytree(
+            "[tool.sofer]\nquality_value_preview_len = 12\nsplits_max_unclassified_names = 2\n"
+        )
+        config.reload(root)
+        assert config.QUALITY_VALUE_PREVIEW_LEN == 12
+        assert config.SPLITS_MAX_UNCLASSIFIED_NAMES == 2
+
+    def test_repo_pyproject_declares_every_default_key(self):
+        """Total parity: every ``_DEFAULTS`` key is declared in ``[tool.sofer]``."""
+        try:
+            import tomli as _tomli
+        except ImportError:
+            import tomllib as _tomli
+
+        with open("pyproject.toml", "rb") as fh:
+            data = _tomli.load(fh)
+        section = data["tool"]["sofer"]
+        missing = [key for key in config._DEFAULTS if key not in section]
+        assert missing == []

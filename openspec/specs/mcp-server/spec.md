@@ -82,9 +82,9 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ### Requirement: Tool roster and schema contract (MSP-R03)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03.
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`).
 
-Server SHALL expose 14 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1); `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
+Server SHALL expose 15 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1); `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -92,7 +92,7 @@ Server SHALL expose 14 callables: `sofer_validate, sofer_prepare, sofer_publish,
 
 - GIVEN `tools/list`
 - WHEN inspected
-- THEN count SHALL be 14, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
+- THEN count SHALL be 15, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
 
 #### Scenario: Annotations and output_schema typed
 
@@ -836,9 +836,9 @@ After `sofer_init` → `sofer_scan_apply`, scanner MUST discover `DATA_GOT_ALL.x
 
 #### Scenario: Valid identity accepted
 
-- GIVEN `sofer_init(name="test", user="emiliodavola", cwd="Desktop/test")`
+- GIVEN `sofer_init(name="test", user="<hf-user>", cwd="Desktop/test")`
 - WHEN the call executes
-- THEN `ok:true` and `Desktop/test/test.toml` SHALL contain `repo_id = "emiliodavola/test"`
+- THEN `ok:true` and `Desktop/test/test.toml` SHALL contain `repo_id = "<hf-user>/test"`
 
 #### Scenario: Missing or blank identity refused before write
 
@@ -1044,3 +1044,127 @@ when the file fits.
 - WHEN `sofer_codebook_all` runs without `max_sample`
 - THEN the batch SHALL analyse up to the configured rows per file
 - AND codebooks whose files fit SHALL report `(full scan)`
+
+---
+
+### Requirement: Optional explicit CSV dialect parameters (MSP-R18)
+
+> Added by change `2026-09-25-csv-dialect-override` (GitHub #204).
+
+`sofer_codebook`, `sofer_codebook_all`, `sofer_profile`, and `sofer_profile_all`
+SHALL each expose optional `delimiter` / `encoding` parameters defaulting to
+`None` ("not supplied"). Their descriptions SHALL state that the configured value
+applies when omitted. Resolution SHALL be **explicit parameter → resolved config
+(tool-wide post-reload `config.CSV_*` for `sofer_codebook` / `sofer_profile`;
+dataset `[meta] cfg.csv_*` for `sofer_codebook_all`; tool-wide for
+`sofer_profile_all`) → the existing reader fallback**. The explicit value SHALL
+win. `None` SHALL be the only "not supplied" signal, and the omitted path's dialect
+resolution SHALL be unchanged.
+
+When at least one explicit parameter is supplied, the tool SHALL add a `dialect`
+key to its **successful** return envelope (e.g. `{"delimiter": ",", "encoding":
+null}`) echoing the supplied override, so the result is traceable. The key SHALL
+be declared in the tool's `output_schema` (so FastMCP validation does not drop it)
+and SHALL be `null` when neither parameter is supplied. Error/refusal envelopes
+are not required to carry it (the read may never have happened). No parameter
+SHALL be required, and MSP-R06's non-interactivity contract SHALL hold — an
+omitted optional parameter is not a prompt. `.tsv` SHALL remain tab-delimited;
+the explicit delimiter SHALL apply to `.csv`.
+
+#### Scenario: explicit delimiter wins over config
+
+- GIVEN `csv_delimiter = ";"` in `[tool.sofer]` and a `.csv` using `,`
+- WHEN `sofer_codebook(path, delimiter=",")` runs
+- THEN the codebook SHALL reflect the explicit `,`
+
+#### Scenario: omitted parameters are unchanged
+
+- GIVEN the same file and config
+- WHEN `sofer_codebook(path)` runs without the parameters
+- THEN the resolved dialect SHALL be the configured one
+- AND the envelope `dialect` SHALL be `null`
+
+#### Scenario: dialect echo when supplied
+
+- GIVEN an explicit `delimiter` and/or `encoding`
+- WHEN any of the four tools runs
+- THEN its envelope SHALL carry a `dialect` object echoing the supplied value(s)
+- AND `dialect` SHALL be `null` when neither is supplied
+
+#### Scenario: batch parameter wins over dataset [meta]
+
+- GIVEN a dataset whose `[meta] csv_delimiter` is `;` and CSV files using `,`
+- WHEN `sofer_codebook_all(config, delimiter=",")` runs
+- THEN every emitted codebook SHALL reflect the explicit `,`
+
+#### Scenario: every parameter has a description
+
+- GIVEN `tools/list` for the four tools
+- WHEN the input schemas are inspected
+- THEN `delimiter` and `encoding` SHALL each carry a description stating the fallback
+- AND neither SHALL be in the `required` list
+
+#### Scenario: scan tools gain no inert parameter
+
+- GIVEN `tools/list` for `sofer_scan_dry_run` / `sofer_scan_apply`
+- WHEN the input schemas are inspected
+- THEN neither SHALL expose `delimiter` or `encoding`
+- AND their behaviour SHALL be unchanged
+
+### Requirement: Assisted failure reporting tool with duplicate search (MSP-R19)
+
+> Added by change `2026-09-25-feat-mcp-failure-report` (issue #244).
+
+The server MUST expose a 15th tool, `sofer_report_failure(error, command="", trace="", confirm=false,
+force=false)`, that prepares a confidential failure report and files it through `gh` only when
+`confirm=true`. With the default `confirm=false` it MUST return the prepared `title`, `body`,
+`manual_url` and any `duplicates` while creating nothing and never calling the send path. The report
+MUST reuse the shared reporter contract: no dataset contents, no environment-variable values, and
+home paths replaced by `~`.
+
+Before filing, the tool MUST search the repository's **open** issues for duplicates (via
+`gh issue list --search`) and, when matches exist and `force` is not set, MUST surface them in the
+envelope with `error_code = "DUPLICATE_REPORT"` instead of filing a redundant report. With
+`force=true` (and `confirm=true`) the tool MUST file despite matches.
+
+When `confirm=true` and filing succeeds, the envelope MUST report `created=true` and the created
+`issue_url`. When `gh` is missing, unauthenticated, or offline, the tool MUST NOT lose the report:
+it MUST persist exactly one timestamped file under the configured state directory and return the
+`persisted_path`, the `retry_command`, the manual `github.com/<repo>/issues/new` URL, and a
+`gh auth login` hint (`error_code = "REPORT_PERSISTED"`).
+
+#### Scenario: Prepared report creates nothing without confirmation
+
+- GIVEN an agent calls `sofer_report_failure(error=..., command=...)` with the default `confirm=false`
+- WHEN the tool returns
+- THEN `created` SHALL be `false` and no issue SHALL be filed
+- AND the envelope SHALL carry the prepared `title`, `body`, `manual_url` and `duplicates`
+- AND `hints.action` SHALL be `confirm_report_failure`
+
+#### Scenario: Matching open issues are surfaced instead of a redundant report
+
+- GIVEN `confirm=true`, no `force`, and the duplicate search returns at least one open issue
+- WHEN the tool runs
+- THEN it SHALL NOT file a new issue
+- AND the envelope SHALL return `error_code = DUPLICATE_REPORT` with the matching issues in `duplicates`
+
+#### Scenario: Confirmed filing creates the issue
+
+- GIVEN `confirm=true` and a working authenticated `gh` with no blocking duplicates (or `force=true`)
+- WHEN the tool runs
+- THEN `created` SHALL be `true` and `issue_url` SHALL name the created issue
+
+#### Scenario: Filing failure persists with the recovery layers
+
+- GIVEN `confirm=true` and `gh` missing, unauthenticated, or offline
+- WHEN the tool runs
+- THEN `error_code` SHALL be `REPORT_PERSISTED`
+- AND the envelope SHALL name the persisted `persisted_path`, the `retry_command`, the manual issue URL, and a `gh_auth_login` hint
+
+#### Scenario: Report excludes secrets and anonymizes home paths
+
+- GIVEN an error message containing a home-directory path and an environment variable value present in the process
+- WHEN the report is prepared
+- THEN the home directory SHALL appear as `~` and the absolute home path SHALL be absent
+- AND the environment-variable value SHALL NOT appear anywhere in the envelope
+- AND no dataset content SHALL appear

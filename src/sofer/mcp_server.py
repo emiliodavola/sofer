@@ -1,11 +1,12 @@
 # ruff: noqa: E501
 """MCP server exposing sofer's deterministic dataset pipeline to agents.
 
-Serves the pipeline as 14 MCP callables (10 logical tools), 3 resources, and
+Serves the pipeline as 15 MCP callables (10 logical tools), 3 resources, and
 3 prompts over stdio (fastmcp v3.4.x, optional ``mcp`` extra). Thin adapter
 over domain modules — never re-implements logic, never calls an LLM, and ships
-no remote/streamable-http transport in v1. Its only network access is the HF
-upload path inside ``sofer_publish_confirm``.
+no remote/streamable-http transport in v1. Its network access is the HF upload
+path inside ``sofer_publish_confirm`` and the ``gh`` calls of
+``sofer_report_failure`` (which only file an explicitly confirmed bug report).
 
 Phased canonical chain (visible from ``tools/list`` without prompts):
 
@@ -63,7 +64,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -82,8 +83,8 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
+from . import _toml, failure_report, workflow
 from . import config as sofer_config
-from . import workflow
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
@@ -148,6 +149,20 @@ _ERROR_ENVELOPE_SCHEMA_FIELDS: dict[str, dict[str, str]] = {
     "hints": {"type": "object"},
 }
 
+# Optional explicit-dialect echo (MSP-R18): the four CSV-reading tools add a
+# "dialect" key only when the caller supplies delimiter/encoding. Declared on
+# their output_schema so FastMCP's validation does not drop the key at the
+# boundary (same rationale as the error-envelope fields above).
+_DIALECT_ENVELOPE_SCHEMA_FIELD: dict[str, dict[str, Any]] = {
+    "dialect": {
+        "type": ["object", "null"],
+        "description": (
+            "Echo of the explicit delimiter/encoding supplied for this call; "
+            "null when neither was supplied."
+        ),
+    }
+}
+
 # Error codes for the single error envelope (10.3). Path escapes are raised
 # as PathOutsideRootError (transport-mapped to isError), never emitted as an
 # error envelope, so they are deliberately absent here.
@@ -160,6 +175,8 @@ _ERROR_CODES: tuple[str, ...] = (
     "PUBLISH_APPROVAL_REQUIRED",
     "PUBLISH_APPROVAL_NOT_CONFIGURED",
     "TARGET_INVALID",
+    "DUPLICATE_REPORT",
+    "REPORT_PERSISTED",
 )
 
 _PHASED_INSTRUCTIONS: str = (
@@ -439,6 +456,28 @@ def _captured_text(out: io.StringIO, err: io.StringIO) -> str:
     return _truncate_output(text)
 
 
+def _dialect_envelope(delimiter: str | None, encoding: str | None) -> dict[str, Any]:
+    """Echo a supplied explicit CSV dialect in the tool envelope (issue #204).
+
+    Traceability contract (MSP-R18): when the caller states a dialect, the
+    envelope names what was supplied.  When neither parameter is supplied the
+    value is ``None`` (the declared field FastMCP materializes), so the omitted
+    path's dialect resolution is unchanged.
+
+    Args:
+        delimiter: Explicit delimiter parameter for this call, or ``None``.
+        encoding: Explicit encoding parameter for this call, or ``None``.
+
+    Returns:
+        ``{"dialect": None}`` when neither is supplied, else
+        ``{"dialect": {"delimiter": ..., "encoding": ...}}`` echoing the
+        supplied values.
+    """
+    if delimiter is None and encoding is None:
+        return {"dialect": None}
+    return {"dialect": {"delimiter": delimiter, "encoding": encoding}}
+
+
 # ---------------------------------------------------------------------------
 #  Path containment (CF-2)
 # ---------------------------------------------------------------------------
@@ -683,12 +722,9 @@ def _read_toml_text(path: Path) -> dict[str, Any]:
     Uses the project-standard ``tomli``/``tomllib`` fallback. Errors
     propagate to the caller.
     """
-    try:
-        import tomli as _tomli
-    except ImportError:  # Python >= 3.11
-        import tomllib as _tomli
+    # Parser resolved once in `sofer._toml` (#192).
     with open(path, "rb") as fh:
-        return _tomli.load(fh)
+        return _toml.load(fh)
 
 
 def _load_dataset(
@@ -744,34 +780,47 @@ def _load_dataset(
     return cfg, report, config_errors
 
 
-def _load_dotenv_if_available() -> None:
-    """Load ``.env`` without overriding existing env vars (best-effort).
+def _read_dotenv_values() -> dict[str, str]:
+    """Return the `.env` view WITHOUT touching `os.environ` (`{}` when dotenv is absent/disabled).
 
-    Tries ``python-dotenv``'s :func:`load_dotenv` with ``override=False`` so
-    an env var already set in the shell prevails over a ``.env`` entry.
-    Explicitly tries ``Path.cwd() / ".env"`` first (so a ``.env`` in the
-    current working directory is found even when ``find_dotenv(usecwd=False)``
-    would miss it), then falls back to the default search. Silently no-ops
-    when the package is not installed.
+    Parity with the `load_dotenv(override=False)` used until now: the cwd `.env` wins, the default
+    search fills the rest, a key with no value contributes nothing (dotenv/main.py:107), and a
+    truthy `PYTHON_DOTENV_DISABLED` disables the read (dotenv/main.py:405-410).
     """
     try:
         from pathlib import Path
 
-        from dotenv import load_dotenv
-
-        load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
-        load_dotenv(override=False)
+        from dotenv import dotenv_values
     except ImportError:
-        pass
+        return {}
+    if _is_truthy_env("PYTHON_DOTENV_DISABLED", {}):
+        return {}
+    values: dict[str, str] = {}
+    for path in (Path.cwd() / ".env", None):
+        parsed = dotenv_values(dotenv_path=path) if path else dotenv_values()
+        for key, value in parsed.items():
+            if value is not None and key not in values:
+                values[key] = value
+    return values
 
 
-def _is_truthy_env(name: str) -> bool:
-    """Return ``True`` when env var *name* is a truthy flag.
+def _merged_env(name: str, dotenv: Mapping[str, str]) -> str:
+    """Environment value for *name* by PRESENCE, else its `.env` value, else ``""``."""
+    if name in os.environ:  # presence — NOT `os.environ.get(name) or dotenv.get(name)`
+        return os.environ[name]
+    return dotenv.get(name, "")
+
+
+def _is_truthy_env(name: str, dotenv: Mapping[str, str]) -> bool:
+    """Return ``True`` when *name* is a truthy flag in the merged environment view.
 
     Mirrors ``huggingface_hub`` truthy check: ``"1"``, ``"true"``,
-    ``"yes"``, ``"on"`` (case-insensitive, stripped).
+    ``"yes"``, ``"on"`` (case-insensitive, stripped). *dotenv* is the required
+    merged view (:func:`_merged_env`), so the ``.env``-only
+    ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` keeps gating the implicit file fallback
+    exactly as ``load_dotenv(override=False)`` made it visible before.
     """
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    return _merged_env(name, dotenv).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _clean_token(t: str | None) -> str | None:
@@ -788,22 +837,24 @@ def _clean_token(t: str | None) -> str | None:
 
 
 def _get_hf_token() -> str | None:
-    """Resolve an HF token via the full fallback chain.
+    """Resolve an HF token via the full fallback chain, without mutating ``os.environ``.
 
     Order: ``HF_TOKEN`` -> ``HF_HUB_TOKEN`` (sofer compat alias) ->
     ``HUGGING_FACE_HUB_TOKEN`` (hub native) -> ``huggingface_hub.get_token()``
     (file via ``HF_TOKEN_PATH`` + OIDC via ``HF_OIDC_RESOURCE`` + Colab).
-    Each env value is cleaned via :func:`_clean_token`; empty/whitespace-only
-    is treated as absent. ``load_dotenv(override=False)`` runs first when
-    available. ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` truthy skips the file/Colab
-    fallback; OIDC errors propagate.
+    Each name is resolved through :func:`_merged_env` — the environment wins by
+    **key presence**, ``.env`` (read with ``dotenv_values``) supplies a value
+    only when the name is absent from the environment — and cleaned via
+    :func:`_clean_token`; empty/whitespace-only is treated as absent.
+    ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` truthy skips the file/Colab fallback;
+    OIDC errors propagate. Nothing here writes to ``os.environ``.
     """
-    _load_dotenv_if_available()
+    dotenv = _read_dotenv_values()
     for env_name in ("HF_TOKEN", "HF_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        token = _clean_token(os.environ.get(env_name))
+        token = _clean_token(_merged_env(env_name, dotenv))
         if token is not None:
             return token
-    if _is_truthy_env("HF_HUB_DISABLE_IMPLICIT_TOKEN"):
+    if _is_truthy_env("HF_HUB_DISABLE_IMPLICIT_TOKEN", dotenv):
         return None
     try:
         from huggingface_hub import get_token
@@ -1007,7 +1058,7 @@ def _refusal(
 
 
 # ---------------------------------------------------------------------------
-#  Tool callables — 14 callables
+#  Tool callables — 15 callables
 # ---------------------------------------------------------------------------
 
 
@@ -1456,6 +1507,25 @@ def sofer_codebook(
             description="Maximum rows to sample for codebook inference; defaults to config codebook_max_sample."
         ),
     ] = None,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter for this call (wins over the "
+                "configured csv_delimiter); when omitted, the configured value "
+                "applies. Applies to .csv only; .tsv stays tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding for this call (wins over the configured "
+                "csv_encoding); when omitted, the configured value applies."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Generate a markdown codebook for one data file.
 
@@ -1478,11 +1548,13 @@ def sofer_codebook(
             if output_file is not None
             else None
         )
+        effective_delimiter = delimiter if delimiter is not None else sofer_config.CSV_DELIMITER
+        effective_encoding = encoding if encoding is not None else sofer_config.CSV_ENCODING
         markdown = generate_codebook(
             str(data_path),
             output_path=str(output_path) if output_path is not None else None,
-            delimiter=sofer_config.CSV_DELIMITER,
-            encoding=sofer_config.CSV_ENCODING,
+            delimiter=effective_delimiter,
+            encoding=effective_encoding,
             max_sample=max_sample,
         )
         return {
@@ -1490,6 +1562,7 @@ def sofer_codebook(
             "exit_code": 0,
             "output": _truncate_output(markdown),
             "output_path": str(output_path) if output_path is not None else None,
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -1509,6 +1582,26 @@ def sofer_codebook_all(
             description=(
                 "Maximum rows to sample for codebook inference; defaults to "
                 "config codebook_max_sample. Omitted = config default."
+            )
+        ),
+    ] = None,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter applied to every .csv entry; wins "
+                "over the dataset [meta] csv_delimiter. When omitted, the "
+                "dataset's configured value applies. .tsv stays tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding applied to every .csv/.tsv entry; wins "
+                "over the dataset [meta] csv_encoding. When omitted, the "
+                "dataset's configured value applies."
             )
         ),
     ] = None,
@@ -1540,8 +1633,8 @@ def sofer_codebook_all(
             generated = generate_all_codebooks(
                 cfg,
                 output_dir=output_path,
-                delimiter=cfg.csv_delimiter,
-                encoding=cfg.csv_encoding,
+                delimiter=delimiter,
+                encoding=encoding,
                 max_sample=max_sample,
             )
         except ValueError as exc:
@@ -1563,6 +1656,7 @@ def sofer_codebook_all(
             "confidential": cfg.confidential,
             "config_errors": config_errors,
             "next": _workflow_next("sofer_codebook_all", config),
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -1582,6 +1676,25 @@ def sofer_profile(
     force: Annotated[
         bool, Field(description="Overwrite existing metadata.yaml when true.")
     ] = False,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter for this call (wins over the "
+                "configured csv_delimiter); when omitted, the configured value "
+                "applies. Applies to .csv only; .tsv stays tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding for this call (wins over the configured "
+                "csv_encoding); when omitted, the configured value applies."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Profile a dataset read-only and write a metadata.yaml document.
 
@@ -1602,7 +1715,13 @@ def sofer_profile(
             else None
         )
         try:
-            rc = run_profile(data_path, output_dir=output_path, force=force)
+            rc = run_profile(
+                data_path,
+                output_dir=output_path,
+                force=force,
+                delimiter=delimiter,
+                encoding=encoding,
+            )
         except FileExistsError as exc:
             return {
                 "ok": False,
@@ -1636,6 +1755,7 @@ def sofer_profile(
             "exit_code": rc,
             "output": _captured_text(out, err),
             "pii_findings": pii_findings,
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -1648,6 +1768,25 @@ def sofer_profile_all(
         str | None,
         Field(
             description="Override directory for batch profiles (default: profiles). Must stay under server root."
+        ),
+    ] = None,
+    delimiter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV field delimiter applied to every .csv entry; when "
+                "omitted, the configured csv_delimiter applies. .tsv stays "
+                "tab-delimited."
+            )
+        ),
+    ] = None,
+    encoding: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Explicit CSV encoding applied to every .csv/.tsv entry; when "
+                "omitted, the configured csv_encoding applies."
+            )
         ),
     ] = None,
 ) -> dict[str, Any]:
@@ -1692,7 +1831,12 @@ def sofer_profile_all(
         from .profile import generate_all_profiles as _gen_all
 
         try:
-            files = _gen_all(cfg, output_dir=output_path)
+            files = _gen_all(
+                cfg,
+                output_dir=output_path,
+                delimiter=delimiter,
+                encoding=encoding,
+            )
         except ValueError:
             return {
                 "ok": False,
@@ -1710,6 +1854,7 @@ def sofer_profile_all(
             "files": files,
             "config_errors": [],
             "next": _workflow_next("sofer_profile_all", config),
+            **_dialect_envelope(delimiter, encoding),
         }
 
 
@@ -2492,8 +2637,138 @@ def sofer_init(
         }
 
 
+def sofer_report_failure(
+    error: Annotated[
+        str,
+        Field(
+            description=(
+                "The error message or exception summary to report. Never include dataset "
+                "contents or secret values; home paths are anonymized automatically."
+            )
+        ),
+    ],
+    command: Annotated[
+        str,
+        Field(
+            description=(
+                "The sofer command or MCP tool that failed, e.g. 'sofer_validate'. "
+                "Shown in the issue title and body."
+            )
+        ),
+    ] = "",
+    trace: Annotated[
+        str,
+        Field(
+            description=(
+                "Optional traceback text for the failure; anonymized and truncated before it "
+                "is embedded in the report."
+            )
+        ),
+    ] = "",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "Set true to actually file the issue. When false (default) the tool only "
+                "prepares the report and returns possible duplicates; nothing is created."
+            )
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        Field(
+            description=(
+                "With confirm=true, file even when open issues match. Without it, matching "
+                "open issues are surfaced instead of filing a redundant report."
+            )
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Prepare and (on explicit confirm) file a confidential failure report via gh.
+
+    Side effects: may create a GitHub issue (network) or write one local report file.
+    Network usage: gh auth status + issue list + issue create; never uploads data.
+
+    When to use: after a sofer tool or CLI command failed and the agent wants to file a
+    bug report. Example: sofer_report_failure(error="ValueError: bad column", command="sofer_validate").
+    Requires: gh available and authenticated to file; never dataset contents or secret values.
+    Next: call again with confirm=true after reviewing the returned body and duplicates.
+    """
+    repo = sofer_config.FAILURE_REPORT_REPO
+    ctx = failure_report.context_from_parts(command or "sofer-mcp", error, trace)
+    title = failure_report.build_issue_title(ctx)
+    body = failure_report.build_issue_body(ctx, repo=repo)
+    manual_url = failure_report.manual_issue_url(repo, title, body)
+    duplicates, search_reason = failure_report.search_open_issues(
+        repo, failure_report.duplicate_query(ctx.command, ctx.error_type)
+    )
+
+    if not confirm:
+        suffix = f" Duplicate search: {search_reason}." if search_reason else ""
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": (
+                "Report prepared but not filed (confirm=false). "
+                f"{len(duplicates)} matching open issue(s).{suffix} "
+                "Review the body, then re-call with confirm=true to file."
+            ),
+            "created": False,
+            "duplicates": duplicates,
+            "title": title,
+            "body": body,
+            "manual_url": manual_url,
+            "next": {},
+            "hints": {"action": "confirm_report_failure"},
+        }
+
+    if duplicates and not force:
+        return _error_envelope(
+            "DUPLICATE_REPORT",
+            f"{len(duplicates)} matching open issue(s) found; not filing a duplicate report.",
+            next_hint={"action": "comment_on_existing_or_force"},
+            extra={
+                "created": False,
+                "duplicates": duplicates,
+                "title": title,
+                "body": body,
+                "manual_url": manual_url,
+            },
+        )
+
+    url, _reason = failure_report.attempt_send(repo, title, body)
+    if url is not None:
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": f"Report filed: {url}",
+            "created": True,
+            "issue_url": url,
+            "duplicates": duplicates,
+            "title": title,
+            "manual_url": manual_url,
+            "next": {},
+            "hints": {},
+        }
+
+    path = failure_report.persist_report(repo, title, body)
+    return _error_envelope(
+        "REPORT_PERSISTED",
+        "Could not send the report automatically; saved it locally.",
+        next_hint={"action": "gh_auth_login"},
+        extra={
+            "created": False,
+            "duplicates": duplicates,
+            "title": title,
+            "persisted_path": str(path),
+            "retry_command": failure_report.retry_command(path),
+            "manual_url": manual_url,
+        },
+    )
+
+
 def _register_tools(server: _FastMCP) -> None:
-    """Register the 14 tool callables on *server*."""
+    """Register the 15 tool callables on *server*."""
     server.tool(
         sofer_validate,
         description=_workflow_description(sofer_validate),
@@ -2611,6 +2886,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "output_path": {"type": ["string", "null"]},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2634,6 +2910,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2655,6 +2932,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "pii_findings": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2677,6 +2955,7 @@ def _register_tools(server: _FastMCP) -> None:
                 "files": {"type": "array"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+                **_DIALECT_ENVELOPE_SCHEMA_FIELD,
             },
             "required": ["ok", "exit_code", "output"],
         },
@@ -2831,6 +3110,34 @@ def _register_tools(server: _FastMCP) -> None:
                     "description": "Package version from installed metadata (_version.get_version()), non-empty, never raises.",
                 },
                 "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_report_failure,
+        description=_workflow_description(sofer_report_failure),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "created": {"type": "boolean"},
+                "duplicates": {"type": "array"},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "manual_url": {"type": "string"},
+                "issue_url": {"type": "string"},
+                "persisted_path": {"type": "string"},
+                "retry_command": {"type": "string"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],

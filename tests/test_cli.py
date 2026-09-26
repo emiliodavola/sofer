@@ -8,13 +8,15 @@ shared ``conftest.run_cli`` helper (PB-09).
 """
 
 import csv
+import io
+import json
 import sys
 from argparse import Namespace
 
 import pytest as _pytest
 from conftest import run_cli
 
-from sofer import cli, mcp_registration
+from sofer import cli, config, mcp_registration
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -212,6 +214,65 @@ def test_main_help_prints(monkeypatch):
         cli.main()
     except SystemExit as e:
         assert e.code == 0
+
+
+class _FakeParser:
+    """Minimal parser whose ``parse_args`` returns a preset namespace."""
+
+    def __init__(self, namespace: Namespace) -> None:
+        self._namespace = namespace
+
+    def parse_args(self) -> Namespace:
+        return self._namespace
+
+
+def test_main_offers_report_on_uncaught_exception(monkeypatch):
+    """An uncaught dispatch exception is handed to the failure reporter (CLI-R13)
+    while the process still exits 1."""
+    seen: dict[str, object] = {}
+
+    def _fake_report(argv, exc):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        seen["exc"] = exc
+        return 1
+
+    def _boom(_args):  # type: ignore[no-untyped-def]
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(cli.failure_report, "report_cli_failure", _fake_report)
+    monkeypatch.setattr(cli, "_build_parser", lambda: _FakeParser(Namespace(func=_boom)))
+    monkeypatch.setattr(sys, "argv", ["sofer", "validate", "dataset.toml"])
+    with _pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 1
+    assert seen["argv"] == ["validate", "dataset.toml"]
+    assert isinstance(seen["exc"], RuntimeError)
+
+
+def test_report_failure_parser_dispatch():
+    """`report-failure FILE` parses to the retry handler."""
+    args = cli._build_parser().parse_args(["report-failure", "saved.json"])
+    assert args.func is cli._cmd_report_failure
+    assert args.file == "saved.json"
+
+
+def test_report_failure_subprocess_offline_prints_safety_net(tmp_path):
+    """End-to-end (PB-02): the retry subcommand with no gh on PATH prints the
+    saved path, the retry command, the manual URL and `gh auth login`, exit 1."""
+    report = tmp_path / "saved.json"
+    report.write_text(json.dumps({"repo": "o/r", "title": "t", "body": "b"}), encoding="utf-8")
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    result = run_cli(
+        ["report-failure", str(report)],
+        cwd=tmp_path,
+        env={"PATH": str(empty_bin)},
+    )
+    assert result.returncode == 1
+    assert str(report) in result.stdout
+    assert 'sofer report-failure "' in result.stdout
+    assert "github.com/o/r/issues/new" in result.stdout
+    assert "gh auth login" in result.stdout
 
 
 # ── init template: prepare/publish, no upload (CLI-R02) ───────────────────────
@@ -1230,8 +1291,23 @@ class TestMcpCliHelp:
         # help sentence renders "(names only, values never written)", so the
         # stable substring is the prefix ending at "(names only".
         flat = re.sub(r"\s+", " ", out)
-        assert "codex and gemini receive env forwarding (names only" in flat
+        assert "codex, gemini and pi receive env forwarding (names only" in flat
         assert "opencode entries carry no environment" in flat
+
+    def test_mcp_help_native_delegation_fidelity(self, capsys):
+        """Both help texts document the native fidelity gate (#167/#232)."""
+        import re
+
+        import pytest
+
+        for command in ("add", "remove"):
+            with pytest.raises(SystemExit):
+                cli._build_parser().parse_args(["mcp", command, "--help"])
+            out = capsys.readouterr().out
+            flat = re.sub(r"\s+", " ", out).lower()
+            assert "native" in flat
+            assert "config file" in flat
+            assert "warning" in flat
 
 
 # ── subprocess boundary: user-visible output via executable CLI (PB-02) ───────
@@ -1266,8 +1342,17 @@ class TestSubprocessBoundary:
         for command in self.SUBCOMMANDS:
             assert command in result.stdout, f"{command!r} missing from --help"
 
-    def test_help_strict_cp1252(self, tmp_path) -> None:
-        """``--help`` under cp1252 exits 0 and has no non-cp1252 glyphs.
+    @_pytest.mark.parametrize(
+        "argv",
+        [
+            ["--help"],
+            *([command, "--help"] for command in SUBCOMMANDS),
+            ["mcp", "add", "--help"],
+            ["mcp", "remove", "--help"],
+        ],
+    )
+    def test_help_strict_cp1252(self, argv: list[str], tmp_path) -> None:
+        """Every help screen under cp1252 exits 0 with no UnicodeEncodeError.
 
         ``PYTHONIOENCODING=cp1252`` forces the child to encode its stdout as
         cp1252; ``run_cli`` decodes it with ``errors="strict"``, so any byte
@@ -1275,17 +1360,167 @@ class TestSubprocessBoundary:
         with ``UnicodeEncodeError`` and a non-zero exit) fails loudly here.
         Re-encoding the decoded text pins the "no non-cp1252 glyphs" contract
         explicitly.
+
+        The parametrization covers every invocation PB-02 names — ``--help``
+        alone, ``<cmd> --help`` for all nine top-level subcommands, and the two
+        nested ``mcp`` help screens — because the single ``--help`` case that
+        this test used to run renders no subparser ``description=`` and
+        therefore passed while ``prepare --help`` / ``scan --help`` crashed
+        (#161). Assertions stay ASCII-substring shaped: the boundary never
+        pins how the CLI keeps its text encodable.
         """
         result = run_cli(
-            ["--help"],
+            argv,
             cwd=tmp_path,
             env={"PYTHONIOENCODING": "cp1252"},
             encoding="cp1252",
         )
-        assert result.returncode == 0
+        assert result.returncode == 0, result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
         # Every glyph must be representable in cp1252 — a glyph outside the
         # codec (e.g. an em dash or arrow) raises UnicodeEncodeError here.
         result.stdout.encode("cp1252")
+
+    def test_runtime_output_strict_cp1252(self, tmp_path) -> None:
+        """A cp1252 runtime console path keeps its result (CLI-R11, PB-02).
+
+        ``validate`` against a TOML carrying configuration errors prints the
+        ``\u2717`` marker before the ASCII ``Configuration errors`` text. On a
+        cp1252 stream that marker used to raise ``UnicodeEncodeError`` and abort
+        ``validate`` with a traceback instead of the report.
+
+        ``rc == 1`` is deliberately *not* the discriminator: a traceback also
+        exits 1. The stable ASCII substring is.
+        """
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "YOUR_USER/test-ds"\n\n'
+            '[[file]]\nlocal = "missing.csv"\nremote = "missing.csv"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["validate", str(toml_path)],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 1
+        assert "Configuration errors" in result.stdout
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stdout.encode("cp1252")
+
+    def test_scan_dry_run_strict_cp1252(self, tmp_path) -> None:
+        """A cp1252 ``scan --dry-run`` copy preview keeps rc 0 (CLI-R11).
+
+        The dry-run copy preview prints a ``U+2192`` arrow per would-be copy;
+        on a cp1252 stream that write used to abort the command with a
+        traceback. ``rc == 0`` is the discriminator: the ASCII ``DRY RUN`` line
+        is printed *before* the arrow, so the substring alone would already
+        pass today.
+        """
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "a.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "user/test-ds"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["scan", "dataset.toml", "--dry-run"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "DRY RUN" in result.stdout
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stdout.encode("cp1252")
+
+    def test_interpolated_stdout_value_strict_cp1252(self, tmp_path) -> None:
+        """ASCII literal + unencodable interpolated TOML value, on stdout.
+
+        ``scan --dry-run`` previews the MOVE phase with the ASCII literal
+        ``DRY RUN`` / ``-> raw/`` followed by the declared local path. When
+        that path's name carries ``U+2192``, only the *interpolated* value
+        falls outside cp1252 — the surrounding literal is pure ASCII and the
+        arrow is the ASCII ``->``, not the authored ``U+2192`` glyph. On the
+        pre-fix tree the strict cp1252 stdout raised ``UnicodeEncodeError``
+        inside that f-string write and aborted with ``rc 1``; the guard must
+        degrade the value and keep the documented result instead.
+
+        ``rc == 0`` is the discriminator (the pre-fix traceback exits 1): the
+        ``DRY RUN`` header is printed *before* the offending write, so the
+        substring alone would pass pre-fix. No glyph and no substitution
+        rendering is asserted — the spec leaves ``?`` vs an escape open
+        (CLI-R11 scenario 2, stdout clause).
+        """
+        (tmp_path / "data\u2192.csv").write_text("col_a;col_b\n1;2\n", encoding="utf-8")
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "user/test-ds"\n\n'
+            '[[file]]\nlocal = "data\u2192.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["scan", "dataset.toml", "--dry-run"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "DRY RUN" in result.stdout
+        assert "raw/" in result.stdout
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stdout.encode("cp1252")
+
+    def test_interpolated_unencodable_value_strict_cp1252(self, tmp_path) -> None:
+        """An ASCII literal with an unencodable interpolated value survives.
+
+        ``scan <path>`` with a nonexistent path whose name carries ``U+2192``
+        prints the ASCII literal ``Config file not found`` with the resolved
+        path interpolated. The traceback this used to raise *also* echoes the
+        ASCII literal, so only ``UnicodeEncodeError not in stderr``
+        discriminates (CLI-R11).
+        """
+        missing = tmp_path / "missing\u2192dataset.toml"
+        result = run_cli(
+            ["scan", str(missing)],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 1
+        assert "Config file not found" in result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stderr.encode("cp1252")
+
+    def test_codebook_warning_strict_cp1252(self, tmp_path) -> None:
+        """A cp1252 console warning carrying a glyph degrades, not aborts.
+
+        ``codebook --all-files`` warns on stderr about a registered entry whose
+        format it cannot analyse; the ``\u26a0`` marker used to raise
+        ``UnicodeEncodeError`` and abort the run (rc 1). ``rc == 0`` is the
+        discriminator here (CLI-R11).
+        """
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+        toml_path = tmp_path / "dataset.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test-ds"\nrepo_id = "user/test-ds"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n\n'
+            '[[file]]\nlocal = "notes.txt"\nremote = "notes.txt"\n',
+            encoding="utf-8",
+        )
+        result = run_cli(
+            ["codebook", "--all-files", "--config", "dataset.toml"],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "cp1252"},
+            encoding="cp1252",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Unsupported format" in result.stderr
+        assert "UnicodeEncodeError" not in result.stderr
+        result.stderr.encode("cp1252")
 
     def test_unknown_command_exits_2(self, tmp_path) -> None:
         """``python -m sofer.cli <unknown-command>`` exits 2 via argparse."""
@@ -1419,6 +1654,236 @@ class TestSubprocessBoundary:
         result = run_cli(["prepare", "proj/dataset.toml"], cwd=tmp_path)
         assert result.returncode == 0, result.stderr
         assert (proj / "build" / "README.md").read_text(encoding="utf-8") == "# PROJ CARD\n"
+
+
+class TestCodebookToolConfigParity:
+    """CB-R11 - the single-file CLI codebook reads the resolved tool-wide config.
+
+    ``_cmd_codebook`` used to leave ``codebook.generate``'s literal ``";"`` /
+    ``"utf-8-sig"`` defaults in force, so a configured repository got a
+    collapsed single-column codebook (delimiter) or an uncaught
+    ``UnicodeDecodeError`` / ``LookupError`` traceback (encoding). These four
+    cases drive the ``conftest.run_cli`` subprocess boundary (PB-02) because
+    ``src/sofer/cli.py`` carries the 100.00% per-file coverage mandate with
+    ``# pragma: no cover`` forbidden (AGENTS.md rule 14): the new
+    ``ValueError`` and ``LookupError`` arms must genuinely execute there.
+    Every case uses a non-default delimiter, a non-default encoding, or a codec
+    that does not exist - a ``";"``-default case would prove nothing here.
+    ``PYTHONIOENCODING=utf-8`` pins the child's stream encoding so the
+    diagnostics are read back deterministically on every platform; the cp1252
+    console path has its own dedicated tests in ``TestConsoleEncodingGuard``.
+    """
+
+    @staticmethod
+    def _utf8_io() -> dict[str, str]:
+        """Child-process env pinning stdout/stderr to UTF-8 (fresh dict, no shared state)."""
+        return {"PYTHONIOENCODING": "utf-8"}
+
+    @staticmethod
+    def _write_tool_config(tmp_path, *lines: str) -> None:
+        """Write the ``[tool.sofer]`` block the CLI discovers from its cwd."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.sofer]\n" + "".join(f"{line}\n" for line in lines),
+            encoding="utf-8",
+        )
+
+    def test_codebook_honors_tool_sofer_delimiter(self, tmp_path) -> None:
+        """A configured ``,`` yields the two-column structure MCP already pins.
+
+        CLI twin of ``tests/test_mcp_server.py::TestSurfacingScenarios::
+        test_codebook_honors_tool_sofer_delimiter`` (MSP-R10): under the frozen
+        ``";"`` default the two-field header collapsed into one column.
+        """
+        self._write_tool_config(tmp_path, 'csv_delimiter = ","')
+        (tmp_path / "data.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 0, result.stderr
+        assert "| 1 | `name`" in result.stdout, result.stdout
+        assert "| 2 | `age`" in result.stdout, result.stdout
+
+    def test_codebook_honors_tool_sofer_encoding(self, tmp_path) -> None:
+        """A cp1252-only byte sequence is read under the configured encoding.
+
+        ``0xE1`` (``a`` with an acute accent in cp1252) is an invalid UTF-8 start
+        byte, so the frozen ``"utf-8-sig"`` default and the ``utf-8`` fallback
+        both fail on this file - only the configured ``cp1252`` decodes it.
+        """
+        self._write_tool_config(tmp_path, 'csv_delimiter = ","', 'csv_encoding = "cp1252"')
+        (tmp_path / "data.csv").write_bytes(b"name,city\nAna,M\xe1laga\n")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 0, result.stderr
+        assert "| 1 | `name`" in result.stdout, result.stdout
+        assert "| 2 | `city`" in result.stdout, result.stdout
+
+    def test_codebook_undecodable_file_is_diagnostic(self, tmp_path) -> None:
+        """Bytes undecodable under the configured encoding and both fallbacks.
+
+        ``0x81`` is undefined in cp1252 *and* an invalid UTF-8 start byte, so the
+        configured encoding plus the ``utf-8-sig`` / ``utf-8`` fallbacks are all
+        exhausted: the ``ValueError`` arm prints ``Error: ...`` on stderr and
+        exits 1 instead of letting ``UnicodeDecodeError`` escape as a traceback.
+        """
+        self._write_tool_config(tmp_path, 'csv_encoding = "cp1252"')
+        (tmp_path / "data.csv").write_bytes(b"name;age\n\x81;30\n")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 1, result.stderr
+        assert result.stderr.startswith("Error: "), result.stderr
+        assert "Cannot decode" in result.stderr, result.stderr
+        assert "Traceback" not in result.stderr
+
+    def test_codebook_unknown_codec_is_diagnostic(self, tmp_path) -> None:
+        """A codec name that does not exist takes the same diagnostic path.
+
+        ``tool-config`` TC-13 accepts any non-empty ``csv_encoding`` string, so
+        ``"not-a-codec"`` is reachable config; ``open`` raises ``LookupError``
+        (never caught by the shared reader), which the CLI branch now converts
+        into ``Error: ...`` plus exit 1 - the arm keeping ``cli.py`` at 100.00%
+        under AGENTS.md rule 14.
+        """
+        self._write_tool_config(tmp_path, 'csv_encoding = "not-a-codec"')
+        (tmp_path / "data.csv").write_text("name;age\nAlice;30\n", encoding="utf-8-sig")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env=self._utf8_io())
+
+        assert result.returncode == 1, result.stderr
+        assert result.stderr.startswith("Error: "), result.stderr
+        assert "not-a-codec" in result.stderr, result.stderr
+        assert "Traceback" not in result.stderr
+
+
+class TestCodebookSingleFileDiagnosticArmsInProcess:
+    """In-process carriers for the two single-file diagnostic arms (rule 14).
+
+    The four ``TestCodebookToolConfigParity`` cases drive the ``conftest.run_cli``
+    subprocess boundary (PB-02) and are the CB-R11 behaviour proof, but
+    ``uv run coverage run -m pytest`` instruments only the test process: execution
+    inside the spawned ``python -m sofer.cli`` is never recorded, so ``cli.py``'s
+    new exception body would have no coverage carrier and the COV-06 per-file gate
+    would fall below 100.00 (AGENTS.md rule 14 forbids the pragma that would
+    otherwise hide it). These two cases call ``cli._cmd_codebook`` in-process,
+    exactly as ``TestCodebookAllFilesErrors`` does for the ``--all-files`` arm, so
+    both arms are genuinely executed in the instrumented process. The spec delta's
+    Test Mapping permits this in-process call and it never replaces the boundary
+    tests; the failures come from the real reader (no mock) - only the resolved
+    tool-wide config constants differ.
+    """
+
+    def test_single_file_decode_exhaustion_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """A real ``ValueError`` from the reader surfaces as ``Error: ...``, rc 1."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        monkeypatch.setattr(config, "CSV_ENCODING", "cp1252")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_bytes(b"name;age\n\x81;30\n")
+
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="unused.toml",
+                csv=str(csv_path),
+                output=None,
+                max_sample=None,
+            )
+        )
+
+        assert rc == 1
+        assert capsys.readouterr().err.startswith("Error: ")
+
+    def test_single_file_unknown_codec_returns_1(self, tmp_path, monkeypatch, capsys) -> None:
+        """A real ``LookupError`` from an absent codec renders the same diagnostic."""
+        monkeypatch.setattr(config, "CSV_ENCODING", "not-a-codec")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("name;age\nAlice;30\n", encoding="utf-8")
+
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="unused.toml",
+                csv=str(csv_path),
+                output=None,
+                max_sample=None,
+            )
+        )
+
+        assert rc == 1
+        assert "not-a-codec" in capsys.readouterr().err
+
+
+class TestConsoleEncodingGuard:
+    """``cli._configure_console_streams`` pinned directly (CLI-R11).
+
+    The three tests exercise the helper's three outcome shapes — the in-place
+    reconfigure, the non-text-stream skip, and the refuses-to-reconfigure skip
+    — so every line and branch arm of the helper has a deterministic carrier
+    independent of how pytest's own capture object behaves (AGENTS.md rule 14
+    forbids ``# pragma: no cover``).
+    """
+
+    def test_console_streams_reconfigured_in_place(self, monkeypatch) -> None:
+        """A real text stream gets ``errors="replace"``, in place (CLI-R11).
+
+        Asserting both ``stream.errors`` and the substitution bytes proves the
+        guard *substitutes* an unencodable character instead of raising (the
+        stream stays ASCII-encoded, so writing ``U+2192`` can only land as the
+        replacement byte).
+        """
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict")
+        monkeypatch.setattr(sys, "stdout", stream)
+        monkeypatch.setattr(sys, "stderr", stream)
+        # The guard's policy is owned by config.py, never a [tool.sofer] key.
+        assert config.CONSOLE_ERRORS == "replace"
+
+        cli._configure_console_streams()
+
+        assert stream.errors == "replace"
+        assert sys.stdout is stream
+        assert sys.stderr is stream
+        stream.write("\u2192")
+        stream.flush()
+        assert buffer.getvalue() == b"?"
+
+    def test_console_guard_skips_stream_without_reconfigure(self, monkeypatch) -> None:
+        """An ``io.StringIO`` capture object is left untouched (CLI-R11).
+
+        ``io.StringIO`` is exactly the object
+        :func:`sofer.mcp_server._capture_output` installs; the guard must
+        neither raise nor replace it, keeping MSP-R01 stdout framing intact.
+        """
+        out = io.StringIO()
+        err = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", out)
+        monkeypatch.setattr(sys, "stderr", err)
+
+        cli._configure_console_streams()
+
+        assert sys.stdout is out
+        assert sys.stderr is err
+        assert out.getvalue() == ""
+        assert err.getvalue() == ""
+
+    def test_console_guard_survives_unreconfigurable_text_wrapper(self, monkeypatch) -> None:
+        """A closed ``TextIOWrapper`` is skipped, never raised on (CLI-R11).
+
+        A closed buffer still passes the ``isinstance`` gate and makes
+        ``reconfigure`` raise ``ValueError``; the guard must swallow it and
+        leave the stream object in place rather than become a new
+        first-statement crash source for ``main()``.
+        """
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        stream.close()
+        monkeypatch.setattr(sys, "stdout", stream)
+        monkeypatch.setattr(sys, "stderr", stream)
+
+        cli._configure_console_streams()
+
+        assert sys.stdout is stream
+        assert sys.stderr is stream
 
 
 def test_codebook_all_files_max_sample_parity(tmp_path):
@@ -2132,6 +2597,116 @@ class TestMcpRemoveCliFailure:
         assert expected in err
 
 
+class TestMcpNativeDelegationFidelityCli:
+    """CLI surface for the unified native-delegation fidelity gate (#167/#232)."""
+
+    def test_add_declines_env_warns_and_file_edits(self, tmp_path, monkeypatch, capsys) -> None:
+        import json as _json
+        from pathlib import Path as _Path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(_Path, "home", lambda: home)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(Namespace(agent="gemini", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "native mcp add cannot express env forwarding" in err
+        assert "hf123" not in err
+        # file edit ran and persisted the env NAME only
+        settings = home / ".config" / "gemini" / "settings.json"
+        data = _json.loads(settings.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["sofer"]["env"] == {"HF_TOKEN": "$HF_TOKEN"}
+        assert "hf123" not in settings.read_text(encoding="utf-8")
+
+    def test_add_declines_project_scope_for_codex(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="codex", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        assert "native mcp add cannot express project scope" in capsys.readouterr().err
+        assert (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_add_passes_requested_scope_to_native(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        seen: list[tuple[str, str]] = []
+
+        def _delegate(agent, cwd, env_keys, scope):
+            seen.append((agent, scope))
+            return True
+
+        monkeypatch.setattr(mcp_registration, "delegate_add", _delegate)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="gemini", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        assert seen == [("gemini", "project")]
+        assert "gemini delegated via native mcp add" in capsys.readouterr().out
+        assert not (tmp_path / ".gemini" / "settings.json").exists()
+
+    def test_add_generic_failure_when_no_fidelity_reason(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        from pathlib import Path as _Path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "delegate_add", lambda *a, **kw: False)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(Namespace(agent="codex", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "native delegation failed, falling back to file edit" in err
+        assert "cannot express" not in err
+
+    def test_remove_declines_project_scope_for_codex(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_remove(Namespace(agent="codex", scope="project", dry_run=False))
+        assert rc == 0
+        assert "native mcp remove cannot express project scope" in capsys.readouterr().err
+
+    def test_remove_passes_scope_and_generic_failure(self, tmp_path, monkeypatch, capsys) -> None:
+        from pathlib import Path as _Path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        seen: list[tuple[str, str]] = []
+
+        def _delegate(agent, scope):
+            seen.append((agent, scope))
+            return len(seen) == 1
+
+        monkeypatch.setattr(mcp_registration, "delegate_remove", _delegate)
+        rc = cli._cmd_mcp_remove(Namespace(agent="gemini", scope="user", dry_run=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert seen == [("gemini", "user")]
+        assert "gemini delegated remove via native mcp remove" in out
+        rc2 = cli._cmd_mcp_remove(Namespace(agent="gemini", scope="user", dry_run=False))
+        assert rc2 == 0
+        err = capsys.readouterr().err
+        # Second call returns False with no fidelity reason -> generic message.
+        assert "native remove failed, falling back to file edit" in err
+        assert "cannot express" not in err
+
+
 class TestInitMoveExistingCoverage:
     def test_move_existing_no_candidates_dry_run(self, tmp_path, monkeypatch, capsys) -> None:
         """No supported files + --move-existing --dry-run prints the no-move line
@@ -2171,3 +2746,216 @@ class TestInitMoveExistingCoverage:
         assert (tmp_path / "raw").is_dir()
         assert (tmp_path / "a.csv").exists()  # never moved
         assert not (tmp_path / "raw" / "a.csv").exists()
+
+
+class TestExplicitCsvDialectOverride:
+    """Issue #204 — explicit --delimiter/--encoding wins over config (CB-R12/PRF-07).
+
+    In-process carriers keep ``src/sofer/cli.py`` at 100.00% (AGENTS.md rule 14);
+    the subprocess twins prove the user-visible behaviour and the stderr echo.
+    """
+
+    def test_echo_helper_lists_only_supplied_keys(self, capsys) -> None:
+        """The echo names only the supplied keys (never an omitted one)."""
+        cli._echo_explicit_dialect(Namespace())  # neither attribute present
+        assert capsys.readouterr().err == ""
+
+        cli._echo_explicit_dialect(Namespace(delimiter=",", encoding=None))
+        only_delim = capsys.readouterr().err
+        assert "delimiter=','" in only_delim
+        assert "encoding=" not in only_delim
+
+        cli._echo_explicit_dialect(Namespace(delimiter=None, encoding="utf-8"))
+        only_enc = capsys.readouterr().err
+        assert "encoding='utf-8'" in only_enc
+        assert "delimiter=" not in only_enc
+
+        cli._echo_explicit_dialect(Namespace(delimiter=",", encoding="utf-8"))
+        both = capsys.readouterr().err
+        assert "delimiter=','" in both and "encoding='utf-8'" in both
+
+    def test_codebook_explicit_delimiter_wins_in_process(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The explicit ``,`` overrides a disagreeing configured ``;``."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8-sig")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=False,
+                config="d.toml",
+                csv=str(csv_path),
+                output=None,
+                max_sample=None,
+                delimiter=",",
+                encoding=None,
+            )
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "| 1 | `name`" in captured.out, captured.out
+        assert "| 2 | `age`" in captured.out, captured.out
+        assert "delimiter=','" in captured.err
+
+    def test_codebook_omitted_is_unchanged_in_process(self, tmp_path, monkeypatch, capsys) -> None:
+        """Omitting the flags reproduces the config path byte-for-byte, no echo."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ",")
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8-sig")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+        base = dict(
+            all_files=False, config="d.toml", csv=str(csv_path), output=None, max_sample=None
+        )
+
+        # Namespace without delimiter/encoding: the pre-change expression runs.
+        rc = cli._cmd_codebook(Namespace(**base))
+        omitted = capsys.readouterr()
+        assert rc == 0
+        assert omitted.err == ""
+        assert "| 1 | `name`" in omitted.out and "| 2 | `age`" in omitted.out
+
+        # Explicitly passing the configured value must produce the same stdout.
+        rc = cli._cmd_codebook(Namespace(**base, delimiter=",", encoding="utf-8-sig"))
+        explicit = capsys.readouterr()
+        assert rc == 0
+        assert explicit.out == omitted.out
+        assert "delimiter=','" in explicit.err and "encoding='utf-8-sig'" in explicit.err
+
+    def test_codebook_all_files_passes_explicit_flags(self, tmp_path, monkeypatch) -> None:
+        """``--all-files`` forwards the explicit pair into ``generate_all``."""
+        (tmp_path / "data.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        seen: dict[str, object] = {}
+
+        def _spy(cfg, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(cli, "generate_all_codebooks", _spy)
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=True,
+                config=str(toml),
+                csv=None,
+                output=None,
+                max_sample=None,
+                delimiter=",",
+                encoding="cp1252",
+            )
+        )
+        assert rc == 0
+        assert seen["delimiter"] == ","
+        assert seen["encoding"] == "cp1252"
+
+    def test_profile_single_passes_explicit_flags(self, tmp_path, monkeypatch, capsys) -> None:
+        """The single-file profile run receives the explicit pair."""
+        monkeypatch.setattr(config, "CSV_DELIMITER", ";")
+        monkeypatch.setattr(config, "CSV_ENCODING", "utf-8-sig")
+        csv_path = tmp_path / "data.csv"
+        csv_path.write_text("col_a,col_b\n1,2\n", encoding="utf-8-sig")
+        seen: dict[str, object] = {}
+        real_run_profile = cli.run_profile
+
+        def _spy(dataset_path, **kwargs):
+            seen.update(kwargs)
+            return real_run_profile(dataset_path, **kwargs)
+
+        monkeypatch.setattr(cli, "run_profile", _spy)
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=str(csv_path),
+                output=None,
+                all_files=False,
+                force=False,
+                delimiter=",",
+                encoding=None,
+            )
+        )
+        assert rc == 0
+        assert seen["delimiter"] == ","
+        assert seen["encoding"] is None
+        assert "delimiter=','" in capsys.readouterr().err
+
+    def test_profile_all_files_passes_explicit_flags(self, tmp_path, monkeypatch) -> None:
+        """``--all-files`` forwards the explicit pair into ``generate_all_profiles``."""
+        import sofer.profile as profile_mod
+
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/a.csv"\nremote = "a.csv"\n',
+            encoding="utf-8",
+        )
+        seen: dict[str, object] = {}
+
+        def _spy(cfg, output_dir=None, delimiter=None, encoding=None):
+            seen.update(output_dir=output_dir, delimiter=delimiter, encoding=encoding)
+            return []
+
+        monkeypatch.setattr(profile_mod, "generate_all_profiles", _spy)
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=None,
+                output=None,
+                all_files=True,
+                force=False,
+                config=str(toml),
+                delimiter=",",
+                encoding="cp1252",
+            )
+        )
+        assert rc == 0
+        assert seen["delimiter"] == ","
+        assert seen["encoding"] == "cp1252"
+
+    def test_codebook_help_lists_dialect_flags(self, capsys) -> None:
+        with _pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["codebook", "--help"])
+        codebook_help = capsys.readouterr().out
+        assert "--delimiter" in codebook_help
+        assert "--encoding" in codebook_help
+
+    def test_profile_help_lists_dialect_flags(self, capsys) -> None:
+        with _pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["profile", "--help"])
+        profile_help = capsys.readouterr().out
+        assert "--delimiter" in profile_help
+        assert "--encoding" in profile_help
+
+    def test_subprocess_explicit_delimiter_wins_and_echoes(self, tmp_path) -> None:
+        """End-to-end: explicit wins over config and is echoed on stderr."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\ncsv_delimiter = ";"\n', encoding="utf-8"
+        )
+        (tmp_path / "data.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+
+        result = run_cli(
+            ["codebook", "data.csv", "--delimiter", ","],
+            cwd=tmp_path,
+            env={"PYTHONIOENCODING": "utf-8"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "| 1 | `name`" in result.stdout, result.stdout
+        assert "| 2 | `age`" in result.stdout, result.stdout
+        assert "delimiter=','" in result.stderr, result.stderr
+
+    def test_subprocess_omitted_emits_no_echo(self, tmp_path) -> None:
+        """End-to-end: omitting the flags leaves stderr free of the echo."""
+        (tmp_path / "data.csv").write_text("col_a;col_b\n1;2\n", encoding="utf-8-sig")
+
+        result = run_cli(["codebook", "data.csv"], cwd=tmp_path, env={"PYTHONIOENCODING": "utf-8"})
+
+        assert result.returncode == 0, result.stderr
+        assert "Explicit dialect" not in result.stderr, result.stderr

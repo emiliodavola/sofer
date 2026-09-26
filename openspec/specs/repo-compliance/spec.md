@@ -1471,9 +1471,10 @@ Tests SHALL follow the project's existing patterns:
 
 ### 6.3 Coverage target
 
-All new code in `repo_compliance.py` SHALL have unit-test coverage of at least
-90% (branch coverage).  The upload orchestration code in `uploader.py` SHALL have
-at least 80% coverage via mocked compliance calls.
+Per-module coverage floors are owned by the `coverage` capability
+(`openspec/specs/coverage/spec.md`, COV-01/COV-06); this section does not re-declare
+a number. The delivery/orchestration code now lives in `publish.py` and is covered
+by the suite per that capability's policy.
 
 ---
 
@@ -1493,7 +1494,7 @@ at least 80% coverage via mocked compliance calls.
 | `src/sofer/model.py` | Add new `[meta]` fields to `DatasetConfig` + update `from_toml()`. |
 | `src/sofer/codebook.py` | Rename `_infer_type` to public `infer_column_type` for cross-module reuse. |
 | `src/sofer/repo_compliance.py` | Add `staging_dir` parameter to `build_schema_report`; add Parquet-reading logic with type mapping. |
-| `src/sofer/uploader.py` | Add conversion loop before compliance; pass `staging_dir=tmpdir` to `build_schema_report`. |
+| `src/sofer/publish.py` + `src/sofer/prepare.py` | Staging is orchestrated by `prepare.py` (`build_schema_report_with_rows(..., staging_dir=...)`) and delivered by `publish.py`; the deleted `uploader.py` is historical. |
 | `pyproject.toml` | Replace `tomli-w` dependency with `PyYAML`. |
 | `tests/test_repo_compliance.py` | Add Parquet-based schema tests (happy path, fallback, sampling, disambiguation). |
 
@@ -1501,7 +1502,7 @@ at least 80% coverage via mocked compliance calls.
 
 | File | Reason |
 |------|--------|
-| `src/sofer/cli.py` | No CLI changes in P0; upload command already calls `uploader.upload()`. |
+| `src/sofer/cli.py` | No CLI changes in P0; delivery is invoked through `publish.py` — the `upload` subcommand and the `uploader` module were removed. |
 | `src/sofer/checks.py` | Compliance is not validation — separate concern. |
 | `src/sofer/__init__.py` | No public API changes for P0. |
 | `src/sofer/codebook.py` | `infer_column_type` unchanged — still used by CSV-fallback path. |

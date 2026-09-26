@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from . import config
+from . import _toml, config
 from ._mirror import _validate_case_fold_collisions
 
 QUALITY_CHECK_NAMES: frozenset[str] = frozenset(
@@ -238,6 +238,14 @@ class DatasetConfig:
                            (default ``";"``).
         csv_encoding:      File encoding for CSV files
                            (default ``"utf-8-sig"``).
+        declared_meta_keys:
+                           The ``[meta]`` keys the TOML actually declared.  This
+                           is the presence signal used by ``_converters`` to tell
+                           a dataset that declared ``csv_delimiter = ";"`` apart
+                           from one that declared nothing, even though both read
+                           back the value ``";"``.  Only :meth:`from_toml`
+                           populates it; programmatic constructions keep the
+                           empty default and therefore take the sniff fallback.
 
         annotations_creators:
                            Source of data annotations (``"found"``,
@@ -320,6 +328,12 @@ class DatasetConfig:
     collection_method: str = ""
     csv_delimiter: str = ";"
     csv_encoding: str = "utf-8-sig"
+    # Presence signal (issue #181 / PC-U01): the [meta] keys declared in the TOML.
+    # Declaring `csv_delimiter = ";"` is then distinguishable from declaring
+    # nothing while both keep the value ";".  Kept separate from the value so the
+    # 244 existing `DatasetConfig(...)` sites and the six sibling readers stay
+    # bit-identical (design D1).
+    declared_meta_keys: frozenset[str] = field(default_factory=frozenset)
     annotations_creators: list[str] = field(default_factory=list)
     language_creators: list[str] = field(default_factory=list)
     language_details: list[str] = field(default_factory=list)
@@ -393,11 +407,6 @@ class DatasetConfig:
         Returns:
             A fully populated :class:`DatasetConfig` instance.
         """
-        try:
-            import tomli as _tomli
-        except ImportError:  # Python ≥ 3.11
-            import tomllib as _tomli
-
         path = Path(path)
         base_dir = path.parent
 
@@ -417,7 +426,7 @@ class DatasetConfig:
             config.reload(base_dir)
 
         with open(path, "rb") as fh:
-            data = _tomli.load(fh)
+            data = _toml.load(fh)
 
         ds = data["dataset"]
 
@@ -529,6 +538,7 @@ class DatasetConfig:
             collection_method=meta.get("collection_method", ""),
             csv_delimiter=meta.get("csv_delimiter", ";"),
             csv_encoding=meta.get("csv_encoding", "utf-8-sig"),
+            declared_meta_keys=frozenset(meta.keys()),
             annotations_creators=meta.get("annotations_creators", []),
             language_creators=meta.get("language_creators", []),
             language_details=meta.get("language_details", []),

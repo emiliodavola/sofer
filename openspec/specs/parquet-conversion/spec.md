@@ -109,11 +109,20 @@ dependencies = [
 
 ---
 
-## 4. Conversion Logic — `uploader.py`
+## 4. Conversion Logic — `_converters.py` (historically `uploader.py`)
 
-### 4.1 New module function
+> **Superseded.** This section records the original pre-split design: conversion
+> lived in the delivery module `uploader.py` and ran inside `upload()`. It was
+> superseded by §13 (universal dispatch) and by the `upload` → `prepare` + `publish`
+> split. Conversion now lives in `src/sofer/_converters.py` (per-format readers plus
+> the shared writer) and is orchestrated by `src/sofer/prepare.py::prepare`; delivery
+> and `keep_csv` staging live in `src/sofer/publish.py::publish`. The text below is
+> preserved as the historical record.
 
-A new module-level function SHALL be added to `src/sofer/uploader.py`:
+### 4.1 Original module function
+
+The original design added a module-level function to the delivery module (the deleted
+`uploader.py`); the shipped conversion home is `src/sofer/_converters.py`:
 
 ```python
 def _convert_to_parquet(
@@ -150,7 +159,7 @@ Key details:
 - **Output path**: The Parquet file SHALL have the same stem as the original CSV
   with a `.parquet` extension (e.g. `survey.csv` → `survey.parquet`).
 
-### 4.2 Conversion pipeline in `upload()`
+### 4.2 Original conversion pipeline in `upload()` (superseded)
 
 The conversion step SHALL be inserted **after** compliance generation (schema
 report, dataset card, license) and **before** the upload loop:
@@ -228,9 +237,13 @@ On conversion failure:
 
 ## 5. CLI: `--keep-csv` flag
 
+> **Superseded (subcommand only).** `--keep-csv` now lives on the `publish`
+> subcommand; the `upload` subcommand was removed. The flag behaviour below is
+> unchanged.
+
 ### 5.1 Behaviour
 
-When `--keep-csv` is passed to the `upload` subcommand, the original CSV file
+When `--keep-csv` is passed to the `publish` subcommand, the original CSV file
 SHALL be staged alongside the converted Parquet file **and** uploaded to the
 Hub as a separate file. This preserves the raw source data for users who want
 both formats.
@@ -458,13 +471,13 @@ following test areas:
 
 ### 10.3 Coverage target
 
-All new code in the conversion module/function SHALL have unit-test coverage of at
-least 90 % (branch coverage). The modified `upload()` function SHALL have at least
-80 % coverage for the conversion-path branches.
+Per-module coverage floors are owned by the `coverage` capability
+(`openspec/specs/coverage/spec.md`), which is the single place that declares a
+number; this historical section does not re-declare one.
 
 ---
 
-## 11. File Checklist
+## 11. File Checklist (historical implementation plan)
 
 ### 11.1 Files to modify
 
@@ -472,8 +485,8 @@ least 90 % (branch coverage). The modified `upload()` function SHALL have at lea
 |------|--------|
 | `pyproject.toml` | Add `pyarrow>=14.0` to `dependencies`. |
 | `src/sofer/model.py` | Add `upload_as_csv: bool = False` to `FileEntry`; update `from_toml()` to read the field. |
-| `src/sofer/uploader.py` | Add `_convert_to_parquet()` function; add conversion loop in `upload()`; update `_hf_upload` call sites; add `keep_csv` parameter. |
-| `src/sofer/cli.py` | Add `--keep-csv` argument to upload subparser; pass to `upload()`. |
+| `src/sofer/_converters.py` + `src/sofer/prepare.py` + `src/sofer/publish.py` | Conversion functions live in `_converters.py` and are orchestrated by `prepare.py`; delivery and `keep_csv` staging live in `publish.py`. (The original plan named the deleted `uploader.py`.) |
+| `src/sofer/cli.py` | `--keep-csv` is registered on the `publish` subparser and passed to `publish()` (the `upload` subcommand was removed). |
 
 ### 11.2 Files to create
 
@@ -510,22 +523,49 @@ least 90 % (branch coverage). The modified `upload()` function SHALL have at lea
 
 ### Requirement: Universal File-to-Parquet Conversion (PC-U01)
 
+> Modified by `2026-09-14-fix-prepare-csv-config-tier` (archived 2026-09-14; GitHub #181) — the `.csv` reader now honours the dataset-declared dialect first, with the sniff/tool-wide path as the fallback; the reader logic has exactly one home.
+
 The system MUST convert every `[[file]]` with suffix `.csv/.tsv/.xlsx/.jsonl` to Parquet unless `convert_to_parquet=false`; `.parquet` MUST be passthrough and `recursive` entries SHALL be skipped. Readers SHALL be:
 
 | Suffix | Reader |
 |--------|--------|
-| `.csv` | `pyarrow.csv.read_csv` sniffing `config.SNIFF_DELIMITERS` with `config.CSV_ENCODING` |
+| `.csv` | `pyarrow.csv.read_csv` using the dataset's declared `[meta] csv_delimiter`/`csv_encoding` when declared; otherwise sniffing `config.SNIFF_DELIMITERS` with `config.CSV_ENCODING` |
 | `.tsv` | `pyarrow.csv.read_csv` with `delimiter="\t"` (hardcoded) |
 | `.xlsx` | `openpyxl` `read_only,data_only`, all `wb.sheetnames` → `pa.Table` per sheet |
 | `.jsonl` | `pyarrow.json.read_json` with `json`+`pa.Table.from_pylist` fallback |
 | `.parquet` | Passthrough |
 
+For `.csv`, the resolution order SHALL be: (1) the dataset-declared `[meta] csv_delimiter`/`csv_encoding`, which WINS; (2) where the dataset declares no dialect, the existing sniff + tool-wide `config.CSV_ENCODING` behaviour, unchanged. "Declared" MUST be observable independently of the value, so a dataset declaring `;` remains distinguishable from one declaring nothing. The declared `csv_encoding` MUST actually govern the read — the reader SHALL NOT read raw bytes and ignore it. When the declared delimiter differs from the delimiter the sniff would have chosen, conversion SHALL emit a non-blocking warning naming BOTH values and SHALL still honour the declared one; it SHALL NOT fail. Conversion reader logic SHALL have exactly one home.
+
 Writer MUST use `config.PARQUET_COMPRESSION`/`config.PARQUET_ROW_GROUP_SIZE`, cast null-col to string, warn at `config.PARQUET_SHARD_WARNING_MB`. Per-file failure SHALL warn and stage original.
 
-#### Scenario: CSV sniff
-- GIVEN `a.csv` with `;` delimiter
-- WHEN dispatcher runs
-- THEN `pyarrow.csv` SHALL sniff `;` and write normalized `a.parquet`
+(Previously: the `.csv` row resolved tool-wide only — sniff of `config.SNIFF_DELIMITERS` with `config.CSV_ENCODING` — and `csv_encoding` was never consulted.)
+
+#### Scenario: CSV sniff when nothing is declared
+- GIVEN `a.csv` with `;` delimiter and a dataset TOML declaring no dialect
+- WHEN the dispatcher runs
+- THEN the reader SHALL sniff `;` and write normalized `a.parquet`
+
+#### Scenario: Declared delimiter outside the sniff set wins (mis-split catcher)
+- GIVEN `a.csv` is `|`-separated and `[meta] csv_delimiter = "|"` is declared (`|` ∉ `config.SNIFF_DELIMITERS`)
+- WHEN the dispatcher runs end-to-end
+- THEN `a.parquet` SHALL hold the file's true column count and SHALL NOT collapse the header into one column
+- AND the parity check SHALL be structurally unable to agree with a wrong delimiter
+
+#### Scenario: Declared encoding is honoured
+- GIVEN `a.csv` is not UTF-8 and `[meta] csv_encoding` declares its actual encoding
+- WHEN the dispatcher runs
+- THEN `a.parquet` SHALL be written with correctly decoded values and the original CSV SHALL NOT be staged
+
+#### Scenario: Declaration disagrees with the file — warn, keep declared
+- GIVEN `a.csv` is `,`-separated and `[meta] csv_delimiter = ";"` is declared
+- WHEN the dispatcher runs
+- THEN conversion SHALL still use `;` and SHALL print one non-blocking warning naming both `,` and `;`
+
+#### Scenario: No declared dialect is byte-identical to today
+- GIVEN a dataset TOML declaring no `csv_delimiter`/`csv_encoding`
+- WHEN conversion runs
+- THEN the produced Parquet SHALL be byte-identical to the pre-change output for the same input
 
 #### Scenario: TSV hardcoded tab
 - GIVEN `b.tsv` tab-separated
@@ -598,6 +638,22 @@ This is 0.x minor breaking change. Docs MUST state `tsv/xlsx/jsonl` previously s
 - WHEN docs consulted
 - THEN migration `convert_to_parquet=false` to keep `report.xlsx` SHALL be described
 
+### Requirement: Single CSV conversion reader (PC-U06)
+
+> Added by change `2026-09-14-fix-prepare-csv-config-tier` (GitHub #181).
+
+`src/sofer/prepare.py` SHALL NOT contain a second copy of the CSV→Parquet conversion cluster (the five helper/reader copies plus `_convert_to_parquet`); no module under `src/sofer/` or `tests/` SHALL import those helpers, and the surviving reader logic SHALL have exactly one home in `src/sofer/_converters.py` (AGENTS.md rule 4). Removal SHALL delete code only and SHALL NOT weaken any coverage floor.
+
+#### Scenario: The duplicated cluster is gone and unreferenced
+- GIVEN the branch after the fix
+- WHEN `src/sofer/prepare.py` and both `src/` and `tests/` are inspected
+- THEN the cluster SHALL be absent from `prepare.py` and no `src/`- or `tests/`-module SHALL reference its symbols
+
+#### Scenario: Single home is exercised
+- GIVEN a declared-dialect CSV conversion
+- WHEN the conversion runs
+- THEN the same `_converters.py` entry point SHALL serve CLI `prepare` and library callers, with no parallel reader left to drift
+
 ### Requirement: CSV→Parquet Conversion Pipeline — Universal (Modified, supersedes §4 CSV-only)
 
 System SHALL convert all eligible `.csv/.tsv/.xlsx/.jsonl` via `src/sofer/_converters.py` dispatcher and shared writer, preserving normalized dir structure. Parity: CSV/TSV row/col/name+value-altered; XLSX row/col/name; JSONL key-union+row count. Overwrite/collision SHALL use normalized keys. `keep_csv` SHALL remain CSV-only.
@@ -613,3 +669,54 @@ System SHALL convert all eligible `.csv/.tsv/.xlsx/.jsonl` via `src/sofer/_conve
 - GIVEN `a.csv` and `b.xlsx` with `--keep-csv`
 - WHEN publish stages
 - THEN `a.csv` SHALL be kept alongside `a.parquet`; `b.xlsx` SHALL NOT
+
+### Requirement: Discriminating, version-stable evidence for the declared-dialect tier (PC-U07)
+
+> Added by change `2026-09-26-test-205-csv-tier-gaps` (issue #205). The behaviour requirement PC-U01
+> is unchanged; this requirement carries the **evidence** duty for the declared-dialect tier after the
+> parent change's verify phase (#181) recorded four test-quality gaps.
+
+The test suite for PC-U01's declared-dialect tier SHALL carry evidence that can fail. The integration
+test for the declared-wins path SHALL drive the dataset-TOML seam (`DatasetConfig.from_toml`, which
+alone populates `declared_meta_keys`) and SHALL assert the produced Parquet's true column count/names,
+not the mere presence of a `.parquet` file — a mis-detected delimiter collapses the header into one
+column and would satisfy an existence-only assertion. At least one declared-wins case SHALL use a
+delimiter outside `config.SNIFF_DELIMITERS` (`[";", ",", "\t"]`), so honouring the declaration is the
+only way to pass. The JSONL fallback path of `_convert_jsonl_to_parquet` SHALL be exercised by a test
+that forces the fast path to fail and asserts the fallback's measured behaviour, with the code comment
+describing that behaviour. The undeclared byte-identity evidence SHALL derive its reference at test
+time from the pre-change read shape and SHALL NOT depend on a frozen digest of
+pyarrow-version-dependent output bytes. The boundary around a programmatically constructed
+`DatasetConfig` SHALL be explicit: a dialect value supplied without the `declared_meta_keys` presence
+signal SHALL take the sniff fallback, the decision SHALL be recorded under the owning change's design,
+and the behaviour SHALL be pinned by a test.
+
+#### Scenario: The declared-wins integration test fails against a mis-split
+- GIVEN the CSV dialect plumbing test
+- WHEN the dataset declares `csv_delimiter = "|"` through the TOML seam and the file is `|`-separated
+- THEN the staged Parquet SHALL hold the file's true column count and column names
+- AND a one-column mis-split SHALL fail the assertion
+
+#### Scenario: A declared-wins case cannot pass by sniff coincidence
+- GIVEN a declared-wins unit test over a delimiter outside `config.SNIFF_DELIMITERS` (e.g. `|`)
+- WHEN the conversion runs with the declaration present
+- THEN it SHALL produce the file's true columns
+- AND without the declaration the same input would collapse to one column
+
+#### Scenario: The JSONL fallback is exercised and its real behaviour asserted
+- GIVEN a JSONL file whose later record carries a key absent from its first record, and a forced failure of `pyarrow.json.read_json`
+- WHEN `_convert_jsonl_to_parquet` runs the fallback
+- THEN it SHALL still write a Parquet file via `json` + `pa.Table.from_pylist`
+- AND the test SHALL assert the measured schema-from-first-record behaviour and the code comment SHALL match it
+
+#### Scenario: The undeclared byte-identity evidence is derived at test time
+- GIVEN the undeclared-dialect byte-identity test
+- WHEN it establishes its reference output
+- THEN the reference digest SHALL be computed from the recreated pre-change read shape with the installed pyarrow, not from a frozen literal
+- AND the emitted Parquet bytes SHALL equal that reference
+
+#### Scenario: The programmatic-config boundary is decided and pinned
+- GIVEN a programmatic `DatasetConfig(csv_delimiter="|")` with an empty `declared_meta_keys`
+- WHEN the conversion runs
+- THEN it SHALL take the sniff fallback
+- AND the decision SHALL be recorded in the owning change's design and pinned by a test

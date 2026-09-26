@@ -30,18 +30,33 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 
 ### 4. No duplicated logic
 - If you find yourself copy-pasting a function (even with a different name), extract it to a shared module.
-- Example: `_parquet_to_hf_dtype` was duplicated in `repo_compliance.py` and `uploader.py` — now in `_parquet_helpers.py`.
+- Example: `_parquet_to_hf_dtype` was duplicated in `repo_compliance.py` and `prepare.py` — now in `_parquet_helpers.py`.
 - Example: quality check names were hardcoded in 4 places — now in `quality.QUALITY_CHECK_NAMES`.
 
 ### 5. Pre-commit hooks run automatically
-- `ruff` (lint + fix + format) and `mypy` run on every commit.
+- `ruff` (lint + fix + format), `mypy`, and `pyright` run on every commit.
 - Never commit with `--no-verify` unless you have a documented reason.
-- Before pushing, run `uv run mypy src/` — the CI will reject type errors.
+- Before pushing, run `uv run mypy src/ scripts/` and `uv run pyright` — the CI will reject type errors.
 
 ### 6. Tests must match specs
-- Every SDD spec scenario must have a corresponding test.
-- When implementing, run `uv run pytest tests/ -q` after every change batch.
-- 1149 tests currently pass (1151 collected, 2 skipped) — never reduce coverage.
+- Every SDD spec scenario maps to a repository test (`test:`) or to declared verify-phase evidence
+  (`verify:`). A spec that carries a `## Test Mapping` table SHALL list every `#### Scenario:` in
+  exactly one row, and each row's Verification cell SHALL begin with exactly one evidence prefix:
+  `test:` (a repository test path, optionally `path::test_name`) or `verify:` (a declared evidence
+  class). The contract of record is the `test-mapping-contract` capability.
+- The gate (`scripts/check_test_mapping.py`, run in CI's `lint` job) verifies that a `test:` reference
+  **exists and is collected by pytest**. That is an existence/collection check, not proof that the
+  referenced test exercises the scenario. A `verify:` row is the **declared, non-verifiable**
+  **escape hatch**: it names an evidence class, it does not prove its scenario, and no mechanism
+  re-checks it. Owner: the repository maintainer. Review trigger: any change to a `verify:` row or to
+  a spec's evidence class, and each release review. The checker reports the accepted `verify:` count
+  on every run so the hatch's size is visible.
+- Specs without a `## Test Mapping` table are recorded in `openspec/test-mapping-registry.md` as a
+  **permanent declared backlog** — not pending work — and stay outside the gate. The checker enforces
+  the registry↔tree bijection, so no spec can silently fall outside the gate.
+- When implementing, run `uv run pytest tests/ -q` after every change batch. Never reduce coverage: the
+  authoritative tally is what `uv run pytest tests/ -q` reports on your branch — re-derive it, never
+  trust a figure written here.
 
 ### 7. CLI help text accuracy
 - When adding a new flag or changing behavior, update the argparse `help=` and `description=` strings.
@@ -60,12 +75,14 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Prefer format-native readers over heavy dependencies (openpyxl over pandas for Excel).
 
 ### 10. Architecture: one module per concern
-- CLI dispatch: `cli.py` (9 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp)
+- CLI dispatch: `cli.py` (10 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
 - Dataset config model: `model.py`
 - Tool config defaults: `config.py` (discovery + reload, profile_dir/render_dir)
 - Format registry: `_formats.py`
 - Each command gets its own domain module: `scanner.py`, `codebook.py`, `prepare.py`, `publish.py`, `profile.py`, `render.py`, `mcp_registration.py`, `mcp_server.py`
-- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`
+- Supporting domains: `checks.py`, `quality.py`, `metadata.py`, `semantic.py`, `pii.py`, `repo_compliance.py`, `splits.py`, `verification.py`, `execution_context.py`, `manifest.py`, `workflow.py`
+- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`, `_patterns.py`, `_toml.py`, `_version.py`
+- The module set is whatever `ls src/sofer/` reports — the directory is the source of truth; the groups above are a reading aid, not an exhaustive list. `__init__.py` is the package docstring + public API.
 - Windows safety: placeholders use `raw/example.csv` (NTFS-valid, `:` reserved — old `TODO: raw/...` was invalid); MCP `sofer_init(cwd=...)` resolves per-call via `_contained_path` + `is_relative_to` as `effective_root` under server root, never mutating global `_SERVER_ROOT`; TOML paths use forward slashes (`raw/`, `cache/`).
 
 ### 11. PR template
@@ -78,8 +95,8 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag runs lint + the full test matrix + a wheel-build validation job, then creates a GitHub Release with auto-generated notes. There is no PyPI publishing. A `citation-check` guard job fails the workflow when `CITATION.cff` does not declare the tagged version, so the CFF must be synced before tagging.
 
 Cutting a release:
-1. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev`. Note: `main` is **not** a fast-forward of `dev` (release PR merge commits live on `main`), so always use `--no-ff`.
-2. Sync `CITATION.cff` with the release version: run `python scripts/update_citation.py --version X.Y.Z`, review the `CITATION.cff` diff, and commit it BEFORE creating the tag.
+1. On `dev`, sync `CITATION.cff` with the release version: run `python scripts/update_citation.py --version X.Y.Z`, review the `CITATION.cff` diff, and commit it. The bump belongs on `dev` so the merge below carries it to `main`.
+2. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev` — the merge carries the `CITATION.cff` bump committed in step 1. Note: `main` is **not** a fast-forward of `dev` (release PR merge commits live on `main`), so always use `--no-ff`.
 3. Do **not** bump a version anywhere else: the version is derived from the tag at build time (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth — `pyproject.toml` has no static `version` field and there is no `__version__` constant.
 4. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push with `git push origin main --follow-tags`.
 5. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases with notes generated from commits/PRs since the previous tag.
@@ -87,8 +104,8 @@ Cutting a release:
 Rules:
 - Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the release notes (e.g. v0.2.0 removed the `upload` subcommand). The shipped version always equals the tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed metadata (never a static constant).
 - **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
-- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: under 3.10 the `import tomli as tomllib` fallback triggers `no-redef` errors (known latent issue in `model.py`, `config.py`, `cli.py`).
-- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time).
+- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: a `3.10` development environment installs the conditional `tomli` backport (`pyproject.toml:27`), which makes the `import tomli as _tomli` arm of the five `try:` / `except ImportError:` fallbacks live and the `import tomllib as _tomli` arm dead, so the second import of the same name triggers `no-redef` errors (known latent issue in `cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`, `model.py`) — and it leaves the COV-06 per-file gates unsatisfiable by construction, because the dead arm cannot be executed by any test while `# pragma: no cover` is forbidden in those modules (rule 14). The dev-environment pin (`.python-version`) is therefore `3.13`; a contributor whose interpreter is older must pass `--python 3.13` explicitly for those two gates (`uv run --python 3.13 mypy src/ scripts/`, `uv run --python 3.13 coverage run -m pytest`). A pyright gate (`uv run pyright`, `[tool.pyright]`) now covers the same `src/` and `scripts/` scope; the four `try:` / `except ImportError:` `tomli` sites named here are resolved for that gate by the committed `typings/tomli-stubs/` stub (`mcp_server.py` is version-gated instead, so a static checker prunes its `tomli` arm; mypy already resolves the remaining sites through the global `ignore_missing_imports = true`), never by adding `tomli` to the dev group — which is exactly the move this note forbids.
+- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time). The release-time `CITATION.cff` bump is itself a `dev` commit (rule 12, step 1), so `main` never receives CFF content that did not arrive through a merge.
 
 ### 13. README / README_ES sync
 - `README_ES.md` mirrors the user-facing headings and section order of `README.md`.
@@ -124,3 +141,4 @@ Rules:
 - This rule's 100% mandate covers exactly those four modules. Other modules are
   governed by their own per-file floors (spec `coverage` COV-01) or have no
   floor.
+- Adjacent policy pointer (not part of this rule's mandate): the three second-tier per-file floors (`profile.py`, `mcp_registration.py`, `verification.py`) are deliberately **not** CI-gated — they stay verify-phase evidence only, and arming a gate for them is a spec change (see spec `coverage` COV-07).

@@ -133,9 +133,17 @@ def _make_link(link: Path, target: Path) -> bool:
 class TestImportWithoutExtra:
     def test_import_raises_without_fastmcp(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "fastmcp", None)
-        sys.modules.pop("sofer.mcp_server", None)
-        with pytest.raises(ImportError) as excinfo:
-            importlib.import_module("sofer.mcp_server")
+        # Restore the original module object afterwards: without this the
+        # failed re-import permanently swaps ``sys.modules`` for a fresh
+        # module, orphaning every pre-existing ``from sofer.mcp_server
+        # import ...`` reference (and any module-attribute patching, e.g.
+        # the #207 dotenv isolation) for the rest of the session.
+        real_mcp_server = sys.modules.pop("sofer.mcp_server")
+        try:
+            with pytest.raises(ImportError) as excinfo:
+                importlib.import_module("sofer.mcp_server")
+        finally:
+            sys.modules["sofer.mcp_server"] = real_mcp_server
         msg = str(excinfo.value)
         assert "sofer[mcp]" in msg
         assert "pip install" in msg
@@ -419,10 +427,11 @@ class TestToolRoster:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_report_failure",
         }
     )
 
-    def test_exactly_fourteen_callables(self, server):
+    def test_exactly_fifteen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -643,7 +652,7 @@ class TestAuthStatusPosture:
 
     def test_posture_fields_confined_to_auth_status(self, tmp_path, monkeypatch) -> None:
         """Roster-wide scan: no other tool's output_schema gains any of the 4
-        posture keys; the roster stays at 14 callables."""
+        posture keys; the roster stays at 15 callables."""
         self._clean_hf(monkeypatch)
         _make_dataset(tmp_path)
         server = build_server(root=tmp_path, approval_phrase="x")
@@ -653,7 +662,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 14, [t.name for t in tools]
+        assert len(tools) == 15, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -839,7 +848,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 14
+                    assert len(tools.tools) == 15
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -3150,6 +3159,7 @@ class TestHfTokenFallback:
         # huggingface_hub raises OIDCError when OIDC resource set but no provider
         assert "HF_OIDC_RESOURCE" in str(excinfo.value) or "OIDC" in str(excinfo.value)
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_not_override_env(self, tmp_path, monkeypatch, restore_tool_config):
         monkeypatch.setenv("HF_TOKEN", "env-token")
         env_file = tmp_path / ".env"
@@ -3165,6 +3175,7 @@ class TestHfTokenFallback:
 
         assert _get_hf_token() == "env-token"
 
+    @pytest.mark.reads_cwd_dotenv
     def test_dotenv_loads_when_env_absent(self, tmp_path, monkeypatch, restore_tool_config):
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
@@ -3179,6 +3190,76 @@ class TestHfTokenFallback:
         from sofer.mcp_server import _get_hf_token
 
         assert _get_hf_token() == "from-dotenv"
+
+    @pytest.mark.reads_cwd_dotenv
+    def test_dotenv_call_leaves_environ_unchanged(self, tmp_path, monkeypatch, restore_tool_config):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        (tmp_path / ".env").write_text(
+            "HF_TOKEN=from-dotenv\nHF_HUB_DISABLE_IMPLICIT_TOKEN=true\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        from sofer.mcp_server import _get_hf_token
+
+        before = dict(os.environ)  # snapshot AFTER setup, BEFORE the call
+        assert _get_hf_token() == "from-dotenv"
+        assert dict(os.environ) == before
+
+    @pytest.mark.reads_cwd_dotenv
+    def test_dotenv_not_substituted_for_blank_present_env(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """PB-13 S2: env wins by key PRESENCE — a blank present value never falls back to `.env`."""
+        monkeypatch.setenv("HF_TOKEN", "   ")
+        monkeypatch.setenv("HF_HUB_TOKEN", "alias-token")
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        (tmp_path / ".env").write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() == "alias-token"
+
+    @pytest.mark.reads_cwd_dotenv
+    def test_dotenv_only_disable_flag_gates_file_fallback(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """PB-13 S4: a `.env`-only disable flag still gates the file fallback."""
+        token_file = tmp_path / "hf_token"
+        token_file.write_text("file-token", encoding="utf-8")
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        (tmp_path / ".env").write_text("HF_HUB_DISABLE_IMPLICIT_TOKEN=true\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(token_file))
+        from sofer.mcp_server import _get_hf_token
+
+        assert _get_hf_token() is None
+
+    @pytest.mark.reads_cwd_dotenv
+    def test_python_dotenv_disabled_short_circuits_dotenv_read(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ):
+        """D1: a truthy ``PYTHON_DOTENV_DISABLED`` disables the `.env` read entirely."""
+        (tmp_path / ".env").write_text("HF_TOKEN=from-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        from sofer.mcp_server import _read_dotenv_values
+
+        assert _read_dotenv_values() == {"HF_TOKEN": "from-dotenv"}
+        monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "true")
+        assert _read_dotenv_values() == {}
 
     def test_never_log_token(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
@@ -3249,6 +3330,32 @@ class TestHfTokenFallback:
         ).data
         assert captured["token"] == "tok-123"
         assert envelope["ok"] is True
+
+
+class TestCwdDotenvIsolation:
+    """#207: the suite outcome never depends on a `.env` in the cwd."""
+
+    def test_cwd_dotenv_ignored_without_opt_in(self, tmp_path, monkeypatch, restore_tool_config):
+        """A cwd `.env` is invisible unless the test opts into the read.
+
+        Regression pin for #207: this test chdirs into a directory
+        carrying a ``.env`` with ``HF_TOKEN`` set. Without the autouse
+        :func:`_isolate_cwd_dotenv` fixture the lookup below returns the
+        leaked value and this fails; with it the read is neutralized.
+        """
+        (tmp_path / ".env").write_text("HF_TOKEN=leaked-from-cwd-dotenv\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
+        import huggingface_hub.constants as hf_constants
+
+        monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(tmp_path / "no-token"))
+        from sofer.mcp_server import _get_hf_token, _read_dotenv_values
+
+        assert _read_dotenv_values() == {}
+        assert _get_hf_token() is None
 
 
 class TestHfTokenIntegration:
@@ -4687,9 +4794,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 14 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 15 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_fourteen(self, tmp_path):
+    def test_tool_roster_still_fifteen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4698,7 +4805,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 14
+        assert len(names) == 15
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):
@@ -5275,3 +5382,95 @@ class TestCodebookAllMaxSample:
         cb = tmp_path / "build" / "codebooks" / "data.md"
         assert cb.is_file(), envelope
         assert "Analysed rows:** 2 (full scan)" in cb.read_text(encoding="utf-8")
+
+
+class TestExplicitCsvDialectOverrideMcp:
+    """Issue #204 — explicit delimiter/encoding on the CSV-reading MCP tools (MSP-R18)."""
+
+    def test_codebook_explicit_delimiter_wins_and_echoes(self, tmp_path, restore_tool_config):
+        (tmp_path / "comma.csv").write_text("name,age\nAlice,30\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_codebook", {"path": "comma.csv", "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert "| 1 | `name`" in envelope["output"], envelope["output"]
+        assert "| 2 | `age`" in envelope["output"], envelope["output"]
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+
+    def test_codebook_omitted_dialect_is_none(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)  # ';'-delimited data.csv
+        server = build_server(root=tmp_path)
+
+        omitted = _call(server, "sofer_codebook", {"path": "data.csv"}).data
+        assert omitted["ok"] is True, omitted
+        assert omitted["dialect"] is None
+
+        explicit = _call(server, "sofer_codebook", {"path": "data.csv", "delimiter": ";"}).data
+        assert explicit["output"] == omitted["output"]
+        assert explicit["dialect"] == {"delimiter": ";", "encoding": None}
+
+    def test_profile_explicit_delimiter_wins_and_echoes(self, tmp_path, restore_tool_config):
+        import yaml
+
+        (tmp_path / "comma.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile", {"dataset": "comma.csv", "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+        data = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+    def test_profile_omitted_dialect_is_none(self, tmp_path, restore_tool_config):
+        _make_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile", {"dataset": "data.csv"}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] is None
+
+    @staticmethod
+    def _comma_dataset(tmp_path: Path) -> Path:
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "comma.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8-sig")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[meta]\ncsv_delimiter = ";"\n\n'
+            '[[file]]\nlocal = "cache/comma.csv"\nremote = "comma.csv"\n',
+            encoding="utf-8",
+        )
+        return toml
+
+    def test_codebook_all_explicit_delimiter_wins_over_meta(self, tmp_path, restore_tool_config):
+        toml = self._comma_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_codebook_all", {"config": str(toml), "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+        cb = tmp_path / "build" / "codebooks" / "comma.md"
+        assert cb.is_file(), envelope
+        text = cb.read_text(encoding="utf-8")
+        assert "| 1 | `col_a`" in text and "| 2 | `col_b`" in text
+
+    def test_profile_all_explicit_delimiter_wins(self, tmp_path, restore_tool_config):
+        import yaml
+
+        toml = self._comma_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_profile_all", {"config": str(toml), "delimiter": ","}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["dialect"] == {"delimiter": ",", "encoding": None}
+        out = tmp_path / "cache" / "profiles" / "comma.metadata.yaml"
+        assert out.is_file(), envelope
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]

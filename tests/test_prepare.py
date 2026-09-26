@@ -1189,7 +1189,7 @@ class TestPrepareParity:
         """An empty CSV yields ([], []) from the csv-module read (StopIteration)."""
         import pyarrow.csv as pcs
 
-        from sofer.prepare import _read_csv_raw_values
+        from sofer._converters import _read_csv_raw_values
 
         csv = tmp_path / "empty.csv"
         csv.write_text("", encoding="utf-8")
@@ -1198,7 +1198,7 @@ class TestPrepareParity:
 
     def test_parity_unreadable_csv_reports_cannot_read(self, tmp_path: Path) -> None:
         """An unreadable CSV path yields None and a parity failure."""
-        from sofer.prepare import _check_conversion_parity, _read_csv_raw_values
+        from sofer._converters import _check_conversion_parity, _read_csv_raw_values
 
         assert _read_csv_raw_values(tmp_path, ";") is None  # directory → open fails
         table = pa.table({"a": [1]})
@@ -1210,7 +1210,7 @@ class TestPrepareParity:
         """Blank lines inflate the csv-module row count vs pyarrow → hard fail."""
         import pyarrow.csv as pcs
 
-        from sofer.prepare import _check_conversion_parity
+        from sofer._converters import _check_conversion_parity
 
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n\n\n", encoding="utf-8")
@@ -1223,7 +1223,7 @@ class TestPrepareParity:
         """A table with an extra column diverges from the CSV header width."""
         import pyarrow.csv as pcs
 
-        from sofer.prepare import _check_conversion_parity
+        from sofer._converters import _check_conversion_parity
 
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n", encoding="utf-8")
@@ -1236,7 +1236,7 @@ class TestPrepareParity:
         """Renamed table columns diverge from the CSV header."""
         import pyarrow.csv as pcs
 
-        from sofer.prepare import _check_conversion_parity
+        from sofer._converters import _check_conversion_parity
 
         csv = tmp_path / "data.csv"
         csv.write_text("a;b\n1;2\n", encoding="utf-8")
@@ -1249,7 +1249,7 @@ class TestPrepareParity:
         """A CSV row shorter than the header is skipped by the soft value check."""
         import pyarrow.csv as pcs
 
-        from sofer.prepare import _check_conversion_parity
+        from sofer._converters import _check_conversion_parity
 
         ragged = tmp_path / "ragged.csv"
         ragged.write_text("a;b;c\n1;2\n", encoding="utf-8")
@@ -1662,36 +1662,6 @@ class TestPrepareOfflineWin32AndManifest:
         assert "artifacts" in payload
 
 
-class TestConvertToParquetDirect:
-    """Direct unit coverage of prepare._convert_to_parquet (299/317 arms)."""
-
-    def test_convert_parity_failure_returns_none(self, tmp_path: Path) -> None:
-        """A parity failure aborts the direct converter with None (line 299)."""
-        from sofer.prepare import _convert_to_parquet
-
-        csv = tmp_path / "parity.csv"
-        csv.write_text("a;b\n1;2\n\n\n", encoding="utf-8")
-        staging = tmp_path / "stage"
-        staging.mkdir()
-        assert _convert_to_parquet(csv, staging) is None
-
-    def test_convert_oversized_shard_warns(
-        self, tmp_path, monkeypatch, capsys, restore_tool_config
-    ) -> None:
-        """A converted shard above the threshold prints the sharding hint."""
-        import sofer.config as cfg_mod
-        from sofer.prepare import _convert_to_parquet
-
-        csv = tmp_path / "big.csv"
-        csv.write_text("a;b\n" + "1;2\n" * 2000, encoding="utf-8")
-        staging = tmp_path / "stage"
-        staging.mkdir()
-        monkeypatch.setattr(cfg_mod, "PARQUET_SHARD_WARNING_MB", 0.000001)
-        result = _convert_to_parquet(csv, staging)
-        assert result is not None
-        assert "Consider sharding into" in capsys.readouterr().out
-
-
 class TestPrepareSchemaFailurePath:
     def test_prepare_cross_file_schema_failure(self, tmp_path: Path, capsys) -> None:
         """A same-split dtype mismatch fails prepare with the assertion block."""
@@ -1806,3 +1776,39 @@ class TestPrepareVerifyNext:
         captured = capsys.readouterr().out
         assert "PASSED" in captured
         assert "train" in captured
+
+
+# -------------------------------------------------------------------------------
+#  PC-U06 - no duplicated CSV conversion cluster in prepare.py
+# -------------------------------------------------------------------------------
+
+
+class TestNoDuplicateConversionCluster:
+    """PC-U06 structural guard: the old reader cluster is gone and unreferenced."""
+
+    _DEAD_SYMBOLS = (
+        "_sniff_csv_delimiter",
+        "_count_delimiters_outside_quotes",
+        "_cast_null_columns_to_string",
+        "_read_csv_raw_values",
+        "_check_conversion_parity",
+        "_convert_to_parquet",
+    )
+
+    def test_prepare_defines_none_of_the_cluster(self) -> None:
+        src = (Path(__file__).resolve().parents[1] / "src" / "sofer" / "prepare.py").read_text(
+            encoding="utf-8"
+        )
+        for name in self._DEAD_SYMBOLS:
+            assert f"def {name}" not in src, f"{name} still defined in prepare.py"
+
+    def test_no_module_references_the_cluster_via_prepare(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        offenders: list[str] = []
+        for base in (root / "src", root / "tests"):
+            for path in sorted(base.rglob("*.py")):
+                text = path.read_text(encoding="utf-8")
+                for name in self._DEAD_SYMBOLS:
+                    if f"prepare import {name}" in text or f"prepare.{name}" in text:
+                        offenders.append(f"{path.name}:{name}")
+        assert offenders == []

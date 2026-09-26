@@ -109,6 +109,33 @@ class TestFromToml:
         assert cfg.column_checks == []
         assert cfg.description == ""
 
+    def test_declared_meta_keys_records_declared_delimiter(self, tmp_path):
+        """Declaring ``csv_delimiter = ";"`` is observable as membership.
+
+        The presence signal is a set of declared ``[meta]`` keys, so the value
+        alone (``";"``, the default) never has to be overloaded.
+        """
+        p = tmp_path / "declared.toml"
+        p.write_text(SAMPLE_TOML_MINIMAL + '\n[meta]\ncsv_delimiter = ";"\n')
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.csv_delimiter == ";"
+        assert "csv_delimiter" in cfg.declared_meta_keys
+        assert "csv_encoding" not in cfg.declared_meta_keys
+
+    def test_declared_meta_keys_empty_when_nothing_declared(self, tmp_path):
+        """Declaring nothing yields the same ``";"`` value but no membership.
+
+        Declared ``;`` must stay distinguishable from declared nothing even
+        though both read back ``";"`` (PC-U01).
+        """
+        p = tmp_path / "minimal.toml"
+        p.write_text(SAMPLE_TOML_MINIMAL)
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.csv_delimiter == ";"
+        assert cfg.csv_encoding == "utf-8-sig"
+        assert "csv_delimiter" not in cfg.declared_meta_keys
+        assert "csv_encoding" not in cfg.declared_meta_keys
+
     def test_build_dir_defaults_to_build(self, tmp_path):
         """A TOML without ``[dataset] build_dir`` defaults to ``"build"``."""
         p = tmp_path / "minimal.toml"

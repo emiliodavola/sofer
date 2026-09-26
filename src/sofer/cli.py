@@ -8,20 +8,19 @@ Run ``sofer --help`` or ``sofer <command> --help``.
 from __future__ import annotations
 
 import argparse
+import io
 import shutil
 import sys
 from pathlib import Path
 from typing import cast
 
-from . import config
+from . import _toml, config, failure_report, mcp_registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
 from .execution_context import resolve_dataset_root, validate_identity
-from .mcp_registration import AgentName as _AgentName
-from .mcp_registration import Scope as _Scope
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
@@ -177,11 +176,25 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     """Generate a markdown codebook for one file or all files in the config.
 
     Without ``--all-files``: analyse *FILE* and print the codebook to
-    stdout (or write to ``--output``).  With ``--all-files``: read every
+    stdout (or write to ``--output``).  The resolved tool-wide
+    ``config.CSV_DELIMITER`` / ``config.CSV_ENCODING`` are read at call time
+    (module-constant reads, resolved by ``main()``'s single ``config.reload``
+    before dispatch), so the invocation's ``[tool.sofer]`` values reach
+    ``codebook.generate`` and its literal defaults never take effect — the
+    same source ``sofer_codebook`` uses (MSP-R10).  An unreadable input
+    (``ValueError`` from an exhausted encoding chain, ``LookupError`` from an
+    unknown codec name) prints ``Error: <message>`` on stderr and returns 1 —
+    never an uncaught traceback.  With ``--all-files``: read every
     ``[[file]]`` entry from the TOML and write one codebook per file
     under the package ``build_dir`` (``--output`` overrides it), plus a
     root index — mirroring where ``sofer_codebook_all`` and ``publish``
     collect codebooks.
+
+    ``--delimiter`` / ``--encoding`` are additive overrides (issue #204): when
+    supplied they win over the applicable tier (single-file: the tool-wide
+    values above; ``--all-files``: the dataset ``[meta]``), and when omitted
+    the resolution is exactly today's.  A supplied override is echoed on
+    stderr (``_echo_explicit_dialect``).
     """
     if args.all_files:
         if args.csv:
@@ -200,10 +213,13 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
             for err in validation_errors:
                 print(f"Error: {err}", file=sys.stderr)
             return 1
+        _echo_explicit_dialect(args)
         try:
             generate_all_codebooks(
                 cfg,
                 output_dir=resolve_output_dir(cfg, args.output),
+                delimiter=getattr(args, "delimiter", None),
+                encoding=getattr(args, "encoding", None),
                 max_sample=args.max_sample,
             )
         except ValueError as exc:
@@ -222,6 +238,20 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # time (post-reload), never from a frozen argparse default.
     max_sample = args.max_sample if args.max_sample is not None else config.CODEBOOK_MAX_SAMPLE
 
+    # Resolve the delimiter/encoding through the config module at call time,
+    # exactly like ``max_sample`` above (TC-04): the single reload in
+    # ``main()`` has already run, so these observe this invocation's
+    # ``[tool.sofer]`` values — the same source ``sofer_codebook`` passes
+    # (MSP-R10).  Leaving them unset would resurrect the literal ``";"`` /
+    # ``"utf-8-sig"`` defaults inside ``codebook.generate``.  An explicit
+    # ``--delimiter`` / ``--encoding`` wins over the configured value (CB-R12).
+    delimiter = getattr(args, "delimiter", None)
+    if delimiter is None:
+        delimiter = config.CSV_DELIMITER
+    encoding = getattr(args, "encoding", None)
+    if encoding is None:
+        encoding = config.CSV_ENCODING
+
     # Anchor a relative --output to the input file's parent (MSP-R10): the
     # codebook lands next to the analysed file, never in an unrelated cwd.
     output_path = args.output
@@ -231,11 +261,22 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
             out = Path(args.csv).parent / out
         output_path = str(out)
 
-    codebook = generate_codebook(
-        args.csv,
-        output_path=output_path,
-        max_sample=max_sample,
-    )
+    # Same diagnostic contract as the --all-files sibling above: an unreadable
+    # input (decode exhaustion is a ``ValueError``) or an unknown codec name
+    # (``LookupError``, reachable while TC-13 accepts any non-empty string)
+    # becomes one ``Error: …`` line on stderr with exit 1 — never a traceback.
+    _echo_explicit_dialect(args)
+    try:
+        codebook = generate_codebook(
+            args.csv,
+            output_path=output_path,
+            delimiter=delimiter,
+            encoding=encoding,
+            max_sample=max_sample,
+        )
+    except (ValueError, LookupError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if not args.output:
         print(codebook)
     return 0
@@ -262,6 +303,11 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     the domain function (0 on success, 1 on error). A missing destination
     guard without ``--force`` surfaces ``FileExistsError`` as exit 1 with a
     ``use --force to overwrite`` hint.
+
+    ``--delimiter`` / ``--encoding`` are additive overrides (issue #204): when
+    supplied they win over the resolved ``config.CSV_*`` values, and when
+    omitted the resolution is exactly today's.  A supplied override is echoed
+    on stderr (``_echo_explicit_dialect``).
     """
     if getattr(args, "all_files", False):
         # Positional ``dataset`` is the TOML path when --all-files is set;
@@ -293,8 +339,14 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             return 1
         from .profile import generate_all_profiles as _gen_all
 
+        _echo_explicit_dialect(args)
         try:
-            _gen_all(cfg, output_dir=args.output)
+            _gen_all(
+                cfg,
+                output_dir=args.output,
+                delimiter=getattr(args, "delimiter", None),
+                encoding=getattr(args, "encoding", None),
+            )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -308,11 +360,14 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     output_dir = Path(args.output) if args.output else None
     if output_dir is not None and not output_dir.is_absolute():
         output_dir = Path(args.dataset).parent / output_dir
+    _echo_explicit_dialect(args)
     try:
         return run_profile(
             Path(args.dataset),
             output_dir=output_dir,
             force=bool(getattr(args, "force", False)),
+            delimiter=getattr(args, "delimiter", None),
+            encoding=getattr(args, "encoding", None),
         )
     except FileExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -394,6 +449,24 @@ def _cmd_render(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_report_failure(args: argparse.Namespace) -> int:
+    """Send a persisted failure report through ``gh`` (CLI-R14, issue #244).
+
+    Reads the JSON document written by the assisted failure reporter, retries
+    the same delivery path, and prints the created issue URL on success. When
+    ``gh`` is still missing, unauthenticated, or offline it re-emits the triple
+    safety net (saved path, retry command, manual URL, ``gh auth login``) and
+    keeps the file, so no reportable failure is ever lost.
+
+    Args:
+        args: Parsed CLI arguments (must expose ``file``).
+
+    Returns:
+        ``0`` when the issue was created, ``1`` otherwise.
+    """
+    return failure_report.send_persisted_report(Path(args.file))
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     """MOVE loose files to ``raw/`` then copy ``raw/`` → ``cache/``.
 
@@ -432,15 +505,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"  X  Config file not found: {config_path}", file=sys.stderr)
         return 1
 
-    # 1. Load raw TOML.
-    try:
-        import tomli as _tomli
-    except ImportError:
-        import tomllib as _tomli
-
+    # 1. Load raw TOML (parser resolved once in `sofer._toml`, #192).
     try:
         with open(config_path, "rb") as fh:
-            raw_toml = _tomli.load(fh)
+            raw_toml = _toml.load(fh)
     except Exception as exc:
         print(f"  X  Failed to read TOML: {exc}", file=sys.stderr)
         return 1
@@ -546,7 +614,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"\n  The following files will be copied to {config.OUTPUT_DIR}/:")
         for f in discovered:
             flat = flatten_first_level(f.relative_to(base_dir))
-            print(f"     → {config.OUTPUT_DIR}/{flat.as_posix()}")
+            print(f"     -> {config.OUTPUT_DIR}/{flat.as_posix()}")
         try:
             answer = input("\n  Continue? [y/N] ").strip().lower()
         except EOFError:
@@ -566,7 +634,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         if copied:
             print("  DRY RUN  Would copy the following files:")
             for _src, dest in copied:
-                print(f"     → {dest.relative_to(base_dir).as_posix()}")
+                print(f"     -> {dest.relative_to(base_dir).as_posix()}")
         else:
             print(
                 "  DRY RUN  Nothing to copy — all files already present in the"
@@ -607,7 +675,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     Orchestration:
 
-        1. Expand ``--agent all`` to the three agents.
+        1. Expand ``--agent all`` to the registry agents (``mcp_registration.AGENT_NAMES``).
         2. Resolve the desired ``cwd`` (``--cwd`` or ``Path.cwd()``) to an
            absolute path via ``Path.resolve()`` and validate containment with
            ``mcp_registration.validate_cwd`` (``is_relative_to`` user/project
@@ -619,7 +687,12 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
         4. For each agent: probe native delegation via
            ``mcp_registration.probe_native`` (``which`` + ``mcp --help``
            timeout 3s); when available, try ``delegate_add`` first — on
-           success skip file-edit, on failure fall back.
+           success skip file-edit. Delegation is fidelity-gated (#167, #232):
+           when the native CLI cannot forward the same env NAMES and scope as
+           the file edit, ``delegate_add`` declines without spawning, a stderr
+           warning names the reason (``env forwarding`` / ``project scope``,
+           NAMES only), and the file-edit path runs; any other native failure
+           (raise or non-zero exit) falls back with the generic message.
         5. File-edit path: ``resolve_config_path`` → ``read_config``
            (unreadable/malformed → print to stderr, return 1, no backup/write)
            → ``build_entry`` (absolute cwd, env forwarding per agent) →
@@ -631,17 +704,17 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
         Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
         from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
-        receives an ``env`` name list (NAMES only — values are never persisted),
-        opencode receives no env. When opencode (or the opencode member of
-        ``all``) is chosen with known env keys present, the step-3 warning is
-        printed once per run and names the variables that cannot be forwarded.
+        and Pi receive an ``env`` name list (NAMES only — values are never
+        persisted; Pi uses the ``${KEY}`` form it interpolates), opencode
+        receives no env. When opencode (or the opencode member of ``all``) is
+        chosen with known env keys present, the step-3 warning is printed once
+        per run and names the variables that cannot be forwarded.
     """
-    from . import mcp_registration
-
     # Expand agent
     raw_agent: str = getattr(args, "agent")
-    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    agents: list[str] = list(mcp_registration.AGENT_NAMES) if raw_agent == "all" else [raw_agent]
     scope: str = getattr(args, "scope", "user")
+    _scope = cast(mcp_registration.Scope, scope)
     cwd_raw: str | None = getattr(args, "cwd", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
 
@@ -653,7 +726,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     # Containment check — must be absolute and inside allowed root
     # validate_cwd uses is_relative_to logic; reject outside
-    if not mcp_registration.validate_cwd(cwd_resolved, cast(_Scope, scope)):
+    if not mcp_registration.validate_cwd(cwd_resolved, cast(mcp_registration.Scope, scope)):
         print(
             f"  X  --cwd {cwd_resolved} is outside the allowed root for scope '{scope}'",
             file=sys.stderr,
@@ -664,40 +737,53 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     overall = 0
 
     for agent in agents:
-        _agent = cast(_AgentName, agent)
-        # Informational opencode env-drop warning (names only, never values)
-        dropped = mcp_registration.dropped_env_keys(_agent, env)
+        # Informational env-drop warning (names only, never values)
+        dropped = mcp_registration.dropped_env_keys(agent, env)
         if dropped:
             print(
-                f"  !  opencode registration receives no env: {', '.join(dropped)} "
+                f"  !  {agent} registration receives no env: {', '.join(dropped)} "
                 "not forwarded. See README for the launcher environment or an explicit "
                 "'environment' literal in opencode.json.",
                 file=sys.stderr,
             )
-        # Prefer native delegation for codex/gemini
-        if mcp_registration.probe_native(_agent, timeout=3.0):
+        # Prefer native delegation for codex/gemini — but only when it is
+        # faithful (#167, #232). A decline warns with the reason and falls back.
+        if mcp_registration.probe_native(agent, timeout=3.0):
             try:
-                delegated = mcp_registration.delegate_add(_agent, cwd_resolved, list(env.keys()))
+                delegated = mcp_registration.delegate_add(
+                    agent, cwd_resolved, list(env.keys()), _scope
+                )
             except Exception:
                 delegated = False
+                native_error = True
+            else:
+                native_error = False
             if delegated:
                 print(f"  OK  {agent} delegated via native mcp add")
                 continue
-            print(
-                f"  !  {agent} native delegation failed, falling back to file edit",
-                file=sys.stderr,
+            reasons = (
+                []
+                if native_error
+                else mcp_registration.native_delegation_decline_reasons(
+                    agent, list(env.keys()), _scope
+                )
             )
+            if reasons:
+                print(
+                    f"  !  {agent} native mcp add cannot express "
+                    f"{', '.join(reasons)}; falling back to file edit",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"  !  {agent} native delegation failed, falling back to file edit",
+                    file=sys.stderr,
+                )
 
-        # File-edit fallback — resolve path (project scope anchored on
-        # cwd_resolved when --cwd given; else Path.cwd())
-        _scope = cast(_Scope, scope)
-        if scope == "project" and cwd_raw is not None:
-            # When project scope with custom cwd, anchor project config under that cwd
-            path = mcp_registration.resolve_config_path(_agent, _scope, cwd_resolved)
-        elif scope == "project":
-            path = mcp_registration.resolve_config_path(_agent, _scope, None)
-        else:
-            path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        # File-edit fallback — project scope anchors on the resolved cwd; user
+        # scope ignores the anchor and resolves under Path.home().
+        anchor = cwd_resolved if scope == "project" else None
+        path = mcp_registration.resolve_config_path(agent, _scope, anchor)
 
         try:
             existing, _fmt = mcp_registration.read_config(path)
@@ -706,8 +792,8 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
             overall = 1
             continue
 
-        desired = mcp_registration.build_entry(_agent, cwd_resolved, env)
-        new_doc, changed = mcp_registration.merge(_agent, existing, desired)
+        desired = mcp_registration.build_entry(agent, cwd_resolved, env)
+        new_doc, changed = mcp_registration.merge(agent, existing, desired)
         if not changed:
             print(f"  OK  {agent} already registered (idempotent)")
             continue
@@ -722,7 +808,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
             overall = 1
             continue
         # Atomic write — fmt from adapter (preserve agent's expected format)
-        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        fmt_expected = mcp_registration.ADAPTERS[agent]["fmt"]
         try:
             mcp_registration.atomic_write(path, new_doc, fmt_expected)
         except Exception as exc:
@@ -741,7 +827,11 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
 
         1. Expand ``--agent all``.
         2. For each agent: probe native ``delegate_remove`` first;
-           on success skip file-edit, on failure fall back.
+           on success skip file-edit. Fidelity-gated like ``add`` (#232):
+           when the native CLI cannot express the requested scope,
+           ``delegate_remove`` declines, a stderr warning names ``project
+           scope``, and the file-edit path runs; any other native failure
+           falls back with the generic message.
         3. File-edit: ``resolve_config_path`` → ``read_config``
            (unreadable → exit 1, no backup/write) → ``remove_entry``
            (preserve other servers, no write when absent) →
@@ -750,31 +840,43 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
 
     No ``--cwd`` flag exists on remove (CLI-R09: only add accepts cwd).
     """
-    from . import mcp_registration
-
     raw_agent: str = getattr(args, "agent")
-    agents: list[str] = ["opencode", "codex", "gemini"] if raw_agent == "all" else [raw_agent]
+    agents: list[str] = list(mcp_registration.AGENT_NAMES) if raw_agent == "all" else [raw_agent]
     scope: str = getattr(args, "scope", "user")
     dry_run: bool = bool(getattr(args, "dry_run", False))
     overall = 0
 
     for agent in agents:
-        _agent = cast(_AgentName, agent)
-        _scope = cast(_Scope, scope)
-        if mcp_registration.probe_native(_agent, timeout=3.0):
+        _scope = cast(mcp_registration.Scope, scope)
+        if mcp_registration.probe_native(agent, timeout=3.0):
             try:
-                delegated = mcp_registration.delegate_remove(_agent)
+                delegated = mcp_registration.delegate_remove(agent, _scope)
             except Exception:
                 delegated = False
+                native_error = True
+            else:
+                native_error = False
             if delegated:
                 print(f"  OK  {agent} delegated remove via native mcp remove")
                 continue
-            print(
-                f"  !  {agent} native remove failed, falling back to file edit",
-                file=sys.stderr,
+            reasons = (
+                []
+                if native_error
+                else mcp_registration.native_delegation_decline_reasons(agent, [], _scope)
             )
+            if reasons:
+                print(
+                    f"  !  {agent} native mcp remove cannot express "
+                    f"{', '.join(reasons)}; falling back to file edit",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"  !  {agent} native remove failed, falling back to file edit",
+                    file=sys.stderr,
+                )
 
-        path = mcp_registration.resolve_config_path(_agent, _scope, None)
+        path = mcp_registration.resolve_config_path(agent, _scope, None)
         try:
             existing, _fmt2 = mcp_registration.read_config(path)
         except Exception as exc:
@@ -782,7 +884,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
             overall = 1
             continue
 
-        new_doc, changed = mcp_registration.remove_entry(_agent, existing)
+        new_doc, changed = mcp_registration.remove_entry(agent, existing)
         if not changed:
             print(f"  OK  {agent} already absent (idempotent)")
             continue
@@ -795,7 +897,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
             print(f"  X  {agent} backup failed: {exc}", file=sys.stderr)
             overall = 1
             continue
-        fmt_expected = mcp_registration.ADAPTERS[_agent]["fmt"]
+        fmt_expected = mcp_registration.ADAPTERS[agent]["fmt"]
         try:
             mcp_registration.atomic_write(path, new_doc, fmt_expected)
         except Exception as exc:
@@ -1026,6 +1128,59 @@ def _cmd_init(args: argparse.Namespace) -> int:
 # ── argument parser ───────────────────────────────────────────────────
 
 
+def _add_dialect_args(parser: argparse.ArgumentParser) -> None:
+    """Add the optional explicit CSV dialect flags (issue #204).
+
+    Both default to ``None`` ("not supplied"), so the omitted path reuses the
+    exact config resolution the command already performs — the override is
+    additive and byte-identical when unused.  When supplied, the explicit value
+    wins over the configured one; the encoding still fronts the shared
+    ``utf-8-sig → utf-8`` fallback chain in ``_csv_reader.stream_csv``.
+
+    Args:
+        parser: The ``codebook`` or ``profile`` subparser to extend.
+    """
+    parser.add_argument(
+        "--delimiter",
+        default=None,
+        help=(
+            "Explicit CSV field delimiter for this invocation; wins over the "
+            "configured csv_delimiter. Omitted = configured value (applies to "
+            ".csv only; .tsv stays tab-delimited)."
+        ),
+    )
+    parser.add_argument(
+        "--encoding",
+        default=None,
+        help=(
+            "Explicit CSV encoding for this invocation; wins over the configured "
+            "csv_encoding. Omitted = configured value (applies to .csv and .tsv)."
+        ),
+    )
+
+
+def _echo_explicit_dialect(args: argparse.Namespace) -> None:
+    """Echo a supplied ``--delimiter`` / ``--encoding`` on stderr (issue #204).
+
+    Traceability contract: when the caller states a dialect explicitly, the
+    command names what was supplied. Only the supplied keys are listed, so an
+    omitted flag is never reported as if it had been chosen. stderr is used so
+    the single-file codebook's stdout stays pure markdown.
+
+    Args:
+        args: Parsed CLI namespace carrying ``delimiter`` / ``encoding``.
+    """
+    parts: list[str] = []
+    delimiter = getattr(args, "delimiter", None)
+    if delimiter is not None:
+        parts.append(f"delimiter={delimiter!r}")
+    encoding = getattr(args, "encoding", None)
+    if encoding is not None:
+        parts.append(f"encoding={encoding!r}")
+    if parts:
+        print(f"  i  Explicit dialect: {' '.join(parts)}", file=sys.stderr)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sofer",
@@ -1069,8 +1224,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate the full dataset package locally (Parquet, card, LICENSE, codebooks).",
         description=(
             "Generate every artifact that makes up a dataset package on the "
-            "local machine: universal csv/tsv/xlsx/jsonl → normalized Parquet "
-            "conversion (Excel → one Parquet per sheet), cross-file schema "
+            "local machine: universal csv/tsv/xlsx/jsonl -> normalized Parquet "
+            "conversion (Excel -> one Parquet per sheet), cross-file schema "
             "checks, a schema report, the Dataset Card (README.md) and "
             "LICENSE, and - with --all-files - codebooks.  Set "
             "convert_to_parquet=false per [[file]] to keep the original.  This "
@@ -1198,7 +1353,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "and a sample value.\n"
             "\n"
             "Use --all-files to generate one codebook per [[file]] entry "
-            "in the TOML configuration, written under the package build_dir/."
+            "in the TOML configuration, written under the package build_dir/.\n"
+            "\n"
+            "--delimiter / --encoding override the resolved CSV dialect for "
+            "this invocation: the explicit value wins over the configured one, "
+            "and omitting both keeps the current behaviour."
         ),
     )
     c.add_argument(
@@ -1233,6 +1392,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "default_config_name from [tool.sofer])."
         ),
     )
+    _add_dialect_args(c)
     c.set_defaults(func=_cmd_codebook)
 
     # ── profile ──────────────────────────────────────────────────
@@ -1258,7 +1418,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "--output anchors to the TOML directory (Option B); writes never "
             "mutate cache/ when --output is given. TOML without [[file]] "
             "fails fast. Collisions write non-colliding first then raise "
-            "ValueError."
+            "ValueError.\n"
+            "\n"
+            "--delimiter / --encoding override the resolved CSV dialect for "
+            "this invocation: the explicit value wins over the configured one, "
+            "and omitting both keeps the current behaviour."
         ),
     )
     prf.add_argument(
@@ -1289,6 +1453,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the TOML config file used with --all-files "
         "(default: default_config_name from [tool.sofer]).",
     )
+    _add_dialect_args(prf)
     prf.set_defaults(func=_cmd_profile)
 
     # ── render ──────────────────────────────────────────────────
@@ -1426,7 +1591,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "\n"
             "Phase 2 — COPY raw/ -> cache/: recursively scan (excluding "
             "cache/ and EXCLUSIONS), flatten the first path segment "
-            "(raw/DPTO.csv → cache/DPTO.csv), register new files as "
+            "(raw/DPTO.csv -> cache/DPTO.csv), register new files as "
             "[[file]] entries in the TOML, and copy them into the cache/ "
             "directory via flatten_first_level + shutil.copy2.\n"
             "\n"
@@ -1472,13 +1637,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── mcp ───────────────────────────────────────────────────────
     mcp = sub.add_parser(
         "mcp",
-        help="Register sofer-mcp with AI agents (opencode, codex, gemini).",
+        help="Register sofer-mcp with AI agents (opencode, codex, gemini, pi).",
         description=(
             "Register or remove the ``sofer-mcp`` MCP server from AI agent "
             "configurations. Supports ``opencode`` (opencode.json), ``codex`` "
-            "(config.toml), and ``gemini`` (settings.json) with idempotent "
-            "merge, backup to ``.bak``, atomic write, and per-agent env "
-            "forwarding. Use ``--agent all`` to target every agent."
+            "(config.toml), ``gemini`` (settings.json), and ``pi`` (mcp.json) "
+            "with idempotent merge, backup to ``.bak``, atomic write, and "
+            "per-agent env forwarding. Use ``--agent all`` to target every agent."
         ),
     )
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1493,15 +1658,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "overwrites), and writes atomically via tmp+os.replace. "
             "``--cwd`` sets the server's working directory (absolute, "
             "contained under the scope root). TOML edits may strip comments. "
-            "Env: codex and gemini receive env forwarding (names only, values never "
-            "written); opencode entries carry no environment, and a warning is printed "
-            "on stderr when HF_TOKEN or SOFER_MCP_APPROVAL_PHRASE are set with "
-            "--agent opencode (or all)."
+            "Env: codex, gemini and pi receive env forwarding (names only, values "
+            "never written; pi uses ${KEY} references); opencode entries carry no "
+            "environment, and a warning is printed on stderr when HF_TOKEN or "
+            "SOFER_MCP_APPROVAL_PHRASE are set with --agent opencode (or all). "
+            "Native codex/gemini delegation is used only when it can forward the "
+            "same env NAMES and scope as the file edit; otherwise the config file "
+            "is edited and a warning naming the reason is printed on stderr."
         ),
     )
     mcp_add.add_argument(
         "--agent",
-        choices=["opencode", "codex", "gemini", "all"],
+        choices=[*mcp_registration.AGENT_NAMES, "all"],
         required=True,
         help="Target agent or 'all' for every agent.",
     )
@@ -1528,12 +1696,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Remove the ``sofer`` entry idempotently. Preserves other "
             "servers, backs up before edit, and does no write when the entry "
-            "is already absent. Prefers native ``mcp remove`` when available."
+            "is already absent. Prefers native ``mcp remove`` only when it can "
+            "express the requested scope; otherwise it edits the config file "
+            "and prints a warning naming the reason on stderr."
         ),
     )
     mcp_remove.add_argument(
         "--agent",
-        choices=["opencode", "codex", "gemini", "all"],
+        choices=[*mcp_registration.AGENT_NAMES, "all"],
         required=True,
         help="Target agent or 'all' for every agent.",
     )
@@ -1550,7 +1720,61 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_remove.set_defaults(func=_cmd_mcp_remove)
 
+    # ── report-failure ────────────────────────────────────────────
+    rf = sub.add_parser(
+        "report-failure",
+        help="Retry sending a previously saved failure report through gh.",
+        description=(
+            "Send a failure report that the assisted reporter persisted to "
+            "disk (one JSON file per failure under the sofer state directory, "
+            "e.g. ~/.local/state/sofer/failure-reports/).  The report captures "
+            "the command, its arguments, the error and traceback, and the "
+            "sofer/Python/platform versions - never dataset contents, secret "
+            "values, or un-anonymized home paths.  On success this prints the "
+            "created GitHub issue URL.  If gh is still missing, unauthenticated, "
+            "or offline it prints the saved path, this retry command, the "
+            "manual github.com/<repo>/issues/new URL, and 'gh auth login'."
+        ),
+    )
+    rf.add_argument(
+        "file",
+        help="Path to a persisted failure report (JSON) to send.",
+    )
+    rf.set_defaults(func=_cmd_report_failure)
+
     return parser
+
+
+def _configure_console_streams() -> None:
+    """Reconfigure the console text streams to substitute unencodable text (CLI-R11).
+
+    Called as the FIRST statement of :func:`main`, ahead of ``config.reload`` and
+    ``_build_parser``: argparse resolves ``sys.stdout`` at call time, so a guard placed
+    after the parser is built would leave ``--help`` unfixed, and the ``config.reload``
+    verbose line (a resolved path interpolated into an f-string) would stay exposed.
+    Each stream is reconfigured *in place* with ``errors=config.CONSOLE_ERRORS``; the
+    stream objects are never swapped or replaced, so stream identity -- and therefore the
+    ``io.StringIO`` capture interleaving in :func:`sofer.mcp_server._capture_output` --
+    is preserved.
+
+    Defensive by construction (CLI-R11): a stream that cannot be reconfigured in place is
+    left untouched and this function SHALL NOT raise. Two cases are skipped explicitly:
+    a stream that is not an :class:`io.TextIOWrapper` (an in-memory capture object such as
+    :class:`io.StringIO`, a foreign capture stream, or ``None``) and a real wrapper that
+    refuses reconfiguration (a closed or detached buffer, or an ``OSError`` from the
+    implicit flush when the stream's reader is gone).
+
+    Returns:
+        ``None``.  The only observable effect is the error handler of the process's
+        ``sys.stdout`` / ``sys.stderr`` objects, which are the same objects on return.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if not isinstance(stream, io.TextIOWrapper):
+            continue
+        try:
+            stream.reconfigure(errors=config.CONSOLE_ERRORS)
+        except (ValueError, OSError):
+            continue
 
 
 def main() -> None:
@@ -1558,17 +1782,34 @@ def main() -> None:
 
     Orchestration:
 
+        0. Console encoding guard: reconfigure ``sys.stdout``/``sys.stderr``
+           in place so a character the active console encoding cannot
+           represent is substituted rather than aborting the command
+           (CLI-R11). Runs first so argparse's ``--help`` output and the
+           ``config.reload`` verbose line are covered too.
         1. Phase-0 bootstrap: resolve ``[tool.sofer]`` anchored on the
            current working directory (``config.reload(None)``) so argparse
            defaults such as ``default_config_name`` reflect cwd-tree
            overrides before the parser is built (TC-07).
         2. Build the parser and dispatch; dataset commands re-resolve via
            ``DatasetConfig.from_toml`` (dataset-dir anchor, TC-04/TC-05).
+        3. An uncaught command exception is handed to
+           :func:`sofer.failure_report.report_cli_failure`, which re-prints the
+           traceback and, on an interactive terminal only, offers to file a
+           confidential GitHub issue (CLI-R13). The process still exits ``1``.
+
+    ``SystemExit`` (argparse) and ``KeyboardInterrupt`` are never intercepted.
     """
+    _configure_console_streams()
     config.reload(None)
     parser = _build_parser()
     args = parser.parse_args()
-    sys.exit(args.func(args))
+    try:
+        exit_code = args.func(args)
+    except Exception as exc:
+        failure_report.report_cli_failure(sys.argv[1:], exc)
+        exit_code = 1
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

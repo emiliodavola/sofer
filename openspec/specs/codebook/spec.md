@@ -110,7 +110,7 @@ When `--all-files` is specified, the system MUST generate one codebook for every
 
 ### Requirement: Root Index (CB-R04)
 
-When `--all-files` is used, the system MUST generate the root `codebook.md` at `write_root / "codebook.md"`: the CLI `codebook --all-files` SHALL resolve `write_root` to the package `build_dir` (or `--output` override), matching `sofer_codebook_all` and where `publish` collects codebooks; the `generate_all` domain function with `output_dir is None` SHALL still write `cache/codebook.md` (Option B only when `output_dir` is set). The index SHALL contain a TOC with relative links under `codebooks/` prefix (matching uploader's HF staging), not `data/codebooks/`, colocated with per-file `codebooks/<rel-stem>.md` (or per-sheet `codebooks/<rel>/<stem>__<sanitized>.md`). System MUST NOT write `base_dir/codebook.md` in standalone mode. `**Tables:**` SHALL count sheets (one per codebook file), and `**Total columns:**` SHALL sum columns across all emitted codebooks.
+When `--all-files` is used, the system MUST generate the root `codebook.md` at `write_root / "codebook.md"`: the CLI `codebook --all-files` SHALL resolve `write_root` to the package `build_dir` (or `--output` override), matching `sofer_codebook_all` and where `publish` collects codebooks; the `generate_all` domain function with `output_dir is None` SHALL still write `cache/codebook.md` (Option B only when `output_dir` is set). The index SHALL contain a TOC with relative links under `codebooks/` prefix (matching the HF staging layout used by `publish`), not `data/codebooks/`, colocated with per-file `codebooks/<rel-stem>.md` (or per-sheet `codebooks/<rel>/<stem>__<sanitized>.md`). System MUST NOT write `base_dir/codebook.md` in standalone mode. `**Tables:**` SHALL count sheets (one per codebook file), and `**Total columns:**` SHALL sum columns across all emitted codebooks.
 
 (Previously: Tables counted TOML entries, not sheets; only `stem.md` links. `codebook --all-files` wrote to `cache/codebook.md` instead of the package `build_dir`.)
 
@@ -325,3 +325,119 @@ analysed the full file, so `sofer_codebook_all` (MSP-R17) and
 - WHEN `generate_all` runs without `max_sample`
 - THEN each codebook SHALL analyse up to the configured rows
 - AND codebooks whose files fit SHALL report `(full scan)`, never a sample cap
+
+---
+
+### Requirement: Single-file codebook reads through the resolved tool-wide config (CB-R11)
+
+> Added by change `2026-09-14-fix-cli-codebook-config` (GitHub #182).
+
+The `sofer codebook FILE` path SHALL pass the resolved tool-wide `config.CSV_DELIMITER` and
+`config.CSV_ENCODING` into `codebook.generate`, resolved at call time after the invocation's single
+tool-config reload (TC-04) — the same source MSP-R10 requires of the MCP codebook tools — and SHALL
+NOT let the literal defaults in `codebook.generate` (`";"`, `"utf-8-sig"`) take effect.
+
+When the input cannot be read — the configured encoding and the repository's fallback chain are
+exhausted (`ValueError`), or the configured encoding names a codec that does not exist (`LookupError`,
+reachable per TC-13) — the command SHALL print `Error: <message>` on stderr and SHALL exit non-zero.
+It SHALL NOT emit an uncaught traceback, and it SHALL NOT retry `latin-1`/`cp1252`: the fallback
+policy remains the repository's existing `utf-8-sig → utf-8` (`src/sofer/_csv_reader.py:27-31`), with
+a configured non-UTF-8 encoding honoured first. `codebook.generate`'s parameter defaults and the
+dataset-`[meta]` resolution of `generate_all` (`codebook.py:505-506`) SHALL remain unchanged, as the
+fallback for direct library callers and for the `--all-files` tier respectively.
+
+#### Scenario: Configured delimiter and encoding are what the codebook reflects
+
+- GIVEN `[tool.sofer] csv_delimiter = ","` (and, separately, a non-default `csv_encoding`) and a file matching that configuration
+- WHEN `sofer codebook FILE` runs with no `--config`
+- THEN the codebook SHALL show the columns induced by the configured delimiter (two columns for a two-field header)
+- AND the file SHALL be read under the configured encoding, not the literal `";"` / `"utf-8-sig"` defaults
+
+#### Scenario: CLI and MCP agree on the same input
+
+- GIVEN the same tool-wide config and the same file
+- WHEN the CLI single-file command and the MCP single-file tool both run
+- THEN both SHALL produce the same column structure for that file
+- AND no MCP source or MCP test SHALL be modified by this change
+
+#### Scenario: Undecodable input yields a diagnostic, never a traceback
+
+- GIVEN a file that cannot be decoded under the configured encoding nor under `utf-8-sig → utf-8`
+- WHEN `sofer codebook FILE` runs
+- THEN it SHALL print `Error: <message>` on stderr
+- AND it SHALL exit non-zero, with no uncaught traceback
+
+#### Scenario: Unknown codec name yields the same diagnostic
+
+- GIVEN `[tool.sofer] csv_encoding` naming a codec that does not exist (valid as a non-empty string under TC-13)
+- WHEN `sofer codebook FILE` runs
+- THEN the same `Error: <message>` diagnostic SHALL be printed on stderr with a non-zero exit
+- AND no traceback SHALL escape the command
+
+#### Scenario: The fallback policy is the existing one, not a new one
+
+- GIVEN the configured encoding is honoured first and then exhausted
+- WHEN the readers fall back
+- THEN only `utf-8-sig → utf-8` SHALL be tried
+- AND `latin-1`/`cp1252` SHALL NOT be added as retries
+
+---
+
+### Requirement: Explicit CSV dialect override wins over config (CB-R12)
+
+> Added by change `2026-09-25-csv-dialect-override` (GitHub #204).
+
+`sofer codebook FILE` and `sofer codebook --all-files` SHALL accept optional
+`--delimiter` / `--encoding`. The resolution order SHALL be **explicit flag →
+resolved config (tool-wide or dataset, per the command's existing tier) → the
+existing reader fallback**. For the single-file tier the configured value is the
+post-reload `config.CSV_DELIMITER` / `config.CSV_ENCODING` (CB-R11); for
+`--all-files` it is `cfg.csv_delimiter` / `cfg.csv_encoding` from the dataset
+`[meta]` (CB-R03/CB-R10). The explicit value SHALL win over whichever tier applies.
+
+`None` (the argparse default) SHALL be the only "not supplied" signal, and the
+omitted path SHALL be byte-identical to the pre-change behaviour. `.tsv` files
+SHALL remain tab-delimited by format; the explicit delimiter SHALL apply to `.csv`
+and the explicit encoding SHALL apply to `.csv` and `.tsv`. When an explicit value
+is supplied, the command SHALL echo it on stderr. `codebook.generate`'s and
+`generate_all`'s parameter defaults SHALL remain unchanged.
+
+#### Scenario: Explicit delimiter wins over a disagreeing tool-wide config
+
+- GIVEN `[tool.sofer] csv_delimiter = ";"` and a `.csv` whose real delimiter is `,`
+- WHEN `sofer codebook FILE --delimiter ,` runs
+- THEN the codebook SHALL show the `,`-induced columns
+- AND the explicit value SHALL NOT be ignored in favour of the configured `;`
+
+#### Scenario: Explicit encoding wins over a disagreeing tool-wide config
+
+- GIVEN `[tool.sofer] csv_encoding = "utf-8-sig"` and a file readable only as a supplied encoding
+- WHEN `sofer codebook FILE --encoding <enc>` runs
+- THEN the file SHALL be read under the explicit encoding first
+
+#### Scenario: Omitted override is unchanged
+
+- GIVEN the same file and `[tool.sofer]` config
+- WHEN `sofer codebook FILE` runs without `--delimiter` / `--encoding`
+- THEN the codebook SHALL be byte-identical to the pre-change run
+- AND no explicit-dialect line SHALL be printed to stderr
+
+#### Scenario: --all-files override wins over the dataset [meta]
+
+- GIVEN a dataset whose `[meta] csv_delimiter` is `;` and CSV files using `,`
+- WHEN `sofer codebook --all-files --delimiter ,` runs
+- THEN every emitted codebook SHALL reflect the explicit `,`
+
+#### Scenario: Explicit dialect is echoed
+
+- GIVEN an explicit `--delimiter` and/or `--encoding` is supplied
+- WHEN the command runs
+- THEN the supplied override SHALL be echoed on stderr
+- AND stdout SHALL remain the codebook markdown (single-file) or the batch report
+
+#### Scenario: .tsv stays tab-delimited
+
+- GIVEN a `.tsv` file and an explicit `--delimiter ,`
+- WHEN the codebook is generated
+- THEN the file SHALL still be read tab-delimited
+- AND the explicit delimiter SHALL NOT change the `.tsv` column split

@@ -2,7 +2,12 @@ name: Release
 
 # Publishes a GitHub Release when a version tag (v*) is pushed.
 # Runs the same quality gates as CI first; if anything fails,
-# no release is created.
+# no release is created. The test job mirrors ci.yml's OS axis
+# (ubuntu-latest + windows-latest) and the `uv run sofer --help`
+# smoke test (issue #209); the lint job mirrors ci.yml's lint
+# gates (ruff check, ruff format --check, mypy, pyright, and the
+# spec test-mapping checker; issue #233); and the coverage job
+# runs the COV-06 core-coverage gate (CI-03, issue #185 — shipped).
 
 on:
   push:
@@ -15,10 +20,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.13"
 
@@ -28,20 +33,30 @@ jobs:
       - name: Lint with ruff
         run: uv run ruff check src/ tests/ scripts/
 
+      - name: Check formatting with ruff
+        run: uv run ruff format --check src/ tests/
+
       - name: Type check with mypy
         run: uv run mypy src/ scripts/
 
+      - name: Type check with pyright
+        run: uv run pyright
+
+      - name: Check spec test mapping
+        run: uv run python scripts/check_test_mapping.py
+
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -51,14 +66,17 @@ jobs:
       - name: Run tests
         run: uv run pytest -v
 
+      - name: Run CLI help smoke test
+        run: uv run sofer --help
+
   coverage:
     needs: [lint, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.13"
 
@@ -79,6 +97,12 @@ jobs:
       - name: Report coverage with missing lines (the gate)
         run: uv run coverage report -m
 
+      # ── CLI-core 100% gates (COV-06, AGENTS.md rule 14) ─────────────
+      # Same script the ci.yml coverage job runs — see the comment there.
+      # Additive and scoped per file; the TOTAL gate stays config-owned.
+      - name: Gate core module coverage (COV-06)
+        run: bash scripts/check_core_coverage.sh
+
       - name: Generate HTML coverage report
         run: uv run coverage html
 
@@ -86,7 +110,7 @@ jobs:
       # retention-days deliberately omitted — GitHub's 90-day default is
       # platform policy, not a value this repo should hardcode.
       - name: Upload htmlcov artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: htmlcov
@@ -95,10 +119,10 @@ jobs:
     needs: [lint, test, coverage]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.13"
 
@@ -135,7 +159,7 @@ jobs:
     needs: [coverage]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Bare runner python on purpose: update_citation.py is stdlib-only, so
       # no `uv sync` is needed. Keep it that way.
@@ -147,9 +171,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true

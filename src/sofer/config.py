@@ -20,6 +20,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from . import _toml
+
 # ---------------------------------------------------------------------------
 #  Hard-coded fallback defaults — used when pyproject.toml is absent or
 #  the ``[tool.sofer]`` section is missing keys.
@@ -68,6 +70,13 @@ _DEFAULTS: dict[str, Any] = {
     # (repo_compliance.build_schema_report). Balances statistical confidence
     # against read-time cost; also surfaced in the card's stats footnote.
     "schema_sample_size": 10_000,
+    # Cap for distinct quality values tracked per column (issue #189):
+    # values stored in the per-file non-empty set are truncated to this
+    # many characters to bound memory on wide free-text columns.
+    "quality_value_preview_len": 50,
+    # Cap for unclassified filenames listed by splits.validate_layout
+    # (issue #189): the slice and its ellipsis guard derive from this one value.
+    "splits_max_unclassified_names": 5,
     # Metadata-core (profile/render) inference knobs.
     # ``semantic_priors["email"] = 0.98``: an email column's ``@`` + TLD
     # structure is distinctive, so a regex match-rate near 1.0 is highly
@@ -92,6 +101,17 @@ _DEFAULTS: dict[str, Any] = {
     # Card collapse threshold: columns per table above which Data Fields
     # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
     "card_collapse_threshold": 15,
+    # Assisted failure reporting (issue #244). ``failure_report_dir`` is the
+    # subdirectory under sofer's state home that holds one JSON file per
+    # unsent failure; ``failure_report_repo`` is the ``owner/repo`` issues are
+    # filed against; the last two bound the report size and the ``gh`` call.
+    "failure_report_dir": "failure-reports",
+    "failure_report_repo": "emiliodavola/sofer",
+    "failure_report_traceback_max_chars": 20_000,
+    "failure_report_manual_url_max_chars": 6_000,
+    "failure_report_gh_timeout_seconds": 30,
+    "failure_report_duplicate_limit": 5,
+    "failure_report_duplicate_query_tokens": 8,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -148,13 +168,8 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     toml_data: dict[str, Any] = {}
     if toml_path is not None and toml_path.is_file():
         try:
-            import tomli as _tomli
-        except ImportError:  # Python ≥ 3.11
-            import tomllib as _tomli
-
-        try:
             with open(toml_path, "rb") as fh:
-                toml_data = _tomli.load(fh)
+                toml_data = _toml.load(fh)
         except Exception:
             toml_data = {}
 
@@ -226,8 +241,10 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
 
     # ``profile_dir`` / ``render_dir`` must be non-empty strings — an empty
     # value would resolve output writes to the write root itself and silently
-    # collide.
-    for _key in ("profile_dir", "render_dir"):
+    # collide. ``failure_report_dir`` and ``failure_report_repo`` are likewise
+    # non-empty: an empty directory would scatter report files in the state
+    # home, and an empty repo would produce an unusable issue URL.
+    for _key in ("profile_dir", "render_dir", "failure_report_dir", "failure_report_repo"):
         _val = merged.get(_key, "")
         if not isinstance(_val, str) or not _val.strip():
             raise ValueError(f"'{_key}' in [tool.sofer] must be a non-empty string")
@@ -237,6 +254,20 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     _thr = merged.get("card_collapse_threshold")
     if not isinstance(_thr, int) or isinstance(_thr, bool) or _thr < 0:
         raise ValueError("'card_collapse_threshold' in [tool.sofer] must be a non-negative integer")
+
+    # Failure-report bounds must be positive: a non-positive traceback cap
+    # would truncate every report to nothing, and a non-positive gh timeout is
+    # meaningless (subprocess would reject it).
+    for _key in (
+        "failure_report_traceback_max_chars",
+        "failure_report_manual_url_max_chars",
+        "failure_report_gh_timeout_seconds",
+        "failure_report_duplicate_limit",
+        "failure_report_duplicate_query_tokens",
+    ):
+        _val = merged.get(_key)
+        if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
+            raise ValueError(f"'{_key}' in [tool.sofer] must be a positive integer")
 
     return merged
 
@@ -352,6 +383,13 @@ CODEBOOK_NUMERIC_THRESHOLD: float = _DEFAULTS["codebook_numeric_threshold"]
 CODEBOOK_MIXED_THRESHOLD: float = _DEFAULTS["codebook_mixed_threshold"]
 
 OUTPUT_ENCODING: str = _DEFAULTS["output_encoding"]
+# Console error handler for sys.stdout/sys.stderr (CLI-R11, issue #161): an emitted
+# character the active console encoding cannot represent is substituted in the stream
+# instead of aborting the command. Deliberately NOT a _DEFAULTS entry: this is the
+# console guard's implementation policy, not a tool-wide user option. _read_tool_section
+# iterates _DEFAULTS, so adding it there would silently make [tool.sofer] console_errors
+# settable and drift the behaviour away from the CLI-R11 contract.
+CONSOLE_ERRORS: str = "replace"
 PROBE_CHUNK_BYTES: int = _DEFAULTS["probe_chunk_bytes"]
 CSV_DELIMITER: str = _DEFAULTS["csv_delimiter"]
 CSV_ENCODING: str = _DEFAULTS["csv_encoding"]
@@ -364,6 +402,9 @@ CARD_BOOLEAN_VALUES: list[str] = _DEFAULTS["card_boolean_values"]
 
 SCHEMA_DUP_THRESHOLD: int = _DEFAULTS["schema_dup_threshold"]
 SCHEMA_SAMPLE_SIZE: int = _DEFAULTS["schema_sample_size"]
+
+QUALITY_VALUE_PREVIEW_LEN: int = _DEFAULTS["quality_value_preview_len"]
+SPLITS_MAX_UNCLASSIFIED_NAMES: int = _DEFAULTS["splits_max_unclassified_names"]
 
 # Metadata-core (profile/render) inference knobs.
 SEMANTIC_PRIORS: dict[str, float] = _DEFAULTS["semantic_priors"]
@@ -380,3 +421,13 @@ AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
 OUTPUT_MAX_BYTES: int = _DEFAULTS["output_max_bytes"]
 
 CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]
+
+# Assisted failure reporting (issue #244): state subdirectory, target repo,
+# traceback cap, and gh timeout — read live through attribute access.
+FAILURE_REPORT_DIR: str = _DEFAULTS["failure_report_dir"]
+FAILURE_REPORT_REPO: str = _DEFAULTS["failure_report_repo"]
+FAILURE_REPORT_TRACEBACK_MAX_CHARS: int = _DEFAULTS["failure_report_traceback_max_chars"]
+FAILURE_REPORT_MANUAL_URL_MAX_CHARS: int = _DEFAULTS["failure_report_manual_url_max_chars"]
+FAILURE_REPORT_GH_TIMEOUT_SECONDS: int = _DEFAULTS["failure_report_gh_timeout_seconds"]
+FAILURE_REPORT_DUPLICATE_LIMIT: int = _DEFAULTS["failure_report_duplicate_limit"]
+FAILURE_REPORT_DUPLICATE_QUERY_TOKENS: int = _DEFAULTS["failure_report_duplicate_query_tokens"]

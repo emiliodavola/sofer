@@ -551,9 +551,7 @@ class TestPrintVerificationReport:
         """A skipped report prints SKIPPED plus its warnings."""
         from sofer.verification import VerificationReport, _print_verification_report
 
-        report = VerificationReport(
-            skipped=True, warnings=["`datasets` package is not installed"]
-        )
+        report = VerificationReport(skipped=True, warnings=["`datasets` package is not installed"])
         _print_verification_report(report)
         out = capsys.readouterr().out
         assert "SKIPPED" in out
@@ -586,3 +584,49 @@ class TestPrintVerificationReport:
         assert "[other] ? rows" in out
         assert "Expected: train" in out
         assert "Warning: Split names differ from expected" in out
+
+
+# ── validate_layout unclassified cap (issue #189) ─────────────────────────────
+
+
+class TestUnclassifiedNamesLimit:
+    """validate_layout lists ``config.SPLITS_MAX_UNCLASSIFIED_NAMES`` names."""
+
+    FILES = ["train.csv"] + [f"mystery-{i}.csv" for i in range(7)]
+
+    def _unclassified_warning(self):
+        warnings = validate_layout(self.FILES)
+        matches = [w for w in warnings if "could not be classified" in w]
+        assert len(matches) == 1
+        return matches[0]
+
+    def test_default_lists_five_with_ellipsis(self):
+        """Default cap (5): five names plus the ellipsis marker."""
+        warning = self._unclassified_warning()
+        for i in range(5):
+            assert f"mystery-{i}.csv" in warning
+        assert "mystery-5.csv" not in warning
+        assert "mystery-6.csv" not in warning
+        assert warning.count("mystery-") == 5
+        assert "\u2026" in warning
+
+    def test_override_changes_rendered_limit(self, monkeypatch):
+        """Overriding the cap changes the rendered names and guard together."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "SPLITS_MAX_UNCLASSIFIED_NAMES", 2)
+        warning = self._unclassified_warning()
+        assert "mystery-0.csv" in warning
+        assert "mystery-1.csv" in warning
+        assert "mystery-2.csv" not in warning
+        assert warning.count("mystery-") == 2
+        assert "\u2026" in warning
+
+    def test_no_ellipsis_when_within_cap(self, monkeypatch):
+        """Slice and guard stay in sync: no ellipsis when nothing is cut."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "SPLITS_MAX_UNCLASSIFIED_NAMES", 10)
+        warning = self._unclassified_warning()
+        assert warning.count("mystery-") == 7
+        assert "\u2026" not in warning

@@ -12,7 +12,6 @@ Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
 
 from __future__ import annotations
 
-import csv
 import json
 import re
 import sys
@@ -21,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from . import config
 from ._converters import sanitize_sheet_name
+from ._csv_reader import stream_csv
 from ._formats import SUPPORTED_FORMATS
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 
@@ -57,21 +57,6 @@ def infer_column_type(values: list[str]) -> str:
     return "categorical/text"
 
 
-def _infer_type(values: list[str]) -> str:
-    """Deprecated alias for :func:`infer_column_type`.
-
-    Use :func:`infer_column_type` directly instead.
-    """
-    import warnings
-
-    warnings.warn(
-        "_infer_type is deprecated, use infer_column_type",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return infer_column_type(values)
-
-
 # ══════════════════════════════════════════════════════════════════════════
 #  Format-specific readers
 # ══════════════════════════════════════════════════════════════════════════
@@ -86,21 +71,38 @@ def _read_csv(
 
     Columns are returned column-by-column (not row-by-row) so that
     :func:`infer_column_type` can consume them directly.
+
+    Reading is delegated to :func:`sofer._csv_reader.stream_csv`, the
+    repository's single CSV reader (AGENTS.md rule 4), so this path shares its
+    encoding policy: *encoding* is honoured first, then the fallback chain
+    ``utf-8-sig`` and ``utf-8`` (never ``latin-1``/``cp1252``). Exhausting the
+    chain raises the reader's ``ValueError`` and an unknown codec name raises
+    ``LookupError``; both propagate unchanged so the CLI can render its
+    ``Error: ...`` diagnostic (CB-R11).
+
+    ``max_sample`` is passed as an explicit ``None`` so the reader's
+    ``codebook_max_sample`` config default never applies: row capping belongs
+    to :func:`_build_markdown` (via :func:`generate`), and a silent cap here
+    would sample the file twice.
+
+    The reader's ``(header, row)`` stream is transposed into the columnar shape
+    this module's callers expect. A fully empty file arrives as a
+    ``([], None)`` header yield, so it renders the "no data rows" placeholder
+    instead of raising. A second header yield (``row is None``) marks a
+    fallback-encoding restart, so the partial pass is discarded rather than
+    accumulating duplicated rows.
     """
-    with open(path, newline="", encoding=encoding) as fh:
-        reader = csv.reader(fh, delimiter=delimiter)
-        try:
-            headers = next(reader)
-        except StopIteration:
-            # Completely empty file — mirror the _csv_reader.py:112-116
-            # precedent: yield no headers and no columns so callers render
-            # the "no data rows" placeholder instead of crashing.
-            return [], [], None
-        rows = list(reader)
+    reader = stream_csv(Path(path), delimiter=delimiter, encoding=encoding, max_sample=None)
+    headers, _ = next(reader)
 
     n_cols = len(headers)
     columns: list[list[str]] = [[] for _ in range(n_cols)]
-    for row in rows:
+    for _header, row in reader:
+        if row is None:
+            # A fallback encoding restarted the stream: drop whatever the
+            # failed attempt had already produced before this header re-yield.
+            columns = [[] for _ in range(n_cols)]
+            continue
         for i in range(n_cols):
             columns[i].append(row[i] if i < len(row) else "")
 
@@ -111,8 +113,8 @@ def _read_tsv(
     path: str,
     encoding: str = "utf-8-sig",
 ) -> tuple[list[str], list[list[str]], None]:
-    """Read a TSV file using ``csv.reader(delimiter='\\\\t')``."""
-    return _read_csv(path, encoding=encoding, delimiter="\t")
+    """Read a TSV file by delegating to :func:`_read_csv` with a tab delimiter."""
+    return _read_csv(path, encoding=encoding, delimiter="	")
 
 
 def _read_parquet(path: str) -> tuple[list[str], list[list[str]], dict[str, str]]:

@@ -25,8 +25,9 @@ Run these from the repository root:
 
 ```bash
 uv run pytest
-uv run mypy src/
-uv run ruff check src/ tests/
+uv run mypy src/ scripts/
+uv run pyright                   # second type gate (config-driven; src/ + scripts/)
+uv run ruff check src/ tests/ scripts/
 uv run coverage run -m pytest   # complete suite under coverage (gate: 90%)
 uv run coverage report -m       # totals + per-file missed lines; fails below 90%
 ```
@@ -49,7 +50,8 @@ src/sofer/
 ├── _clean.py            # Build/cache cleanup helpers (publish --clean)
 ├── _converters.py       # Format-specific Parquet conversion
 ├── _parquet_helpers.py  # Shared Parquet dtype helpers
-├── cli.py               # argparse CLI with 9 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp)
+├── _toml.py             # TOML parser selection (tomllib/tomli fallback)
+├── cli.py               # argparse CLI with 10 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
 ├── config.py            # Tool-wide defaults from [tool.sofer] (discovery + reload)
 ├── model.py             # DatasetConfig + InferenceStatus
 ├── checks.py            # DatasetValidator — data integrity checks
@@ -66,6 +68,10 @@ src/sofer/
 ├── repo_compliance.py   # Dataset Card & schema compliance
 ├── splits.py            # Split detection (train/test/validation)
 ├── verification.py      # load_dataset() end-to-end verification
+├── execution_context.py # Shared dataset-identity contract (CLI init + MCP sofer_init)
+├── manifest.py          # Package artifact manifest (publishable vs intermediate)
+├── workflow.py          # Typed workflow metadata + result envelopes for adapters
+├── failure_report.py    # Assisted failure reporting: context, anonymization, gh send, persistence
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
 └── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini)
 ```
@@ -74,11 +80,26 @@ src/sofer/
 
 ### Code style
 
-This project uses **ruff** for linting and formatting. Configuration is in `ruff.toml` at the repo root. Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
+This project uses **ruff** 0.16.7 for linting and formatting. Configuration lives in `pyproject.toml` under `[tool.ruff]` (`target-version = "py310"`, `line-length = 100`, `extend-exclude = ["openspec"]`). Run `ruff check` and `ruff format` before committing — the pre-commit hook does this automatically.
 
 ### Type checking
 
-We use **mypy** in strict mode. Run `mypy src/` to check types. The CI will reject PRs that don't type-check.
+Two type checkers gate the source — **mypy** (`[tool.mypy]`, `strict = true`) and **pyright**
+(`[tool.pyright]`, `typeCheckingMode = "standard"`). Both are wired into the local pre-commit hooks and
+into the CI `lint` job, and `pyproject.toml` is the single source of the mode, scope and version each one
+runs with:
+
+```bash
+uv run mypy src/ scripts/   # the enforced mypy invocation (CI + the `mypy` hook)
+uv run pyright              # the enforced pyright invocation (CI + the `pyright` hook)
+```
+
+The scope is `src/` and `scripts/`; **`tests/` is excluded from both type gates** by policy (recorded in
+`openspec/specs/ci/spec.md` CI-09) — test helpers are still annotated by convention
+(`process-boundary` PB-07), but the test tree is never type-checked. Both analyzers are pinned exactly in `[dependency-groups] dev` and resolved through `uv.lock` — a
+floating range would let the gate's behaviour move under CI with no diff (the rule CI-08 already enforces
+for ruff). pyright must be run through `uv run`: it resolves third-party imports against the project
+environment, so running it any other way (bare, `npx`, `uvx`) can report phantom missing imports.
 
 ### Commit messages
 
@@ -116,6 +137,15 @@ Use the issue template and include:
 - Expected vs actual behaviour
 - `sofer --version` output
 - Relevant TOML config (sanitised)
+
+When a CLI command crashes with an uncaught error, sofer offers to file the issue
+for you on an interactive terminal: it collects the command, the traceback, and the
+environment versions, anonymizes home paths, and shows the full body before sending.
+If `gh` is missing, unauthenticated, or offline, the report is persisted under the
+sofer state directory (`~/.local/state/sofer/failure-reports/`) and
+`sofer report-failure <file>` retries it later. See
+[README → Assisted failure reporting](README.md#assisted-failure-reporting). Never
+paste dataset rows or secret values into an issue.
 
 ## Questions?
 

@@ -83,7 +83,7 @@ class TestStdioFraming:
     """PB-01: real stdio transport with clean JSON-RPC framing (one spawn)."""
 
     def test_initialize_list_call_clean_jsonrpc(self, mcp_stdio_server: Any) -> None:
-        """``initialize -> tools/list (14) -> tools/call`` over one stdio session.
+        """``initialize -> tools/list (15) -> tools/call`` over one stdio session.
 
         The MCP client library parses every response as JSON-RPC, so a stray
         stdout byte from the server would break framing before any assertion;
@@ -105,7 +105,7 @@ class TestStdioFraming:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 14
+                    assert len(tools.tools) == 15
                     result = await session.call_tool("sofer_validate", {"config": "dataset.toml"})
                     assert not result.isError
                     envelope = json.loads(result.content[0].text)
