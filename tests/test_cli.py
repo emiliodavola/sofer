@@ -9,6 +9,7 @@ shared ``conftest.run_cli`` helper (PB-09).
 
 import csv
 import io
+import json
 import sys
 from argparse import Namespace
 
@@ -213,6 +214,65 @@ def test_main_help_prints(monkeypatch):
         cli.main()
     except SystemExit as e:
         assert e.code == 0
+
+
+class _FakeParser:
+    """Minimal parser whose ``parse_args`` returns a preset namespace."""
+
+    def __init__(self, namespace: Namespace) -> None:
+        self._namespace = namespace
+
+    def parse_args(self) -> Namespace:
+        return self._namespace
+
+
+def test_main_offers_report_on_uncaught_exception(monkeypatch):
+    """An uncaught dispatch exception is handed to the failure reporter (CLI-R13)
+    while the process still exits 1."""
+    seen: dict[str, object] = {}
+
+    def _fake_report(argv, exc):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        seen["exc"] = exc
+        return 1
+
+    def _boom(_args):  # type: ignore[no-untyped-def]
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(cli.failure_report, "report_cli_failure", _fake_report)
+    monkeypatch.setattr(cli, "_build_parser", lambda: _FakeParser(Namespace(func=_boom)))
+    monkeypatch.setattr(sys, "argv", ["sofer", "validate", "dataset.toml"])
+    with _pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 1
+    assert seen["argv"] == ["validate", "dataset.toml"]
+    assert isinstance(seen["exc"], RuntimeError)
+
+
+def test_report_failure_parser_dispatch():
+    """`report-failure FILE` parses to the retry handler."""
+    args = cli._build_parser().parse_args(["report-failure", "saved.json"])
+    assert args.func is cli._cmd_report_failure
+    assert args.file == "saved.json"
+
+
+def test_report_failure_subprocess_offline_prints_safety_net(tmp_path):
+    """End-to-end (PB-02): the retry subcommand with no gh on PATH prints the
+    saved path, the retry command, the manual URL and `gh auth login`, exit 1."""
+    report = tmp_path / "saved.json"
+    report.write_text(json.dumps({"repo": "o/r", "title": "t", "body": "b"}), encoding="utf-8")
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    result = run_cli(
+        ["report-failure", str(report)],
+        cwd=tmp_path,
+        env={"PATH": str(empty_bin)},
+    )
+    assert result.returncode == 1
+    assert str(report) in result.stdout
+    assert 'sofer report-failure "' in result.stdout
+    assert "github.com/o/r/issues/new" in result.stdout
+    assert "gh auth login" in result.stdout
 
 
 # ── init template: prepare/publish, no upload (CLI-R02) ───────────────────────

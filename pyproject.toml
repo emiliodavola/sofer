@@ -182,6 +182,16 @@ card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries"
 card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
 card_collapse_threshold = 15
 
+# ── Assisted failure reporting (issue #244) ──
+# Directory under sofer's state home (~/.local/state/sofer by default) holding
+# one timestamped JSON report per unsent failure; the owner/repo issues are
+# filed against; the traceback truncation cap; and the gh subprocess timeout.
+failure_report_dir = "failure-reports"
+failure_report_repo = "emiliodavola/sofer"
+failure_report_traceback_max_chars = 20_000
+failure_report_manual_url_max_chars = 6_000
+failure_report_gh_timeout_seconds = 30
+
 # ── Schema report ──
 # Rows sampled per file for schema inference (schema report + card footnote).
 schema_sample_size = 10_000

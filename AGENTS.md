@@ -75,7 +75,7 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - Prefer format-native readers over heavy dependencies (openpyxl over pandas for Excel).
 
 ### 10. Architecture: one module per concern
-- CLI dispatch: `cli.py` (9 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp)
+- CLI dispatch: `cli.py` (10 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
 - Dataset config model: `model.py`
 - Tool config defaults: `config.py` (discovery + reload, profile_dir/render_dir)
 - Format registry: `_formats.py`
