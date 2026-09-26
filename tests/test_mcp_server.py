@@ -2831,10 +2831,10 @@ class TestWheelPackaging:
             meta = zf.read(metadata[0]).decode("utf-8")
             assert "Provides-Extra: mcp" in meta
             # unconditional Requires-Dist (no extra marker) + alias with marker
-            assert "Requires-Dist: fastmcp>=3.4,<4" in meta
+            assert "Requires-Dist: fastmcp<5,>=4" in meta
             alias_present = (
-                'Requires-Dist: fastmcp>=3.4,<4; extra == "mcp"' in meta
-                or "Requires-Dist: fastmcp>=3.4,<4; extra == 'mcp'" in meta
+                "Requires-Dist: fastmcp<5,>=4; extra == 'mcp'" in meta
+                or 'Requires-Dist: fastmcp<5,>=4; extra == "mcp"' in meta
             )
             assert alias_present
             # ensure at least one unconditional line exists (without extra ==)
