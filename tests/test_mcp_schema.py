@@ -42,6 +42,25 @@ def _tools_dict(tmp_path: Path):  # type: ignore[no-untyped-def]
     return _run(_list_tools(server))
 
 
+def _schema_has_description(schema: Any) -> bool:
+    """Whether *schema* declares a description at any nesting level.
+
+    FastMCP/pydantic render optional (``X | None``) parameters differently per
+    interpreter: Python 3.10 nests the ``description`` inside the ``anyOf``
+    branch, while 3.11+ keeps it at the property's top level. Walking the
+    wrappers recursively keeps the assertion version-independent.
+    """
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("description"):
+        return True
+    for key in ("anyOf", "allOf", "oneOf"):
+        for sub in schema.get(key, []):
+            if _schema_has_description(sub):
+                return True
+    return False
+
+
 class TestToolCount:
     def test_fourteen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
@@ -104,26 +123,13 @@ class TestDescriptions:
 
 
 class TestParamDescriptions:
-    def _has_description(self, schema: dict) -> bool:
-        """Recursively find description in anyOf/allOf wrappers (Py 3.10 nests differently)."""
-        if not isinstance(schema, dict):
-            return False
-        if schema.get("description"):
-            return True
-        for key in ("anyOf", "allOf", "oneOf"):
-            if key in schema:
-                for sub in schema[key]:
-                    if self._has_description(sub):
-                        return True
-        return False
-
     def test_every_param_has_description(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
         for name, tool in tools.items():
             schema = tool.inputSchema or {}
             props = schema.get("properties", {})
             for pname, pschema in props.items():
-                assert self._has_description(pschema), f"{name}.{pname} missing description"
+                assert _schema_has_description(pschema), f"{name}.{pname} missing description"
 
     def test_no_legacy_params(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
@@ -503,7 +509,7 @@ class TestExplicitDialectParams:
         for name in self.DIALECT_TOOLS:
             props = (tools[name].inputSchema or {}).get("properties", {})
             for param in ("delimiter", "encoding"):
-                assert props[param].get("description"), f"{name}.{param} missing description"
+                assert _schema_has_description(props[param]), f"{name}.{param} missing description"
 
     def test_scan_tools_gain_no_inert_dialect_param(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
