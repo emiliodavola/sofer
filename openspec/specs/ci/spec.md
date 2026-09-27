@@ -791,6 +791,34 @@ CI-04 uses.
 - THEN the `release` job SHALL declare `contents: write` (the scope `softprops/action-gh-release`
   needs) and no other write scope
 - AND no other job SHALL declare any `write` grant
+
+---
+
+### Requirement: CI workflow gates push and pull requests on long-lived branches (CI-16)
+
+> Added by change `2026-09-26-ci-push-trigger` (GitHub #262). Before this change `ci.yml`
+> contained no `push` trigger, so a direct push to `dev` or `main` bypassed the
+> lint/test/coverage gates the PR pipeline enforces.
+
+`.github/workflows/ci.yml` SHALL trigger on `push` to `main` and `dev` and on `pull_request`
+targeting `main` and `dev`, mirroring `.github/workflows/codeql.yml`'s branch list. Every
+commit that lands on a long-lived branch SHALL therefore be gated by the `lint`, `test`, and
+`coverage` jobs, not only commits that arrive through a pull request. A static guard in
+`tests/test_ci_workflows.py` SHALL assert the trigger contract so it cannot silently regress.
+
+#### Scenario: Push trigger targets main and dev
+
+- GIVEN `.github/workflows/ci.yml` parsed
+- WHEN its `push` trigger is inspected
+- THEN `push.branches` SHALL be `[main, dev]`, so a direct push to either long-lived branch
+  is gated
+
+#### Scenario: Pull request trigger still targets main and dev
+
+- GIVEN `.github/workflows/ci.yml` parsed
+- WHEN its `pull_request` trigger is inspected
+- THEN `pull_request.branches` SHALL be `[main, dev]`
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -850,3 +878,5 @@ evidence recorded in the verify report.
 | CI-14 | minor/patch groups exclude majors | test:tests/test_ci_workflows.py — `test_dependabot_groups_exclude_majors`: YAML inspection of every update's `groups` update-types |
 | CI-15 | Workflow-level permissions grant no write access | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of release.yml workflow-level permissions |
 | CI-15 | Only the release job declares contents write | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of every release.yml job's permissions |
+| CI-16 | Push trigger targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
+| CI-16 | Pull request trigger still targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
