@@ -3,7 +3,7 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-14) by parsing the repository's
+`ci` specification (requirements CI-01..CI-16) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, the Dependabot
 config, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
@@ -15,7 +15,8 @@ before any parse, the PB-14 hook-scope guard, the CI-07 clause-agreement guard,
 which re-enforces an existing CI-07 row rather than adding one, the three
 `211-test-mapping-gate` guards (rule 6 / config contract agreement, the config
 context tally, and the lint-job checker step), the three CI-12 release
-lint-job parity guards, and the CI-13/CI-14 dependency-bump hardening guards
+lint-job parity guards, the CI-16 ci.yml trigger contract guard, and the
+CI-13/CI-14 dependency-bump hardening guards
 (workflow action-ref consistency, the derived setup-uv parity, the interpreter
 pin equality, and the Dependabot update policy), and the four issue #258
 SDD-context drift guards (the project.md subcommand inventory, the enforced
@@ -629,6 +630,25 @@ def test_codeql_pull_request_targets_dev() -> None:
     codeql, _ = _workflow("codeql.yml")
     pr_branches = _triggers(codeql).get("pull_request", {}).get("branches", [])
     assert set(pr_branches) == {"main", "dev"}
+
+
+def test_ci_has_push_and_pr_triggers_targeting_main_and_dev() -> None:
+    """CI-16: ci.yml gates pushes and PRs on the long-lived branches.
+
+    Issue #262: ci.yml triggered only on `pull_request`, so a direct push to
+    `dev` or `main` — or any path that does not open a PR — ran no
+    lint/test/coverage gate. The trigger set now mirrors `codeql.yml`: `push` and
+    `pull_request` both target `[main, dev]`.
+    """
+    ci, _ = _workflow("ci.yml")
+    triggers = _triggers(ci)
+    assert triggers.get("push", {}).get("branches") == ["main", "dev"], (
+        "ci.yml must trigger on push to [main, dev] so a direct push to a long-lived "
+        "branch is gated (CI-16, issue #262)"
+    )
+    assert triggers.get("pull_request", {}).get("branches") == ["main", "dev"], (
+        "ci.yml must keep gating pull requests targeting [main, dev] (CI-16)"
+    )
 
 
 def test_codeql_security_write_permission_and_python() -> None:

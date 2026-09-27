@@ -1,6 +1,11 @@
 name: CI
 
+# Trigger contract (CI-16, issue #262): `push` gates every commit that lands on
+# the long-lived branches, mirroring `codeql.yml`, so a direct push to `dev` or
+# `main` cannot bypass lint/test/coverage; `pull_request` keeps PR-time gating.
 on:
+  push:
+    branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
