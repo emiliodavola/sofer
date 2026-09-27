@@ -115,15 +115,23 @@ present); and an installed-CLI subprocess test.
 
 ### Requirement: Install documentation (PKG-05)
 
-The README SHALL document `pip install sofer` and `uv tool install sofer` as
-install paths.
+> Modified by `docs-pkg05-install-contract` (issue #259, 2026-09-26) — there is
+> no PyPI project (AGENTS.md rule 12), so the documented paths are the git-tag
+> install commands, not a bare `pip install sofer` / `uv tool install sofer`.
 
-#### Scenario: README documents both install paths
+The README SHALL document the git-tag install commands, since no PyPI project is
+published: `uv tool install "sofer @ git+<repo>@vX.Y.Z" --force`,
+`pip install "sofer @ git+<repo>@vX.Y.Z"`,
+`pip install "sofer[mcp] @ git+<repo>@vX.Y.Z"`, and
+`uvx --from git+<repo>@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help`. The README
+SHALL NOT document a bare `pip install sofer` or `uv tool install sofer`.
 
-- GIVEN the README
+#### Scenario: README documents the git-tag install paths
+
+- GIVEN the README (`README.md` and `README_ES.md`)
 - WHEN its install section is inspected
-- THEN `pip install sofer` SHALL be documented
-- AND `uv tool install sofer` SHALL be documented
+- THEN `uv tool install "sofer @ git+..."`, `pip install "sofer @ git+..."`, the `sofer[mcp]` alias, and the `uvx` command SHALL be documented
+- AND a bare `pip install sofer` / `uv tool install sofer` SHALL NOT be documented
 
 ---
 
