@@ -177,7 +177,14 @@ def profile(
             dataset_path, resolved_delimiter, resolved_encoding
         )
     else:
-        headers, columns, _dtypes = _read_file(str(dataset_path))
+        # Non-CSV/TSV formats (parquet/xlsx/jsonl) ignore the dialect, but
+        # ``codebook._read_file`` now requires it (issue #260, rule 3): pass the
+        # configured values explicitly rather than relying on a hardcoded default.
+        headers, columns, _dtypes = _read_file(
+            str(dataset_path),
+            delimiter=config.CSV_DELIMITER,
+            encoding=config.CSV_ENCODING,
+        )
         rows = len(columns[0]) if columns else 0
         resolved_encoding = ""
         resolved_delimiter = ""
@@ -518,7 +525,11 @@ def _read_dataset_for_profile(
         used_encoding = encoding if encoding is not None else config.CSV_ENCODING
         headers, columns, rows = _stream_columns(path, used_delimiter, used_encoding)
         return headers, columns, rows, used_encoding, used_delimiter
-    headers, columns, _dtypes = _read_file(str(path))
+    headers, columns, _dtypes = _read_file(
+        str(path),
+        delimiter=config.CSV_DELIMITER,
+        encoding=config.CSV_ENCODING,
+    )
     rows = len(columns[0]) if columns else 0
     return headers, columns, rows, "", ""
 
