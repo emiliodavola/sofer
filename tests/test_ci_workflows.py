@@ -3,7 +3,7 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-14) by parsing the repository's
+`ci` specification (requirements CI-01..CI-15) by parsing the repository's
 workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, the Dependabot
 config, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
@@ -15,7 +15,8 @@ before any parse, the PB-14 hook-scope guard, the CI-07 clause-agreement guard,
 which re-enforces an existing CI-07 row rather than adding one, the three
 `211-test-mapping-gate` guards (rule 6 / config contract agreement, the config
 context tally, and the lint-job checker step), the three CI-12 release
-lint-job parity guards, and the CI-13/CI-14 dependency-bump hardening guards
+lint-job parity guards, the CI-15 release least-privilege permission guard,
+and the CI-13/CI-14 dependency-bump hardening guards
 (workflow action-ref consistency, the derived setup-uv parity, the interpreter
 pin equality, and the Dependabot update policy), and the four issue #258
 SDD-context drift guards (the project.md subcommand inventory, the enforced
@@ -1164,6 +1165,53 @@ def test_release_header_states_lint_parity_without_the_stale_cov06_claim() -> No
         "the release header must not keep the stale claim that the COV-06 gate is tracked "
         "separately (CI-12 / CI-03)"
     )
+
+
+def test_release_workflow_permissions_are_least_privilege() -> None:
+    """CI-15: release.yml grants write only to the job that needs it.
+
+    Issue #261: `permissions: contents: write` used to sit at the workflow root,
+    so every job (lint, test, coverage, build, citation-check) ran with write
+    access even though only the `release` job calls
+    `softprops/action-gh-release`. The workflow-level table SHALL now be
+    read-only (`contents: read`) and only the `release` job SHALL declare
+    `contents: write`.
+    """
+    release, _ = _workflow("release.yml")
+    workflow_permissions = release.get("permissions") or {}
+    assert isinstance(workflow_permissions, dict), "release.yml permissions must be a mapping"
+    workflow_writes = [
+        scope for scope, value in workflow_permissions.items() if str(value).endswith("write")
+    ]
+    assert not workflow_writes, (
+        f"release.yml workflow-level permissions must not grant write access: {workflow_writes} "
+        "(CI-15, issue #261)"
+    )
+    assert workflow_permissions.get("contents") == "read", (
+        "release.yml workflow-level permissions must be read-only (contents: read) so every "
+        "gate/build job runs least-privilege (CI-15)"
+    )
+    jobs = release.get("jobs", {})
+    assert isinstance(jobs, dict) and "release" in jobs, "release.yml has no `release` job"
+    for name, job in jobs.items():
+        job_permissions = job.get("permissions") or {}
+        assert isinstance(job_permissions, dict)
+        job_writes = {
+            scope for scope, value in job_permissions.items() if str(value).endswith("write")
+        }
+        if name == "release":
+            assert job_permissions.get("contents") == "write", (
+                "the `release` job must declare `contents: write` for action-gh-release (CI-15)"
+            )
+            assert job_writes == {"contents"}, (
+                f"the `release` job must grant only `contents: write`, got {job_permissions} "
+                "(CI-15)"
+            )
+        else:
+            assert not job_writes, (
+                f"the `{name}` job must not grant write access in release.yml: {job_permissions} "
+                "(CI-15, issue #261)"
+            )
 
 
 def test_workflow_action_refs_are_consistent_across_workflows() -> None:
