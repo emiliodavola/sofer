@@ -761,6 +761,39 @@ pass.
 
 ---
 
+### Requirement: Least-privilege permissions in the release workflow (CI-15)
+
+> Added by change `2026-09-26-ci-release-least-privilege` (GitHub #261). The release workflow
+> declared `permissions: contents: write` at the **workflow** root, so every job — `lint`, `test`,
+> `coverage`, `build`, `citation-check` — ran with write access to the repository even though only
+> the `release` job needs it.
+
+`.github/workflows/release.yml` SHALL scope write access to the job that needs it: the workflow-level
+`permissions` table SHALL NOT grant any `write` scope and SHALL be the read-only `contents: read`, so
+every gate/build job runs least-privilege. Only the `release` job — the one calling
+`softprops/action-gh-release` — SHALL declare `contents: write`, and SHALL NOT grant any other write
+scope. Every other job SHALL NOT declare a `write` grant. A static guard in
+`tests/test_ci_workflows.py` SHALL assert this contract, mirroring the per-workflow permission checks
+CI-04 uses.
+
+#### Scenario: Workflow-level permissions grant no write access
+
+- GIVEN `.github/workflows/release.yml` parsed
+- WHEN its workflow-level `permissions` table is inspected
+- THEN no scope SHALL be `write`
+- AND `contents` SHALL be `read`, so `lint`, `test`, `coverage`, `build`, and `citation-check`
+  all run read-only
+
+#### Scenario: Only the release job declares contents write
+
+- GIVEN `.github/workflows/release.yml`
+- WHEN every job's `permissions` table is inspected
+- THEN the `release` job SHALL declare `contents: write` (the scope `softprops/action-gh-release`
+  needs) and no other write scope
+- AND no other job SHALL declare any `write` grant
+
+---
+
 ### Requirement: CI workflow gates push and pull requests on long-lived branches (CI-16)
 
 > Added by change `2026-09-26-ci-push-trigger` (GitHub #262). Before this change `ci.yml`
@@ -785,6 +818,7 @@ commit that lands on a long-lived branch SHALL therefore be gated by the `lint`,
 - GIVEN `.github/workflows/ci.yml` parsed
 - WHEN its `pull_request` trigger is inspected
 - THEN `pull_request.branches` SHALL be `[main, dev]`
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -842,5 +876,7 @@ evidence recorded in the verify report.
 | CI-14 | uv updates ignore the coordinated ruff pin | test:tests/test_ci_workflows.py — `test_dependabot_ignores_the_coordinated_ruff_pin`: YAML inspection of the `uv` update's `ignore` list |
 | CI-14 | uv updates ignore fastmcp majors | test:tests/test_ci_workflows.py — `test_dependabot_ignores_fastmcp_majors`: YAML inspection of the `uv` update's `ignore` list |
 | CI-14 | minor/patch groups exclude majors | test:tests/test_ci_workflows.py — `test_dependabot_groups_exclude_majors`: YAML inspection of every update's `groups` update-types |
+| CI-15 | Workflow-level permissions grant no write access | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of release.yml workflow-level permissions |
+| CI-15 | Only the release job declares contents write | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of every release.yml job's permissions |
 | CI-16 | Push trigger targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
 | CI-16 | Pull request trigger still targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |

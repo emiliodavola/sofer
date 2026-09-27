@@ -13,8 +13,12 @@ on:
   push:
     tags: ["v*"]
 
+# Least privilege (issue #261): the workflow-level token is read-only, so every
+# gate/build job (lint, test, coverage, build, citation-check) runs without write
+# access. Only the `release` job below is granted `contents: write`, the single
+# scope it needs to create the GitHub Release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   lint:
@@ -169,6 +173,10 @@ jobs:
   release:
     needs: [lint, test, build, citation-check, coverage]
     runs-on: ubuntu-latest
+    # The only job that needs write access: `softprops/action-gh-release`
+    # creates the release (issue #261, least privilege).
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v7

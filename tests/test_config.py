@@ -475,7 +475,11 @@ class TestTc06PostReloadVisibility:
 
         root = pytree("[tool.sofer]\ncodebook_max_sample = 5\n", at="cfg5")
         config.reload(root)
-        md = generate_codebook(str(csv_path))
+        md = generate_codebook(
+            str(csv_path),
+            delimiter=config.CSV_DELIMITER,
+            encoding=config.CSV_ENCODING,
+        )
         assert "**Analysed rows:** 5" in md
 
         # Sequential operation after a second reload sees the new value too.
@@ -483,7 +487,11 @@ class TestTc06PostReloadVisibility:
             "[tool.sofer]\ncodebook_max_sample = 3\n", encoding="utf-8"
         )
         config.reload(root)
-        md2 = generate_codebook(str(csv_path))
+        md2 = generate_codebook(
+            str(csv_path),
+            delimiter=config.CSV_DELIMITER,
+            encoding=config.CSV_ENCODING,
+        )
         assert "**Analysed rows:** 3" in md2
 
     def test_stream_csv_reader_sentinel_follows_reload(self, restore_tool_config, pytree):
