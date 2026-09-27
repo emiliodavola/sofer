@@ -4,7 +4,7 @@
 schema: spec-driven
 
 context: |
-  Tech stack: Python 3.10+ CLI tool, uv + hatchling, ruff 0.16.0 (lint+format), mypy 2.3.0.
+  Tech stack: Python 3.10+ CLI tool, uv + hatchling, ruff 0.16.8 (lint+format), mypy 2.3.1, pyright 1.1.414.
   Architecture: flat src/sofer/ package, argparse CLI with func dispatch, one module per concern.
   Testing: pytest 9.1.1, spec-driven scenarios; Strict TDD disabled (tests follow specs but red-green-refactor is not enforced per mem #441). Run `uv run pytest tests/ -q` for the authoritative tally.
   Style: no hardcoded values (config via pyproject [tool.sofer] + per-dataset TOML), mandatory docstrings,
@@ -26,10 +26,11 @@ testing:
     available: true
     command: "uv run coverage run -m pytest"
   quality:
-    linter: {available: true, command: "uv run ruff check src/ tests/"}
-    type_checker: {available: true, command: "uv run mypy src/"}
-    formatter: {available: true, command: "uv run ruff format"}
-  pre_commit: "ruff --fix + ruff-format + mypy (uv run mypy src/), runs on every commit"
+    linter: {available: true, command: "uv run ruff check src/ tests/ scripts/"}
+    type_checker: {available: true, command: "uv run mypy src/ scripts/"}
+    second_type_checker: {available: true, command: "uv run pyright"}
+    formatter: {available: true, command: "uv run ruff format --check src/ tests/"}
+  pre_commit: "ruff --fix + ruff-format + mypy + pyright (uv run mypy src/ scripts/, uv run pyright), runs on every commit"
 
 rules:
   proposal:
@@ -58,7 +59,7 @@ rules:
     - test_command: "uv run pytest tests/ -q"
   verify:
     - test_command: "uv run pytest tests/ -q"
-    - build_command: "uv run ruff check src/ tests/ && uv run mypy src/"
+    - build_command: "uv run ruff check src/ tests/ scripts/ && uv run ruff format --check src/ tests/ && uv run mypy src/ scripts/ && uv run pyright"
     - coverage_threshold: 90
   archive:
     - Warn before merging destructive deltas.
