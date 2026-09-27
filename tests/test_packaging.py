@@ -52,6 +52,50 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProc
     return result
 
 
+# The fastmcp runtime cap is declared in `pyproject.toml` (the dependency, the
+# `mcp` extra alias, and the dev group) and named by the packaging and mcp-server
+# specs, `CONTRIBUTING.md`, and `.github/dependabot.yml`. This guard derives the
+# cap from `pyproject.toml` so every prose home must agree with the shipped
+# declaration and the retired `>=3.4,<4` cap cannot silently return (issue #257).
+_FASTMCP_CAP_RE = re.compile(r"fastmcp(?P<cap>>=[0-9][0-9A-Za-z.\-]*,\s*<[0-9][0-9A-Za-z.\-]*)")
+
+
+def test_fastmcp_cap_is_single_across_declaration_homes():
+    """Issue #257: one fastmcp cap, and every declaring home names it."""
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    caps = set(_FASTMCP_CAP_RE.findall(pyproject))
+    assert caps, "pyproject.toml declares no fastmcp requirement"
+    assert len(caps) == 1, f"pyproject.toml must declare one fastmcp cap, got {sorted(caps)}"
+    cap = caps.pop()
+    upper = cap.rsplit(",", 1)[-1]  # e.g. "<5"
+
+    prose_homes = (
+        "openspec/specs/packaging/spec.md",
+        "openspec/specs/mcp-server/spec.md",
+    )
+    for rel in prose_homes:
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert f"fastmcp{cap}" in text, (
+            f"{rel} must name the declared fastmcp cap fastmcp{cap} (issue #257)"
+        )
+        other = set(_FASTMCP_CAP_RE.findall(text)) - {cap}
+        assert not other, (
+            f"{rel} names another fastmcp cap besides the declared {cap}: "
+            f"{sorted(other)} (issue #257)"
+        )
+
+    stale = "fastmcp>=3.4,<4"
+    for rel in (*prose_homes, "CONTRIBUTING.md", ".github/dependabot.yml"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert stale not in text, f"{rel} still names the retired fastmcp cap {stale} (issue #257)"
+    for rel in ("CONTRIBUTING.md", ".github/dependabot.yml"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert f"`{upper}`" in text, (
+            f"{rel} must name the declared fastmcp upper bound `{upper}` (issue #257)"
+        )
+        assert "`<4`" not in text, f"{rel} still calls the fastmcp cap `<4` (issue #257)"
+
+
 @pytest.fixture(scope="module")
 def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Build the distribution once per module with ``uv build``.

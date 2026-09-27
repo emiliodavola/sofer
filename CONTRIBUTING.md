@@ -117,7 +117,7 @@ Two bumps are intentionally not automated:
   declarations plus `uv.lock`, then run the CI-08 guard row and the full suite.
 - **fastmcp majors** — the MCP SDK API changes across majors, so adoption needs a
   code-adapting change rather than a bot PR. Minor and patch updates stay automatic; the
-  declared `<4` cap is a real boundary because majors are ignored.
+  declared `<5` cap is a real boundary because majors are ignored.
 
 When a bump still breaks CI, the failure is a guard, not a missing manual edit: the fix is
 to move the declaration that drifted. The guards live in `tests/test_ci_workflows.py` —

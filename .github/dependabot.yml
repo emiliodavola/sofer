@@ -16,7 +16,7 @@
 #     CI-08; the `uv` ecosystem can move only the first, so every PR it would
 #     open is red (#252). Bump all homes together — see CONTRIBUTING.md.
 #   * `fastmcp` majors are ignored: a major changes the MCP SDK API and needs a
-#     code-adapting change, and Dependabot otherwise rewrites the declared `<4`
+#     code-adapting change, and Dependabot otherwise rewrites the declared `<5`
 #     cap itself (#253). Minor/patch fastmcp updates remain enabled.
 version: 2
 updates:

@@ -129,15 +129,16 @@ install paths.
 
 ### Requirement: MCP runtime dependency included by default (PKG-06)
 
-> Added by `feat-mcp-auto-install` (2026-08-31).
+> Added by `feat-mcp-auto-install` (2026-08-31). Modified by `docs-fastmcp-cap-drift`
+> (issue #257, 2026-09-26) — the cap is `>=4,<5`, matching the shipped `fastmcp 4.x`.
 
-`pyproject.toml` SHALL declare `fastmcp>=3.4,<4` in `dependencies`; MAY retain `mcp` alias with identical pin. `uv.lock` SHALL be regenerated.
+`pyproject.toml` SHALL declare `fastmcp>=4,<5` in `dependencies`; MAY retain `mcp` alias with identical pin. `uv.lock` SHALL be regenerated.
 
 #### Scenario: dependencies include fastmcp
 
 - GIVEN `pyproject.toml`
 - WHEN `dependencies` inspected
-- THEN `fastmcp>=3.4,<4` SHALL be present
+- THEN `fastmcp>=4,<5` SHALL be present
 
 #### Scenario: Alias identical pin
 
