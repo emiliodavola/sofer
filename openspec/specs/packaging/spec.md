@@ -115,29 +115,38 @@ present); and an installed-CLI subprocess test.
 
 ### Requirement: Install documentation (PKG-05)
 
-The README SHALL document `pip install sofer` and `uv tool install sofer` as
-install paths.
+> Modified by `docs-pkg05-install-contract` (issue #259, 2026-09-26) — there is
+> no PyPI project (AGENTS.md rule 12), so the documented paths are the git-tag
+> install commands, not a bare `pip install sofer` / `uv tool install sofer`.
 
-#### Scenario: README documents both install paths
+The README SHALL document the git-tag install commands, since no PyPI project is
+published: `uv tool install "sofer @ git+<repo>@vX.Y.Z" --force`,
+`pip install "sofer @ git+<repo>@vX.Y.Z"`,
+`pip install "sofer[mcp] @ git+<repo>@vX.Y.Z"`, and
+`uvx --from git+<repo>@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help`. The README
+SHALL NOT document a bare `pip install sofer` or `uv tool install sofer`.
 
-- GIVEN the README
+#### Scenario: README documents the git-tag install paths
+
+- GIVEN the README (`README.md` and `README_ES.md`)
 - WHEN its install section is inspected
-- THEN `pip install sofer` SHALL be documented
-- AND `uv tool install sofer` SHALL be documented
+- THEN `uv tool install "sofer @ git+..."`, `pip install "sofer @ git+..."`, the `sofer[mcp]` alias, and the `uvx` command SHALL be documented
+- AND a bare `pip install sofer` / `uv tool install sofer` SHALL NOT be documented
 
 ---
 
 ### Requirement: MCP runtime dependency included by default (PKG-06)
 
-> Added by `feat-mcp-auto-install` (2026-08-31).
+> Added by `feat-mcp-auto-install` (2026-08-31). Modified by `docs-fastmcp-cap-drift`
+> (issue #257, 2026-09-26) — the cap is `>=4,<5`, matching the shipped `fastmcp 4.x`.
 
-`pyproject.toml` SHALL declare `fastmcp>=3.4,<4` in `dependencies`; MAY retain `mcp` alias with identical pin. `uv.lock` SHALL be regenerated.
+`pyproject.toml` SHALL declare `fastmcp>=4,<5` in `dependencies`; MAY retain `mcp` alias with identical pin. `uv.lock` SHALL be regenerated.
 
 #### Scenario: dependencies include fastmcp
 
 - GIVEN `pyproject.toml`
 - WHEN `dependencies` inspected
-- THEN `fastmcp>=3.4,<4` SHALL be present
+- THEN `fastmcp>=4,<5` SHALL be present
 
 #### Scenario: Alias identical pin
 

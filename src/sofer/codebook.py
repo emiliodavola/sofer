@@ -64,13 +64,20 @@ def infer_column_type(values: list[str]) -> str:
 
 def _read_csv(
     path: str,
-    encoding: str = "utf-8-sig",
-    delimiter: str = ";",
+    *,
+    encoding: str,
+    delimiter: str,
 ) -> tuple[list[str], list[list[str]], None]:
     """Read a CSV file and return ``(headers, columns, None)``.
 
     Columns are returned column-by-column (not row-by-row) so that
     :func:`infer_column_type` can consume them directly.
+
+    Both *encoding* and *delimiter* are **required** keyword arguments: the
+    reader carries no literal ``";"`` / ``"utf-8-sig"`` default, so a caller can
+    never silently fall back to the wrong dialect (AGENTS.md rule 3, issue
+    #260). Every call site passes the configured ``csv_delimiter`` /
+    ``csv_encoding`` for its tier.
 
     Reading is delegated to :func:`sofer._csv_reader.stream_csv`, the
     repository's single CSV reader (AGENTS.md rule 4), so this path shares its
@@ -111,10 +118,18 @@ def _read_csv(
 
 def _read_tsv(
     path: str,
-    encoding: str = "utf-8-sig",
+    *,
+    encoding: str,
 ) -> tuple[list[str], list[list[str]], None]:
-    """Read a TSV file by delegating to :func:`_read_csv` with a tab delimiter."""
-    return _read_csv(path, encoding=encoding, delimiter="	")
+    """Read a TSV file by delegating to :func:`_read_csv` with a tab delimiter.
+
+    Args:
+        path: Path to the ``.tsv`` file.
+        encoding: File encoding (required — no literal default; rule 3). The
+            delimiter is fixed at ``"\\t"`` by the format, so it is not a
+            parameter here.
+    """
+    return _read_csv(path, encoding=encoding, delimiter="\t")
 
 
 def _read_parquet(path: str) -> tuple[list[str], list[list[str]], dict[str, str]]:
@@ -273,12 +288,25 @@ def _read_jsonl(path: str) -> tuple[list[str], list[list[str]], None]:
 
 def _read_file(
     path: str,
-    delimiter: str = ";",
-    encoding: str = "utf-8-sig",
+    *,
+    delimiter: str,
+    encoding: str,
 ) -> tuple[list[str], list[list[str]], dict[str, str] | None]:
     """Route to the correct format-specific reader based on file suffix.
 
-    Raises ``ValueError`` for unsupported formats.
+    *delimiter* and *encoding* are required keyword arguments (no literal
+    defaults — AGENTS.md rule 3, issue #260). They are only consumed by the
+    ``.csv``/``.tsv`` branches; the ``.parquet`` / ``.xlsx`` / ``.jsonl``
+    readers ignore them, but every call site still passes the configured values
+    so no call can rely on a hardcoded fallback.
+
+    Args:
+        path: Path to the data file.
+        delimiter: CSV delimiter (ignored for non-CSV/TSV formats).
+        encoding: CSV/TSV encoding (ignored for non-CSV/TSV formats).
+
+    Raises:
+        ValueError: for unsupported formats.
     """
     suffix = Path(path).suffix.lower()
     if suffix == ".csv":
@@ -399,8 +427,9 @@ def _build_markdown(
 def generate(
     csv_path: str,
     output_path: str | None = None,
-    delimiter: str = ";",
-    encoding: str = "utf-8-sig",
+    *,
+    delimiter: str,
+    encoding: str,
     max_sample: int | None = None,
 ) -> str:
     """Generate a markdown codebook from a data file.
@@ -413,10 +442,14 @@ def generate(
     Args:
         csv_path:   Path to the input data file.
         output_path: If given, write the codebook to this file.
-        delimiter:  CSV delimiter character (default ``;``).  Only used
+        delimiter:  CSV delimiter. **Required** keyword argument — there is no
+                    literal ``";"`` default; callers pass the configured
+                    ``config.CSV_DELIMITER`` (issue #260, rule 3). Only used
                     for CSV/TSV files; ignored for other formats.
-        encoding:   File encoding (default ``utf-8-sig``).  Only used
-                    for CSV/TSV files; ignored for other formats.
+        encoding:   File encoding. **Required** keyword argument — there is no
+                    literal ``"utf-8-sig"`` default; callers pass the configured
+                    ``config.CSV_ENCODING`` (issue #260, rule 3). Only used for
+                    CSV/TSV files; ignored for other formats.
         max_sample: Maximum rows to read for analysis; ``None`` resolves to
                     the ``codebook_max_sample`` value from ``[tool.sofer]``
                     at call time (never frozen from the import-time default).

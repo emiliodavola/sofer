@@ -180,7 +180,8 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     ``config.CSV_DELIMITER`` / ``config.CSV_ENCODING`` are read at call time
     (module-constant reads, resolved by ``main()``'s single ``config.reload``
     before dispatch), so the invocation's ``[tool.sofer]`` values reach
-    ``codebook.generate`` and its literal defaults never take effect — the
+    ``codebook.generate`` — whose dialect parameters are now required keyword
+    arguments with no literal default (issue #260) — the
     same source ``sofer_codebook`` uses (MSP-R10).  An unreadable input
     (``ValueError`` from an exhausted encoding chain, ``LookupError`` from an
     unknown codec name) prints ``Error: <message>`` on stderr and returns 1 —
@@ -242,9 +243,10 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
     # exactly like ``max_sample`` above (TC-04): the single reload in
     # ``main()`` has already run, so these observe this invocation's
     # ``[tool.sofer]`` values — the same source ``sofer_codebook`` passes
-    # (MSP-R10).  Leaving them unset would resurrect the literal ``";"`` /
-    # ``"utf-8-sig"`` defaults inside ``codebook.generate``.  An explicit
-    # ``--delimiter`` / ``--encoding`` wins over the configured value (CB-R12).
+    # (MSP-R10).  ``codebook.generate`` now takes the dialect as required
+    # keyword arguments (issue #260), so these are the only values it can use;
+    # an explicit ``--delimiter`` / ``--encoding`` wins over the configured
+    # value (CB-R12).
     delimiter = getattr(args, "delimiter", None)
     if delimiter is None:
         delimiter = config.CSV_DELIMITER

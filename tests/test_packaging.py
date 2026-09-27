@@ -3,7 +3,8 @@
 These tests verify the distribution contract end-to-end: the runtime version
 resolver never returns an empty or non-PEP-440 value, no static version literal
 exists anywhere (PKG-01), ``uv build`` produces a complete wheel (PKG-02,
-PKG-03), and the installed console script runs standalone (PKG-03, CLI-R05).
+PKG-03), the installed console script runs standalone (PKG-03, CLI-R05), and both
+READMEs document the git-tag install paths (PKG-05).
 
 Build and install steps shell out to ``uv``. The first ``uv build`` run is NOT
 network-free: build isolation fetches the build backends (hatch-vcs) from the
@@ -15,9 +16,11 @@ check itself.
 
 from __future__ import annotations
 
+import importlib
 import os
 import re
 import subprocess
+import sys
 import sysconfig
 import zipfile
 from pathlib import Path
@@ -50,6 +53,94 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProc
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     return result
+
+
+# The fastmcp runtime cap is declared in `pyproject.toml` (the dependency, the
+# `mcp` extra alias, and the dev group) and named by the packaging and mcp-server
+# specs, `CONTRIBUTING.md`, and `.github/dependabot.yml`. This guard derives the
+# cap from `pyproject.toml` so every prose home must agree with the shipped
+# declaration and the retired `>=3.4,<4` cap cannot silently return (issue #257).
+_FASTMCP_CAP_RE = re.compile(r"fastmcp(?P<cap>>=[0-9][0-9A-Za-z.\-]*,\s*<[0-9][0-9A-Za-z.\-]*)")
+
+
+def test_fastmcp_cap_is_single_across_declaration_homes():
+    """Issue #257: one fastmcp cap, and every declaring home names it."""
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    caps = set(_FASTMCP_CAP_RE.findall(pyproject))
+    assert caps, "pyproject.toml declares no fastmcp requirement"
+    assert len(caps) == 1, f"pyproject.toml must declare one fastmcp cap, got {sorted(caps)}"
+    cap = caps.pop()
+    upper = cap.rsplit(",", 1)[-1]  # e.g. "<5"
+
+    prose_homes = (
+        "openspec/specs/packaging/spec.md",
+        "openspec/specs/mcp-server/spec.md",
+    )
+    for rel in prose_homes:
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert f"fastmcp{cap}" in text, (
+            f"{rel} must name the declared fastmcp cap fastmcp{cap} (issue #257)"
+        )
+        other = set(_FASTMCP_CAP_RE.findall(text)) - {cap}
+        assert not other, (
+            f"{rel} names another fastmcp cap besides the declared {cap}: "
+            f"{sorted(other)} (issue #257)"
+        )
+
+    stale = "fastmcp>=3.4,<4"
+    for rel in (*prose_homes, "CONTRIBUTING.md", ".github/dependabot.yml"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert stale not in text, f"{rel} still names the retired fastmcp cap {stale} (issue #257)"
+    for rel in ("CONTRIBUTING.md", ".github/dependabot.yml"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert f"`{upper}`" in text, (
+            f"{rel} must name the declared fastmcp upper bound `{upper}` (issue #257)"
+        )
+        assert "`<4`" not in text, f"{rel} still calls the fastmcp cap `<4` (issue #257)"
+
+
+# ── PKG-05 install documentation ────────────────────────────────────────────
+# The documented install paths are git-tag installs because no PyPI project is
+# published (AGENTS.md rule 12). The repository URL is derived from
+# `[project.urls] Homepage`, so a repository move needs no test edit.
+_README_TAG_PLACEHOLDER = "vX.Y.Z"
+
+# A bare PyPI install: `pip install sofer` / `uv tool install sofer`. The
+# lookaheads exclude the two legitimate git-tag forms — `sofer[...]` (the extra
+# alias) and `sofer @ git+...` (the PEP 508 direct reference).
+_RETIRED_INSTALL_RE = re.compile(r"(?:pip3?|uv\s+tool)\s+install\s+['\"]?sofer(?!\[)(?!\s*@)")
+
+
+def _project_homepage() -> str:
+    """Return the ``[project.urls] Homepage`` URL from ``pyproject.toml``."""
+    parser = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
+    document = parser.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return document["project"]["urls"]["Homepage"]
+
+
+def _documented_git_tag_commands() -> tuple[str, ...]:
+    """Return the four install commands PKG-05 requires, derived from the homepage URL."""
+    git_url = f"git+{_project_homepage().rstrip('/')}.git"
+    tag = _README_TAG_PLACEHOLDER
+    return (
+        f'uv tool install "sofer @ {git_url}@{tag}" --force',
+        f'pip install "sofer @ {git_url}@{tag}"',
+        f'pip install "sofer[mcp] @ {git_url}@{tag}"',
+        f'uvx --from {git_url}@{tag} --with "sofer[mcp]" sofer-mcp --help',
+    )
+
+
+def test_readme_documents_the_git_tag_install_paths():
+    """PKG-05: both READMEs document the git-tag install commands, no bare PyPI path."""
+    commands = _documented_git_tag_commands()
+    for rel in ("README.md", "README_ES.md"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        for command in commands:
+            assert command in text, f"{rel} must document `{command}` (PKG-05)"
+        assert _RETIRED_INSTALL_RE.search(text) is None, (
+            f"{rel} must not document a bare `pip install sofer` / "
+            "`uv tool install sofer` — no PyPI project exists (PKG-05, issue #259)"
+        )
 
 
 @pytest.fixture(scope="module")

@@ -3,8 +3,9 @@
 Module: tests/test_ci_workflows.py
 
 Purpose: inspect the CI/CodeQL/config/documentation surface declared by the
-`ci` specification (requirements CI-01..CI-12) by parsing the repository's
-workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, and the docs.
+`ci` specification (requirements CI-01..CI-16) by parsing the repository's
+workflow YAML files, `pyproject.toml`, `openspec/config.yaml`, the Dependabot
+config, and the docs.
 Every pytest function maps 1:1 to a spec scenario (AGENTS.md rule 6): the
 scenario-verifying tests are the `ci` Test Mapping rows whose verification
 names a test in this module (CI-09's posture row is carried by two guards), plus
@@ -13,8 +14,14 @@ the tests owned by other capabilities or supporting this one — the two
 before any parse, the PB-14 hook-scope guard, the CI-07 clause-agreement guard,
 which re-enforces an existing CI-07 row rather than adding one, the three
 `211-test-mapping-gate` guards (rule 6 / config contract agreement, the config
-context tally, and the lint-job checker step), and the three CI-12 release
-lint-job parity guards. Runtime
+context tally, and the lint-job checker step), the three CI-12 release
+lint-job parity guards, the CI-15 release least-privilege permission guard,
+the CI-16 ci.yml trigger contract guard, and the CI-13/CI-14 dependency-bump
+hardening guards
+(workflow action-ref consistency, the derived setup-uv parity, the interpreter
+pin equality, and the Dependabot update policy), and the four issue #258
+SDD-context drift guards (the project.md subcommand inventory, the enforced
+tool versions, the pyright gate, and the config.yaml quality commands). Runtime
 gate exit-code evidence (CI-01 S2's local gate run, CI-08 S4's required-version
 mismatch probe, and CI-09 S2's pyright gate run) is recorded in the SDD verify
 report, not asserted here.
@@ -96,6 +103,17 @@ def _as_list(value: Any) -> list[Any]:
 _RUFF_PRE_COMMIT_REPO = "https://github.com/astral-sh/ruff-pre-commit"
 _DEV_ENTRY_RE = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?P<spec>[<>=!~].*)$")
 _EXACT_PIN_RE = re.compile(r"^==(?P<version>\d+\.\d+\.\d+)$")
+
+# ── Dependency-bump hardening (CI-13/CI-14) ─────────────────────────────────
+# The setup-uv action whose ref the release lint-job parity (CI-13 S2) derives
+# from ci.yml; the Dependabot config file and the gate jobs whose interpreter
+# pins the declared `.python-version` must equal (CI-13 S3); and the semver
+# update-type a `fastmcp` ignore must name (CI-14 S2).
+_SETUP_UV_REPO = "astral-sh/setup-uv"
+_GATE_JOBS = ("lint", "coverage")
+_DEPENDABOT_CONFIG = ".github/dependabot.yml"
+_SEMVER_MAJOR = "version-update:semver-major"
+_GROUP_UPDATE_TYPES = frozenset({"minor", "patch"})
 
 # Machine-local trees the CI-09 S3 config-home walk prunes: virtualenv, dependency
 # caches, coverage output and VCS metadata can all carry a third-party
@@ -221,10 +239,18 @@ def _triggers(wf: dict[Any, Any]) -> dict[str, Any]:
 def _workflow_names() -> tuple[str, ...]:
     """List the workflow file names under ``.github/workflows``, sorted.
 
+    GitHub treats both ``.yml`` and ``.yaml`` as workflow files, so both are
+    enumerated; the version-declaration scans must not miss a ``.yaml`` file.
+
     Returns:
-        A sorted tuple of ``*.yml`` file names present in the workflows dir.
+        A sorted tuple of ``*.yml``/``*.yaml`` file names present in the
+        workflows dir.
     """
-    workflows = (_REPO_ROOT / _WORKFLOW_DIR).glob("*.yml")
+    workflows = (
+        path
+        for path in (_REPO_ROOT / _WORKFLOW_DIR).iterdir()
+        if path.suffix in {".yml", ".yaml"} and path.is_file()
+    )
     return tuple(sorted(path.name for path in workflows))
 
 
@@ -267,6 +293,164 @@ def _find_step(
         if uses is not None and step.get("uses") == uses:
             return step
     return None
+
+
+def _action_and_ref(uses: str) -> tuple[str, str] | None:
+    """Split a workflow ``uses`` value into its action and ref.
+
+    Args:
+        uses: A step's ``uses`` string (e.g. ``actions/checkout@v7`` or
+            ``github/codeql-action/init@v4``).
+
+    Returns:
+        ``(owner/action, ref)`` for a ref-pinned action, or ``None`` when the
+        value carries no ``@`` or is missing a side of it.
+    """
+    if "@" not in uses:
+        return None
+    action, _, ref = uses.rpartition("@")
+    if not action or not ref:
+        return None
+    return action, ref
+
+
+def _step_action_ref(job: dict[str, Any], action: str) -> str | None:
+    """Return the ``uses`` value of a job's step for one action.
+
+    Args:
+        job: A parsed GitHub Actions job mapping.
+        action: The ``owner/action`` to locate (e.g. ``astral-sh/setup-uv``).
+
+    Returns:
+        The full ``uses`` string of the first matching step, or ``None`` when
+        the job carries no step for that action.
+    """
+    for step in job.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        uses = step.get("uses")
+        if isinstance(uses, str):
+            parsed = _action_and_ref(uses)
+            if parsed is not None and parsed[0] == action:
+                return uses
+    return None
+
+
+def _action_repo(action: str) -> str:
+    """Reduce an action path to its owning repository (``owner/repo``).
+
+    Args:
+        action: An action path such as ``github/codeql-action/init`` or
+            ``owner/repo/.github/workflows/reusable.yml``.
+
+    Returns:
+        The first two path segments, lower-cased (GitHub owner/repo names are
+        case-insensitive), so ``github/codeql-action/init`` and
+        ``github/codeql-action/analyze`` share one key — the granularity
+        Dependabot's ``github-actions`` ecosystem uses when it bumps them.
+    """
+    parts = action.split("/")
+    return "/".join(parts[:2]).lower()
+
+
+def _register_action_uses(refs: dict[str, set[str]], uses: str) -> None:
+    """Record one ``uses`` value into the repo-to-refs mapping.
+
+    Args:
+        refs: Mutable mapping of ``owner/repo`` to the refs seen for it.
+        uses: A ``uses`` string from a step or a job-level reusable-workflow
+            reference.
+    """
+    parsed = _action_and_ref(uses)
+    if parsed is not None:
+        refs.setdefault(_action_repo(parsed[0]), set()).add(parsed[1])
+
+
+def _action_refs_by_action() -> dict[str, set[str]]:
+    """Collect every action ref used across the workflows, grouped by repository.
+
+    Both step-level ``uses`` values and job-level reusable-workflow ``uses``
+    values are scanned, so a ref drift in either position is caught.
+
+    Returns:
+        A mapping of action repository (``owner/repo``) to the set of refs used
+        for it across all workflow files under ``.github/workflows``. A set with
+        more than one member is a drifted action (CI-13 S1).
+    """
+    refs: dict[str, set[str]] = {}
+    for name in _workflow_names():
+        wf, _ = _workflow(name)
+        for job in wf.get("jobs", {}).values():
+            if not isinstance(job, dict):
+                continue
+            job_uses = job.get("uses")
+            if isinstance(job_uses, str):
+                _register_action_uses(refs, job_uses)
+            for step in job.get("steps", []):
+                if not isinstance(step, dict):
+                    continue
+                uses = step.get("uses")
+                if isinstance(uses, str):
+                    _register_action_uses(refs, uses)
+    return refs
+
+
+def _gate_job_interpreter_pins() -> list[tuple[str, str, object]]:
+    """Collect every gate job's setup-uv ``python-version`` pin.
+
+    Only the ``lint`` and ``coverage`` jobs carry a single declared gate
+    interpreter; the ``test`` jobs' ``${{ matrix.python-version }}`` expression
+    is the support-axis probe, not a gate pin.
+
+    Returns:
+        A list of ``(workflow, job, pin)`` triples in declaration order.
+    """
+    pins: list[tuple[str, str, object]] = []
+    for name in ("ci.yml", "release.yml"):
+        wf, _ = _workflow(name)
+        for job_name in _GATE_JOBS:
+            job = wf.get("jobs", {}).get(job_name)
+            assert isinstance(job, dict), f"{name} has no `{job_name}` job"
+            for step in job.get("steps", []):
+                if not isinstance(step, dict):
+                    continue
+                uses = step.get("uses")
+                if not isinstance(uses, str):
+                    continue
+                parsed = _action_and_ref(uses)
+                if parsed is not None and parsed[0] == _SETUP_UV_REPO:
+                    pins.append((name, job_name, step.get("with", {}).get("python-version")))
+    return pins
+
+
+def _dependabot_updates() -> list[dict[str, Any]]:
+    """Parse ``.github/dependabot.yml`` and return its ``updates`` list.
+
+    Returns:
+        The parsed update entries; a missing or empty list raises so the policy
+        guards never pass vacuously.
+    """
+    updates = _load_yaml(_DEPENDABOT_CONFIG).get("updates")
+    assert isinstance(updates, list) and updates, f"{_DEPENDABOT_CONFIG} declares no updates"
+    return updates
+
+
+def _dependabot_update(ecosystem: str) -> dict[str, Any]:
+    """Return the single repo-root update entry for an ecosystem.
+
+    Args:
+        ecosystem: The ``package-ecosystem`` value (e.g. ``uv``).
+
+    Returns:
+        The matching update mapping; a missing or duplicated entry raises.
+    """
+    matches = [
+        entry
+        for entry in _dependabot_updates()
+        if entry.get("package-ecosystem") == ecosystem and entry.get("directory") == "/"
+    ]
+    assert len(matches) == 1, f"expected one {ecosystem!r} update entry, found {len(matches)}"
+    return matches[0]
 
 
 def _openspec_config() -> dict[str, Any]:
@@ -447,6 +631,25 @@ def test_codeql_pull_request_targets_dev() -> None:
     codeql, _ = _workflow("codeql.yml")
     pr_branches = _triggers(codeql).get("pull_request", {}).get("branches", [])
     assert set(pr_branches) == {"main", "dev"}
+
+
+def test_ci_has_push_and_pr_triggers_targeting_main_and_dev() -> None:
+    """CI-16: ci.yml gates pushes and PRs on the long-lived branches.
+
+    Issue #262: ci.yml triggered only on `pull_request`, so a direct push to
+    `dev` or `main` — or any path that does not open a PR — ran no
+    lint/test/coverage gate. The trigger set now mirrors `codeql.yml`: `push` and
+    `pull_request` both target `[main, dev]`.
+    """
+    ci, _ = _workflow("ci.yml")
+    triggers = _triggers(ci)
+    assert triggers.get("push", {}).get("branches") == ["main", "dev"], (
+        "ci.yml must trigger on push to [main, dev] so a direct push to a long-lived "
+        "branch is gated (CI-16, issue #262)"
+    )
+    assert triggers.get("pull_request", {}).get("branches") == ["main", "dev"], (
+        "ci.yml must keep gating pull requests targeting [main, dev] (CI-16)"
+    )
 
 
 def test_codeql_security_write_permission_and_python() -> None:
@@ -913,13 +1116,20 @@ def _lint_gate_runs(job: dict[str, Any]) -> list[str]:
 
 
 def test_release_lint_job_runs_the_ci_lint_gates() -> None:
-    """CI-12 S1: the release `lint` job runs the format, pyright and mapping gates.
+    """CI-12 S1 + CI-13 S2: the release `lint` job runs the format, pyright and
+    mapping gates, and its setup-uv ref is derived from ci.yml (never a literal).
 
     Issue #233: the release header claimed CI parity while the `lint` job omitted
     three gates the CI `lint` job runs. Each SHALL be present with its exact
     invocation and SHALL keep the job's single ubuntu-latest / 3.13 axis.
+    Issue #251: the setup-uv ref is compared against ci.yml by action name, so a
+    consistent bump of both workflows needs no test edit. The guard holds no
+    setup-uv version literal.
     """
+    ci, _ = _workflow("ci.yml")
     release, _ = _workflow("release.yml")
+    ci_lint = ci.get("jobs", {}).get("lint", {})
+    assert isinstance(ci_lint, dict), "ci.yml has no `lint` job"
     lint = release.get("jobs", {}).get("lint", {})
     assert isinstance(lint, dict), "release.yml has no `lint` job"
     for command in (
@@ -931,9 +1141,19 @@ def test_release_lint_job_runs_the_ci_lint_gates() -> None:
             f"the release `lint` job must run exactly {command!r} (CI-12)"
         )
     assert lint.get("runs-on") == "ubuntu-latest", "the release `lint` job keeps its single OS axis"
-    uv_step = _find_step(lint, uses="astral-sh/setup-uv@v10.2.0")
-    assert uv_step is not None and uv_step.get("with", {}).get("python-version") == "3.13", (
-        "the release `lint` job must keep its single Python axis (3.13), matching ci.yml (CI-12)"
+    ci_uv = _step_action_ref(ci_lint, _SETUP_UV_REPO)
+    release_uv = _step_action_ref(lint, _SETUP_UV_REPO)
+    assert ci_uv is not None, f"the ci.yml `lint` job must use {_SETUP_UV_REPO} (CI-13)"
+    assert release_uv == ci_uv, (
+        f"the release `lint` job must use the same {_SETUP_UV_REPO} ref as ci.yml "
+        f"({ci_uv}), got {release_uv!r} — derived, never a literal (CI-13 S2, GitHub #251)"
+    )
+    assert release_uv is not None
+    uv_step = _find_step(lint, uses=release_uv)
+    interpreter = _read_text(".python-version").strip()
+    assert uv_step is not None and uv_step.get("with", {}).get("python-version") == interpreter, (
+        f"the release `lint` job must keep ci.yml's single Python axis ({interpreter}), "
+        f"matching ci.yml (CI-12/CI-13)"
     )
 
 
@@ -965,6 +1185,159 @@ def test_release_header_states_lint_parity_without_the_stale_cov06_claim() -> No
         "the release header must not keep the stale claim that the COV-06 gate is tracked "
         "separately (CI-12 / CI-03)"
     )
+
+
+def test_release_workflow_permissions_are_least_privilege() -> None:
+    """CI-15: release.yml grants write only to the job that needs it.
+
+    Issue #261: `permissions: contents: write` used to sit at the workflow root,
+    so every job (lint, test, coverage, build, citation-check) ran with write
+    access even though only the `release` job calls
+    `softprops/action-gh-release`. The workflow-level table SHALL now be
+    read-only (`contents: read`) and only the `release` job SHALL declare
+    `contents: write`.
+    """
+    release, _ = _workflow("release.yml")
+    workflow_permissions = release.get("permissions") or {}
+    assert isinstance(workflow_permissions, dict), "release.yml permissions must be a mapping"
+    workflow_writes = [
+        scope for scope, value in workflow_permissions.items() if str(value).endswith("write")
+    ]
+    assert not workflow_writes, (
+        f"release.yml workflow-level permissions must not grant write access: {workflow_writes} "
+        "(CI-15, issue #261)"
+    )
+    assert workflow_permissions.get("contents") == "read", (
+        "release.yml workflow-level permissions must be read-only (contents: read) so every "
+        "gate/build job runs least-privilege (CI-15)"
+    )
+    jobs = release.get("jobs", {})
+    assert isinstance(jobs, dict) and "release" in jobs, "release.yml has no `release` job"
+    for name, job in jobs.items():
+        job_permissions = job.get("permissions") or {}
+        assert isinstance(job_permissions, dict)
+        job_writes = {
+            scope for scope, value in job_permissions.items() if str(value).endswith("write")
+        }
+        if name == "release":
+            assert job_permissions.get("contents") == "write", (
+                "the `release` job must declare `contents: write` for action-gh-release (CI-15)"
+            )
+            assert job_writes == {"contents"}, (
+                f"the `release` job must grant only `contents: write`, got {job_permissions} "
+                "(CI-15)"
+            )
+        else:
+            assert not job_writes, (
+                f"the `{name}` job must not grant write access in release.yml: {job_permissions} "
+                "(CI-15, issue #261)"
+            )
+
+
+def test_workflow_action_refs_are_consistent_across_workflows() -> None:
+    """CI-13 S1: every action repository is referenced at one ref across workflows.
+
+    GitHub #251: Dependabot bumps an action in every workflow, but a partial
+    bump (or a hand edit) could leave two workflows on different refs with no
+    guard noticing. Grouping each ``uses`` value by its action repository
+    (``owner/repo``, so ``github/codeql-action/init`` and
+    ``github/codeql-action/analyze`` share one key) and asserting a single ref
+    makes that drift fail loudly, with the repository and the competing refs in
+    the message.
+    """
+    refs = _action_refs_by_action()
+    assert refs, "no action refs found — the scan would pass vacuously"
+    drift = {action: sorted(values) for action, values in refs.items() if len(values) > 1}
+    assert not drift, (
+        f"the same GitHub Action repository is referenced at more than one ref across "
+        f".github/workflows/*.yml: {drift} — a bump must move every occurrence together "
+        f"(CI-13 S1, GitHub #251)"
+    )
+
+
+def test_dev_interpreter_pin_matches_gate_jobs() -> None:
+    """CI-13 S3: `.python-version` equals every gate job's setup-uv interpreter pin.
+
+    CI-07 pinned the `.python-version` ↔ gate-pin equality as verify-phase
+    evidence only. This promotes it to a static guard: the interpreter a
+    contributor's `.python-version` resolves and the interpreter the `lint` /
+    `coverage` jobs use in `ci.yml` and `release.yml` cannot diverge silently.
+    The `test` jobs' ``${{ matrix.python-version }}`` expression is the support
+    axis, not a gate pin, and is excluded by construction.
+    """
+    interpreter = _read_text(".python-version").strip()
+    assert interpreter, ".python-version is empty"
+    pins = _gate_job_interpreter_pins()
+    assert len(pins) == 4, (
+        f"expected four gate-job pins (lint + coverage x ci.yml + release.yml), got {pins}"
+    )
+    mismatches = [(name, job, pin) for name, job, pin in pins if pin != interpreter]
+    assert not mismatches, (
+        f"every gate job must pin the declared interpreter {interpreter!r}: {mismatches} (CI-13 S3)"
+    )
+
+
+def test_dependabot_ignores_the_coordinated_ruff_pin() -> None:
+    """CI-14 S1: the `uv` update ignores `ruff` at every update type.
+
+    GitHub #252: Dependabot bumped the `ruff` dev pin while `[tool.ruff]
+    required-version`, the `astral-sh/ruff-pre-commit` `rev`, and
+    `CONTRIBUTING.md`'s Code style section still named the old version — four
+    homes, of which Dependabot's `uv` ecosystem can move only the first. The
+    pin is coordinated by CI-08; the ignore keeps the bot from opening a PR that
+    can only be red.
+    """
+    uv = _dependabot_update("uv")
+    ignores = uv.get("ignore", [])
+    assert isinstance(ignores, list), "the `uv` update's `ignore` must be a list"
+    ruff = [entry for entry in ignores if entry.get("dependency-name") == "ruff"]
+    assert len(ruff) == 1, f"expected exactly one `ruff` ignore entry, found {ruff!r}"
+    assert "update-types" not in ruff[0], (
+        "the `ruff` ignore must not narrow its scope: its version is coordinated across the "
+        "pyproject dev pin + required-version, the pre-commit rev, and CONTRIBUTING.md, and "
+        "Dependabot can move only the first (CI-08, GitHub #252)"
+    )
+
+
+def test_dependabot_ignores_fastmcp_majors() -> None:
+    """CI-14 S2: the `uv` update ignores `fastmcp` majors, keeping minor/patch.
+
+    GitHub #253: Dependabot rewrote `fastmcp>=3.4,<4` to `<5` and the major
+    broke the MCP SDK API. Ignoring only major updates keeps the declared cap a
+    real boundary while minor/patch updates remain automatic.
+    """
+    uv = _dependabot_update("uv")
+    ignores = uv.get("ignore", [])
+    assert isinstance(ignores, list), "the `uv` update's `ignore` must be a list"
+    fastmcp = [entry for entry in ignores if entry.get("dependency-name") == "fastmcp"]
+    assert len(fastmcp) == 1, f"expected exactly one `fastmcp` ignore entry, found {fastmcp!r}"
+    assert fastmcp[0].get("update-types") == [_SEMVER_MAJOR], (
+        "the `fastmcp` ignore must cover exactly major updates "
+        "(`version-update:semver-major`); a major requires code adaptation and Dependabot "
+        "otherwise rewrites the declared cap (CI-14 S2, GitHub #253)"
+    )
+
+
+def test_dependabot_groups_exclude_majors() -> None:
+    """CI-14 S3: every group declares exactly minor/patch, never major.
+
+    Majors must stay ungrouped so they arrive individually and can be adapted
+    deliberately (CI-14). A group that declared `major` would silently fold each
+    major into the routine sweep, and any other update-type set would make the
+    group's scope drift from the declared minor/patch sweep — both are pinned
+    here.
+    """
+    saw_group = False
+    for entry in _dependabot_updates():
+        for group_name, group in (entry.get("groups") or {}).items():
+            saw_group = True
+            update_types = group.get("update-types")
+            assert isinstance(update_types, list) and set(update_types) == _GROUP_UPDATE_TYPES, (
+                f"group {group_name!r} must declare exactly {sorted(_GROUP_UPDATE_TYPES)} "
+                f"(minor/patch), so a major cannot be silently absorbed; got {update_types!r} "
+                f"(CI-14 S3)"
+            )
+    assert saw_group, "no dependabot group found — the scan would pass vacuously"
 
 
 _RULE6_RE = re.compile(r"### 6\..*?(?=\n### )", re.DOTALL)
@@ -1065,3 +1438,102 @@ def test_lint_job_runs_the_test_mapping_checker() -> None:
         "the checker must not add a new job or matrix axis — one step in the existing "
         f"`lint` job only (MC-07 S1), got {sorted(jobs)}"
     )
+
+
+# ── SDD-context drift guards (issue #258) ───────────────────────────────────
+# `openspec/project.md` and `openspec/config.yaml` are the SDD context every
+# future change reads; they carried stale facts that contradicted the enforced
+# configuration (the mypy strict posture, the CLI subcommand count, the pinned
+# tool versions, the pyright gate, and the quality commands). These supporting
+# guards derive every expected value from a declaration home (`pyproject.toml`,
+# `src/sofer/cli.py`, the CI lint contract in this module) so the context files
+# cannot drift again without a test failing.
+
+# Top-level argparse subparsers are registered on the bare ``sub`` object; the
+# nested ``mcp_sub.add_parser(...)`` calls do not match because the ``\b``
+# before ``sub`` fails inside ``mcp_sub`` (``_`` is a word character).
+_CLI_TOP_LEVEL_SUBPARSER_RE = re.compile(r"\bsub\.add_parser\(\s*[\"'](?P<name>[a-z0-9-]+)[\"']")
+_PROJECT_MD_SUBCOMMAND_RE = re.compile(
+    r"argparse CLI, (?P<count>\d+) subcommands:\s*(?P<names>[a-z0-9, -]+)"
+)
+
+
+def _cli_top_level_subcommands() -> list[str]:
+    """Derive the CLI's top-level subcommand names from ``cli.py`` source.
+
+    Returns:
+        The subcommand names registered on the bare ``sub`` subparsers object,
+        in declaration order (nested ``mcp_sub`` subcommands are excluded).
+    """
+    return _CLI_TOP_LEVEL_SUBPARSER_RE.findall(_read_text("src/sofer/cli.py"))
+
+
+def test_openspec_project_md_declares_the_shipped_subcommands() -> None:
+    """Issue #258: project.md's CLI inventory equals cli.py's top-level subparsers."""
+    declared = _cli_top_level_subcommands()
+    assert declared, "no top-level subparsers found in src/sofer/cli.py"
+    match = _PROJECT_MD_SUBCOMMAND_RE.search(_read_text("openspec/project.md"))
+    assert match is not None, "openspec/project.md carries no CLI subcommand inventory line"
+    names = [name.strip() for name in match.group("names").split(",")]
+    assert set(names) == set(declared), (
+        f"openspec/project.md must list exactly the shipped subcommands: declared "
+        f"{sorted(names)}, cli.py registers {sorted(declared)}"
+    )
+    assert int(match.group("count")) == len(declared), (
+        f"openspec/project.md declares {match.group('count')} subcommands but cli.py "
+        f"registers {len(declared)} (issue #258)"
+    )
+
+
+def test_openspec_context_declares_the_enforced_tool_versions() -> None:
+    """Issue #258: the tool versions in the SDD context match the enforced pins.
+
+    Both tool pins are derived — ruff from its dev pin, mypy and pyright from
+    their exact dev pins — so bumping a tool edits declarations only.
+    """
+    versions = {
+        "ruff": _declared_ruff_version(),
+        "mypy": _declared_exact_dev_pin("mypy"),
+        "pyright": _declared_pyright_version(),
+    }
+    for rel in ("openspec/project.md", "openspec/config.yaml"):
+        text = _read_text(rel)
+        for tool, version in versions.items():
+            pattern = rf"(?<![\d.]){re.escape(tool)} {re.escape(version)}(?!\d)(?!\.\d)"
+            assert re.search(pattern, text), (
+                f"{rel} must name the enforced {tool} {version} (issue #258)"
+            )
+
+
+def test_openspec_context_names_the_pyright_gate() -> None:
+    """Issue #258: the pyright gate is named in both SDD context files."""
+    for rel in ("openspec/project.md", "openspec/config.yaml"):
+        assert "uv run pyright" in _read_text(rel), (
+            f"{rel} must name the enforced `uv run pyright` gate (CI-09, issue #258)"
+        )
+
+
+def test_openspec_config_quality_commands_match_the_ci_lint_gates() -> None:
+    """Issue #258: config.yaml's quality commands equal the CI lint-job commands.
+
+    Each expected command is checked against the shared ``_CI_LINT_GATE_RUNS``
+    contract before it is compared to the config, so the SDD config and the CI
+    lint job cannot diverge: a CI command drift breaks the shared contract first,
+    and then this guard.
+    """
+    quality = _openspec_config()["testing"]["quality"]
+    expected = {
+        "linter": "uv run ruff check src/ tests/ scripts/",
+        "type_checker": "uv run mypy src/ scripts/",
+        "second_type_checker": "uv run pyright",
+        "formatter": "uv run ruff format --check src/ tests/",
+    }
+    for key, command in expected.items():
+        assert command in _CI_LINT_GATE_RUNS, (
+            f"the expected {key} command {command!r} is not a CI lint gate — update the "
+            "shared contract in this module (issue #258)"
+        )
+        assert quality[key]["command"] == command, (
+            f"openspec/config.yaml {key} command must be {command!r}, got "
+            f"{quality[key]['command']!r} (issue #258)"
+        )

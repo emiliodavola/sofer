@@ -1,6 +1,7 @@
 """Tests for sofer.codebook — multi-format analysis and markdown generation."""
 
 import csv
+import inspect
 import sys
 from pathlib import Path
 
@@ -20,6 +21,12 @@ from sofer.codebook import (
 )
 
 # ── infer_column_type ─────────────────────────────────────────────────────────
+
+# The repository's configured default CSV dialect. ``generate`` and the
+# ``_read_*`` readers take the dialect as **required** arguments (issue #260,
+# rule 3), so each call passes it explicitly instead of a hardcoded default.
+_DEFAULT_DELIMITER = ";"
+_DEFAULT_ENCODING = "utf-8-sig"
 
 
 class TestInferColumnTypeSamples:
@@ -82,7 +89,7 @@ class TestGenerate:
             w.writerow(["1", "Alice", "30"])
             w.writerow(["2", "Bob", "25"])
 
-        result = generate(str(csv_path))
+        result = generate(str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "# Codebook: test.csv" in result
         assert "| # | Column" in result
@@ -102,7 +109,9 @@ class TestGenerate:
             w.writerow([""])
             w.writerow(["30"])
 
-        result = generate(str(csv_path), max_sample=10)
+        result = generate(
+            str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING, max_sample=10
+        )
         # 2 out of 4 data rows are missing → 50%
         assert "50.0%" in result or "50%" in result
 
@@ -112,7 +121,12 @@ class TestGenerate:
         csv_path.write_text("x;y\n1;2\n", encoding="utf-8")
         out_path = tmp_path / "codebook.md"
 
-        result = generate(str(csv_path), output_path=str(out_path))
+        result = generate(
+            str(csv_path),
+            output_path=str(out_path),
+            delimiter=_DEFAULT_DELIMITER,
+            encoding=_DEFAULT_ENCODING,
+        )
         assert out_path.exists()
         content = out_path.read_text(encoding="utf-8")
         assert "Codebook: data.csv" in content
@@ -127,7 +141,12 @@ class TestGenerate:
             w.writerow(["col"])
             for i in range(100):
                 w.writerow([i])
-        result = generate(str(csv_path), max_sample=1000)
+        result = generate(
+            str(csv_path),
+            delimiter=_DEFAULT_DELIMITER,
+            encoding=_DEFAULT_ENCODING,
+            max_sample=1000,
+        )
         assert "**Rows:** 100" in result
 
     def test_large_file_samples(self, tmp_path):
@@ -139,7 +158,12 @@ class TestGenerate:
             for i in range(5000):
                 w.writerow([i])
 
-        result = generate(str(csv_path), max_sample=100)
+        result = generate(
+            str(csv_path),
+            delimiter=_DEFAULT_DELIMITER,
+            encoding=_DEFAULT_ENCODING,
+            max_sample=100,
+        )
         assert "sample" in result.lower()
 
     def test_small_file_is_full_scan(self, tmp_path):
@@ -151,7 +175,12 @@ class TestGenerate:
             for i in range(10):
                 w.writerow([i])
 
-        result = generate(str(csv_path), max_sample=100)
+        result = generate(
+            str(csv_path),
+            delimiter=_DEFAULT_DELIMITER,
+            encoding=_DEFAULT_ENCODING,
+            max_sample=100,
+        )
         assert "full scan" in result.lower()
 
     def test_numeric_column_type_in_codebook(self, tmp_path):
@@ -163,7 +192,7 @@ class TestGenerate:
             for i in range(20):
                 w.writerow([i])
 
-        result = generate(str(csv_path))
+        result = generate(str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
         assert "numeric" in result
 
     def test_categorical_column_type_in_codebook(self, tmp_path):
@@ -175,7 +204,7 @@ class TestGenerate:
             for v in ["red", "blue", "green"] * 10:
                 w.writerow([v])
 
-        result = generate(str(csv_path))
+        result = generate(str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
         assert "categorical/text" in result
 
 
@@ -193,7 +222,9 @@ class TestReadCsv:
             w.writerow(["1", "x", "3"])
             w.writerow(["4", "y", "6"])
 
-        headers, columns, dtypes = _read_csv(str(csv_path))
+        headers, columns, dtypes = _read_csv(
+            str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
 
         assert headers == ["a", "b", "c"]
         assert dtypes is None
@@ -206,7 +237,9 @@ class TestReadCsv:
             w.writerow(["x", "y"])
             w.writerow(["alpha", "beta"])
 
-        headers, columns, _dtypes = _read_csv(str(csv_path), delimiter=",")
+        headers, columns, _dtypes = _read_csv(
+            str(csv_path), delimiter=",", encoding=_DEFAULT_ENCODING
+        )
 
         assert headers == ["x", "y"]
         assert columns == [["alpha"], ["beta"]]
@@ -215,7 +248,9 @@ class TestReadCsv:
         csv_path = tmp_path / "uneven.csv"
         csv_path.write_text("a;b;c\n1;2\n3\n", encoding="utf-8")
 
-        headers, columns, _dtypes = _read_csv(str(csv_path))
+        headers, columns, _dtypes = _read_csv(
+            str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
 
         assert headers == ["a", "b", "c"]
         assert columns[0] == ["1", "3"]
@@ -228,7 +263,9 @@ class TestReadCsv:
             w = csv.writer(f, delimiter=";")
             w.writerow(["only", "headers"])
 
-        headers, columns, dtypes = _read_csv(str(csv_path))
+        headers, columns, dtypes = _read_csv(
+            str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
 
         assert headers == ["only", "headers"]
         assert dtypes is None
@@ -240,7 +277,7 @@ class TestReadTsv:
         tsv_path = tmp_path / "data.tsv"
         tsv_path.write_text("name\tage\nAlice\t30\nBob\t25\n", encoding="utf-8")
 
-        headers, columns, dtypes = _read_tsv(str(tsv_path))
+        headers, columns, dtypes = _read_tsv(str(tsv_path), encoding=_DEFAULT_ENCODING)
 
         assert headers == ["name", "age"]
         assert dtypes is None
@@ -374,14 +411,18 @@ class TestReadFileDispatcher:
     def test_routes_csv(self, tmp_path):
         p = tmp_path / "f.csv"
         p.write_text("a;b\n1;2\n", encoding="utf-8")
-        headers, _columns, dtypes = _read_file(str(p))
+        headers, _columns, dtypes = _read_file(
+            str(p), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
         assert headers == ["a", "b"]
         assert dtypes is None
 
     def test_routes_tsv(self, tmp_path):
         p = tmp_path / "f.tsv"
         p.write_text("x\ty\n10\t20\n", encoding="utf-8")
-        headers, _columns, _dtypes = _read_file(str(p))
+        headers, _columns, _dtypes = _read_file(
+            str(p), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
         assert headers == ["x", "y"]
 
     def test_routes_parquet(self, tmp_path):
@@ -390,7 +431,9 @@ class TestReadFileDispatcher:
 
         p = tmp_path / "f.parquet"
         pq.write_table(pa.table({"v": [1]}), p)
-        headers, _columns, dtypes = _read_file(str(p))
+        headers, _columns, dtypes = _read_file(
+            str(p), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
         assert headers == ["v"]
         assert dtypes is not None
 
@@ -403,21 +446,84 @@ class TestReadFileDispatcher:
         ws.append(["k"])
         ws.append(["val"])
         wb.save(p)
-        headers, _columns, dtypes = _read_file(str(p))
+        headers, _columns, dtypes = _read_file(
+            str(p), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
         assert headers == ["k"]
         assert dtypes is not None
 
     def test_routes_jsonl(self, tmp_path):
         p = tmp_path / "f.jsonl"
         p.write_text('{"q": "x"}\n', encoding="utf-8")
-        headers, _columns, _dtypes = _read_file(str(p))
+        headers, _columns, _dtypes = _read_file(
+            str(p), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
         assert headers == ["q"]
 
     def test_raises_unsupported(self, tmp_path):
         p = tmp_path / "f.txt"
         p.write_text("hello", encoding="utf-8")
         with pytest.raises(ValueError, match="Unsupported file format"):
-            _read_file(str(p))
+            _read_file(str(p), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Issue #260 — the dialect is a required argument, never a hardcoded default
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDialectParametersAreRequired:
+    """The readers and ``generate`` take the dialect as required arguments.
+
+    Issue #260 / AGENTS.md rule 3: ``codebook.py`` must not carry a literal
+    ``";"`` / ``"utf-8-sig"`` default that a caller can silently inherit. Each
+    entry point fails closed when the dialect is omitted, and the value that is
+    supplied is the one that drives parsing.
+    """
+
+    def test_generate_requires_delimiter_and_encoding(self, tmp_path):
+        csv_path = tmp_path / "t.csv"
+        csv_path.write_text("a;b\n1;2\n", encoding="utf-8")
+        with pytest.raises(TypeError):
+            generate(str(csv_path))
+
+    def test_read_csv_requires_dialect(self, tmp_path):
+        csv_path = tmp_path / "t.csv"
+        csv_path.write_text("a;b\n1;2\n", encoding="utf-8")
+        with pytest.raises(TypeError):
+            _read_csv(str(csv_path))
+
+    def test_read_tsv_requires_encoding(self, tmp_path):
+        tsv_path = tmp_path / "t.tsv"
+        tsv_path.write_text("a\tb\n1\t2\n", encoding="utf-8")
+        with pytest.raises(TypeError):
+            _read_tsv(str(tsv_path))
+
+    def test_read_file_requires_dialect(self, tmp_path):
+        csv_path = tmp_path / "t.csv"
+        csv_path.write_text("a;b\n1;2\n", encoding="utf-8")
+        with pytest.raises(TypeError):
+            _read_file(str(csv_path))
+
+    def test_supplied_dialect_drives_parsing(self, tmp_path):
+        csv_path = tmp_path / "c.csv"
+        csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
+        comma = generate(str(csv_path), delimiter=",", encoding=_DEFAULT_ENCODING)
+        assert "`a`" in comma and "`b`" in comma
+        semicolon = generate(str(csv_path), delimiter=";", encoding=_DEFAULT_ENCODING)
+        assert "`a,b`" in semicolon
+
+    def test_no_literal_dialect_default_in_signatures(self):
+        """No literal dialect default survives in the four entry points."""
+        for func in (generate, _read_csv, _read_tsv, _read_file):
+            sig = inspect.signature(func)
+            for name in ("delimiter", "encoding"):
+                param = sig.parameters.get(name)
+                if param is None:
+                    continue
+                assert param.default is inspect.Parameter.empty, (
+                    f"{func.__name__}.{name} must not carry a literal default (issue #260, rule 3)"
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -434,9 +540,13 @@ class TestBuildMarkdown:
             w.writerow(["1", "Alice", "30"])
             w.writerow(["2", "Bob", "25"])
 
-        result_via_generate = generate(str(csv_path))
+        result_via_generate = generate(
+            str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
 
-        headers, columns, dtypes = _read_file(str(csv_path))
+        headers, columns, dtypes = _read_file(
+            str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING
+        )
         result_via_builder = _build_markdown(headers, columns, dtypes, str(csv_path))
 
         assert result_via_builder == result_via_generate
@@ -847,7 +957,7 @@ class TestEdgeCases:
             w = csv.writer(f, delimiter=";")
             w.writerow(["col_a", "col_b"])
 
-        result = generate(str(csv_path))
+        result = generate(str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "# Codebook: header_only.csv" in result
         assert "**Rows:** 0" in result
@@ -863,7 +973,7 @@ class TestEdgeCases:
         table = pa.table({"flag": pa.array([True, False, True])})
         pq.write_table(table, pq_path)
 
-        result = generate(str(pq_path))
+        result = generate(str(pq_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "Actual Type" in result
         assert "bool" in result
@@ -879,7 +989,7 @@ class TestEdgeCases:
         ws.append(["banana", 2.0])
         wb.save(xlsx_path)
 
-        result = generate(str(xlsx_path))
+        result = generate(str(xlsx_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "# Codebook: sheet.xlsx" in result
         assert "Actual Type" in result
@@ -893,7 +1003,7 @@ class TestEdgeCases:
             encoding="utf-8",
         )
 
-        result = generate(str(jsonl_path))
+        result = generate(str(jsonl_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "# Codebook: data.jsonl" in result
         assert "`name`" in result
@@ -1039,7 +1149,7 @@ class TestEmptyInputPlaceholder:
         csv_path = tmp_path / "empty.csv"
         csv_path.write_text("", encoding="utf-8")
 
-        result = generate(str(csv_path))
+        result = generate(str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "**No data rows found** — the file is empty or headerless." in result
 
@@ -1047,7 +1157,7 @@ class TestEmptyInputPlaceholder:
         jsonl_path = tmp_path / "empty.jsonl"
         jsonl_path.write_text("", encoding="utf-8")
 
-        result = generate(str(jsonl_path))
+        result = generate(str(jsonl_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "**No data rows found** — the file is empty or headerless." in result
 
@@ -1058,7 +1168,7 @@ class TestEmptyInputPlaceholder:
             w = csv.writer(f, delimiter=";")
             w.writerow(["col_a", "col_b"])
 
-        result = generate(str(csv_path))
+        result = generate(str(csv_path), delimiter=_DEFAULT_DELIMITER, encoding=_DEFAULT_ENCODING)
 
         assert "**No data rows found**" not in result
         assert "| 1 | `col_a`" in result

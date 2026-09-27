@@ -330,28 +330,34 @@ analysed the full file, so `sofer_codebook_all` (MSP-R17) and
 
 ### Requirement: Single-file codebook reads through the resolved tool-wide config (CB-R11)
 
-> Added by change `2026-09-14-fix-cli-codebook-config` (GitHub #182).
+> Added by change `2026-09-14-fix-cli-codebook-config` (GitHub #182). Amended by change
+> `2026-09-26-refactor-codebook-dialect-config` (GitHub #260): the literal defaults in
+> `codebook.generate` are removed, so the parameters are required and the invocation passes the
+> configured value by construction.
 
 The `sofer codebook FILE` path SHALL pass the resolved tool-wide `config.CSV_DELIMITER` and
 `config.CSV_ENCODING` into `codebook.generate`, resolved at call time after the invocation's single
-tool-config reload (TC-04) — the same source MSP-R10 requires of the MCP codebook tools — and SHALL
-NOT let the literal defaults in `codebook.generate` (`";"`, `"utf-8-sig"`) take effect.
+tool-config reload (TC-04) — the same source MSP-R10 requires of the MCP codebook tools. The
+dialect parameters of `codebook.generate` and of its readers (`_read_csv`, `_read_tsv`,
+`_read_file`) SHALL be required arguments with no literal `";"` / `"utf-8-sig"` default, so a call
+that omits them SHALL fail closed (`TypeError`) rather than silently assume a dialect; every
+production call site SHALL pass the configured value for its tier.
 
 When the input cannot be read — the configured encoding and the repository's fallback chain are
 exhausted (`ValueError`), or the configured encoding names a codec that does not exist (`LookupError`,
 reachable per TC-13) — the command SHALL print `Error: <message>` on stderr and SHALL exit non-zero.
 It SHALL NOT emit an uncaught traceback, and it SHALL NOT retry `latin-1`/`cp1252`: the fallback
 policy remains the repository's existing `utf-8-sig → utf-8` (`src/sofer/_csv_reader.py:27-31`), with
-a configured non-UTF-8 encoding honoured first. `codebook.generate`'s parameter defaults and the
-dataset-`[meta]` resolution of `generate_all` (`codebook.py:505-506`) SHALL remain unchanged, as the
-fallback for direct library callers and for the `--all-files` tier respectively.
+a configured non-UTF-8 encoding honoured first. `generate_all`'s `None` sentinel and its
+dataset-`[meta]` resolution (`codebook.py:522-523`) SHALL remain unchanged, as the `--all-files`
+tier's configured source.
 
 #### Scenario: Configured delimiter and encoding are what the codebook reflects
 
 - GIVEN `[tool.sofer] csv_delimiter = ","` (and, separately, a non-default `csv_encoding`) and a file matching that configuration
 - WHEN `sofer codebook FILE` runs with no `--config`
 - THEN the codebook SHALL show the columns induced by the configured delimiter (two columns for a two-field header)
-- AND the file SHALL be read under the configured encoding, not the literal `";"` / `"utf-8-sig"` defaults
+- AND the file SHALL be read under the configured encoding, not a literal `";"` / `"utf-8-sig"` default
 
 #### Scenario: CLI and MCP agree on the same input
 
@@ -381,11 +387,21 @@ fallback for direct library callers and for the `--all-files` tier respectively.
 - THEN only `utf-8-sig → utf-8` SHALL be tried
 - AND `latin-1`/`cp1252` SHALL NOT be added as retries
 
+#### Scenario: Omitting the dialect fails closed
+
+- GIVEN `codebook.generate`, `_read_csv`, `_read_tsv`, or `_read_file`
+- WHEN a caller omits the required delimiter/encoding argument
+- THEN the call SHALL raise `TypeError`
+- AND it SHALL NOT fall back to a hardcoded `";"` / `"utf-8-sig"` default (issue #260, AGENTS.md rule 3)
+
 ---
 
 ### Requirement: Explicit CSV dialect override wins over config (CB-R12)
 
-> Added by change `2026-09-25-csv-dialect-override` (GitHub #204).
+> Added by change `2026-09-25-csv-dialect-override` (GitHub #204). Amended by change
+> `2026-09-26-refactor-codebook-dialect-config` (GitHub #260): `codebook.generate`'s dialect
+> parameters are now required keyword arguments, so the "defaults unchanged" clause no longer
+> applies to them; only `generate_all`'s `None` sentinel remains.
 
 `sofer codebook FILE` and `sofer codebook --all-files` SHALL accept optional
 `--delimiter` / `--encoding`. The resolution order SHALL be **explicit flag →
@@ -399,8 +415,10 @@ post-reload `config.CSV_DELIMITER` / `config.CSV_ENCODING` (CB-R11); for
 omitted path SHALL be byte-identical to the pre-change behaviour. `.tsv` files
 SHALL remain tab-delimited by format; the explicit delimiter SHALL apply to `.csv`
 and the explicit encoding SHALL apply to `.csv` and `.tsv`. When an explicit value
-is supplied, the command SHALL echo it on stderr. `codebook.generate`'s and
-`generate_all`'s parameter defaults SHALL remain unchanged.
+is supplied, the command SHALL echo it on stderr. `generate_all`'s `None` sentinel
+SHALL remain unchanged; `codebook.generate`'s dialect parameters SHALL be required
+keyword arguments (CB-R11, issue #260), so every call site passes a resolved value
+and no literal default exists to inherit.
 
 #### Scenario: Explicit delimiter wins over a disagreeing tool-wide config
 

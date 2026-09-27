@@ -30,9 +30,9 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ### Requirement: Import without the extra fails clearly (MSP-R02)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `feat-mcp-auto-install` (2026-08-31).
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `feat-mcp-auto-install` (2026-08-31). Modified by `docs-fastmcp-cap-drift` (issue #257, 2026-09-26) — the cap is `>=4,<5`.
 
-`sofer.mcp_server` SHALL import on lean install. `fastmcp>=3.4,<4` SHALL be in `dependencies` so `pip install "sofer @ git+..."` and `uv tool install "sofer @ git+..."` SHALL install `fastmcp` and `sofer-mcp --help` SHALL succeed. `mcp` alias `["fastmcp>=3.4,<4"]` SHALL remain one minor. Guard in `mcp_server.py` SHALL stay degraded-only with `pip`+`uv tool` and `sofer[mcp] @ git+...`.
+`sofer.mcp_server` SHALL import on lean install. `fastmcp>=4,<5` SHALL be in `dependencies` so `pip install "sofer @ git+..."` and `uv tool install "sofer @ git+..."` SHALL install `fastmcp` and `sofer-mcp --help` SHALL succeed. `mcp` alias `["fastmcp>=4,<5"]` SHALL remain one minor. Guard in `mcp_server.py` SHALL stay degraded-only with `pip`+`uv tool` and `sofer[mcp] @ git+...`.
 
 (Previously: base stayed lean — `fastmcp` not a core dep; import raised `ImportError` to `pip install 'sofer[mcp]'`.)
 
@@ -64,7 +64,7 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 - GIVEN built wheel
 - WHEN METADATA `Requires-Dist` inspected
-- THEN `fastmcp>=3.4,<4` SHALL appear without `extra == 'mcp'`
+- THEN `fastmcp>=4,<5` SHALL appear without `extra == 'mcp'`
 
 #### Scenario: uv.lock unconditional
 
@@ -468,9 +468,9 @@ The MCP server SHALL be fully testable offline with no LLM: unit tests on tool f
 
 ### Requirement: Packaging and documentation (MSP-R12)
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `feat-mcp-auto-install` (2026-08-31).
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `feat-mcp-auto-install` (2026-08-31). Modified by `docs-fastmcp-cap-drift` (issue #257, 2026-09-26) — the cap is `>=4,<5`.
 
-`pyproject.toml` SHALL declare `fastmcp>=3.4,<4` in `dependencies` and `sofer-mcp = "sofer.mcp_server:main"`; MAY retain `mcp` alias. READMEs SHALL document Install + AI/MCP with correct PEP 508 `name[extra] @ URL`, `uv tool` and `uvx --with`, and flip intro to included-by-default.
+`pyproject.toml` SHALL declare `fastmcp>=4,<5` in `dependencies` and `sofer-mcp = "sofer.mcp_server:main"`; MAY retain `mcp` alias. READMEs SHALL document Install + AI/MCP with correct PEP 508 `name[extra] @ URL`, `uv tool` and `uvx --with`, and flip intro to included-by-default.
 
 (Previously: only `optional-dependencies mcp` + script; README showed `pip install 'sofer[mcp]'`.)
 
@@ -478,13 +478,13 @@ The MCP server SHALL be fully testable offline with no LLM: unit tests on tool f
 
 - GIVEN built wheel
 - WHEN `entry_points.txt` + METADATA inspected
-- THEN `sofer-mcp = sofer.mcp_server:main` and unconditional `fastmcp>=3.4,<4` SHALL be present
+- THEN `sofer-mcp = sofer.mcp_server:main` and unconditional `fastmcp>=4,<5` SHALL be present
 
 #### Scenario: Alias optional
 
 - GIVEN wheel METADATA
 - WHEN `Provides-Extra` inspected
-- THEN `mcp` MAY be present mapping to `fastmcp>=3.4,<4; extra == 'mcp'`
+- THEN `mcp` MAY be present mapping to `fastmcp>=4,<5; extra == 'mcp'`
 
 #### Scenario: README Install correct
 

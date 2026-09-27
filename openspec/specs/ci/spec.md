@@ -3,15 +3,19 @@
 ## Purpose
 
 Contracts for sofer's continuous-integration presence: the total-coverage gate
-(CI-01..CI-03), CodeQL scanning cadence and config (CI-04..CI-05), and the
+(CI-01..CI-03), CodeQL scanning cadence and config (CI-04..CI-05), the
 declared config + documentation truth that keeps the gate enforced and
-discoverable (CI-06). The `packaging` spec remains the untouched distribution
-contract — release gating that stops publishing below the coverage floor lives
-here, not in `packaging`. The coverage run SHALL re-execute the complete test
-suite, holding the invariant pinned by `process-boundary` PB-05 (which SHALL
-remain unchanged), so the gate measures the same suite CI gates today.
+discoverable (CI-06), the static/type-gate posture (CI-07..CI-12), and the
+dependency-update hardening that keeps automated bumps compatible with the
+repository's coordinated declarations (CI-13..CI-14). The `packaging` spec
+remains the untouched distribution contract — release gating that stops
+publishing below the coverage floor lives here, not in `packaging`. The
+coverage run SHALL re-execute the complete test suite, holding the invariant
+pinned by `process-boundary` PB-05 (which SHALL remain unchanged), so the gate
+measures the same suite CI gates today.
 
 > Introduced by change `2026-09-13-ci-coverage-codeql` (archived 2026-09-13).
+> CI-13/CI-14 added by change `2026-09-26-harden-dependabot-bump-flow`.
 
 ## Requirements
 
@@ -632,6 +636,189 @@ that gate).
 
 ---
 
+### Requirement: Literal-free, consistency-guarded version declarations (CI-13)
+
+> Added by change `2026-09-26-harden-dependabot-bump-flow` (Dependabot CI
+> breakage #251/#252/#253). Before this change a static guard hardcoded the
+> `astral-sh/setup-uv` action ref (GitHub #251), so a consistent Dependabot
+> action bump failed eleven test jobs until a human edited the literal; no
+> guard asserted that an action ref is identical across workflows; and the
+> `.python-version` ↔ gate-job interpreter equality of CI-07 was verify-phase
+> only.
+
+Every declaration that decides **which tooling runs** and appears in more than
+one home SHALL be guarded by a static test that derives the expected value from
+one declaration home and SHALL carry **no version or action-ref literal of its
+own**, so a consistent bump or ref move edits declarations only and never a
+test. Specifically:
+
+- Every GitHub Action repository referenced under `.github/workflows/` SHALL
+  use exactly one ref across all workflow files — the same `owner/repo@ref`
+  value wherever that repository appears, in a step-level `uses` or a
+  job-level reusable-workflow `uses` (so `github/codeql-action/init` and
+  `github/codeql-action/analyze` move together) — so a partial bump fails
+  loudly instead of drifting silently.
+- The `lint` job of `.github/workflows/release.yml` SHALL use the same
+  `astral-sh/setup-uv` ref as the `lint` job of `.github/workflows/ci.yml`, and
+  the guard SHALL derive that ref from `ci.yml` rather than naming it.
+- `.python-version` SHALL equal the `python-version` pin of the `lint` and
+  `coverage` jobs of both `ci.yml` and `release.yml` — the CI-07 invariant,
+  promoted from verify-phase evidence to a static guard. The `test` jobs'
+  `${{ matrix.python-version }}` expression is excluded by design (it is the
+  support matrix, not a gate pin).
+
+These guards SHALL arm no new CI step: they run in the existing test/lint jobs
+that already execute `tests/test_ci_workflows.py`. A bump that moves every
+occurrence together SHALL leave them green with no test edit.
+
+#### Scenario: Action refs are consistent across workflows
+
+- GIVEN every workflow file under `.github/workflows/` (`.yml` or `.yaml`)
+- WHEN `tests/test_ci_workflows.py::test_workflow_action_refs_are_consistent_across_workflows`
+  groups every step-level and job-level `uses:` value by its action repository
+  (`owner/repo`) and collects the distinct refs
+- THEN each action repository SHALL map to exactly one ref, so a ref that moves
+  in one workflow but not another fails with the repository and the competing
+  refs
+
+#### Scenario: Release setup-uv parity is derived from ci.yml
+
+- GIVEN the `lint` job of `.github/workflows/ci.yml` and of `.github/workflows/release.yml`
+- WHEN `tests/test_ci_workflows.py::test_release_lint_job_runs_the_ci_lint_gates`
+  locates each job's `astral-sh/setup-uv` step by action name
+- THEN the release ref SHALL equal the CI ref, and the guard SHALL hold no
+  `setup-uv` version literal, so a consistent bump of both workflows needs no
+  test edit (GitHub #251)
+
+#### Scenario: Interpreter pin agrees across homes
+
+- GIVEN `.python-version` and the `lint` and `coverage` jobs of both workflows
+- WHEN `tests/test_ci_workflows.py::test_dev_interpreter_pin_matches_gate_jobs`
+  reads each setup-uv step's `with.python-version`
+- THEN every gate-job pin SHALL equal the `.python-version` value, so the local
+  and CI gate interpreters cannot diverge silently
+
+---
+
+### Requirement: Dependabot update policy (CI-14)
+
+> Added by change `2026-09-26-harden-dependabot-bump-flow`. Dependabot opened
+> three consecutively red PRs (#251/#252/#253). Two of the three classes are
+> bumps the bot cannot complete atomically: the coordinated `ruff` pin
+> (#252 — its version is declared in `pyproject.toml` twice, in
+> `.pre-commit-config.yaml`, and in `CONTRIBUTING.md`, and the `uv` ecosystem
+> can move only the first) and a `fastmcp` major (#253 — a runtime dependency
+> whose major changes the MCP SDK API, and whose declared `<4` cap Dependabot
+> rewrote to `<5` itself).
+
+`.github/dependabot.yml` SHALL declare an update policy that keeps automated
+bumps compatible with the repository's coordinated declarations and its
+review granularity:
+
+- The `uv` update SHALL `ignore` the `ruff` dependency entirely, so Dependabot
+  opens no `ruff` PR. The version is coordinated across the `pyproject.toml`
+  dev pin and `[tool.ruff] required-version`, the
+  `astral-sh/ruff-pre-commit` `rev` in `.pre-commit-config.yaml`, and the
+  `CONTRIBUTING.md` Code style section, forced to agree by CI-08; the manual
+  bump procedure SHALL be documented in `CONTRIBUTING.md`.
+- The `uv` update SHALL `ignore` `fastmcp` **major** updates, so a major is
+  only adopted by a deliberate, code-adapting change rather than a bot PR that
+  widens the declared cap (GitHub #253).
+- Every catch-all minor/patch group SHALL declare exactly
+  `update-types: ["minor", "patch"]` and SHALL NOT declare `major`, so major
+  updates stay out of the routine sweep and arrive individually for explicit
+  review.
+
+This requirement SHALL add no workflow step and SHALL NOT weaken any existing
+gate: the full test matrix remains the code-level barrier that a major must
+pass.
+
+#### Scenario: uv updates ignore the coordinated ruff pin
+
+- GIVEN `.github/dependabot.yml` parsed
+- WHEN `tests/test_ci_workflows.py::test_dependabot_ignores_the_coordinated_ruff_pin`
+  reads the `uv` update's `ignore` list
+- THEN exactly one entry SHALL name `ruff` and SHALL NOT narrow the ignore with
+  `update-types`, so Dependabot opens no `ruff` PR at any update type
+
+#### Scenario: uv updates ignore fastmcp majors
+
+- GIVEN `.github/dependabot.yml` parsed
+- WHEN `tests/test_ci_workflows.py::test_dependabot_ignores_fastmcp_majors`
+  reads the `uv` update's `ignore` list
+- THEN exactly one entry SHALL name `fastmcp` and SHALL declare
+  `update-types: ["version-update:semver-major"]`, so a major is never adopted
+  automatically while minor/patch updates remain enabled
+
+#### Scenario: minor/patch groups exclude majors
+
+- GIVEN `.github/dependabot.yml` parsed
+- WHEN `tests/test_ci_workflows.py::test_dependabot_groups_exclude_majors`
+  reads every update's `groups`
+- THEN every group SHALL declare `update-types` exactly
+  `["minor", "patch"]`, so a major cannot be silently absorbed into the routine
+  sweep and a group's scope cannot drift from the declared sweep
+
+---
+
+### Requirement: Least-privilege permissions in the release workflow (CI-15)
+
+> Added by change `2026-09-26-ci-release-least-privilege` (GitHub #261). The release workflow
+> declared `permissions: contents: write` at the **workflow** root, so every job — `lint`, `test`,
+> `coverage`, `build`, `citation-check` — ran with write access to the repository even though only
+> the `release` job needs it.
+
+`.github/workflows/release.yml` SHALL scope write access to the job that needs it: the workflow-level
+`permissions` table SHALL NOT grant any `write` scope and SHALL be the read-only `contents: read`, so
+every gate/build job runs least-privilege. Only the `release` job — the one calling
+`softprops/action-gh-release` — SHALL declare `contents: write`, and SHALL NOT grant any other write
+scope. Every other job SHALL NOT declare a `write` grant. A static guard in
+`tests/test_ci_workflows.py` SHALL assert this contract, mirroring the per-workflow permission checks
+CI-04 uses.
+
+#### Scenario: Workflow-level permissions grant no write access
+
+- GIVEN `.github/workflows/release.yml` parsed
+- WHEN its workflow-level `permissions` table is inspected
+- THEN no scope SHALL be `write`
+- AND `contents` SHALL be `read`, so `lint`, `test`, `coverage`, `build`, and `citation-check`
+  all run read-only
+
+#### Scenario: Only the release job declares contents write
+
+- GIVEN `.github/workflows/release.yml`
+- WHEN every job's `permissions` table is inspected
+- THEN the `release` job SHALL declare `contents: write` (the scope `softprops/action-gh-release`
+  needs) and no other write scope
+- AND no other job SHALL declare any `write` grant
+
+---
+
+### Requirement: CI workflow gates push and pull requests on long-lived branches (CI-16)
+
+> Added by change `2026-09-26-ci-push-trigger` (GitHub #262). Before this change `ci.yml`
+> contained no `push` trigger, so a direct push to `dev` or `main` bypassed the
+> lint/test/coverage gates the PR pipeline enforces.
+
+`.github/workflows/ci.yml` SHALL trigger on `push` to `main` and `dev` and on `pull_request`
+targeting `main` and `dev`, mirroring `.github/workflows/codeql.yml`'s branch list. Every
+commit that lands on a long-lived branch SHALL therefore be gated by the `lint`, `test`, and
+`coverage` jobs, not only commits that arrive through a pull request. A static guard in
+`tests/test_ci_workflows.py` SHALL assert the trigger contract so it cannot silently regress.
+
+#### Scenario: Push trigger targets main and dev
+
+- GIVEN `.github/workflows/ci.yml` parsed
+- WHEN its `push` trigger is inspected
+- THEN `push.branches` SHALL be `[main, dev]`, so a direct push to either long-lived branch
+  is gated
+
+#### Scenario: Pull request trigger still targets main and dev
+
+- GIVEN `.github/workflows/ci.yml` parsed
+- WHEN its `pull_request` trigger is inspected
+- THEN `pull_request.branches` SHALL be `[main, dev]`
+
 ## Test Mapping
 
 Every scenario SHALL map to a green test or to verify-phase static evidence
@@ -683,3 +870,13 @@ evidence recorded in the verify report.
 | CI-12 | Release lint job runs the three missing gates | test:tests/test_ci_workflows.py — `test_release_lint_job_runs_the_ci_lint_gates`: YAML inspection of the release `lint` job steps |
 | CI-12 | Release lint gate invocations match the CI lint job | test:tests/test_ci_workflows.py — `test_release_lint_job_mirrors_ci_lint_invocations`: YAML inspection of both `lint` jobs |
 | CI-12 | Release header states the enforced parity | test:tests/test_ci_workflows.py — `test_release_header_states_lint_parity_without_the_stale_cov06_claim`: full-text scan of the release header comment |
+| CI-13 | Action refs are consistent across workflows | test:tests/test_ci_workflows.py — `test_workflow_action_refs_are_consistent_across_workflows`: YAML inspection of every `.github/workflows/*.yml`, grouping `uses` values by action |
+| CI-13 | Release setup-uv parity is derived from ci.yml | test:tests/test_ci_workflows.py — `test_release_lint_job_runs_the_ci_lint_gates`: YAML inspection of both `lint` jobs, ref derived by action name |
+| CI-13 | Interpreter pin agrees across homes | test:tests/test_ci_workflows.py — `test_dev_interpreter_pin_matches_gate_jobs`: `.python-version` read against every gate job's setup-uv `python-version` |
+| CI-14 | uv updates ignore the coordinated ruff pin | test:tests/test_ci_workflows.py — `test_dependabot_ignores_the_coordinated_ruff_pin`: YAML inspection of the `uv` update's `ignore` list |
+| CI-14 | uv updates ignore fastmcp majors | test:tests/test_ci_workflows.py — `test_dependabot_ignores_fastmcp_majors`: YAML inspection of the `uv` update's `ignore` list |
+| CI-14 | minor/patch groups exclude majors | test:tests/test_ci_workflows.py — `test_dependabot_groups_exclude_majors`: YAML inspection of every update's `groups` update-types |
+| CI-15 | Workflow-level permissions grant no write access | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of release.yml workflow-level permissions |
+| CI-15 | Only the release job declares contents write | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of every release.yml job's permissions |
+| CI-16 | Push trigger targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
+| CI-16 | Pull request trigger still targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
