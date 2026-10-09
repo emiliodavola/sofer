@@ -1291,8 +1291,51 @@ class TestMcpCliHelp:
         # help sentence renders "(names only, values never written)", so the
         # stable substring is the prefix ending at "(names only".
         flat = re.sub(r"\s+", " ", out)
-        assert "codex, gemini and pi receive env forwarding (names only" in flat
+        assert "codex, gemini, pi and hermes receive env forwarding (names only" in flat
         assert "opencode entries carry no environment" in flat
+
+    def test_mcp_help_names_hermes_and_yaml(self, capsys):
+        """H-9: `sofer mcp --help` names hermes and its config.yaml file."""
+        import re
+
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "--help"])
+        flat = re.sub(r"\s+", " ", capsys.readouterr().out)
+        assert "hermes" in flat
+        assert "config.yaml" in flat
+
+    def test_mcp_add_help_documents_yaml_and_single_scope(self, capsys):
+        """H-9: the add description carries the ${KEY} form, YAML preservation
+        and the Hermes single-scope sentence."""
+        import re
+
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "add", "--help"])
+        flat = re.sub(r"\s+", " ", capsys.readouterr().out)
+        assert "hermes" in flat
+        assert "${KEY}" in flat
+        assert "YAML" in flat
+        assert "preserves the rest of the document" in flat
+        assert "TOML" in flat
+        assert "strip comments" in flat
+        assert "single user-scope config" in flat
+        assert "--scope project" in flat
+
+    def test_mcp_agent_choices_include_hermes(self, capsys):
+        """H-9: both add and remove `--agent` choices list hermes."""
+        import re
+
+        import pytest
+
+        for command in ("add", "remove"):
+            with pytest.raises(SystemExit):
+                cli._build_parser().parse_args(["mcp", command, "--help"])
+            flat = re.sub(r"\s+", " ", capsys.readouterr().out)
+            assert "hermes" in flat
 
     def test_mcp_help_native_delegation_fidelity(self, capsys):
         """Both help texts document the native fidelity gate (#167/#232)."""
@@ -2705,6 +2748,99 @@ class TestMcpNativeDelegationFidelityCli:
         # Second call returns False with no fidelity reason -> generic message.
         assert "native remove failed, falling back to file edit" in err
         assert "cannot express" not in err
+
+
+class TestHermesCli:
+    """H-5: the single-scope note reaches stderr in add and remove, dry-run too."""
+
+    def test_add_project_scope_prints_note_and_writes_user_file(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="hermes", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "hermes reads a single user-scope config" in err
+        assert "--scope project has no separate file" in err
+        assert str(hermes_home / "config.yaml") in err
+        assert (hermes_home / "config.yaml").exists()
+        assert not (proj / ".hermes").exists()
+
+    def test_add_project_scope_dry_run_prints_note_without_writing(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="hermes", scope="project", cwd=str(proj), dry_run=True)
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "hermes reads a single user-scope config" in err
+        assert not (hermes_home / "config.yaml").exists()
+
+    def test_remove_project_scope_prints_note(self, tmp_path, monkeypatch, capsys) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "mcp_servers:\n  sofer:\n    command: sofer-mcp\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(Namespace(agent="hermes", scope="project", dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "hermes reads a single user-scope config" in err
+        assert str(hermes_home / "config.yaml") in err
+
+    def test_remove_project_scope_dry_run_prints_note_without_mutation(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        path = hermes_home / "config.yaml"
+        path.write_text("mcp_servers:\n  sofer:\n    command: sofer-mcp\n", encoding="utf-8")
+        before = path.read_bytes()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(Namespace(agent="hermes", scope="project", dry_run=True))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "hermes reads a single user-scope config" in err
+        assert path.read_bytes() == before
+
+    def test_user_scope_prints_no_single_scope_note(self, tmp_path, monkeypatch, capsys) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(Namespace(agent="hermes", scope="user", cwd=None, dry_run=False))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "single user-scope config" not in err
+        assert "--scope project" not in err
+        assert (hermes_home / "config.yaml").exists()
 
 
 class TestInitMoveExistingCoverage:

@@ -1,5 +1,5 @@
 """
-MCP registration automation for opencode, codex, gemini, pi, and YAML-config agents.
+MCP registration automation for opencode, codex, gemini, pi and hermes.
 
 Provides per-agent adapters (path resolution, JSON/TOML/YAML I/O, merge,
 backup, atomic write, delegation probe) and entry builders. The CLI
@@ -17,21 +17,26 @@ Each agent has a distinct on-disk shape:
 - codex: ``config.toml`` TOML ``[mcp_servers.sofer] command,cwd,env_vars``
 - gemini: ``settings.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
 - pi: ``mcp.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
-- yaml agents: a YAML ``<key>.<name>`` mapping (``command``, ``cwd``, ``env``),
+- hermes: ``config.yaml`` YAML ``mcp_servers.sofer={command:"sofer-mcp",cwd,env}``,
   written by the surgical :mod:`sofer._yaml` writer instead of a
   whole-document serialization.
 
 All writes are idempotent, preserve unrelated keys, create a single
 ``.bak`` backup before the first mutation, and use an atomic
 ``tmp+os.replace`` commit. Codex ``env_vars`` and the ``env`` mappings of
-Gemini/Pi persist env NAMES only (an allow-list of keys present in the
+Gemini/Pi/Hermes persist env NAMES only (an allow-list of keys present in the
 environment) — secret values (``HF_TOKEN``, ``SOFER_MCP_APPROVAL_PHRASE``)
 are never written to disk. Codex/Gemini use a bare ``$KEY`` reference; Pi's
-``pi-mcp-adapter`` only interpolates braced ``${KEY}`` references, so Pi
-entries use that form. ``command`` string/array variations are normalized
-before comparison. Native delegation (``codex``/``gemini``) is probed via
-``shutil.which`` + ``--help`` with a timeout and falls back to file-edit;
-opencode and pi always use file-edit.
+``pi-mcp-adapter`` and Hermes only interpolate braced ``${KEY}`` references,
+so Pi and Hermes entries use that form. ``command`` string/array variations
+are normalized before comparison. Native delegation (``codex``/``gemini``) is
+probed via ``shutil.which`` + ``--help`` with a timeout and falls back to
+file-edit; opencode, pi and hermes always use file-edit.
+
+Hermes reads a single config file with no distinct project-scope file
+(``project_scope=False``), so project scope resolves to the same user file and
+:func:`single_scope_note` names the substitution on stderr rather than
+silently writing a file Hermes never reads.
 
 Native delegation is **fidelity-gated** (#167, #232): it is used only when the
 native CLI can express the same registration the file edit would write. When env
@@ -73,6 +78,12 @@ _SOFER_ENTRY_NAME = "sofer"
 _YAML_SUFFIXES = (".yaml", ".yml")
 """File suffixes that select the ``yaml`` config format."""
 
+_SINGLE_SCOPE_NOTE = (
+    "  !  {agent} reads a single user-scope config; --scope project has no "
+    "separate file, using {path}"
+)
+"""Stderr note naming the single-scope substitution (rule 1: one home)."""
+
 
 class Adapter(TypedDict):
     """Single-source descriptor for one MCP agent.
@@ -108,6 +119,11 @@ class Adapter(TypedDict):
         user_env_dir: Environment variable naming a directory that overrides
             the user-scope config directory (the file name is
             ``user_parts[-1]``); ``None`` for agents without such an override.
+        project_scope: Whether the agent has a distinct project-scope config
+            file. ``False`` for Hermes, which reads a single config resolved by
+            ``user_parts`` / ``user_env_dir``; project scope therefore resolves
+            to that same file and the CLI names the substitution via
+            :func:`single_scope_note`.
     """
 
     fmt: Literal["json", "toml", "yaml"]
@@ -121,6 +137,7 @@ class Adapter(TypedDict):
     native_env: bool
     native_scope: bool
     user_env_dir: str | None
+    project_scope: bool
 
 
 ADAPTERS: dict[AgentName, Adapter] = {
@@ -136,6 +153,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "user_env_dir": None,
+        "project_scope": True,
     },
     "codex": {
         "fmt": "toml",
@@ -149,6 +167,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "user_env_dir": None,
+        "project_scope": True,
     },
     "gemini": {
         "fmt": "json",
@@ -162,6 +181,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": True,
         "user_env_dir": None,
+        "project_scope": True,
     },
     "pi": {
         "fmt": "json",
@@ -175,6 +195,24 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "user_env_dir": "PI_CODING_AGENT_DIR",
+        "project_scope": True,
+    },
+    # Hermes reads a single user-scope ``config.yaml`` and has no distinct
+    # project-scope file. ``project_parts`` stays empty so the Adapter shape is
+    # uniform; ``project_scope=False`` is the capability that is read.
+    "hermes": {
+        "fmt": "yaml",
+        "key": "mcp_servers",
+        "user_parts": (".hermes", "config.yaml"),
+        "project_parts": (),
+        "command": "string",
+        "adds_type_local": False,
+        "env": "refs_braced",
+        "delegates": False,
+        "native_env": False,
+        "native_scope": False,
+        "user_env_dir": "HERMES_HOME",
+        "project_scope": False,
     },
 }
 
@@ -237,7 +275,11 @@ def resolve_config_path(
     3. ``Path.home()`` joined with ``user_parts`` — the documented default.
 
     Project scope resolves under *cwd* (or ``Path.cwd()`` when ``None``) and
-    ignores ``user_config``: the declared file is a *user*-scope concept.
+    ignores ``user_config``: the declared file is a *user*-scope concept. When
+    the adapter declares ``project_scope=False`` (Hermes) there is no separate
+    project file, so project scope falls back to the **user** resolution —
+    ignoring ``user_config`` exactly as project scope already does — and the
+    CLI names the substitution via :func:`single_scope_note`.
 
     Args:
         agent: Target agent name.
@@ -251,9 +293,13 @@ def resolve_config_path(
         Absolute path to the agent's config file.
     """
     spec = _adapter(agent)
-    if scope == "user":
-        if user_config is not None and user_config.strip():
-            return Path(user_config).expanduser().resolve()
+    # A single-scope agent (``project_scope=False``) has no project file, so
+    # project scope resolves like user scope. ``user_config`` stays a user-scope
+    # concept, so it is honored only for an explicit ``scope="user"`` request.
+    user_scope = scope == "user" or not spec["project_scope"]
+    if scope == "user" and user_config is not None and user_config.strip():
+        return Path(user_config).expanduser().resolve()
+    if user_scope:
         env_dir = spec["user_env_dir"]
         override = os.environ.get(env_dir) if env_dir else None
         if override:
@@ -261,6 +307,31 @@ def resolve_config_path(
         return Path.home().joinpath(*spec["user_parts"])
     base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
     return base.joinpath(*spec["project_parts"])
+
+
+def single_scope_note(agent: AgentName, scope: Scope, path: Path) -> str | None:
+    """Return the single-scope substitution note for *agent*, or ``None``.
+
+    Hermes reads a single user-scope ``config.yaml`` (``project_scope=False``),
+    so a ``--scope project`` request resolves to that same file; writing a
+    project-local file Hermes never reads would be a silent no-op (issue #272).
+    The note names the substitution and the resolved file so the caller can see
+    it, mirroring :func:`home_mismatch_warning`'s informational style.
+
+    Args:
+        agent: Target agent name.
+        scope: Requested ``"user"`` or ``"project"`` scope.
+        path: The path :func:`resolve_config_path` returned.
+
+    Returns:
+        A stderr-ready message when *agent* is single-scope and *scope* is
+        ``project``, otherwise ``None``.
+    """
+    spec = ADAPTERS.get(agent)
+    project_scope = spec["project_scope"] if spec is not None else True
+    if scope != "project" or project_scope:
+        return None
+    return _SINGLE_SCOPE_NOTE.format(agent=agent, path=path)
 
 
 def _account_home() -> Path | None:
@@ -372,6 +443,9 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
     - pi: ``env`` is a mapping of known key -> ``${KEY}`` reference — Pi's
       ``pi-mcp-adapter`` only interpolates the braced form, so the bare
       ``$KEY`` used by Gemini would be persisted literally
+    - hermes: ``env`` is a mapping of known key -> ``${KEY}`` reference,
+      the same braced form as Pi (Hermes interpolates it, the bare ``$KEY``
+      would be persisted literally)
     - opencode: no env forwarding (returns minimal entry); the entry stays
       env-less and the selection-time warning when env would be dropped is
       the CLI's responsibility

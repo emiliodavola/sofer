@@ -698,22 +698,24 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
            warning names the reason (``env forwarding`` / ``project scope``,
            NAMES only), and the file-edit path runs; any other native failure
            (raise or non-zero exit) falls back with the generic message.
-        5. File-edit path: ``resolve_config_path`` → ``read_config``
-           (unreadable/malformed → print to stderr, return 1, no backup/write)
-           → ``build_entry`` (absolute cwd, env forwarding per agent) →
-           ``merge`` (normalize Codex command string/array, preserve other
-           servers, no write when unchanged) → ``--dry-run`` guard (no
+        5. File-edit path: ``resolve_config_path`` → ``single_scope_note``
+           (a single-scope agent under ``--scope project`` prints the
+           substitution to stderr here, before the read/merge/dry-run branch) →
+           ``read_config`` (unreadable/malformed → print to stderr, return 1,
+           no backup/write) → ``build_entry`` (absolute cwd, env forwarding per
+           agent) → ``merge`` (normalize Codex command string/array, preserve
+           other servers, no write when unchanged) → ``--dry-run`` guard (no
            mutation) → ``backup`` (single ``.bak`` copy2 overwrite) →
            ``atomic_write`` (tmp in same dir + ``os.replace``).
         6. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
 
         Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
-        from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini
-        and Pi receive an ``env`` name list (NAMES only — values are never
-        persisted; Pi uses the ``${KEY}`` form it interpolates), opencode
-        receives no env. When opencode (or the opencode member of ``all``) is
-        chosen with known env keys present, the step-3 warning is printed once
-        per run and names the variables that cannot be forwarded.
+        from ``os.environ``; Codex receives an ``env_vars`` allow-list, Gemini,
+        Pi and Hermes receive an ``env`` name list (NAMES only — values are
+        never persisted; Pi and Hermes use the ``${KEY}`` form they interpolate),
+        opencode receives no env. When opencode (or the opencode member of
+        ``all``) is chosen with known env keys present, the step-3 warning is
+        printed once per run and names the variables that cannot be forwarded.
     """
     # Expand agent
     raw_agent: str = getattr(args, "agent")
@@ -815,6 +817,12 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
         # scope ignores the anchor and resolves under Path.home().
         anchor = cwd_resolved if scope == "project" else None
         path = mcp_registration.resolve_config_path(agent, _scope, anchor, user_config)
+        # Single-scope agents (Hermes) have no project file: name the
+        # substitution on stderr before the read/merge/dry-run branch so
+        # ``--dry-run`` sees it too (issue #272).
+        note = mcp_registration.single_scope_note(agent, _scope, path)
+        if note is not None:
+            print(note, file=sys.stderr)
 
         try:
             existing, _fmt = mcp_registration.read_config(path)
@@ -863,9 +871,11 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
            ``delegate_remove`` declines, a stderr warning names ``project
            scope``, and the file-edit path runs; any other native failure
            falls back with the generic message.
-        3. File-edit: ``resolve_config_path`` → ``read_config``
-           (unreadable → exit 1, no backup/write) → ``remove_entry``
-           (preserve other servers, no write when absent) →
+        3. File-edit: ``resolve_config_path`` → ``single_scope_note``
+           (a single-scope agent under ``--scope project`` prints the
+           substitution to stderr here, before the read/dry-run branch) →
+           ``read_config`` (unreadable → exit 1, no backup/write) →
+           ``remove_entry`` (preserve other servers, no write when absent) →
            ``--dry-run`` guard → ``backup`` → ``atomic_write``.
         4. Aggregate exit codes — 0 iff all succeed else 1.
 
@@ -925,6 +935,11 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
                 )
 
         path = mcp_registration.resolve_config_path(agent, _scope, None, user_config)
+        # Same single-scope note as ``add``: name the substitution before the
+        # read/dry-run branch so ``--dry-run`` sees it too (issue #272).
+        note = mcp_registration.single_scope_note(agent, _scope, path)
+        if note is not None:
+            print(note, file=sys.stderr)
         try:
             existing, _fmt2 = mcp_registration.read_config(path)
         except Exception as exc:
@@ -1685,13 +1700,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── mcp ───────────────────────────────────────────────────────
     mcp = sub.add_parser(
         "mcp",
-        help="Register sofer-mcp with AI agents (opencode, codex, gemini, pi).",
+        help="Register sofer-mcp with AI agents (opencode, codex, gemini, pi, hermes).",
         description=(
             "Register or remove the ``sofer-mcp`` MCP server from AI agent "
             "configurations. Supports ``opencode`` (opencode.json), ``codex`` "
-            "(config.toml), ``gemini`` (settings.json), and ``pi`` (mcp.json) "
-            "with idempotent merge, backup to ``.bak``, atomic write, and "
-            "per-agent env forwarding. Use ``--agent all`` to target every agent."
+            "(config.toml), ``gemini`` (settings.json), ``pi`` (mcp.json) and "
+            "``hermes`` (config.yaml) with idempotent merge, backup to ``.bak``, "
+            "atomic write, and per-agent env forwarding. Use ``--agent all`` to "
+            "target every agent."
         ),
     )
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1708,12 +1724,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "be an existing directory, and a tree outside the home is accepted "
             "with a warning naming it). ``--user-config`` states the user-scope "
             "config file explicitly - it wins over the adapter's env override and "
-            "the home default, and it is rejected with ``--agent all``. TOML "
-            "edits may strip comments. "
-            "Env: codex, gemini and pi receive env forwarding (names only, values "
-            "never written; pi uses ${KEY} references); opencode entries carry no "
+            "the home default, and it is rejected with ``--agent all``. A YAML "
+            "config edit preserves the rest of the document (comments, key order, "
+            "unrelated keys); a TOML edit may strip comments. "
+            "Env: codex, gemini, pi and hermes receive env forwarding (names only, "
+            "values never written; gemini uses $KEY references, pi and hermes use "
+            "${KEY} references); opencode entries carry no "
             "environment, and a warning is printed on stderr when HF_TOKEN or "
             "SOFER_MCP_APPROVAL_PHRASE are set with --agent opencode (or all). "
+            "hermes reads a single user-scope config, so --scope project resolves "
+            "to that same file and the substitution is named on stderr. "
             "Native codex/gemini delegation is used only when it can forward the "
             "same env NAMES and scope as the file edit; otherwise the config file "
             "is edited and a warning naming the reason is printed on stderr."
@@ -1758,7 +1778,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Remove the ``sofer`` entry idempotently. Preserves other "
             "servers, backs up before edit, and does no write when the entry "
-            "is already absent. Prefers native ``mcp remove`` only when it can "
+            "is already absent. A YAML config edit preserves the rest of the "
+            "document, while a TOML edit may strip comments. hermes reads a "
+            "single user-scope config, so --scope project resolves to that "
+            "same file and the substitution is named on stderr. Prefers native "
+            "``mcp remove`` only when it can "
             "express the requested scope; otherwise it edits the config file "
             "and prints a warning naming the reason on stderr."
         ),
