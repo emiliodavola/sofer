@@ -138,7 +138,7 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 | Topic | What to do | Why / detail |
 | ------- | ------------ | -------------- |
 | **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
-| **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
+| **MCP `cwd` param** | The server root is chosen at startup by `--root PATH` or the `SOFER_MCP_ROOT` environment variable (the argument wins; with neither, the resolved process cwd). `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
 | **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `flatten_first_level`. |
 | **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
 | **Console encoding** | Nothing to do: the CLI never aborts on a character the active console encoding cannot represent — the character is substituted in the emitted text and the command keeps its documented exit code (CLI-R11). Unicode-capable terminals (Windows Terminal, VS Code, macOS, Linux) are unaffected and keep sofer's `⚠`/`✓`/`✗`/`→` markers. | Affects streams that are not a Unicode-capable console: output redirected to a file or pipe (`sofer scan --help > out.txt`), an IDE/CI capture, or a legacy code page forced with `PYTHONIOENCODING=cp1252`. The unencodable character is written as a placeholder (or an escape sequence) instead of raising `UnicodeEncodeError`. To keep every marker, set `PYTHONIOENCODING=utf-8`. |
@@ -633,8 +633,12 @@ Optional `delimiter` / `encoding` on the CSV-reading tools (`sofer_codebook`, `s
 claude mcp add sofer -- uv run sofer-mcp
 ```
 
-The server inherits its working directory — pass an explicit root when the
-agent should only reach a specific tree (see below).
+The server's containment root defaults to its working directory (the process
+cwd, resolved). Point it at a specific tree with `--root PATH` or the
+`SOFER_MCP_ROOT` environment variable — the argument wins when both are set.
+Any path outside that root is refused with `PathOutsideRootError` (fail
+closed), so the agent can only reach the chosen tree (see the security model
+below).
 
 ### Register sofer-mcp with AI agents (opencode, codex, gemini, pi)
 
@@ -702,7 +706,8 @@ Per-agent locations and shapes:
 ### Security model
 
 - **Path containment (server root).** The server captures a root at build
-  time (`build_server(root=...)`; default: the process cwd, resolved) and
+  time (`build_server(root=...)`; default: the process cwd, resolved;
+  overridden by `--root`/`SOFER_MCP_ROOT` at the `sofer-mcp` entry point) and
   refuses any tool argument, resource URI, `output` directory, or
   `[[file]]` local/remote that resolves outside it — including `..`
   traversal, absolute paths, drive/UNC-prefixed remotes, and symlink/junction

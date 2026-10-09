@@ -146,7 +146,7 @@ reciente que el Parquet más nuevo).
 | Tema | Qué hacer | Por qué / detalle |
 | ------ | ----------- | ------------------ |
 | **CWD en CLI** | Ejecuta siempre `sofer init` desde el directorio del dataset (p. ej. `C:\Users\...\test`). La CLI usa `Path.cwd()` en vivo — `test.toml` y `raw/` se crean exactamente donde la ejecutes. | Ejecutarlo desde el padre crea `test.toml`/`raw/` en el lugar equivocado. Haz `cd` al directorio del dataset primero. |
-| **Parámetro `cwd` en MCP** | `sofer_init` tiene un `cwd` opcional. Cuando `cwd` es `None` usa el `Path.cwd()` en vivo solo si es un **descendiente estricto** de la raíz del servidor; en caso contrario la llamada es RECHAZADA (fails closed) indicando el argumento requerido `cwd="<directorio del dataset>"` — **no** vuelve a la raíz del servidor. Un `cwd="C:/Users/.../Desktop/test"` explícito sigue soportado como `effective_root` por llamada vía `_contained_path` y nunca muta la raíz global. | Rechaza con `PathOutsideRootError` para `cwd` explícito fuera de la raíz (sin `../` por encima, sin `C:/evil`, sin escape por symlink). El caso auto con `cwd=None` está contenido por una verificación de descendiente estricto `is_relative_to` — nunca escapa ni muta `_SERVER_ROOT`, y rechaza (indicando `cwd`) en vez de volver a la raíz cuando el `cwd` en vivo no es un descendiente estricto. |
+| **Parámetro `cwd` en MCP** | La raíz del servidor se elige al arrancar con `--root PATH` o la variable de entorno `SOFER_MCP_ROOT` (el argumento gana; con ninguno, el cwd del proceso, resuelto). `sofer_init` tiene un `cwd` opcional. Cuando `cwd` es `None` usa el `Path.cwd()` en vivo solo si es un **descendiente estricto** de la raíz del servidor; en caso contrario la llamada es RECHAZADA (fails closed) indicando el argumento requerido `cwd="<directorio del dataset>"` — **no** vuelve a la raíz del servidor. Un `cwd="C:/Users/.../Desktop/test"` explícito sigue soportado como `effective_root` por llamada vía `_contained_path` y nunca muta la raíz global. | Rechaza con `PathOutsideRootError` para `cwd` explícito fuera de la raíz (sin `../` por encima, sin `C:/evil`, sin escape por symlink). El caso auto con `cwd=None` está contenido por una verificación de descendiente estricto `is_relative_to` — nunca escapa ni muta `_SERVER_ROOT`, y rechaza (indicando `cwd`) en vez de volver a la raíz cuando el `cwd` en vivo no es un descendiente estricto. |
 | **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `flatten_first_level`. |
 | **Separadores de ruta** | Escribe siempre `raw/` y `cache/` con barras `/` en el TOML (`raw/example.csv`, `cache/file.csv`). CLI y MCP normalizan internamente a POSIX. | Funciona en Windows y POSIX; `ntpath.splitdrive` trataría `C:/...` como absoluto, pero `raw/...` permanece relativo y contenido. |
 | **Codificación de consola** | Nada que hacer: la CLI nunca aborta por un carácter que la codificación activa de la consola no puede representar — el carácter se sustituye en el texto emitido y el comando conserva su código de salida documentado (CLI-R11). Las terminales con Unicode (Windows Terminal, VS Code, macOS, Linux) no se ven afectadas y mantienen los marcadores `⚠`/`✓`/`✗`/`→` de sofer. | Afecta a los flujos que no son una consola con Unicode: salida redirigida a un archivo o tubería, captura de IDE/CI, o una página de códigos antigua forzada con `PYTHONIOENCODING=cp1252`. El carácter no representable se escribe como marcador de posición (o secuencia de escape) en lugar de lanzar `UnicodeEncodeError`. Para conservar todos los marcadores, define `PYTHONIOENCODING=utf-8`. |
@@ -667,8 +667,12 @@ Args: `config` (ruta TOML, debe permanecer bajo la raíz del servidor), `dataset
 claude mcp add sofer -- uv run sofer-mcp
 ```
 
-El servidor hereda su directorio de trabajo — pasa una raíz explícita cuando el
-agente solo deba alcanzar un árbol concreto (ver más abajo).
+La raíz de contención del servidor es, por defecto, su directorio de trabajo
+(el cwd del proceso, resuelto). Apúntala a un árbol concreto con `--root PATH`
+o la variable de entorno `SOFER_MCP_ROOT` — el argumento gana cuando ambos
+están definidos. Cualquier ruta fuera de esa raíz se rechaza con
+`PathOutsideRootError` (fails closed), de modo que el agente solo alcanza el
+árbol elegido (ver el modelo de seguridad más abajo).
 
 ### Registrar sofer-mcp con agentes de IA (opencode, codex, gemini, pi)
 
@@ -737,7 +741,8 @@ Ubicaciones y formas por agente:
 
 - **Contención de rutas (raíz del servidor).** El servidor captura una raíz en
   tiempo de construcción (`build_server(root=...)`; por defecto: el cwd del
-  proceso, resuelto) y rechaza cualquier argumento de herramienta, URI de
+  proceso, resuelto; `--root`/`SOFER_MCP_ROOT` la sobrescriben en el punto de
+  entrada `sofer-mcp`) y rechaza cualquier argumento de herramienta, URI de
   recurso, directorio `output` o `local`/`remote` de `[[file]]` que se resuelva
   fuera de ella — incluyendo la travesía `..`, las rutas absolutas, los
   remotes con prefijo de unidad/UNC y los escapes por symlink/junction. El

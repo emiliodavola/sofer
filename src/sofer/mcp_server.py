@@ -56,6 +56,7 @@ any phrase-derived value, and the configured env value never appear in them.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hmac
 import io
@@ -64,7 +65,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -264,6 +265,16 @@ _APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE: str = (
     f"{_PHRASE_LAUNCH_ENV_FACT}; {_PHRASE_RESTART_FACT} - "
     "a human approval phrase is required for any Hugging Face publish"
 )
+
+# Containment-root process-start configuration (issue #273). ``main`` resolves
+# the root exactly once by precedence: explicit ``--root PATH`` >
+# ``SOFER_MCP_ROOT`` > the resolved process cwd (the documented default). Both
+# names are module constants (AGENTS.md rule 1); a blank or whitespace-only env
+# value is treated as unset, matching the blank approval-phrase treatment.
+_MCP_ROOT_ENV_VAR: str = "SOFER_MCP_ROOT"
+_MCP_ROOT_FLAG: str = "--root"
+_MCP_ROOT_MISSING_REASON: str = "does not exist"
+_MCP_ROOT_NOT_DIR_REASON: str = "exists but is not a directory"
 
 
 def _with_untrusted_note(text: str) -> str:
@@ -3453,12 +3464,69 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     return server
 
 
-def main() -> None:
+def _resolve_root(argv: Sequence[str] | None) -> Path:
+    """Resolve the containment root from the command line and environment.
+
+    Precedence (documented, MSP-R01): explicit ``--root PATH`` >
+    ``SOFER_MCP_ROOT`` > the resolved process cwd. A blank or whitespace-only
+    value from either source is treated as unset. The result is always
+    ``expanduser()``-ed and ``resolve()``-d so the path validated at startup is
+    the same absolute path the containment checks use.
+
+    Args:
+        argv: Argument vector without the program name; ``None`` reads
+            ``sys.argv[1:]`` (the console-script default).
+
+    Returns:
+        The resolved containment root; existence/directory validation is left
+        to :func:`main` so the refusal message can name the resolved path.
+    """
+    parser = argparse.ArgumentParser(
+        prog="sofer-mcp",
+        description="Run sofer's MCP server over stdio.",
+    )
+    parser.add_argument(
+        _MCP_ROOT_FLAG,
+        dest="root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Containment root: the directory every path-bearing tool argument "
+            "and resource URI must resolve inside. Overrides "
+            f"{_MCP_ROOT_ENV_VAR}; with neither set, the root defaults to the "
+            "resolved process cwd."
+        ),
+    )
+    args = parser.parse_args(argv)
+    raw = args.root if args.root is not None else os.environ.get(_MCP_ROOT_ENV_VAR)
+    if raw is None or not raw.strip():
+        return Path.cwd().resolve()
+    return Path(raw).expanduser().resolve()
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """Entry point for the ``sofer-mcp`` console script (MSP-R01).
 
-    Builds the server with the default root (the process cwd, resolved) and
-    approval phrase (``SOFER_MCP_APPROVAL_PHRASE``) and runs it over stdio.
-    No remote/streamable-http transport is exposed in v1.
+    Resolves the containment root with the documented precedence — explicit
+    ``--root PATH`` > ``SOFER_MCP_ROOT`` > the resolved process cwd — refuses
+    startup (non-zero exit and a message on stderr naming the resolved path)
+    when the resolved root does not exist or is not a directory, then builds
+    the server with that root and the approval phrase
+    (``SOFER_MCP_APPROVAL_PHRASE``) and runs it over stdio. No
+    remote/streamable-http transport is exposed in v1.
+
+    Args:
+        argv: Argument vector without the program name; ``None`` reads
+            ``sys.argv[1:]`` (the console-script default).
     """
-    server = build_server()
+    root = _resolve_root(argv)
+    if not root.is_dir():
+        reason = _MCP_ROOT_NOT_DIR_REASON if root.exists() else _MCP_ROOT_MISSING_REASON
+        print(
+            f"sofer-mcp: refusing to start: containment root {root} {reason} "
+            f"(from {_MCP_ROOT_FLAG} or {_MCP_ROOT_ENV_VAR})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    server = build_server(root=root)
     server.run("stdio")

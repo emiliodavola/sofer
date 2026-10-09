@@ -44,6 +44,7 @@ from conftest import (
     call_tool,
 )
 
+from sofer import mcp_server
 from sofer.mcp_server import build_server
 
 #: Offline happy-path fixture tree (dataset.toml + data.csv), PB-04.
@@ -137,6 +138,157 @@ class TestNestedCwd:
         assert (nested / "raw").is_dir()
         assert not (parent / "nested-ds.toml").exists()
         assert not (parent / "raw").exists()
+
+
+class _RunlessServer:
+    """Stub returned by the ``build_server`` spy in :class:`TestExplicitRoot`.
+
+    ``main()`` only calls ``run("stdio")``, which would block the test
+    session; this stub keeps the entry point in-process while the real
+    ``FastMCP`` instance captured by the spy serves the tool calls.
+    """
+
+    def run(self, transport: str) -> None:
+        """Accept the stdio transport request without starting a server."""
+
+
+class TestExplicitRoot:
+    """issue #273: ``main()`` resolves the containment root flag > env > cwd.
+
+    Drives the real entry point in-process (the checkout module, not a fresh
+    subprocess) by capturing the server ``main()`` builds and stubbing only
+    the blocking ``run("stdio")`` call — no new subprocess per test (PB-09
+    lean-spawn bound).
+    """
+
+    @staticmethod
+    def _drive_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> dict[str, Any]:
+        """Run ``main(argv)`` in-process and return the built root and server.
+
+        The ``build_server`` spy calls the real builder (so the captured
+        server is the real ``FastMCP``) but returns a runless stub, so
+        ``main`` never blocks on stdio.
+        """
+        captured: dict[str, Any] = {}
+        real_build_server = mcp_server.build_server
+
+        def _capturing_build_server(
+            root: Path | None = None, approval_phrase: str | None = None
+        ) -> Any:
+            captured["server"] = real_build_server(root=root, approval_phrase=approval_phrase)
+            captured["root"] = root
+            return _RunlessServer()
+
+        monkeypatch.setattr(mcp_server, "build_server", _capturing_build_server)
+        mcp_server.main(argv)
+        return captured
+
+    def test_root_flag_sets_containment_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_tool_config: Any
+    ) -> None:
+        """``--root PATH`` becomes the containment root; a path-bearing tool
+        resolves a dataset inside it through the client boundary."""
+        dataset_root = tmp_path / "dataset"
+        dataset_root.mkdir()
+        _make_dataset(dataset_root)
+
+        captured = self._drive_main(monkeypatch, ["--root", str(dataset_root)])
+
+        assert captured["root"] == dataset_root.resolve()
+        envelope = _call(
+            captured["server"],
+            "sofer_validate",
+            {"config": str(dataset_root / "dataset.toml")},
+        ).data
+        assert envelope["ok"] is True, envelope
+
+    def test_env_root_sets_containment_root_when_no_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``SOFER_MCP_ROOT`` sets the root when no ``--root`` is given."""
+        env_root = tmp_path / "env-root"
+        env_root.mkdir()
+        monkeypatch.setenv(mcp_server._MCP_ROOT_ENV_VAR, str(env_root))
+        monkeypatch.chdir(tmp_path)  # the cwd default would be tmp_path, not env_root
+
+        captured = self._drive_main(monkeypatch, [])
+
+        assert captured["root"] == env_root.resolve()
+
+    def test_root_flag_beats_env_var(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit ``--root`` wins over ``SOFER_MCP_ROOT`` when both are set."""
+        env_root = tmp_path / "env-root"
+        env_root.mkdir()
+        flag_root = tmp_path / "flag-root"
+        flag_root.mkdir()
+        monkeypatch.setenv(mcp_server._MCP_ROOT_ENV_VAR, str(env_root))
+
+        captured = self._drive_main(monkeypatch, ["--root", str(flag_root)])
+
+        assert captured["root"] == flag_root.resolve()
+
+    def test_default_root_is_resolved_process_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With neither flag nor env var the root is the resolved process cwd
+        (the documented default and today's behaviour)."""
+        monkeypatch.delenv(mcp_server._MCP_ROOT_ENV_VAR, raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        captured = self._drive_main(monkeypatch, [])
+
+        assert captured["root"] == Path.cwd().resolve()
+
+    def test_blank_env_root_is_treated_as_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A blank/whitespace-only ``SOFER_MCP_ROOT`` is unset, not a root
+        (fail-closed, matching the blank approval-phrase treatment)."""
+        monkeypatch.setenv(mcp_server._MCP_ROOT_ENV_VAR, "   \t ")
+        monkeypatch.chdir(tmp_path)
+
+        captured = self._drive_main(monkeypatch, [])
+
+        assert captured["root"] == Path.cwd().resolve()
+
+    def test_missing_root_refuses_at_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A nonexistent ``--root`` refuses at startup: non-zero exit, stderr
+        naming the resolved path, and no server built."""
+        missing = tmp_path / "does-not-exist"
+        monkeypatch.setattr(
+            mcp_server,
+            "build_server",
+            lambda *a, **kw: pytest.fail("build_server must not run for an invalid root"),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            mcp_server.main(["--root", str(missing)])
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert str(missing.resolve()) in err, err
+
+    def test_file_root_refuses_at_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A ``--root`` that exists but is a file refuses at startup, naming
+        the resolved path."""
+        a_file = tmp_path / "not-a-dir.csv"
+        a_file.write_text("col_a\n1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            mcp_server,
+            "build_server",
+            lambda *a, **kw: pytest.fail("build_server must not run for an invalid root"),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            mcp_server.main(["--root", str(a_file)])
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert str(a_file.resolve()) in err, err
 
 
 class TestParentRootIdentity:
