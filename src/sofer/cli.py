@@ -1668,8 +1668,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "config when missing, merges idempotently when present, preserves "
             "other servers, backs up the original to ``.bak`` (single file, "
             "overwrites), and writes atomically via tmp+os.replace. "
-            "``--cwd`` sets the server's working directory (absolute, "
-            "contained under the scope root). TOML edits may strip comments. "
+            "``--cwd`` sets the server's working directory (absolute; it must "
+            "be an existing directory, and a tree outside the home is accepted "
+            "with a warning naming it). TOML edits may strip comments. "
             "Env: codex, gemini and pi receive env forwarding (names only, values "
             "never written; pi uses ${KEY} references); opencode entries carry no "
             "environment, and a warning is printed on stderr when HF_TOKEN or "
@@ -1693,7 +1694,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_add.add_argument(
         "--cwd",
-        help="Working directory for the MCP server (absolute, contained under scope root).",
+        help=(
+            "Working directory for the MCP server (absolute, must be an existing "
+            "directory; a tree outside the home is accepted with a warning)."
+        ),
     )
     mcp_add.add_argument(
         "--dry-run",

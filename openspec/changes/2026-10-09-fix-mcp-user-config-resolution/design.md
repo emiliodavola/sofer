@@ -113,6 +113,7 @@ No REFACTOR target: the change replaces one rule with a simpler one.
 | # | Risk | Severity | Disposition |
 | --- | --- | --- | --- |
 | R1 | Relaxing a fail-closed gate is a behavior change, not a bugfix | **Med** | Accepted deliberately and recorded in three places: the spec clause, its amendment note, and this design. The lost protection is named in §2 (it protected no privilege boundary and missed the real mistake). The PR body flags it as the one behavior change. |
+| **R1b** | **The removal also drops a fail-closed brake on misconfiguration.** An unintended tree — `--cwd /`, `--cwd C:\` — now exits **0** with a non-fatal stderr line, so a caller that does not surface stderr (an agent, a script, a CI step) can register a server rooted somewhere unexpected without noticing. | Med | Named rather than hidden, after the independent verification pointed out that the first draft of this design omitted it. The warning is printed, the acceptance is the explicit decision D2, and the alternative — refusing — is the false gate that blocked legitimate container layouts. This is the one judgment call in the change. |
 | R2 | A caller depending on the old refusal | Low | Verified: no test asserted the refusal of an existing outside-root directory except the one that *is* the changed behavior, and it was rewritten with the change. |
 | R3 | Removing the `scope` parameter breaks a caller | Low | The focused files and the full suite were run; the two direct callers were found and updated, the second only because the full suite was run. |
 

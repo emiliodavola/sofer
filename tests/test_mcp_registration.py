@@ -495,6 +495,18 @@ class TestCwdContainment:
         assert rc == 1
         assert str(missing.resolve()) in capsys.readouterr().err
 
+    def test_cmd_add_refuses_a_missing_cwd_without_writing(self, tmp_path, monkeypatch):
+        """The refusal precedes any write with ``dry_run`` OFF — the scenario's
+        "SHALL NOT write" half, which a dry-run case cannot evidence."""
+        monkeypatch.chdir(tmp_path)
+        missing = tmp_path / "nope"
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(missing), dry_run=False)
+        )
+        assert rc == 1
+        assert not (tmp_path / "opencode.json").exists()
+        assert not (tmp_path / "opencode.json.bak").exists()
+
 
 # ── env forwarding ────────────────────────────────────────────────────
 

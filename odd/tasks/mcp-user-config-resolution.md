@@ -1,8 +1,8 @@
 # Feature: mcp-user-config-resolution — issue #274
 
-**Branch:** `feat/274-mcp-user-config` from `dev@69f5051`
+**Branch:** slice 1 on `fix/274-cwd-existence-rule` from `dev@2eb4927` (PR #283); slice 2 gets its own branch
 **Issue:** `emiliodavola/sofer#274` — *`sofer mcp add --agent opencode` resolves the user config from `$HOME`, so the entry can land in a file the agent never reads*
-**SDD change:** `openspec/changes/2026-10-09-fix-mcp-user-config-resolution/`
+**SDD change:** `openspec/changes/2026-10-09-fix-mcp-user-config-resolution/` (slice 1; archived after merge)
 
 ## Goal
 
