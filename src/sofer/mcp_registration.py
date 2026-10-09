@@ -1,7 +1,7 @@
 """
-MCP registration automation for opencode, codex, gemini, and pi.
+MCP registration automation for opencode, codex, gemini, pi and hermes.
 
-Provides per-agent adapters (path resolution, JSON/TOML I/O, merge,
+Provides per-agent adapters (path resolution, JSON/TOML/YAML I/O, merge,
 backup, atomic write, delegation probe) and entry builders. The CLI
 layer in ``sofer.cli`` orchestrates these helpers.
 
@@ -17,18 +17,26 @@ Each agent has a distinct on-disk shape:
 - codex: ``config.toml`` TOML ``[mcp_servers.sofer] command,cwd,env_vars``
 - gemini: ``settings.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
 - pi: ``mcp.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
+- hermes: ``config.yaml`` YAML ``mcp_servers.sofer={command:"sofer-mcp",cwd,env}``,
+  written by the surgical :mod:`sofer._yaml` writer instead of a
+  whole-document serialization.
 
 All writes are idempotent, preserve unrelated keys, create a single
 ``.bak`` backup before the first mutation, and use an atomic
 ``tmp+os.replace`` commit. Codex ``env_vars`` and the ``env`` mappings of
-Gemini/Pi persist env NAMES only (an allow-list of keys present in the
+Gemini/Pi/Hermes persist env NAMES only (an allow-list of keys present in the
 environment) — secret values (``HF_TOKEN``, ``SOFER_MCP_APPROVAL_PHRASE``)
 are never written to disk. Codex/Gemini use a bare ``$KEY`` reference; Pi's
-``pi-mcp-adapter`` only interpolates braced ``${KEY}`` references, so Pi
-entries use that form. ``command`` string/array variations are normalized
-before comparison. Native delegation (``codex``/``gemini``) is probed via
-``shutil.which`` + ``--help`` with a timeout and falls back to file-edit;
-opencode and pi always use file-edit.
+``pi-mcp-adapter`` and Hermes only interpolate braced ``${KEY}`` references,
+so Pi and Hermes entries use that form. ``command`` string/array variations
+are normalized before comparison. Native delegation (``codex``/``gemini``) is
+probed via ``shutil.which`` + ``--help`` with a timeout and falls back to
+file-edit; opencode, pi and hermes always use file-edit.
+
+Hermes reads a single config file with no distinct project-scope file
+(``project_scope=False``), so project scope resolves to the same user file and
+:func:`single_scope_note` names the substitution on stderr rather than
+silently writing a file Hermes never reads.
 
 Native delegation is **fidelity-gated** (#167, #232): it is used only when the
 native CLI can express the same registration the file edit would write. When env
@@ -44,11 +52,12 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict
 
-from . import _toml
+from . import _toml, _yaml
 
 AgentName: TypeAlias = str
 """Registry key for one supported MCP agent — the domain of :data:`ADAPTERS`.
@@ -63,6 +72,18 @@ Scope = Literal["user", "project"]
 
 _ENV_KEYS: list[str] = ["HF_TOKEN", "SOFER_MCP_APPROVAL_PHRASE"]
 
+_SOFER_ENTRY_NAME = "sofer"
+"""Entry name every adapter's servers mapping keys this tool's server under."""
+
+_YAML_SUFFIXES = (".yaml", ".yml")
+"""File suffixes that select the ``yaml`` config format."""
+
+_SINGLE_SCOPE_NOTE = (
+    "  !  {agent} reads a single user-scope config; --scope project has no "
+    "separate file, using {path}"
+)
+"""Stderr note naming the single-scope substitution (rule 1: one home)."""
+
 
 class Adapter(TypedDict):
     """Single-source descriptor for one MCP agent.
@@ -73,6 +94,9 @@ class Adapter(TypedDict):
 
     Attributes:
         fmt: Config serialization format consumed by ``cli.py`` atomic writes.
+            ``"yaml"`` delegates to the surgical :mod:`sofer._yaml` writer,
+            which preserves the pre-write document; ``"json"`` / ``"toml"``
+            serialize the whole document.
         key: Config table that holds the servers mapping.
         user_parts: Path components under ``Path.home()``, also the fallback
             when ``user_env_dir`` is set but its variable is absent.
@@ -95,9 +119,14 @@ class Adapter(TypedDict):
         user_env_dir: Environment variable naming a directory that overrides
             the user-scope config directory (the file name is
             ``user_parts[-1]``); ``None`` for agents without such an override.
+        project_scope: Whether the agent has a distinct project-scope config
+            file. ``False`` for Hermes, which reads a single config resolved by
+            ``user_parts`` / ``user_env_dir``; project scope therefore resolves
+            to that same file and the CLI names the substitution via
+            :func:`single_scope_note`.
     """
 
-    fmt: Literal["json", "toml"]
+    fmt: Literal["json", "toml", "yaml"]
     key: str
     user_parts: tuple[str, ...]
     project_parts: tuple[str, ...]
@@ -108,6 +137,7 @@ class Adapter(TypedDict):
     native_env: bool
     native_scope: bool
     user_env_dir: str | None
+    project_scope: bool
 
 
 ADAPTERS: dict[AgentName, Adapter] = {
@@ -123,6 +153,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "user_env_dir": None,
+        "project_scope": True,
     },
     "codex": {
         "fmt": "toml",
@@ -136,6 +167,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "user_env_dir": None,
+        "project_scope": True,
     },
     "gemini": {
         "fmt": "json",
@@ -149,6 +181,7 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": True,
         "user_env_dir": None,
+        "project_scope": True,
     },
     "pi": {
         "fmt": "json",
@@ -162,6 +195,24 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "user_env_dir": "PI_CODING_AGENT_DIR",
+        "project_scope": True,
+    },
+    # Hermes reads a single user-scope ``config.yaml`` and has no distinct
+    # project-scope file. ``project_parts`` stays empty so the Adapter shape is
+    # uniform; ``project_scope=False`` is the capability that is read.
+    "hermes": {
+        "fmt": "yaml",
+        "key": "mcp_servers",
+        "user_parts": (".hermes", "config.yaml"),
+        "project_parts": (),
+        "command": "string",
+        "adds_type_local": False,
+        "env": "refs_braced",
+        "delegates": False,
+        "native_env": False,
+        "native_scope": False,
+        "user_env_dir": "HERMES_HOME",
+        "project_scope": False,
     },
 }
 
@@ -208,27 +259,47 @@ def resolve_config_path(
     agent: AgentName,
     scope: Scope,
     cwd: Path | None = None,
+    user_config: str | None = None,
 ) -> Path:
     """Resolve the config file path for *agent* and *scope*.
 
-    User scope resolves under ``Path.home()`` (Windows-aware via
-    ``Path.home()``), unless the adapter declares a ``user_env_dir`` whose
-    environment variable is set to a non-empty value — then the directory
-    it names replaces the home prefix and the file name is
-    ``user_parts[-1]`` (Pi's ``$PI_CODING_AGENT_DIR/mcp.json``). Project
-    scope resolves under *cwd* (or ``Path.cwd()`` when ``None``).
+    User scope resolves by explicit declaration first, then the adapter's
+    environment override, then the home directory (issue #274):
+
+    1. ``user_config`` — the path the caller stated with ``--user-config``,
+       returned as-is (it names the **file**, not a directory). A blank or
+       whitespace-only value counts as unset.
+    2. The adapter's ``user_env_dir`` when that variable is set to a non-empty
+       value — the directory it names replaces the home prefix and the file
+       name is ``user_parts[-1]`` (Pi's ``$PI_CODING_AGENT_DIR/mcp.json``).
+    3. ``Path.home()`` joined with ``user_parts`` — the documented default.
+
+    Project scope resolves under *cwd* (or ``Path.cwd()`` when ``None``) and
+    ignores ``user_config``: the declared file is a *user*-scope concept. When
+    the adapter declares ``project_scope=False`` (Hermes) there is no separate
+    project file, so project scope falls back to the **user** resolution —
+    ignoring ``user_config`` exactly as project scope already does — and the
+    CLI names the substitution via :func:`single_scope_note`.
 
     Args:
         agent: Target agent name.
         scope: ``"user"`` or ``"project"``.
         cwd: Project directory anchor for ``project`` scope; ignored
             for ``user`` scope.
+        user_config: Explicit config **file** path for ``user`` scope; wins
+            over the adapter's ``user_env_dir`` and ``Path.home()``.
 
     Returns:
         Absolute path to the agent's config file.
     """
     spec = _adapter(agent)
-    if scope == "user":
+    # A single-scope agent (``project_scope=False``) has no project file, so
+    # project scope resolves like user scope. ``user_config`` stays a user-scope
+    # concept, so it is honored only for an explicit ``scope="user"`` request.
+    user_scope = scope == "user" or not spec["project_scope"]
+    if scope == "user" and user_config is not None and user_config.strip():
+        return Path(user_config).expanduser().resolve()
+    if user_scope:
         env_dir = spec["user_env_dir"]
         override = os.environ.get(env_dir) if env_dir else None
         if override:
@@ -238,8 +309,87 @@ def resolve_config_path(
     return base.joinpath(*spec["project_parts"])
 
 
+def single_scope_note(agent: AgentName, scope: Scope, path: Path) -> str | None:
+    """Return the single-scope substitution note for *agent*, or ``None``.
+
+    Hermes reads a single user-scope ``config.yaml`` (``project_scope=False``),
+    so a ``--scope project`` request resolves to that same file; writing a
+    project-local file Hermes never reads would be a silent no-op (issue #272).
+    The note names the substitution and the resolved file so the caller can see
+    it, mirroring :func:`home_mismatch_warning`'s informational style.
+
+    Args:
+        agent: Target agent name.
+        scope: Requested ``"user"`` or ``"project"`` scope.
+        path: The path :func:`resolve_config_path` returned.
+
+    Returns:
+        A stderr-ready message when *agent* is single-scope and *scope* is
+        ``project``, otherwise ``None``.
+    """
+    spec = ADAPTERS.get(agent)
+    project_scope = spec["project_scope"] if spec is not None else True
+    if scope != "project" or project_scope:
+        return None
+    return _SINGLE_SCOPE_NOTE.format(agent=agent, path=path)
+
+
+def _account_home() -> Path | None:
+    """Return the account's home directory, or ``None`` when unavailable.
+
+    ``Path.home()`` follows ``$HOME``; the passwd database does not. Agents such
+    as opencode resolve their config from the **account** home, so the two can
+    disagree — which is the reported defect (issue #274).
+
+    Returns:
+        The account home on POSIX, or ``None`` on platforms without a passwd
+        database (Windows) or for a uid that has no entry.
+    """
+    if sys.platform == "win32":  # Windows has no passwd database
+        return None
+    import pwd
+
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:  # a uid with no passwd entry
+        return None
+
+
+def home_mismatch_warning() -> str | None:
+    """Return a warning when ``$HOME`` and the account home disagree.
+
+    Informational only (issue #274). ``Path.home()`` follows ``$HOME`` while an
+    agent may read its config from the account home, so when the two differ
+    sofer can write an entry into a file the agent never reads **and report
+    success** — the silent no-op this warning exists to surface.
+
+    Returns:
+        A stderr-ready message naming both homes, or ``None`` when they agree or
+        no account home is available.
+    """
+    account = _account_home()
+    if account is None:
+        return None
+    resolved_home = Path.home().resolve()
+    resolved_account = account.resolve()
+    if resolved_home == resolved_account:
+        return None
+    return (
+        f"  !  HOME ({resolved_home}) differs from the account home "
+        f"({resolved_account}); an agent may read its config from the latter. "
+        "Pass --user-config PATH to state the file explicitly"
+    )
+
+
 def _infer_fmt(path: Path) -> str:
+    """Return the config format implied by *path*'s suffix.
+
+    ``.yaml`` / ``.yml`` -> ``"yaml"``; ``.toml`` -> ``"toml"``; anything
+    else (including no suffix) -> ``"json"``.
+    """
     suffix = path.suffix.lower()
+    if suffix in _YAML_SUFFIXES:
+        return "yaml"
     if suffix == ".toml":
         return "toml"
     return "json"
@@ -257,7 +407,8 @@ def read_config(path: Path) -> tuple[dict[str, object], str]:
         path: Config file path.
 
     Returns:
-        Tuple of document dict and format string ``"json"`` or ``"toml"``.
+        Tuple of document dict and format string ``"json"``, ``"toml"`` or
+        ``"yaml"``.
     """
     fmt = _infer_fmt(path)
     if not path.exists():
@@ -268,6 +419,11 @@ def read_config(path: Path) -> tuple[dict[str, object], str]:
             if not isinstance(data, dict):
                 raise ValueError(f"config {path} is not a JSON object")
             return data, fmt
+    if fmt == "yaml":
+        try:
+            return _yaml.load(path.read_text(encoding="utf-8")), fmt
+        except ValueError as exc:
+            raise ValueError(f"config {path} is not a YAML mapping") from exc
     # toml (parser resolved once in `sofer._toml`, #192)
     with open(path, "rb") as fh:
         data = _toml.load(fh)
@@ -287,6 +443,9 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
     - pi: ``env`` is a mapping of known key -> ``${KEY}`` reference — Pi's
       ``pi-mcp-adapter`` only interpolates the braced form, so the bare
       ``$KEY`` used by Gemini would be persisted literally
+    - hermes: ``env`` is a mapping of known key -> ``${KEY}`` reference,
+      the same braced form as Pi (Hermes interpolates it, the bare ``$KEY``
+      would be persisted literally)
     - opencode: no env forwarding (returns minimal entry); the entry stays
       env-less and the selection-time warning when env would be dropped is
       the CLI's responsibility
@@ -426,21 +585,66 @@ def backup(path: Path) -> Path | None:
     return bak
 
 
+def _yaml_config_key(pre_write: str, doc: dict[str, Any]) -> str | None:
+    """Return the top-level YAML table that holds the ``sofer`` entry.
+
+    The YAML writer must name the ``key`` table explicitly, but
+    :func:`atomic_write` receives only the merged document. The table is
+    recovered by looking for the servers mapping that contains the ``sofer``
+    entry, first in the pre-write text (a removal that drops an emptied table
+    leaves no entry in *doc*) and then in *doc* (a first-time add). ``None``
+    when neither document names one.
+    """
+    for source in (_yaml.load(pre_write), doc):
+        for key, value in source.items():
+            if isinstance(value, dict) and _SOFER_ENTRY_NAME in value:
+                return key
+    return None
+
+
 def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
     """Atomically write *doc* to *path* via tmp+os.replace.
+
+    The ``json`` and ``toml`` branches serialize *doc* wholesale. The ``yaml``
+    branch instead splices *doc* into the **pre-write** text read back from
+    *path* -- preserving the document's comments, key order, indentation and
+    line-ending convention (LF or CRLF) outside the edited entry -- and
+    therefore MUST be called while the file still holds the pre-write content.
+    The caller reaches it after the single ``.bak`` backup, and nothing mutates
+    the file in between; when *path* does not exist the merged document is
+    rendered fresh.
 
     Args:
         path: Destination file.
         doc: Document to serialize.
-        fmt: ``"json"`` or ``"toml"``.
+        fmt: ``"json"``, ``"toml"`` or ``"yaml"``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     # Ensure tmp is in same directory for atomic replace
     if fmt == "json":
+        # Whole-document rewrite: text-mode newline translation is pre-existing,
+        # declared JSON behavior and stays out of the YAML preservation scope.
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
+    elif fmt == "yaml":
+        # newline="" disables universal-newline translation on both ends so the
+        # pre-write LF/CRLF convention survives byte-for-byte. `open` is used
+        # rather than `Path.read_text` because the latter only grew a `newline`
+        # parameter in Python 3.13 and this package targets 3.10+.
+        if path.exists():
+            with open(path, encoding="utf-8", newline="") as fh:
+                pre_write = fh.read()
+        else:
+            pre_write = _yaml.dump(doc)
+        key = _yaml_config_key(pre_write, doc)
+        if key is None:
+            content = _yaml.dump(doc)
+        else:
+            content = _yaml.splice_entry(pre_write, key, _SOFER_ENTRY_NAME, doc)
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
     else:
         try:
             import tomli_w as _tomli_w
@@ -661,31 +865,59 @@ def dropped_env_keys(agent: AgentName, env: Mapping[str, str]) -> list[str]:
     return []
 
 
-def validate_cwd(cwd: Path, scope: Scope) -> bool:
-    """Validate that *cwd* is contained under the allowed root.
+def validate_cwd(cwd: Path) -> bool:
+    """Validate that *cwd* is usable as the server's working directory.
 
-    Uses ``Path.resolve()`` + ``is_relative_to``. For ``user`` scope the
-    allowed root is ``Path.home()``; for ``project`` scope it is
-    ``Path.cwd()``. Succeeds when contained under either root to tolerate
-    tmp paths that are under home on Windows.
+    The rule is **existence**, not containment (issue #274). The previous rule
+    refused any cwd outside ``Path.home()`` or the process cwd; it was removed
+    because, measured: it was undeclared in any spec; it was scope-blind (its
+    ``user`` and ``project`` branches were the *same expression*, so the
+    parameter lied); it was effectively untested (the only "rejection" test
+    monkeypatched this function away); it protected no privilege boundary (the
+    caller of ``sofer mcp add`` is the human, who can edit the agent config
+    directly, and since #273 the server root is explicitly settable); it
+    rejected legitimate trees (a dataset tree outside ``$HOME``, which is the
+    reported container case); and it still *accepted* a nonexistent path under
+    either root, so it failed to catch the mistake that actually matters.
 
     Args:
         cwd: Candidate cwd (already resolved or not).
-        scope: Scope for containment check.
 
     Returns:
-        ``True`` when contained, ``False`` otherwise.
+        ``True`` when *cwd* is an existing directory, ``False`` otherwise.
+    """
+    try:
+        return cwd.resolve().is_dir()
+    except Exception:
+        return False
+
+
+def outside_root_warning(cwd: Path) -> str | None:
+    """Return a warning when *cwd* lies outside the conventional roots.
+
+    Informational only (issue #274): an explicit ``--cwd`` is the caller's own
+    declaration, so an unusual tree is accepted and **named** rather than
+    refused. That keeps the odd case visible without blocking a legitimate
+    layout.
+
+    Args:
+        cwd: Candidate cwd (already resolved or not).
+
+    Returns:
+        A stderr-ready message naming the cwd and the roots it is outside of,
+        or ``None`` when it is inside ``Path.home()`` or the process cwd.
     """
     try:
         resolved = cwd.resolve()
     except Exception:
-        return False
-    home = Path.home().resolve()
-    project_root = Path.cwd().resolve()
-    # Accept if relative to either allowed root; this keeps tmp_path under
-    # home on Windows passing while still rejecting truly outside paths like
-    # D: vs C: drive mismatch.
-    if scope == "user":
-        return resolved.is_relative_to(home) or resolved.is_relative_to(project_root)
-    # project
-    return resolved.is_relative_to(project_root) or resolved.is_relative_to(home)
+        return None
+    outside: list[str] = []
+    for label, root in (("home", Path.home()), ("the process cwd", Path.cwd())):
+        resolved_root = root.resolve()
+        if resolved.is_relative_to(resolved_root):
+            return None
+        outside.append(f"{label} ({resolved_root})")
+    return (
+        f"  !  --cwd {resolved} is outside {' and '.join(outside)}; the server "
+        "is rooted there, so paths outside it are refused"
+    )

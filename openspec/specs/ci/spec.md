@@ -710,6 +710,11 @@ occurrence together SHALL leave them green with no test edit.
 > can move only the first) and a `fastmcp` major (#253 — a runtime dependency
 > whose major changes the MCP SDK API, and whose declared `<4` cap Dependabot
 > rewrote to `<5` itself).
+>
+> Extended by change `2026-10-09-fix-dependabot-multi-home-pins` (GitHub #275):
+> the `mypy` and `pyright` analyzer pins are the same class as the coordinated
+> `ruff` pin — three text homes, of which the `uv` ecosystem can move only the
+> first — so they are ignored too.
 
 `.github/dependabot.yml` SHALL declare an update policy that keeps automated
 bumps compatible with the repository's coordinated declarations and its
@@ -721,6 +726,12 @@ review granularity:
   `astral-sh/ruff-pre-commit` `rev` in `.pre-commit-config.yaml`, and the
   `CONTRIBUTING.md` Code style section, forced to agree by CI-08; the manual
   bump procedure SHALL be documented in `CONTRIBUTING.md`.
+- The `uv` update SHALL `ignore` `mypy` and `pyright` entirely, so Dependabot
+  opens no analyzer PR. Each exact version is declared in the `pyproject.toml`
+  dev pin and named in `openspec/project.md` and `openspec/config.yaml`, forced
+  to agree by the tool-version guard; the `uv` ecosystem can move only the first
+  (GitHub #275). The manual bump procedure SHALL be documented in
+  `CONTRIBUTING.md`.
 - The `uv` update SHALL `ignore` `fastmcp` **major** updates, so a major is
   only adopted by a deliberate, code-adapting change rather than a bot PR that
   widens the declared cap (GitHub #253).
@@ -740,6 +751,15 @@ pass.
   reads the `uv` update's `ignore` list
 - THEN exactly one entry SHALL name `ruff` and SHALL NOT narrow the ignore with
   `update-types`, so Dependabot opens no `ruff` PR at any update type
+
+#### Scenario: uv updates ignore the coordinated analyzer pins
+
+- GIVEN `.github/dependabot.yml` parsed
+- WHEN `tests/test_ci_workflows.py::test_dependabot_ignores_the_coordinated_analyzer_pins`
+  reads the `uv` update's `ignore` list
+- THEN exactly one entry SHALL name `mypy` and exactly one SHALL name `pyright`,
+  and neither SHALL narrow the ignore with `update-types`, so Dependabot opens
+  no analyzer PR at any update type
 
 #### Scenario: uv updates ignore fastmcp majors
 
@@ -874,6 +894,7 @@ evidence recorded in the verify report.
 | CI-13 | Release setup-uv parity is derived from ci.yml | test:tests/test_ci_workflows.py — `test_release_lint_job_runs_the_ci_lint_gates`: YAML inspection of both `lint` jobs, ref derived by action name |
 | CI-13 | Interpreter pin agrees across homes | test:tests/test_ci_workflows.py — `test_dev_interpreter_pin_matches_gate_jobs`: `.python-version` read against every gate job's setup-uv `python-version` |
 | CI-14 | uv updates ignore the coordinated ruff pin | test:tests/test_ci_workflows.py — `test_dependabot_ignores_the_coordinated_ruff_pin`: YAML inspection of the `uv` update's `ignore` list |
+| CI-14 | uv updates ignore the coordinated analyzer pins | test:tests/test_ci_workflows.py — `test_dependabot_ignores_the_coordinated_analyzer_pins`: YAML inspection of the `uv` update's `ignore` list |
 | CI-14 | uv updates ignore fastmcp majors | test:tests/test_ci_workflows.py — `test_dependabot_ignores_fastmcp_majors`: YAML inspection of the `uv` update's `ignore` list |
 | CI-14 | minor/patch groups exclude majors | test:tests/test_ci_workflows.py — `test_dependabot_groups_exclude_majors`: YAML inspection of every update's `groups` update-types |
 | CI-15 | Workflow-level permissions grant no write access | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of release.yml workflow-level permissions |

@@ -74,8 +74,9 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - New dependencies go in `pyproject.toml` `dependencies`, not `dev-dependencies`, unless they're test-only.
 - Prefer format-native readers over heavy dependencies (openpyxl over pandas for Excel).
 - Dependency bumps (spec `ci` CI-13/CI-14): minor/patch are grouped and automatic; majors stay
-  ungrouped and require explicit adaptation review. `ruff` is a coordinated multi-home pin and
-  `fastmcp` majors are ignored in `.github/dependabot.yml`; see CONTRIBUTING → Dependency updates
+  ungrouped and require explicit adaptation review. `ruff` is a coordinated multi-home pin, and
+  `fastmcp` majors plus the `mypy`/`pyright` analyzer pins are ignored in
+  `.github/dependabot.yml`; see CONTRIBUTING → Dependency updates
   for the manual bump procedure. Version declarations live in more than one home — move every home
   together, and let the guards in `tests/test_ci_workflows.py` catch the drift.
 
@@ -147,3 +148,19 @@ Rules:
   governed by their own per-file floors (spec `coverage` COV-01) or have no
   floor.
 - Adjacent policy pointer (not part of this rule's mandate): the three second-tier per-file floors (`profile.py`, `mcp_registration.py`, `verification.py`) are deliberately **not** CI-gated — they stay verify-phase evidence only, and arming a gate for them is a spec change (see spec `coverage` COV-07).
+
+### 15. SDD archive placement
+- A completed SDD change SHALL be archived **inside the pull request that delivers it**: the same PR
+  that merges the change also moves `openspec/changes/<change>/` to
+  `openspec/changes/archive/<change>/` and adds its `archive-report.md`. The archive is part of the
+  change, not follow-up housekeeping.
+- Never open a second PR whose only purpose is to archive a change that already merged. By then the
+  change is delivered, the archive is orphaned from its own diff, and the reviewer can no longer read
+  the change and its record together — which is exactly what happened to the changes delivered by
+  #276 and #279 and only archived later in #281.
+- The PR body's SDD artifacts section (rule 11) SHALL name the archive path for the change it
+  delivers. **"Not archived yet — archive after merge" is not a valid state for a merged change.**
+- An archive report's claims SHALL be true of the artifact they describe. A report saying "all tasks
+  complete" while the archived `tasks.md` still carries a `pending` row is a **defect in the durable
+  record**, not a cosmetic slip — the archived report is the only thing a future reader has (see the
+  #281 correction in #282).

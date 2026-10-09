@@ -73,7 +73,7 @@ src/sofer/
 ├── workflow.py          # Typed workflow metadata + result envelopes for adapters
 ├── failure_report.py    # Assisted failure reporting: context, anonymization, gh send, persistence
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
-└── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini)
+└── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini/pi/hermes)
 ```
 
 ## Development conventions
@@ -107,7 +107,7 @@ Automated dependency updates are driven by `.github/dependabot.yml`. Minor and p
 updates are grouped and opened automatically; **major** updates are deliberately left out
 of every group so each arrives as its own PR for explicit review and code adaptation.
 
-Two bumps are intentionally not automated:
+Three bumps are intentionally not automated:
 
 - **ruff** — its single version is declared in four homes that must move together: the
   `[dependency-groups] dev` pin and `[tool.ruff] required-version` in `pyproject.toml`, the
@@ -115,6 +115,12 @@ Two bumps are intentionally not automated:
   this file's Code style section. CI-08 forces them to agree, and Dependabot's `uv`
   ecosystem can move only the first, so the bot ignores `ruff`. To bump it, edit all four
   declarations plus `uv.lock`, then run the CI-08 guard row and the full suite.
+- **mypy and pyright** — each analyzer's exact version is declared in three text homes that
+  must move together: the `[dependency-groups] dev` pin in `pyproject.toml`, and the version
+  named in `openspec/project.md` and `openspec/config.yaml`. The tool-version guard forces
+  them to agree, and Dependabot's `uv` ecosystem can move only the first, so the bot ignores
+  both (#275). To bump either, edit all three declarations plus `uv.lock`, then run the
+  tool-version guard row and the full suite.
 - **fastmcp majors** — the MCP SDK API changes across majors, so adoption needs a
   code-adapting change rather than a bot PR. Minor and patch updates stay automatic; the
   declared `<5` cap is a real boundary because majors are ignored.

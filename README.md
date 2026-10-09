@@ -138,7 +138,7 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 | Topic | What to do | Why / detail |
 | ------- | ------------ | -------------- |
 | **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
-| **MCP `cwd` param** | `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
+| **MCP `cwd` param** | The server root is chosen at startup by `--root PATH` or the `SOFER_MCP_ROOT` environment variable (the argument wins; with neither, the resolved process cwd). `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
 | **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `flatten_first_level`. |
 | **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
 | **Console encoding** | Nothing to do: the CLI never aborts on a character the active console encoding cannot represent — the character is substituted in the emitted text and the command keeps its documented exit code (CLI-R11). Unicode-capable terminals (Windows Terminal, VS Code, macOS, Linux) are unaffected and keep sofer's `⚠`/`✓`/`✗`/`→` markers. | Affects streams that are not a Unicode-capable console: output redirected to a file or pipe (`sofer scan --help > out.txt`), an IDE/CI capture, or a legacy code page forced with `PYTHONIOENCODING=cp1252`. The unencodable character is written as a placeholder (or an escape sequence) instead of raising `UnicodeEncodeError`. To keep every marker, set `PYTHONIOENCODING=utf-8`. |
@@ -320,7 +320,7 @@ detector class, no changes to the pipeline.
 | --- | --- |
 | `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
-| `mcp add --agent <opencode\|codex\|gemini\|pi\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute contained), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
+| `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute, must be an existing directory), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` or `__<sanitized>.metadata.yaml` per sheet for `.xlsx` N>1, `PurePath.suffixes`, sanitization + `seen _{n}`, normalized `__+`→`_` collision `ValueError` with `::sheet`), `--force` (overwrite guard), `--config` (TOML path for batch), `--delimiter D` / `--encoding E` (explicit CSV dialect, wins over config). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
 | `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` or `__<sanitized>.README.md` per sheet for `.xlsx` N>1 with same sanitization/dedup/collision parity, skip missing `metadata.yaml`), `--force`, `--config`. |
@@ -352,8 +352,9 @@ detector class, no changes to the pipeline.
 | `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
 | `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); required — missing `--user` exits 2, placeholder (`YOUR_USER`) or unsafe values exit 1, no file written. |
 | `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`; for `codebook`, `-o`/`--output` is the output file path, default stdout). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
-| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` same without `--cwd`. |
-| `--cwd PATH` | `mcp add` | Absolute contained cwd for the server; fails with path when outside scope root. |
+| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all> [--scope user\|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` same without `--cwd`. |
+| `--cwd PATH` | `mcp add` | Absolute cwd for the server; must be an existing directory (otherwise exit 1 naming the resolved path). A tree outside the home and the process cwd is accepted with a warning naming it. |
+| `--user-config PATH` | `mcp add`, `mcp remove` | Explicit user-scope config **file** for the selected agent; wins over the adapter's env override (Pi's `PI_CODING_AGENT_DIR`) and the `Path.home()` default. Rejected with `--agent all` — one path cannot name four different files. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
 
 ## Assisted failure reporting
@@ -633,22 +634,27 @@ Optional `delimiter` / `encoding` on the CSV-reading tools (`sofer_codebook`, `s
 claude mcp add sofer -- uv run sofer-mcp
 ```
 
-The server inherits its working directory — pass an explicit root when the
-agent should only reach a specific tree (see below).
+The server's containment root defaults to its working directory (the process
+cwd, resolved). Point it at a specific tree with `--root PATH` or the
+`SOFER_MCP_ROOT` environment variable — the argument wins when both are set.
+Any path outside that root is refused with `PathOutsideRootError` (fail
+closed), so the agent can only reach the chosen tree (see the security model
+below).
 
-### Register sofer-mcp with AI agents (opencode, codex, gemini, pi)
+### Register sofer-mcp with AI agents (opencode, codex, gemini, pi, hermes)
 
-`sofer` can register itself in the four supported agent configs
+`sofer` can register itself in the five supported agent configs
 idempotently, preserving existing servers and backing up the original to
 `.bak`:
 
 ```bash
-sofer mcp add --agent all                 # register in all four
+sofer mcp add --agent all                 # register in all five
 sofer mcp add --agent opencode --scope project --cwd ./my-proj
 sofer mcp add --agent codex --scope user
 sofer mcp add --agent gemini --scope user --dry-run   # preview, no write
 sofer mcp add --agent pi --scope user                 # pi-mcp-adapter
-sofer mcp remove --agent all              # remove from all four
+sofer mcp add --agent hermes --scope user             # Hermes Agent (config.yaml)
+sofer mcp remove --agent all              # remove from all five
 ```
 
 Per-agent locations and shapes:
@@ -663,21 +669,31 @@ Per-agent locations and shapes:
 | gemini | `--scope project` | `./.gemini/settings.json` | same |
 | pi | `--scope user` | `$PI_CODING_AGENT_DIR/mcp.json` (default `~/.pi/agent/mcp.json`) | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
 | pi | `--scope project` | `./.pi/mcp.json` | same |
+| hermes | `--scope user` | `$HERMES_HOME/config.yaml` (default `~/.hermes/config.yaml`) | `mcp_servers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
+| hermes | `--scope project` | the same user-scope file — Hermes has no project-scope config, and the substitution is named on stderr | same |
 
+- **User-scope resolution:** the paths below are sofer's **default** resolution under `Path.home()`.
+  Agents such as opencode read their config from the system **account** home instead, so when the two
+  differ the entry can land in a file the agent never reads. Pass `--user-config PATH` to state the
+  file explicitly — it wins over the adapter's env override and the home default. When the two homes
+  differ, `sofer` prints a warning naming both instead of reporting a clean success.
 - **Idempotency:** re-running with the same `cwd` and env does no write and
   creates no `.bak`; the file is byte-identical.
 - **Backup:** before the first mutation the original is copied to `<path>.bak`
   (single file, overwrites any existing `.bak`).
 - **Atomic write:** the new content is written to a temporary file in the
   same directory and committed via `os.replace`.
-- **Cwd:** `--cwd` is stored as the resolved absolute path and must be
-  contained under the scope root (`Path.resolve()` + `is_relative_to`);
-  otherwise the command exits 1 with the offending path.
+- **Cwd:** `--cwd` is stored as the resolved absolute path and must be an
+  **existing directory**; otherwise the command exits 1 naming the resolved
+  path. A tree outside the home and the process cwd is accepted with a warning
+  naming it — an explicit `--cwd` is your own declaration, so an unusual tree is
+  named rather than refused.
 - **Env:** `HF_TOKEN` and `SOFER_MCP_APPROVAL_PHRASE` from the shell are
-  forwarded — codex as an `env_vars` allow-list, gemini and pi as an explicit
-  `env` dict (no shell inheritance). Gemini emits `$KEY` references; Pi emits
-  `${KEY}` references because `pi-mcp-adapter` interpolates only the braced
-  form. Opencode receives no env. When
+  forwarded — codex as an `env_vars` allow-list, gemini, pi and hermes as an
+  explicit `env` dict (no shell inheritance). Gemini emits `$KEY` references;
+  Pi and Hermes emit `${KEY}` references — `pi-mcp-adapter` interpolates only
+  the braced form, and Hermes resolves `${VAR}` / `${env:VAR}` inside a server
+  entry. Opencode receives no env. When
   `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode`
   (or `all`) is chosen, `sofer mcp add` prints a warning on stderr naming
   the dropped variables and leaves the exit code unchanged.
@@ -696,13 +712,20 @@ Per-agent locations and shapes:
 - **TOML warning:** edits via `tomli`/`tomli-w` do not preserve comments or
   formatting in `config.toml` — the file is reformatted and comments are
   stripped.
+- **YAML edits:** the `hermes` adapter splices only the `sofer` entry into
+  `config.yaml`, so unrelated keys, comments and indentation are preserved.
+- **Hermes scope:** Hermes reads a single user-scope config, so `--scope
+  project` for `--agent hermes` resolves to that same file — no
+  `<cwd>/.hermes/config.yaml` is written, and the substitution is named on
+  stderr.
 - **Unreadable:** a malformed or unreadable config exits 1 and creates no
   backup or new file.
 
 ### Security model
 
 - **Path containment (server root).** The server captures a root at build
-  time (`build_server(root=...)`; default: the process cwd, resolved) and
+  time (`build_server(root=...)`; default: the process cwd, resolved;
+  overridden by `--root`/`SOFER_MCP_ROOT` at the `sofer-mcp` entry point) and
   refuses any tool argument, resource URI, `output` directory, or
   `[[file]]` local/remote that resolves outside it — including `..`
   traversal, absolute paths, drive/UNC-prefixed remotes, and symlink/junction
@@ -751,8 +774,8 @@ It is read **once at process start** (`build_server(root, approval_phrase=...)`
 or `SOFER_MCP_APPROVAL_PHRASE`) and stays immutable for that process — change
 the value in the launcher, then fully restart the agent host. Configure it the
 way each agent persists MCP env (see
-[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini-pi)):
-codex `env_vars`, and gemini and pi `env`, persist the env **name** only,
+[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini-pi-hermes)):
+codex `env_vars`, and gemini, pi and hermes `env`, persist the env **name** only,
 never the secret; opencode receives no env from `sofer mcp add`, so use the
 launcher environment or an explicit `environment` literal (plaintext on disk).
 

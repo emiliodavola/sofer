@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from sofer import cli, mcp_registration
 
@@ -348,6 +349,8 @@ class TestDryRun:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
         monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        # Hermes resolves project scope to its user file; keep it sandboxed.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         proj = tmp_path / "proj"
         proj.mkdir()
         rc = cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=True))
@@ -409,27 +412,349 @@ class TestUnreadable:
 # ── cwd containment ───────────────────────────────────────────────────
 
 
-class TestCwdContainment:
-    def test_validate_cwd_allows_home_or_project(self, tmp_path, monkeypatch):
+class TestUserConfigResolution:
+    """`--user-config` and the `$HOME`-vs-account-home divergence (issue #274).
+
+    `sofer mcp add --scope user` used to resolve the config under `Path.home()`,
+    which follows `$HOME`; agents such as opencode resolve theirs from the system
+    account home and ignore `$HOME`, so the entry could land in a file the agent
+    never reads while sofer reported success. The explicit declaration now wins,
+    and a divergence between the two homes is named instead of being silent.
+    """
+
+    def test_user_config_wins_over_home(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: home)
-        monkeypatch.chdir(tmp_path)
-        # tmp_path is project root; home is separate. A cwd under home should pass for user scope
-        cwd_under_home = home / "proj"
-        cwd_under_home.mkdir()
-        assert mcp_registration.validate_cwd(cwd_under_home, "user") is True
-        # cwd under project should pass for project
-        assert mcp_registration.validate_cwd(tmp_path, "project") is True
+        declared = tmp_path / "elsewhere" / "opencode.json"
+        assert (
+            mcp_registration.resolve_config_path("opencode", "user", user_config=str(declared))
+            == declared.resolve()
+        )
 
-    def test_cmd_add_rejects_outside_root(self, tmp_path, monkeypatch):
+    def test_user_config_beats_the_adapter_env_dir(self, tmp_path, monkeypatch):
+        env_dir = tmp_path / "pi-env"
+        env_dir.mkdir()
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(env_dir))
+        declared = tmp_path / "declared" / "mcp.json"
+        assert (
+            mcp_registration.resolve_config_path("pi", "user", user_config=str(declared))
+            == declared.resolve()
+        )
+
+    def test_adapter_env_dir_still_wins_over_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        env_dir = tmp_path / "pi-env"
+        env_dir.mkdir()
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(env_dir))
+        assert mcp_registration.resolve_config_path("pi", "user") == env_dir / "mcp.json"
+
+    def test_home_is_still_the_default(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        assert mcp_registration.resolve_config_path("opencode", "user") == (
+            home / ".config" / "opencode" / "opencode.json"
+        )
+
+    def test_blank_user_config_is_treated_as_unset(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        assert mcp_registration.resolve_config_path("opencode", "user", user_config="   \t ") == (
+            home / ".config" / "opencode" / "opencode.json"
+        )
+
+    def test_project_scope_ignores_user_config(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        # Mock validate to force failure
-        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: False)
+        declared = tmp_path / "declared.json"
+        assert mcp_registration.resolve_config_path(
+            "opencode", "project", user_config=str(declared)
+        ) == (tmp_path / "opencode.json")
+
+    def test_cmd_add_rejects_user_config_with_agent_all(self, tmp_path, monkeypatch, capsys):
+        """Each agent has a different config file, so one path is ambiguous."""
+        monkeypatch.chdir(tmp_path)
+        # Defensive: the early rejection never resolves the Hermes user file.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         rc = cli._cmd_mcp_add(
-            Namespace(agent="opencode", scope="project", cwd=str(tmp_path / "proj"), dry_run=False)
+            Namespace(
+                agent="all",
+                scope="user",
+                cwd=None,
+                dry_run=True,
+                user_config=str(tmp_path / "declared.json"),
+            )
         )
         assert rc == 1
+        assert "--user-config" in capsys.readouterr().err
+
+    def test_cmd_add_uses_the_declared_user_config(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        declared = tmp_path / "declared" / "opencode.json"
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="opencode",
+                scope="user",
+                cwd=None,
+                dry_run=True,
+                user_config=str(declared),
+            )
+        )
+        assert rc == 0
+        assert str(declared.resolve()) in capsys.readouterr().out
+
+    def test_cmd_remove_uses_the_declared_user_config(self, tmp_path, monkeypatch):
+        """The declared file is the one consulted — asserted by its mutation, not
+        by the exit code, which a missing file would also pass."""
+        monkeypatch.chdir(tmp_path)
+        declared = tmp_path / "declared" / "opencode.json"
+        declared.parent.mkdir()
+        declared.write_text(
+            '{"mcp": {"sofer": {"type": "local", "command": ["sofer-mcp"]}}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(
+            Namespace(agent="opencode", scope="user", dry_run=False, user_config=str(declared))
+        )
+        assert rc == 0
+        assert "sofer" not in declared.read_text(encoding="utf-8")
+
+    def test_account_home_is_none_without_a_passwd_database(self, monkeypatch):
+        """Windows: no passwd database, so there is nothing to compare."""
+        monkeypatch.setattr(mcp_registration.sys, "platform", "win32")
+        assert mcp_registration._account_home() is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pwd module off POSIX")
+    def test_account_home_returns_the_passwd_entry(self, monkeypatch):
+        import pwd as real_pwd
+
+        entry = real_pwd.struct_passwd(("u", "x", 1000, 1000, "", "/home/u", "/bin/sh"))
+        monkeypatch.setattr(real_pwd, "getpwuid", lambda _uid: entry)
+        assert mcp_registration._account_home() == Path("/home/u")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pwd module off POSIX")
+    def test_account_home_is_none_for_a_uid_without_an_entry(self, monkeypatch):
+        import pwd as real_pwd
+
+        def _raise(_uid):
+            raise KeyError("no such uid")
+
+        monkeypatch.setattr(real_pwd, "getpwuid", _raise)
+        assert mcp_registration._account_home() is None
+
+    def test_home_mismatch_warning_names_both_paths(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        account = tmp_path / "account"
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: account)
+        warning = mcp_registration.home_mismatch_warning()
+        assert warning is not None
+        assert str(home.resolve()) in warning
+        assert str(account.resolve()) in warning
+
+    def test_home_mismatch_warning_is_none_when_they_agree(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: home)
+        assert mcp_registration.home_mismatch_warning() is None
+
+    def test_home_mismatch_warning_is_none_without_an_account_home(self, monkeypatch):
+        """Windows has no `pwd`: no account home to compare, so no warning."""
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: None)
+        assert mcp_registration.home_mismatch_warning() is None
+
+    def test_cmd_add_prints_the_mismatch_warning(self, tmp_path, monkeypatch, capsys):
+        """The silent success is the worst part of the report: it must be named."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: tmp_path / "account")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(Namespace(agent="opencode", scope="user", cwd=None, dry_run=True))
+        assert rc == 0
+        assert str(home.resolve()) in capsys.readouterr().err
+
+    def test_cmd_remove_rejects_user_config_with_agent_all(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        # Defensive: the early rejection never resolves the Hermes user file.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+        rc = cli._cmd_mcp_remove(
+            Namespace(
+                agent="all",
+                scope="user",
+                dry_run=True,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        assert "--user-config" in capsys.readouterr().err
+
+    def test_cmd_remove_prints_the_mismatch_warning(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: tmp_path / "account")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(Namespace(agent="opencode", scope="user", dry_run=True))
+        assert rc == 0
+        assert str(home.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_rejects_user_config_with_agent_all_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        """The rejection precedes any write - with ``dry_run`` OFF, so the no-write
+        half of the contract is actually exercised rather than assumed."""
+        monkeypatch.chdir(tmp_path)
+        # Defensive: even the early rejection cannot reach the real Hermes home.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="all",
+                scope="project",
+                cwd=None,
+                dry_run=False,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        for rel in (
+            "opencode.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+            ".pi/mcp.json",
+        ):
+            assert not (tmp_path / rel).exists(), rel
+
+    def test_cmd_remove_rejects_user_config_with_agent_all_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        # Defensive: even the early rejection cannot reach the real Hermes home.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+        rc = cli._cmd_mcp_remove(
+            Namespace(
+                agent="all",
+                scope="project",
+                dry_run=False,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        for rel in (
+            "opencode.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+            ".pi/mcp.json",
+        ):
+            assert not (tmp_path / rel).exists(), rel
+
+
+class TestCwdContainment:
+    """The `--cwd` rule: an existing directory is accepted, anything else is refused.
+
+    The previous rule refused any cwd outside `Path.home()` or the process cwd. It
+    was removed (issue #274): undeclared in any spec, scope-blind (its two branches
+    were the same expression), effectively untested (the only "rejection" test
+    monkeypatched the function away), protecting no privilege boundary, and it
+    rejected legitimate trees — a dataset tree outside `$HOME`, which is exactly the
+    reported container case. What remains is the check that catches a real mistake:
+    the cwd must be an existing directory.
+    """
+
+    def test_validate_cwd_accepts_an_existing_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "proj"
+        target.mkdir()
+        assert mcp_registration.validate_cwd(target) is True
+
+    def test_validate_cwd_accepts_an_existing_directory_outside_home(self, tmp_path, monkeypatch):
+        """The reported case: the home and the dataset tree are unrelated."""
+        home = tmp_path / "home"
+        home.mkdir()
+        tree = tmp_path / "workspace" / "test"
+        tree.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        assert mcp_registration.validate_cwd(tree) is True
+
+    def test_validate_cwd_refuses_a_missing_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert mcp_registration.validate_cwd(tmp_path / "nope") is False
+
+    def test_validate_cwd_refuses_a_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        a_file = tmp_path / "not-a-dir.csv"
+        a_file.write_text("a\n1\n", encoding="utf-8")
+        assert mcp_registration.validate_cwd(a_file) is False
+
+    def test_outside_root_warning_names_both_sides(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        tree = tmp_path / "workspace" / "test"
+        tree.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        warning = mcp_registration.outside_root_warning(tree)
+        assert warning is not None
+        assert str(tree.resolve()) in warning
+        assert str(home.resolve()) in warning
+
+    def test_outside_root_warning_is_none_inside_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        inside = home / "proj"
+        inside.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        assert mcp_registration.outside_root_warning(inside) is None
+
+    def test_cmd_add_accepts_an_outside_root_dir_with_a_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Accepted, not refused — and the odd case is named, never silent."""
+        home = tmp_path / "home"
+        home.mkdir()
+        tree = tmp_path / "workspace" / "test"
+        tree.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="user", cwd=str(tree), dry_run=True)
+        )
+        assert rc == 0
+        assert str(tree.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_refuses_a_missing_cwd(self, tmp_path, monkeypatch, capsys):
+        """A cwd that is not an existing directory is the mistake worth failing on."""
+        monkeypatch.chdir(tmp_path)
+        missing = tmp_path / "nope"
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(missing), dry_run=True)
+        )
+        assert rc == 1
+        assert str(missing.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_refuses_a_missing_cwd_without_writing(self, tmp_path, monkeypatch):
+        """The refusal precedes any write with ``dry_run`` OFF — the scenario's
+        "SHALL NOT write" half, which a dry-run case cannot evidence."""
+        monkeypatch.chdir(tmp_path)
+        missing = tmp_path / "nope"
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(missing), dry_run=False)
+        )
+        assert rc == 1
+        assert not (tmp_path / "opencode.json").exists()
+        assert not (tmp_path / "opencode.json.bak").exists()
 
 
 # ── env forwarding ────────────────────────────────────────────────────
@@ -528,6 +853,8 @@ class TestEnvForwarding:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
         monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        # Hermes is now part of ``all`` and writes to its user file.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         proj = tmp_path / "proj"
         proj.mkdir()
         monkeypatch.setenv("HF_TOKEN", "hf123")
@@ -537,11 +864,12 @@ class TestEnvForwarding:
         err = capsys.readouterr().err
         # exactly one warning, for the opencode member only
         assert err.count("receives no env") == 1
-        # all still expands to every registered agent (four)
+        # all still expands to every registered agent (five)
         assert (proj / "opencode.json").exists()
         assert (proj / ".codex" / "config.toml").exists()
         assert (proj / ".gemini" / "settings.json").exists()
         assert (proj / ".pi" / "mcp.json").exists()
+        assert (tmp_path / "hermes" / "config.yaml").exists()
         # codex/gemini persist names only, values absent
         _tomli2 = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
@@ -740,9 +1068,12 @@ class TestRemove:
         monkeypatch.chdir(proj)
         monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
         monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=False))
         rc = cli._cmd_mcp_remove(Namespace(agent="all", scope="project", dry_run=False))
         assert rc == 0
+        # The Hermes user file landed in the sandbox, never the real home.
+        assert (tmp_path / "hermes" / "config.yaml").exists()
         agents: list[mcp_registration.AgentName] = list(mcp_registration.AGENT_NAMES)
         for agent in agents:
             path = mcp_registration.resolve_config_path(agent, "project", proj)
@@ -992,8 +1323,11 @@ class TestDelegationNext:
 
 
 class TestCwdContainmentNext:
-    def test_validate_cwd_project_scope_and_resolve_failure(self, tmp_path, monkeypatch) -> None:
-        """Project-scope containment excludes foreign paths; resolve failure → False."""
+    def test_validate_cwd_requires_an_existing_directory_and_tolerates_resolve_failure(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Existence is the rule (issue #274): a foreign-but-real directory is
+        accepted and named, and an unresolvable path is refused rather than raising."""
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: home)
@@ -1001,16 +1335,19 @@ class TestCwdContainmentNext:
         monkeypatch.chdir(tmp_path / "proj")
         foreign = tmp_path / "elsewhere"
         foreign.mkdir()
-        # project scope: foreign is under neither project_root (proj) nor home
-        assert mcp_registration.validate_cwd(foreign, "project") is False
-        assert mcp_registration.validate_cwd(tmp_path / "proj", "project") is True
+        # A real directory outside home and the process cwd is ACCEPTED — the
+        # deliberate change from the old containment rule — and named by the
+        # warning instead of being refused.
+        assert mcp_registration.validate_cwd(foreign) is True
+        assert mcp_registration.outside_root_warning(foreign) is not None
+        assert mcp_registration.validate_cwd(tmp_path / "proj") is True
 
         def _boom_resolve(self):
             raise OSError("unresolvable")
 
         monkeypatch.setattr(Path, "resolve", _boom_resolve)
-        assert mcp_registration.validate_cwd(foreign, "project") is False
-        assert mcp_registration.validate_cwd(tmp_path / "proj", "user") is False
+        assert mcp_registration.validate_cwd(foreign) is False
+        assert mcp_registration.outside_root_warning(foreign) is None
 
 
 class TestIdempotencyMatrixGaps:
@@ -1084,11 +1421,12 @@ class TestSingleSourceRegistry:
             "native_env",
             "native_scope",
             "user_env_dir",
+            "project_scope",
         }
         for agent in mcp_registration.AGENT_NAMES:
             spec = mcp_registration.ADAPTERS[agent]
             assert set(spec) == required, agent
-            assert spec["fmt"] in {"json", "toml"}
+            assert spec["fmt"] in {"json", "toml", "yaml"}
             assert spec["command"] in {"array", "string"}
             assert spec["env"] in {"none", "allow_list", "refs", "refs_braced"}
 
@@ -1105,12 +1443,14 @@ class TestSingleSourceRegistry:
             env_dir = spec["user_env_dir"]
             if env_dir:
                 monkeypatch.delenv(env_dir, raising=False)
-            assert mcp_registration.resolve_config_path(agent, "user") == home.joinpath(
-                *spec["user_parts"]
-            )
-            assert mcp_registration.resolve_config_path(
-                agent, "project", proj
-            ) == proj.resolve().joinpath(*spec["project_parts"])
+            user_path = home.joinpath(*spec["user_parts"])
+            assert mcp_registration.resolve_config_path(agent, "user") == user_path
+            resolved_project = mcp_registration.resolve_config_path(agent, "project", proj)
+            if spec["project_scope"]:
+                assert resolved_project == proj.resolve().joinpath(*spec["project_parts"])
+            else:
+                # A single-scope agent resolves project scope to its user file.
+                assert resolved_project == user_path
 
     @pytest.mark.parametrize("command", ["add", "remove"])
     def test_cli_agent_choices_derive_from_registry(self, command: str) -> None:
@@ -1136,10 +1476,14 @@ class TestSingleSourceRegistry:
             "native_env": False,
             "native_scope": False,
             "user_env_dir": None,
+            "project_scope": True,
         }
         patched = {**mcp_registration.ADAPTERS, "sentinel": sentinel}
         monkeypatch.setattr(mcp_registration, "ADAPTERS", patched)
         monkeypatch.setattr(mcp_registration, "AGENT_NAMES", tuple(patched))
+        # Hermes is part of the patched registry and resolves project scope to
+        # its user file: keep that file inside the sandbox, never the real home.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
 
         assert _parser_agent_choices("add") == [*tuple(patched), "all"]
         assert _parser_agent_choices("remove") == [*tuple(patched), "all"]
@@ -1154,6 +1498,7 @@ class TestSingleSourceRegistry:
         assert (proj / ".codex" / "config.toml").exists()
         assert (proj / ".gemini" / "settings.json").exists()
         assert (proj / ".pi" / "mcp.json").exists()
+        assert (tmp_path / "hermes" / "config.yaml").exists()
 
 
 class TestRefactorParity:
@@ -1192,8 +1537,14 @@ class TestRefactorParity:
 
 
 class TestPiAdapter:
-    def test_agent_names_includes_pi_last(self) -> None:
-        assert mcp_registration.AGENT_NAMES == ("opencode", "codex", "gemini", "pi")
+    def test_agent_names_includes_hermes_last(self) -> None:
+        assert mcp_registration.AGENT_NAMES == (
+            "opencode",
+            "codex",
+            "gemini",
+            "pi",
+            "hermes",
+        )
 
     def test_pi_registry_entry_is_complete(self) -> None:
         assert mcp_registration.ADAPTERS["pi"] == {
@@ -1208,6 +1559,7 @@ class TestPiAdapter:
             "native_env": False,
             "native_scope": False,
             "user_env_dir": "PI_CODING_AGENT_DIR",
+            "project_scope": True,
         }
 
     def test_pi_entry_shape_string_command_no_type_or_enabled(self, tmp_path) -> None:
@@ -1375,6 +1727,190 @@ class TestPiCli:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Hermes agent (#272) — YAML config, single user-scope file, ${KEY} env refs.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestHermesAdapter:
+    """H-1..H-8: the fifth adapter, its single-scope rule and its YAML shape."""
+
+    def test_hermes_registry_entry_is_exact(self) -> None:
+        assert mcp_registration.ADAPTERS["hermes"] == {
+            "fmt": "yaml",
+            "key": "mcp_servers",
+            "user_parts": (".hermes", "config.yaml"),
+            "project_parts": (),
+            "command": "string",
+            "adds_type_local": False,
+            "env": "refs_braced",
+            "delegates": False,
+            "native_env": False,
+            "native_scope": False,
+            "user_env_dir": "HERMES_HOME",
+            "project_scope": False,
+        }
+
+    def test_adapter_key_set_gains_project_scope(self) -> None:
+        assert all("project_scope" in spec for spec in mcp_registration.ADAPTERS.values())
+        assert mcp_registration.ADAPTERS["hermes"]["project_scope"] is False
+        for agent in ("opencode", "codex", "gemini", "pi"):
+            assert mcp_registration.ADAPTERS[agent]["project_scope"] is True
+
+    def test_hermes_user_path_defaults_under_home(self, tmp_path, monkeypatch) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        assert mcp_registration.resolve_config_path("hermes", "user") == (
+            home / ".hermes" / "config.yaml"
+        )
+
+    def test_hermes_user_path_honours_env_dir_override(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        assert mcp_registration.resolve_config_path("hermes", "user") == (
+            hermes_home / "config.yaml"
+        )
+
+    def test_hermes_entry_shape_string_command_and_env_refs(self, tmp_path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("hermes", cwd, {"HF_TOKEN": "hf123"})
+        assert entry == {
+            "command": "sofer-mcp",
+            "cwd": str(cwd.resolve()),
+            "env": {"HF_TOKEN": "${HF_TOKEN}"},
+        }
+        assert isinstance(entry["command"], str)
+        assert "type" not in entry
+        # The value never reaches the entry (NAMES only).
+        assert "hf123" not in str(entry)
+
+    def test_hermes_project_scope_resolves_to_user_file(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        assert mcp_registration.resolve_config_path("hermes", "project", proj) == (
+            hermes_home / "config.yaml"
+        )
+        # No project-local file is ever named or created.
+        assert not (proj / ".hermes" / "config.yaml").exists()
+
+    def test_hermes_project_scope_ignores_user_config(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        declared = tmp_path / "declared.yaml"
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        assert mcp_registration.resolve_config_path(
+            "hermes", "project", proj, user_config=str(declared)
+        ) == (hermes_home / "config.yaml")
+
+    def test_hermes_never_delegates_with_a_fake_binary(self, monkeypatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda x: "/fake/hermes" if x == "hermes" else None)
+        assert mcp_registration.probe_native("hermes") is False
+        assert mcp_registration.delegate_add("hermes", Path("/tmp"), []) is False
+        assert mcp_registration.delegate_remove("hermes") is False
+
+    def test_hermes_entries_equal_follows_refs_braced(self) -> None:
+        entry = {"command": "sofer-mcp", "cwd": "/proj", "env": {"HF_TOKEN": "${HF_TOKEN}"}}
+        assert mcp_registration._entries_equal("hermes", entry, {**entry}) is True
+        assert mcp_registration._entries_equal("hermes", entry, {**entry, "cwd": "/x"}) is False
+        assert mcp_registration._entries_equal("hermes", entry, {**entry, "env": {}}) is False
+        assert (
+            mcp_registration._entries_equal("hermes", entry, {**entry, "command": ["sofer-mcp"]})
+            is False
+        )
+
+    def test_single_scope_note_project_and_user(self, tmp_path) -> None:
+        target = tmp_path / "config.yaml"
+        note = mcp_registration.single_scope_note("hermes", "project", target)
+        assert note is not None
+        assert "hermes reads a single user-scope config" in note
+        assert "--scope project has no separate file" in note
+        assert str(target) in note
+        assert mcp_registration.single_scope_note("hermes", "user", target) is None
+        # A multi-scope agent never gets the note under any scope.
+        assert mcp_registration.single_scope_note("opencode", "project", target) is None
+        assert mcp_registration.single_scope_note("opencode", "user", target) is None
+
+    def test_add_all_project_writes_five_configs_and_sandboxes_hermes(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """H-2: ``--agent all --scope project`` yields four project files and
+        the Hermes user file, which must land in the sandboxed home."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        rc = cli._cmd_mcp_add(Namespace(agent="all", scope="project", cwd=str(proj), dry_run=False))
+        assert rc == 0
+        for rel in ("opencode.json", ".codex/config.toml", ".gemini/settings.json", ".pi/mcp.json"):
+            assert (proj / rel).exists(), rel
+        hermes_path = home / ".hermes" / "config.yaml"
+        assert hermes_path.exists()
+        assert not (proj / ".hermes").exists()
+        # The single-scope substitution is named on stderr (H-2/H-5).
+        assert "hermes reads a single user-scope config" in capsys.readouterr().err
+
+    def test_hermes_cli_add_is_idempotent_no_second_backup(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """H-6: a second equal add rewrites nothing and leaves the first .bak."""
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        path = hermes_home / "config.yaml"
+        path.write_text("mcp_servers:\n  other:\n    command: other\n", encoding="utf-8")
+        namespace = Namespace(agent="hermes", scope="project", cwd=str(proj), dry_run=False)
+        assert cli._cmd_mcp_add(namespace) == 0
+        first_bytes = path.read_bytes()
+        bak = Path(str(path) + ".bak")
+        assert bak.exists()
+        first_bak = bak.read_bytes()
+        capsys.readouterr()
+        assert cli._cmd_mcp_add(namespace) == 0
+        assert "already registered" in capsys.readouterr().out
+        assert path.read_bytes() == first_bytes
+        assert bak.read_bytes() == first_bak
+
+    def test_hermes_env_references_only_and_no_value(self, tmp_path, monkeypatch, capsys) -> None:
+        """H-8: Hermes is a forwarding agent; only the NAME is written."""
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="hermes", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 0
+        # Hermes forwards, so it never contributes the opencode no-env warning.
+        assert "receives no env" not in capsys.readouterr().err
+        raw = (hermes_home / "config.yaml").read_text(encoding="utf-8")
+        assert "hf123" not in raw
+        doc = yaml.safe_load(raw)
+        assert doc["mcp_servers"]["sofer"]["env"] == {"HF_TOKEN": "${HF_TOKEN}"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Native delegation fidelity (#167 env, #232 scope) — one unified criterion.
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1390,6 +1926,7 @@ class TestNativeDelegationFidelity:
         assert mcp_registration.ADAPTERS["codex"]["native_scope"] is False
         assert mcp_registration.ADAPTERS["opencode"]["native_scope"] is False
         assert mcp_registration.ADAPTERS["pi"]["native_scope"] is False
+        assert mcp_registration.ADAPTERS["hermes"]["native_scope"] is False
 
     def test_decline_reasons_truth_table(self) -> None:
         r = mcp_registration.native_delegation_decline_reasons
@@ -1472,3 +2009,124 @@ class TestNativeDelegationFidelity:
         monkeypatch.setattr(subprocess, "run", mock_run)
         assert mcp_registration.delegate_remove("codex", "project") is False
         mock_run.assert_not_called()
+
+
+# ── YAML config format (design §3-§4, Y-6/Y-7) ─────────────────────────
+
+
+class TestYamlFormat:
+    """``_infer_fmt``/``read_config``/``atomic_write`` learn ``fmt == "yaml"``."""
+
+    def test_infer_fmt_yaml_suffixes(self, tmp_path: Path) -> None:
+        assert mcp_registration._infer_fmt(tmp_path / "config.yaml") == "yaml"
+        assert mcp_registration._infer_fmt(tmp_path / "config.yml") == "yaml"
+        assert mcp_registration._infer_fmt(tmp_path / "CONFIG.YAML") == "yaml"
+        assert mcp_registration._infer_fmt(tmp_path / "config.toml") == "toml"
+        assert mcp_registration._infer_fmt(tmp_path / "config.json") == "json"
+        assert mcp_registration._infer_fmt(tmp_path / "config") == "json"
+
+    def test_read_config_missing_yaml_returns_empty(self, tmp_path: Path) -> None:
+        assert mcp_registration.read_config(tmp_path / "config.yaml") == ({}, "yaml")
+
+    def test_read_config_comment_only_yaml_returns_empty(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("# comment only\n", encoding="utf-8")
+        assert mcp_registration.read_config(path) == ({}, "yaml")
+
+    def test_read_config_non_mapping_yaml_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("- 1\n- 2\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="not a YAML mapping"):
+            mcp_registration.read_config(path)
+
+    def test_atomic_write_yaml_preserves_prewrite(self, tmp_path: Path) -> None:
+        path = tmp_path / "nested" / "config.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "# keep me\nuser: alice\nmcp_servers:\n  other:\n    command: other\n",
+            encoding="utf-8",
+        )
+        doc = {
+            "user": "alice",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": {
+                    "command": "sofer-mcp",
+                    "cwd": "/proj",
+                    "env": {"HF_TOKEN": "${HF_TOKEN}"},
+                },
+            },
+        }
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        text = path.read_text(encoding="utf-8")
+        assert "# keep me\n" in text
+        assert "user: alice\n" in text
+        assert not (path.with_name(path.name + ".tmp")).exists()
+        assert yaml.safe_load(text) == doc
+
+    def test_atomic_write_yaml_fresh_document_creates_parents(self, tmp_path: Path) -> None:
+        path = tmp_path / "new" / "config.yaml"
+        doc = {"mcp_servers": {"sofer": {"command": "sofer-mcp"}}}
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        assert path.exists()
+        assert not (path.with_name(path.name + ".tmp")).exists()
+        assert yaml.safe_load(path.read_text(encoding="utf-8")) == doc
+
+    def test_atomic_write_yaml_without_entry_renders_fresh(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        doc = {"other": 1}
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        assert yaml.safe_load(path.read_text(encoding="utf-8")) == doc
+
+    def test_atomic_write_yaml_lf_stays_lf(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_bytes(b"# keep\nuser: alice\nmcp_servers:\n  other:\n    command: other\n")
+        doc = {
+            "user": "alice",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": {
+                    "command": "sofer-mcp",
+                    "cwd": "/proj",
+                    "env": {"HF_TOKEN": "${HF_TOKEN}"},
+                },
+            },
+        }
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        raw = path.read_bytes()
+        assert b"\r" not in raw
+        assert b"# keep\n" in raw
+        assert yaml.safe_load(raw.decode("utf-8")) == doc
+
+    def test_atomic_write_yaml_crlf_stays_crlf(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_bytes(
+            b"# keep\r\nuser: alice\r\nmcp_servers:\r\n  other:\r\n    command: other\r\n"
+        )
+        doc = {
+            "user": "alice",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": {
+                    "command": "sofer-mcp",
+                    "cwd": "/proj",
+                    "env": {"HF_TOKEN": "${HF_TOKEN}"},
+                },
+            },
+        }
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        raw = path.read_bytes()
+        assert b"# keep\r\n" in raw
+        assert b"  sofer:\r\n    command: sofer-mcp\r\n" in raw
+        assert b"\n" not in raw.replace(b"\r\n", b"")
+        assert yaml.safe_load(raw.decode("utf-8")) == doc

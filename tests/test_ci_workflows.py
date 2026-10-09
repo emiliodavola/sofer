@@ -1299,6 +1299,30 @@ def test_dependabot_ignores_the_coordinated_ruff_pin() -> None:
     )
 
 
+def test_dependabot_ignores_the_coordinated_analyzer_pins() -> None:
+    """CI-14 S4: the `uv` update ignores `mypy` and `pyright` at every update type.
+
+    GitHub #275: each analyzer's exact version is declared in three text homes —
+    the `[dependency-groups] dev` pin in `pyproject.toml`, and the version named
+    in `openspec/project.md` and `openspec/config.yaml` — forced to agree by
+    `test_openspec_context_declares_the_enforced_tool_versions`. Dependabot's
+    `uv` ecosystem can move only the first, so every PR it opens is red by
+    construction; #271 is the measured instance. Same shape as the coordinated
+    `ruff` pin (CI-14 S1).
+    """
+    uv = _dependabot_update("uv")
+    ignores = uv.get("ignore", [])
+    assert isinstance(ignores, list), "the `uv` update's `ignore` must be a list"
+    for name in ("mypy", "pyright"):
+        entries = [entry for entry in ignores if entry.get("dependency-name") == name]
+        assert len(entries) == 1, f"expected exactly one `{name}` ignore entry, found {entries!r}"
+        assert "update-types" not in entries[0], (
+            f"the `{name}` ignore must not narrow its scope: its version is declared in the "
+            "pyproject dev pin and named in openspec/project.md and openspec/config.yaml, and "
+            "Dependabot can move only the first (GitHub #275)"
+        )
+
+
 def test_dependabot_ignores_fastmcp_majors() -> None:
     """CI-14 S2: the `uv` update ignores `fastmcp` majors, keeping minor/patch.
 
