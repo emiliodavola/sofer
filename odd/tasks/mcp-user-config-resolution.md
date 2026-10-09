@@ -35,7 +35,8 @@ The issue is **evidence of a problem**, not a decision record. Its "Proposed sol
 | T5 | MCP-REG-01: clause + amendment note + `Cwd existence, not containment` scenario | done | `check_test_mapping.py` exit 0 |
 | T6 | Rule-14 gate: `cli.py` at 100.00%, no pragma | done | `check_core_coverage.sh` exit 0; `cli.py 613 0 178 0 100%` |
 | T7 | Full gates | done | `2011 passed, 6 skipped`; ruff/format/mypy/pyright clean; TOTAL 94% |
-| T8 | Commits + push + PR | pending | — |
+| T8 | Commits + push + PR | done | PR #283 — 3 commits (`6b42519`, `04a9f0d`, `a18503e`); merged as `b650d1a` |
+| T9 | Archive the change | done | moved to `openspec/changes/archive/2026-10-09-fix-mcp-user-config-resolution/` with its `archive-report.md`; `openspec/changes/` holds only `archive/` |
 
 ## Tasks — slice 2 (the `$HOME` resolution defect, the issue's own core): PENDING
 

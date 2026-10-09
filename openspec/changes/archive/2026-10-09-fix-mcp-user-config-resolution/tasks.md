@@ -39,7 +39,8 @@ new rule:
 | T5 | MCP-REG-01: the clause, the amendment note and the `Cwd existence, not containment` scenario | done | spec diff; `check_test_mapping.py` exit 0 |
 | T6 | Rule-14 gate: `cli.py` at 100.00% with no pragma | done | `check_core_coverage.sh` exit 0; `cli.py 613 0 178 0 100%` |
 | T7 | Full gates | done | `2011 passed, 6 skipped`; ruff/format/mypy/pyright clean; coverage TOTAL 94% |
-| T8 | Commits + push + PR | pending | PR URL |
+| T8 | Commits + push + PR | done | PR #283 — 3 commits (`6b42519` the rule, `04a9f0d` the SDD record, `a18503e` the post-verification correction); merged as `b650d1a` |
+| T9 | Post-verification correction: the argparse help and both READMEs still asserted the removed rule (rule 7); the scenario's "SHALL NOT write" half was unproven; the lost fail-closed brake was not named | done | commit `a18503e`; final tally `2012 passed, 6 skipped` (T7's `2011` is the pre-correction run); the lost brake is recorded as risk `R1b` in `design.md` |
 
 ---
 
