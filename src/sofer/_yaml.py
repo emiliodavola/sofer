@@ -99,24 +99,26 @@ def splice_entry(text: str, key: str, name: str, doc: dict[str, Any]) -> str:
     servers: dict[str, Any] = target if isinstance(target, dict) else {}
     entry_present = name in servers
 
+    ending = _line_ending(text)
     lines = text.splitlines(keepends=True)
     located = _find_child(yaml.compose(text), key)
 
     if located is None:
         if not entry_present:
             return text
-        return _append_block(text, _render({key: {name: servers[name]}}))
+        block = _with_ending(_render({key: {name: servers[name]}}), ending)
+        return _append_block(text, block, ending)
 
     key_node, value_node = located
     if not isinstance(value_node, MappingNode) or value_node.flow_style:
-        return _replace_key_block(lines, key_node, value_node, key, doc)
+        return _replace_key_block(lines, key_node, value_node, key, doc, ending)
 
     name_nodes = _find_child(value_node, name)
     if entry_present:
         if name_nodes is None:
-            return _insert_entry(lines, value_node, name, servers[name])
+            return _insert_entry(lines, value_node, name, servers[name], ending)
         name_key, name_value = name_nodes
-        return _replace_entry(lines, name_key, name_value, name, servers[name])
+        return _replace_entry(lines, name_key, name_value, name, servers[name], ending)
 
     if name_nodes is None:
         return text
@@ -124,6 +126,22 @@ def splice_entry(text: str, key: str, name: str, doc: dict[str, Any]) -> str:
     if key in doc and servers:
         return _remove_entry_only(lines, name_key, name_value)
     return _remove_key_block(lines, key_node, value_node)
+
+
+def _line_ending(text: str) -> str:
+    """Return the line ending to render edited blocks with.
+
+    A document that uses CRLF anywhere keeps CRLF; otherwise (including a
+    fresh document with no line breaks yet) the render uses LF. Untouched
+    lines are copied verbatim regardless, so this only governs the lines the
+    splice itself produces.
+    """
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _with_ending(block: str, ending: str) -> str:
+    """Return *block* (rendered with LF) re-joined with *ending*."""
+    return block if ending == "\n" else block.replace("\n", ending)
 
 
 def _render(mapping: Mapping[str, Any]) -> str:
@@ -171,26 +189,27 @@ def _indent_block(text: str, indent: int) -> str:
     )
 
 
-def _entry_block(name: str, entry: Any, indent: int) -> list[str]:
+def _entry_block(name: str, entry: Any, indent: int, ending: str) -> list[str]:
     """Render ``{name: entry}`` as block lines indented by *indent* spaces."""
-    return _indent_block(_render({name: entry}), indent).splitlines(keepends=True)
+    block = _with_ending(_render({name: entry}), ending)
+    return _indent_block(block, indent).splitlines(keepends=True)
 
 
 def _replace_entry(
-    lines: list[str], name_key: Node, name_value: Node, name: str, entry: Any
+    lines: list[str], name_key: Node, name_value: Node, name: str, entry: Any, ending: str
 ) -> str:
     """Replace the existing *name* entry's own lines; return the new text."""
     start = name_key.start_mark.line
     end = _content_end(name_value).line + 1
-    block = _entry_block(name, entry, name_key.start_mark.column)
+    block = _entry_block(name, entry, name_key.start_mark.column, ending)
     return "".join(lines[:start] + block + lines[end:])
 
 
-def _insert_entry(lines: list[str], value_node: Node, name: str, entry: Any) -> str:
+def _insert_entry(lines: list[str], value_node: Node, name: str, entry: Any, ending: str) -> str:
     """Append a new *name* entry to the *value_node* block mapping."""
     indent = value_node.value[0][0].start_mark.column
     at = _content_end(value_node).line + 1
-    block = _entry_block(name, entry, indent)
+    block = _entry_block(name, entry, indent, ending)
     return "".join(lines[:at] + block + lines[at:])
 
 
@@ -209,7 +228,7 @@ def _remove_key_block(lines: list[str], key_node: Node, value_node: Node) -> str
 
 
 def _replace_key_block(
-    lines: list[str], key_node: Node, value_node: Node, key: str, doc: dict[str, Any]
+    lines: list[str], key_node: Node, value_node: Node, key: str, doc: dict[str, Any], ending: str
 ) -> str:
     """Re-render a flow-style (or non-mapping) *key* block in block style.
 
@@ -221,15 +240,15 @@ def _replace_key_block(
     end = _content_end(value_node).line + 1
     target = doc.get(key)
     if isinstance(target, dict) and target:
-        replacement = _render({key: target}).splitlines(keepends=True)
+        replacement = _with_ending(_render({key: target}), ending).splitlines(keepends=True)
     else:
         replacement = []
     return "".join(lines[:start] + replacement + lines[end:])
 
 
-def _append_block(text: str, block: str) -> str:
+def _append_block(text: str, block: str, ending: str) -> str:
     """Append *block* at end of file, separated by one blank line."""
     if not text.strip():
         return block
-    body = text.rstrip("\n")
-    return body + "\n\n" + block
+    body = text.rstrip("\r\n")
+    return body + ending + ending + block

@@ -2083,3 +2083,50 @@ class TestYamlFormat:
         mcp_registration.atomic_write(path, doc, "yaml")
 
         assert yaml.safe_load(path.read_text(encoding="utf-8")) == doc
+
+    def test_atomic_write_yaml_lf_stays_lf(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_bytes(b"# keep\nuser: alice\nmcp_servers:\n  other:\n    command: other\n")
+        doc = {
+            "user": "alice",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": {
+                    "command": "sofer-mcp",
+                    "cwd": "/proj",
+                    "env": {"HF_TOKEN": "${HF_TOKEN}"},
+                },
+            },
+        }
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        raw = path.read_bytes()
+        assert b"\r" not in raw
+        assert b"# keep\n" in raw
+        assert yaml.safe_load(raw.decode("utf-8")) == doc
+
+    def test_atomic_write_yaml_crlf_stays_crlf(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_bytes(
+            b"# keep\r\nuser: alice\r\nmcp_servers:\r\n  other:\r\n    command: other\r\n"
+        )
+        doc = {
+            "user": "alice",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": {
+                    "command": "sofer-mcp",
+                    "cwd": "/proj",
+                    "env": {"HF_TOKEN": "${HF_TOKEN}"},
+                },
+            },
+        }
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        raw = path.read_bytes()
+        assert b"# keep\r\n" in raw
+        assert b"  sofer:\r\n    command: sofer-mcp\r\n" in raw
+        assert b"\n" not in raw.replace(b"\r\n", b"")
+        assert yaml.safe_load(raw.decode("utf-8")) == doc

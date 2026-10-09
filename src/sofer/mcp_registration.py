@@ -607,11 +607,12 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
 
     The ``json`` and ``toml`` branches serialize *doc* wholesale. The ``yaml``
     branch instead splices *doc* into the **pre-write** text read back from
-    *path* -- preserving the document's comments, key order and indentation
-    outside the edited entry -- and therefore MUST be called while the file
-    still holds the pre-write content. The caller reaches it after the single
-    ``.bak`` backup, and nothing mutates the file in between; when *path* does
-    not exist the merged document is rendered fresh.
+    *path* -- preserving the document's comments, key order, indentation and
+    line-ending convention (LF or CRLF) outside the edited entry -- and
+    therefore MUST be called while the file still holds the pre-write content.
+    The caller reaches it after the single ``.bak`` backup, and nothing mutates
+    the file in between; when *path* does not exist the merged document is
+    rendered fresh.
 
     Args:
         path: Destination file.
@@ -622,17 +623,27 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     # Ensure tmp is in same directory for atomic replace
     if fmt == "json":
+        # Whole-document rewrite: text-mode newline translation is pre-existing,
+        # declared JSON behavior and stays out of the YAML preservation scope.
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
     elif fmt == "yaml":
-        pre_write = path.read_text(encoding="utf-8") if path.exists() else _yaml.dump(doc)
+        # newline="" disables universal-newline translation on both ends so the
+        # pre-write LF/CRLF convention survives byte-for-byte. `open` is used
+        # rather than `Path.read_text` because the latter only grew a `newline`
+        # parameter in Python 3.13 and this package targets 3.10+.
+        if path.exists():
+            with open(path, encoding="utf-8", newline="") as fh:
+                pre_write = fh.read()
+        else:
+            pre_write = _yaml.dump(doc)
         key = _yaml_config_key(pre_write, doc)
         if key is None:
             content = _yaml.dump(doc)
         else:
             content = _yaml.splice_entry(pre_write, key, _SOFER_ENTRY_NAME, doc)
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
             fh.write(content)
     else:
         try:

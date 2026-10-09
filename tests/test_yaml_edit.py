@@ -269,3 +269,60 @@ class TestStringRoundTrip:
 
         assert "${HF_TOKEN}" in text
         assert _yaml.load(text) == doc
+
+
+class TestLineEndings:
+    """Splicing must preserve the document's ``\\n`` vs ``\\r\\n`` convention."""
+
+    def test_splice_crlf_keeps_crlf_everywhere(self) -> None:
+        original = (
+            "# lead\r\n"
+            "mcp_servers:\r\n"
+            "  other:\r\n"
+            "    command: other\r\n"
+            "  sofer:\r\n"
+            "    command: old\r\n"
+            "other: 1\r\n"
+        )
+        doc = {
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": _entry(),
+            },
+            "other": 1,
+        }
+
+        result = _yaml.splice_entry(original, "mcp_servers", "sofer", doc)
+
+        assert "# lead\r\n" in result
+        assert result.endswith("other: 1\r\n")
+        assert "  sofer:\r\n    command: sofer-mcp\r\n" in result
+        # No bare LF anywhere: every line break is CRLF.
+        assert "\n" not in result.replace("\r\n", "")
+        assert _yaml.load(result) == doc
+
+    def test_splice_lf_has_no_carriage_return(self) -> None:
+        original = "mcp_servers:\n  sofer:\n    command: old\n"
+        doc = {"mcp_servers": {"sofer": _entry()}}
+
+        result = _yaml.splice_entry(original, "mcp_servers", "sofer", doc)
+
+        assert "\r" not in result
+        assert _yaml.load(result) == doc
+
+    def test_append_crlf_uses_crlf_separator(self) -> None:
+        original = "# cfg\r\nother: 1\r\n"
+        doc = {"other": 1, "mcp_servers": {"sofer": _entry()}}
+
+        result = _yaml.splice_entry(original, "mcp_servers", "sofer", doc)
+
+        assert "# cfg\r\nother: 1\r\n\r\nmcp_servers:\r\n" in result
+        assert "\n" not in result.replace("\r\n", "")
+        assert _yaml.load(result) == doc
+
+    def test_dump_ends_with_single_lf(self) -> None:
+        text = _yaml.dump({"a": 1})
+
+        assert text.endswith("\n")
+        assert not text.endswith("\r\n")
+        assert "\r" not in text

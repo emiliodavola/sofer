@@ -54,7 +54,8 @@ value, else `~/.hermes/config.yaml`. Hermes entries MUST NOT carry an array `com
 `type` field, and Hermes MUST be file-edit only: `hermes mcp add` documents no `cwd` and no env
 surface, and a native path that omitted `cwd` would reintroduce the broken registration this clause
 exists to prevent. A Hermes edit SHALL splice only the `sofer` entry into `config.yaml` and SHALL leave
-every unrelated key, comment and indentation byte-identical; the declared "TOML edits may strip
+every unrelated key, comment, indentation and line ending byte-identical (LF stays LF and CRLF
+stays CRLF, inside and outside the spliced entry); the declared "TOML edits may strip
 comments" behavior of the other formats is unchanged.
 
 Hermes reads a single config file and has no distinct project-scope file (`hermes project` is a named
@@ -82,7 +83,7 @@ declared for project scope, `--user-config` SHALL still be ignored.
 - WHEN `add --agent hermes --scope user` runs
 - THEN `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) SHALL contain
   `mcp_servers.sofer={command:"sofer-mcp",cwd,env}` with an absolute `cwd`
-- AND every unrelated line of the file SHALL be byte-identical
+- AND every unrelated line of the file SHALL be byte-identical, line endings included
 - AND a single `.bak` SHALL precede the first mutation
 
 #### Scenario: Hermes env references only
