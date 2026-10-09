@@ -38,15 +38,23 @@ The issue is **evidence of a problem**, not a decision record. Its "Proposed sol
 | T8 | Commits + push + PR | done | PR #283 — 3 commits (`6b42519`, `04a9f0d`, `a18503e`); merged as `b650d1a` |
 | T9 | Archive the change | done | moved to `openspec/changes/archive/2026-10-09-fix-mcp-user-config-resolution/` with its `archive-report.md`; `openspec/changes/` holds only `archive/` |
 
-## Tasks — slice 2 (the `$HOME` resolution defect, the issue's own core): PENDING
+## Tasks — slice 2 (the `$HOME` resolution defect, the issue's own core): DONE
 
-| # | Task | State |
-| --- | --- | --- |
-| S1 | `--user-config PATH` on `mcp add`/`mcp remove`; precedence over `user_env_dir` and `Path.home()` | pending |
-| S2 | Reject `--user-config` with `--agent all` (each agent has a different file) | pending |
-| S3 | Account-home mismatch warning (`pwd.getpwuid(os.getuid()).pw_dir` on POSIX) | pending |
-| S4 | MCP-REG-01 resolution clause; CLI-R09 flag enumeration and help scenario | pending |
-| S5 | `README.md` + `README_ES.md` (rule 13): flags table + per-agent locations table | pending |
+| # | Task | State | Evidence |
+| --- | --- | --- | --- |
+| S1 | `--user-config PATH` on `mcp add`/`mcp remove`; precedence over `user_env_dir` and `Path.home()` | done | RED `16 failed, 2 passed, 2 skipped` → GREEN `18 passed, 2 skipped`, both with the **released** test file (20 tests; 2 POSIX-only) |
+| S2 | Reject `--user-config` with `--agent all` (each agent has a different file) | done | tested on **both** subcommands, with `dry_run=False` and an assertion that none of the four project-scope agent files exists |
+| S3 | Account-home mismatch warning (`pwd.getpwuid(os.getuid()).pw_dir` on POSIX) | done | `_account_home` + `home_mismatch_warning`; the `sys.platform == "win32"` guard is what keeps mypy clean on both platforms |
+| S4 | MCP-REG-01 resolution clause; CLI-R09 flag enumeration and help scenario | done | both specs amended; `check_test_mapping.py` exit 0 |
+| S5 | `README.md` + `README_ES.md` (rule 13): flags table + per-agent locations table | done | 3 mirrored edits each |
+| S6 | Rule-14 gate: `cli.py` at 100.00%, no pragma | done | `check_core_coverage.sh` exit 0; `cli.py 631 0 190 0 100%` |
+| S7 | Archive the change **inside the delivering PR** (rule 15) | done | `openspec/changes/archive/2026-10-09-feat-mcp-user-config-flag/` with its `archive-report.md` |
+
+**A test was vacuous and was strengthened:** the first draft of
+`test_cmd_remove_uses_the_declared_user_config` used `dry_run=True` with a nonexistent file, where
+removal writes nothing and exits 0 regardless — it passed against the **old** code and proved nothing.
+It now asserts the declared file was mutated. The same weakness was caught by the independent verifier
+in slice 1 (`"SHALL NOT write"` under `dry_run=True`), which is why it was looked for here.
 
 **Why two slices:** the two defects are independent, and each PR should carry one reason to exist.
 Slice 1 is the decision taken on our side (the false gate); slice 2 is the issue's core fix. Splitting

@@ -409,6 +409,244 @@ class TestUnreadable:
 # ── cwd containment ───────────────────────────────────────────────────
 
 
+class TestUserConfigResolution:
+    """`--user-config` and the `$HOME`-vs-account-home divergence (issue #274).
+
+    `sofer mcp add --scope user` used to resolve the config under `Path.home()`,
+    which follows `$HOME`; agents such as opencode resolve theirs from the system
+    account home and ignore `$HOME`, so the entry could land in a file the agent
+    never reads while sofer reported success. The explicit declaration now wins,
+    and a divergence between the two homes is named instead of being silent.
+    """
+
+    def test_user_config_wins_over_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        declared = tmp_path / "elsewhere" / "opencode.json"
+        assert (
+            mcp_registration.resolve_config_path("opencode", "user", user_config=str(declared))
+            == declared.resolve()
+        )
+
+    def test_user_config_beats_the_adapter_env_dir(self, tmp_path, monkeypatch):
+        env_dir = tmp_path / "pi-env"
+        env_dir.mkdir()
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(env_dir))
+        declared = tmp_path / "declared" / "mcp.json"
+        assert (
+            mcp_registration.resolve_config_path("pi", "user", user_config=str(declared))
+            == declared.resolve()
+        )
+
+    def test_adapter_env_dir_still_wins_over_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        env_dir = tmp_path / "pi-env"
+        env_dir.mkdir()
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(env_dir))
+        assert mcp_registration.resolve_config_path("pi", "user") == env_dir / "mcp.json"
+
+    def test_home_is_still_the_default(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        assert mcp_registration.resolve_config_path("opencode", "user") == (
+            home / ".config" / "opencode" / "opencode.json"
+        )
+
+    def test_blank_user_config_is_treated_as_unset(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        assert mcp_registration.resolve_config_path("opencode", "user", user_config="   \t ") == (
+            home / ".config" / "opencode" / "opencode.json"
+        )
+
+    def test_project_scope_ignores_user_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        declared = tmp_path / "declared.json"
+        assert mcp_registration.resolve_config_path(
+            "opencode", "project", user_config=str(declared)
+        ) == (tmp_path / "opencode.json")
+
+    def test_cmd_add_rejects_user_config_with_agent_all(self, tmp_path, monkeypatch, capsys):
+        """Each agent has a different config file, so one path is ambiguous."""
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="all",
+                scope="user",
+                cwd=None,
+                dry_run=True,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        assert "--user-config" in capsys.readouterr().err
+
+    def test_cmd_add_uses_the_declared_user_config(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        declared = tmp_path / "declared" / "opencode.json"
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="opencode",
+                scope="user",
+                cwd=None,
+                dry_run=True,
+                user_config=str(declared),
+            )
+        )
+        assert rc == 0
+        assert str(declared.resolve()) in capsys.readouterr().out
+
+    def test_cmd_remove_uses_the_declared_user_config(self, tmp_path, monkeypatch):
+        """The declared file is the one consulted — asserted by its mutation, not
+        by the exit code, which a missing file would also pass."""
+        monkeypatch.chdir(tmp_path)
+        declared = tmp_path / "declared" / "opencode.json"
+        declared.parent.mkdir()
+        declared.write_text(
+            '{"mcp": {"sofer": {"type": "local", "command": ["sofer-mcp"]}}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(
+            Namespace(agent="opencode", scope="user", dry_run=False, user_config=str(declared))
+        )
+        assert rc == 0
+        assert "sofer" not in declared.read_text(encoding="utf-8")
+
+    def test_account_home_is_none_without_a_passwd_database(self, monkeypatch):
+        """Windows: no passwd database, so there is nothing to compare."""
+        monkeypatch.setattr(mcp_registration.sys, "platform", "win32")
+        assert mcp_registration._account_home() is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pwd module off POSIX")
+    def test_account_home_returns_the_passwd_entry(self, monkeypatch):
+        import pwd as real_pwd
+
+        entry = real_pwd.struct_passwd(("u", "x", 1000, 1000, "", "/home/u", "/bin/sh"))
+        monkeypatch.setattr(real_pwd, "getpwuid", lambda _uid: entry)
+        assert mcp_registration._account_home() == Path("/home/u")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pwd module off POSIX")
+    def test_account_home_is_none_for_a_uid_without_an_entry(self, monkeypatch):
+        import pwd as real_pwd
+
+        def _raise(_uid):
+            raise KeyError("no such uid")
+
+        monkeypatch.setattr(real_pwd, "getpwuid", _raise)
+        assert mcp_registration._account_home() is None
+
+    def test_home_mismatch_warning_names_both_paths(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        account = tmp_path / "account"
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: account)
+        warning = mcp_registration.home_mismatch_warning()
+        assert warning is not None
+        assert str(home.resolve()) in warning
+        assert str(account.resolve()) in warning
+
+    def test_home_mismatch_warning_is_none_when_they_agree(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: home)
+        assert mcp_registration.home_mismatch_warning() is None
+
+    def test_home_mismatch_warning_is_none_without_an_account_home(self, monkeypatch):
+        """Windows has no `pwd`: no account home to compare, so no warning."""
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: None)
+        assert mcp_registration.home_mismatch_warning() is None
+
+    def test_cmd_add_prints_the_mismatch_warning(self, tmp_path, monkeypatch, capsys):
+        """The silent success is the worst part of the report: it must be named."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: tmp_path / "account")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(Namespace(agent="opencode", scope="user", cwd=None, dry_run=True))
+        assert rc == 0
+        assert str(home.resolve()) in capsys.readouterr().err
+
+    def test_cmd_remove_rejects_user_config_with_agent_all(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_remove(
+            Namespace(
+                agent="all",
+                scope="user",
+                dry_run=True,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        assert "--user-config" in capsys.readouterr().err
+
+    def test_cmd_remove_prints_the_mismatch_warning(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(mcp_registration, "_account_home", lambda: tmp_path / "account")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_remove(Namespace(agent="opencode", scope="user", dry_run=True))
+        assert rc == 0
+        assert str(home.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_rejects_user_config_with_agent_all_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        """The rejection precedes any write - with ``dry_run`` OFF, so the no-write
+        half of the contract is actually exercised rather than assumed."""
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="all",
+                scope="project",
+                cwd=None,
+                dry_run=False,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        for rel in (
+            "opencode.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+            ".pi/mcp.json",
+        ):
+            assert not (tmp_path / rel).exists(), rel
+
+    def test_cmd_remove_rejects_user_config_with_agent_all_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_remove(
+            Namespace(
+                agent="all",
+                scope="project",
+                dry_run=False,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        for rel in (
+            "opencode.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+            ".pi/mcp.json",
+        ):
+            assert not (tmp_path / rel).exists(), rel
+
+
 class TestCwdContainment:
     """The `--cwd` rule: an existing directory is accepted, anything else is refused.
 

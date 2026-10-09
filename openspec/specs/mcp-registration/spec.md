@@ -23,6 +23,33 @@ The `--cwd` value SHALL be an **existing directory**, and that SHALL be the whol
 
 > Amended by `2026-10-09-fix-mcp-user-config-resolution` (issue #274). The previous rule refused any cwd outside `Path.home()` or the process cwd. It was removed because, measured: it was undeclared in any spec (this clause did not exist); it was scope-blind (its `user` and `project` branches were the *same expression*); it was effectively untested (the only "rejection" test monkeypatched the function away); it protected no privilege boundary; it rejected legitimate trees (a dataset tree outside `$HOME`, which is the reported container case); and it still *accepted* a nonexistent path under either root, so it failed to catch the mistake that matters.
 
+The user-scope config file SHALL resolve by explicit declaration first, then the adapter's environment
+override, then the home directory: (1) `--user-config PATH` — expanded and resolved, naming the **file**, with a blank or
+whitespace-only value counting as unset; (2) the adapter's `user_env_dir` when that variable
+is set to a non-empty value (Pi's `PI_CODING_AGENT_DIR`), whose directory replaces the home prefix and
+whose file name is `user_parts[-1]`; (3) `Path.home()` joined with `user_parts` — the documented
+default. `--user-config` SHALL be rejected when combined with `--agent all`, because each agent has
+its own config file and one path is ambiguous for all of them. When `Path.home()` differs from the
+account home (`pwd.getpwuid(os.getuid()).pw_dir` on POSIX), `add` and `remove` SHALL print a warning
+naming both homes, so that a write into a file the agent never reads is never a silent success.
+Project scope SHALL ignore `--user-config`: the declared file is a user-scope concept.
+
+> Added by `2026-10-09-feat-mcp-user-config-flag` (issue #274). The previous behaviour resolved user
+> scope under `Path.home()` alone, which follows `$HOME`; agents such as opencode resolve their config
+> from the system account home and ignore both `$HOME` and `XDG_CONFIG_HOME`, so sofer could write the
+> entry into a file the agent never reads **and report success**. Removing that silent no-op is the
+> whole point of this clause.
+
+#### Scenario: User-scope config resolution
+
+- GIVEN a user-scope `add` or `remove`
+- WHEN `--user-config PATH` is passed, or the adapter's env override is set, or neither is present
+- THEN the config file SHALL be the first present of `--user-config PATH`, the adapter's
+  `user_env_dir` file, and `Path.home()` joined with `user_parts` (a blank `--user-config` counts as
+  unset, and project scope ignores it)
+- AND `--user-config` combined with `--agent all` SHALL exit 1 without writing
+- AND when the home and the account home differ, a warning naming both SHALL be printed to stderr
+
 #### Scenario: Add all
 
 - GIVEN no `sofer` in any config
