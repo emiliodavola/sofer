@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Register `sofer-mcp` in opencode/codex/gemini/pi agent configs via the `sofer mcp add/remove` subcommands. Registration edits the agent's on-disk config idempotently: unrelated keys are preserved, a single `.bak` backup precedes the first mutation, writes are atomic, and the agent process (or file merge fallback) is preferred over direct file surgery. Env forwarding persists **names only** — secret values are never written to disk.
+Register `sofer-mcp` in opencode/codex/gemini/pi/hermes agent configs via the `sofer mcp add/remove` subcommands. Registration edits the agent's on-disk config idempotently: unrelated keys are preserved, a single `.bak` backup precedes the first mutation, writes are atomic, and the agent process (or file merge fallback) is preferred over direct file surgery. A JSON or TOML edit rewrites the document (a TOML edit may strip comments), while a YAML edit splices only the `sofer` entry and leaves the rest of the file byte-identical. Env forwarding persists **names only** — secret values are never written to disk.
 
 ## Requirements
 
