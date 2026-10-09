@@ -679,9 +679,12 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
         1. Expand ``--agent all`` to the registry agents (``mcp_registration.AGENT_NAMES``).
         2. Resolve the desired ``cwd`` (``--cwd`` or ``Path.cwd()``) to an
-           absolute path via ``Path.resolve()`` and validate containment with
-           ``mcp_registration.validate_cwd`` (``is_relative_to`` user/project
-           root) — fail with exit 1 and a path message when outside.
+           absolute path via ``Path.resolve()`` and require it to be an
+           **existing directory** via ``mcp_registration.validate_cwd`` —
+           fail with exit 1 and a path message when it is not. A tree outside
+           the home and the process cwd is accepted and named by
+           ``mcp_registration.outside_root_warning`` instead of being refused
+           (issue #274).
         3. For each agent: when opencode is selected and known env keys are
            present, print an informational stderr warning naming the dropped
            env NAMES (never values) and pointing at the README alternative.
@@ -726,14 +729,21 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     else:
         cwd_resolved = Path.cwd().resolve()
 
-    # Containment check — must be absolute and inside allowed root
-    # validate_cwd uses is_relative_to logic; reject outside
-    if not mcp_registration.validate_cwd(cwd_resolved, cast(mcp_registration.Scope, scope)):
+    # ``--cwd`` must be an existing directory. The rule is existence, not
+    # containment (issue #274): the previous home/process-cwd gate refused
+    # legitimate trees and still accepted a nonexistent path under either root.
+    if not mcp_registration.validate_cwd(cwd_resolved):
         print(
-            f"  X  --cwd {cwd_resolved} is outside the allowed root for scope '{scope}'",
+            f"  X  --cwd {cwd_resolved} is not an existing directory",
             file=sys.stderr,
         )
         return 1
+
+    # Informational: an explicit --cwd is the caller's declaration, so an
+    # unusual tree is accepted and named rather than refused (issue #274).
+    outside_warning = mcp_registration.outside_root_warning(cwd_resolved)
+    if outside_warning is not None:
+        print(outside_warning, file=sys.stderr)
 
     env = mcp_registration.collect_env()
     overall = 0
@@ -1658,8 +1668,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "config when missing, merges idempotently when present, preserves "
             "other servers, backs up the original to ``.bak`` (single file, "
             "overwrites), and writes atomically via tmp+os.replace. "
-            "``--cwd`` sets the server's working directory (absolute, "
-            "contained under the scope root). TOML edits may strip comments. "
+            "``--cwd`` sets the server's working directory (absolute; it must "
+            "be an existing directory, and a tree outside the home is accepted "
+            "with a warning naming it). TOML edits may strip comments. "
             "Env: codex, gemini and pi receive env forwarding (names only, values "
             "never written; pi uses ${KEY} references); opencode entries carry no "
             "environment, and a warning is printed on stderr when HF_TOKEN or "
@@ -1683,7 +1694,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_add.add_argument(
         "--cwd",
-        help="Working directory for the MCP server (absolute, contained under scope root).",
+        help=(
+            "Working directory for the MCP server (absolute, must be an existing "
+            "directory; a tree outside the home is accepted with a warning)."
+        ),
     )
     mcp_add.add_argument(
         "--dry-run",

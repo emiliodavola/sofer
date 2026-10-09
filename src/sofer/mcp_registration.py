@@ -661,31 +661,59 @@ def dropped_env_keys(agent: AgentName, env: Mapping[str, str]) -> list[str]:
     return []
 
 
-def validate_cwd(cwd: Path, scope: Scope) -> bool:
-    """Validate that *cwd* is contained under the allowed root.
+def validate_cwd(cwd: Path) -> bool:
+    """Validate that *cwd* is usable as the server's working directory.
 
-    Uses ``Path.resolve()`` + ``is_relative_to``. For ``user`` scope the
-    allowed root is ``Path.home()``; for ``project`` scope it is
-    ``Path.cwd()``. Succeeds when contained under either root to tolerate
-    tmp paths that are under home on Windows.
+    The rule is **existence**, not containment (issue #274). The previous rule
+    refused any cwd outside ``Path.home()`` or the process cwd; it was removed
+    because, measured: it was undeclared in any spec; it was scope-blind (its
+    ``user`` and ``project`` branches were the *same expression*, so the
+    parameter lied); it was effectively untested (the only "rejection" test
+    monkeypatched this function away); it protected no privilege boundary (the
+    caller of ``sofer mcp add`` is the human, who can edit the agent config
+    directly, and since #273 the server root is explicitly settable); it
+    rejected legitimate trees (a dataset tree outside ``$HOME``, which is the
+    reported container case); and it still *accepted* a nonexistent path under
+    either root, so it failed to catch the mistake that actually matters.
 
     Args:
         cwd: Candidate cwd (already resolved or not).
-        scope: Scope for containment check.
 
     Returns:
-        ``True`` when contained, ``False`` otherwise.
+        ``True`` when *cwd* is an existing directory, ``False`` otherwise.
+    """
+    try:
+        return cwd.resolve().is_dir()
+    except Exception:
+        return False
+
+
+def outside_root_warning(cwd: Path) -> str | None:
+    """Return a warning when *cwd* lies outside the conventional roots.
+
+    Informational only (issue #274): an explicit ``--cwd`` is the caller's own
+    declaration, so an unusual tree is accepted and **named** rather than
+    refused. That keeps the odd case visible without blocking a legitimate
+    layout.
+
+    Args:
+        cwd: Candidate cwd (already resolved or not).
+
+    Returns:
+        A stderr-ready message naming the cwd and the roots it is outside of,
+        or ``None`` when it is inside ``Path.home()`` or the process cwd.
     """
     try:
         resolved = cwd.resolve()
     except Exception:
-        return False
-    home = Path.home().resolve()
-    project_root = Path.cwd().resolve()
-    # Accept if relative to either allowed root; this keeps tmp_path under
-    # home on Windows passing while still rejecting truly outside paths like
-    # D: vs C: drive mismatch.
-    if scope == "user":
-        return resolved.is_relative_to(home) or resolved.is_relative_to(project_root)
-    # project
-    return resolved.is_relative_to(project_root) or resolved.is_relative_to(home)
+        return None
+    outside: list[str] = []
+    for label, root in (("home", Path.home()), ("the process cwd", Path.cwd())):
+        resolved_root = root.resolve()
+        if resolved.is_relative_to(resolved_root):
+            return None
+        outside.append(f"{label} ({resolved_root})")
+    return (
+        f"  !  --cwd {resolved} is outside {' and '.join(outside)}; the server "
+        "is rooted there, so paths outside it are refused"
+    )

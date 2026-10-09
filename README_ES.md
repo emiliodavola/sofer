@@ -332,7 +332,7 @@ canalización.
 | --- | --- |
 | `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Requiere `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`); un `--user` faltante sale con 2, y los valores placeholder (`YOUR_USER`) o inseguros salen con 1 antes de cualquier escritura — la línea de éxito imprime el `config_path` absoluto. |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
-| `mcp add --agent <opencode\|codex\|gemini\|pi\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto contenido), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
+| `mcp add --agent <opencode\|codex\|gemini\|pi\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto, debe ser un directorio existente), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
 | `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` o `__<sanitized>.metadata.yaml` por hoja para `.xlsx` N>1, `PurePath.suffixes`, sanitización + `seen _{n}`, colisión normalizada `__+`→`_` `ValueError` con `::sheet`), `--force` (guardia de sobreescritura), `--config` (ruta TOML para batch), `--delimiter D` / `--encoding E` (dialecto CSV explícito, gana sobre la config). `--output` relativo anclado al dir TOML (Option B); `cache/` intacto con `--output`. |
 | `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` o `__<sanitized>.README.md` por hoja para `.xlsx` N>1 con misma paridad sanitización/dedup/colisión, omite `metadata.yaml` faltante), `--force`, `--config`. |
@@ -365,7 +365,7 @@ canalización.
 | `--user USUARIO` | `init` | Usuario/org HF para `repo_id` (p. ej. `--user myuser` → `repo_id "myuser/<name>"`); obligatorio — un `--user` faltante sale con 2, los valores placeholder (`YOUR_USER`) o inseguros salen con 1, sin escribir archivos. |
 | `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`; para `codebook`, `-o`/`--output` es la ruta del archivo de salida, por defecto stdout). `publish --clean` respeta `--output` solo para `build`; `cache/` siempre en `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
-| `--cwd PATH` | `mcp add` | `cwd` absoluto contenido para el servidor; falla con la ruta cuando está fuera de la raíz del scope. |
+| `--cwd PATH` | `mcp add` | `cwd` absoluto para el servidor; debe ser un directorio existente (si no, sale con 1 indicando la ruta resuelta). Un árbol fuera del home y del cwd del proceso se acepta con un warning que lo nombra. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
 
 ## Reporte asistido de fallos
@@ -708,9 +708,11 @@ Ubicaciones y formas por agente:
   (un solo archivo, sobrescribe cualquier `.bak` existente).
 - **Escritura atómica:** el nuevo contenido se escribe en un archivo temporal en
   el mismo directorio y se confirma vía `os.replace`.
-- **Cwd:** `--cwd` se guarda como ruta absoluta resuelta y debe estar contenida
-  bajo la raíz del scope (`Path.resolve()` + `is_relative_to`); en caso
-  contrario el comando sale con código 1 indicando la ruta infractora.
+- **Cwd:** `--cwd` se guarda como ruta absoluta resuelta y debe ser un
+  **directorio existente**; si no, el comando sale con código 1 indicando la ruta
+  resuelta. Un árbol fuera del home y del cwd del proceso se acepta con un warning
+  que lo nombra — un `--cwd` explícito es tu propia declaración, así que un árbol
+  inusual se nombra en vez de rechazarse.
 - **Env:** `HF_TOKEN` y `SOFER_MCP_APPROVAL_PHRASE` del shell se reenvían — codex
   como lista `env_vars`, gemini y pi como dict `env` explícito (sin herencia del
   shell). Gemini emite referencias `$KEY`; pi emite referencias `${KEY}` porque

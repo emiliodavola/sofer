@@ -19,6 +19,10 @@ Register `sofer-mcp` in opencode/codex/gemini/pi agent configs via the `sofer mc
 
 Both Gemini and Pi `env` and Codex `env_vars` persist env NAMES only (an allow-list of keys present in the environment); secret values (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) are never written to disk. Gemini's CLI expands the `$KEY` references from the host environment at runtime; Pi's `pi-mcp-adapter` interpolates only the braced `${KEY}` form and MUST never receive a bare `$KEY`. The Pi user-scope file is `$PI_CODING_AGENT_DIR/mcp.json` when that variable is set to a non-empty value, else `~/.pi/agent/mcp.json`; the project-scope file is `<cwd>/.pi/mcp.json`. Pi entries MUST NOT carry an array `command`, `type`, or `enabled` field, and Pi MUST be file-edit only (no native CLI to delegate to).
 
+The `--cwd` value SHALL be an **existing directory**, and that SHALL be the whole rule: `add` SHALL exit 1 with a message naming the resolved path when it is not, and SHALL NOT write. A resolved `--cwd` that is an existing directory but lies **outside** both `Path.home()` and the process cwd SHALL be **accepted**, with a warning naming the resolved cwd and the roots it is outside of printed to stderr — an explicit `--cwd` is the caller's own declaration, so an unusual tree is named rather than refused. Containment of the *server root* is a separate contract (MSP-R01/MSP-R07) and is unaffected by this clause.
+
+> Amended by `2026-10-09-fix-mcp-user-config-resolution` (issue #274). The previous rule refused any cwd outside `Path.home()` or the process cwd. It was removed because, measured: it was undeclared in any spec (this clause did not exist); it was scope-blind (its `user` and `project` branches were the *same expression*); it was effectively untested (the only "rejection" test monkeypatched the function away); it protected no privilege boundary; it rejected legitimate trees (a dataset tree outside `$HOME`, which is the reported container case); and it still *accepted* a nonexistent path under either root, so it failed to catch the mistake that matters.
+
 #### Scenario: Add all
 
 - GIVEN no `sofer` in any config
@@ -60,6 +64,14 @@ Both Gemini and Pi `env` and Codex `env_vars` persist env NAMES only (an allow-l
 - GIVEN `--cwd /tmp/myproj`
 - WHEN add with that cwd runs
 - THEN stored `cwd` equals resolved absolute
+
+#### Scenario: Cwd existence, not containment
+
+- GIVEN `--cwd` resolving to a path that is not an existing directory
+- WHEN add runs
+- THEN exit 1 SHALL be returned with a message naming the resolved path, and no write SHALL occur
+- AND GIVEN `--cwd` resolving to an existing directory outside both the home and the process cwd
+- THEN the add SHALL proceed and a warning naming the resolved cwd and the roots it is outside of SHALL be printed to stderr
 
 #### Scenario: Gemini env names only
 

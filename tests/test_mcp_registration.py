@@ -410,26 +410,102 @@ class TestUnreadable:
 
 
 class TestCwdContainment:
-    def test_validate_cwd_allows_home_or_project(self, tmp_path, monkeypatch):
+    """The `--cwd` rule: an existing directory is accepted, anything else is refused.
+
+    The previous rule refused any cwd outside `Path.home()` or the process cwd. It
+    was removed (issue #274): undeclared in any spec, scope-blind (its two branches
+    were the same expression), effectively untested (the only "rejection" test
+    monkeypatched the function away), protecting no privilege boundary, and it
+    rejected legitimate trees — a dataset tree outside `$HOME`, which is exactly the
+    reported container case. What remains is the check that catches a real mistake:
+    the cwd must be an existing directory.
+    """
+
+    def test_validate_cwd_accepts_an_existing_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "proj"
+        target.mkdir()
+        assert mcp_registration.validate_cwd(target) is True
+
+    def test_validate_cwd_accepts_an_existing_directory_outside_home(self, tmp_path, monkeypatch):
+        """The reported case: the home and the dataset tree are unrelated."""
         home = tmp_path / "home"
         home.mkdir()
+        tree = tmp_path / "workspace" / "test"
+        tree.mkdir(parents=True)
         monkeypatch.setattr(Path, "home", lambda: home)
-        monkeypatch.chdir(tmp_path)
-        # tmp_path is project root; home is separate. A cwd under home should pass for user scope
-        cwd_under_home = home / "proj"
-        cwd_under_home.mkdir()
-        assert mcp_registration.validate_cwd(cwd_under_home, "user") is True
-        # cwd under project should pass for project
-        assert mcp_registration.validate_cwd(tmp_path, "project") is True
+        monkeypatch.chdir(home)
+        assert mcp_registration.validate_cwd(tree) is True
 
-    def test_cmd_add_rejects_outside_root(self, tmp_path, monkeypatch):
+    def test_validate_cwd_refuses_a_missing_directory(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        # Mock validate to force failure
-        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: False)
+        assert mcp_registration.validate_cwd(tmp_path / "nope") is False
+
+    def test_validate_cwd_refuses_a_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        a_file = tmp_path / "not-a-dir.csv"
+        a_file.write_text("a\n1\n", encoding="utf-8")
+        assert mcp_registration.validate_cwd(a_file) is False
+
+    def test_outside_root_warning_names_both_sides(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        tree = tmp_path / "workspace" / "test"
+        tree.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        warning = mcp_registration.outside_root_warning(tree)
+        assert warning is not None
+        assert str(tree.resolve()) in warning
+        assert str(home.resolve()) in warning
+
+    def test_outside_root_warning_is_none_inside_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        inside = home / "proj"
+        inside.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        assert mcp_registration.outside_root_warning(inside) is None
+
+    def test_cmd_add_accepts_an_outside_root_dir_with_a_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Accepted, not refused — and the odd case is named, never silent."""
+        home = tmp_path / "home"
+        home.mkdir()
+        tree = tmp_path / "workspace" / "test"
+        tree.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(home)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
         rc = cli._cmd_mcp_add(
-            Namespace(agent="opencode", scope="project", cwd=str(tmp_path / "proj"), dry_run=False)
+            Namespace(agent="opencode", scope="user", cwd=str(tree), dry_run=True)
+        )
+        assert rc == 0
+        assert str(tree.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_refuses_a_missing_cwd(self, tmp_path, monkeypatch, capsys):
+        """A cwd that is not an existing directory is the mistake worth failing on."""
+        monkeypatch.chdir(tmp_path)
+        missing = tmp_path / "nope"
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(missing), dry_run=True)
         )
         assert rc == 1
+        assert str(missing.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_refuses_a_missing_cwd_without_writing(self, tmp_path, monkeypatch):
+        """The refusal precedes any write with ``dry_run`` OFF — the scenario's
+        "SHALL NOT write" half, which a dry-run case cannot evidence."""
+        monkeypatch.chdir(tmp_path)
+        missing = tmp_path / "nope"
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(missing), dry_run=False)
+        )
+        assert rc == 1
+        assert not (tmp_path / "opencode.json").exists()
+        assert not (tmp_path / "opencode.json.bak").exists()
 
 
 # ── env forwarding ────────────────────────────────────────────────────
@@ -992,8 +1068,11 @@ class TestDelegationNext:
 
 
 class TestCwdContainmentNext:
-    def test_validate_cwd_project_scope_and_resolve_failure(self, tmp_path, monkeypatch) -> None:
-        """Project-scope containment excludes foreign paths; resolve failure → False."""
+    def test_validate_cwd_requires_an_existing_directory_and_tolerates_resolve_failure(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Existence is the rule (issue #274): a foreign-but-real directory is
+        accepted and named, and an unresolvable path is refused rather than raising."""
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: home)
@@ -1001,16 +1080,19 @@ class TestCwdContainmentNext:
         monkeypatch.chdir(tmp_path / "proj")
         foreign = tmp_path / "elsewhere"
         foreign.mkdir()
-        # project scope: foreign is under neither project_root (proj) nor home
-        assert mcp_registration.validate_cwd(foreign, "project") is False
-        assert mcp_registration.validate_cwd(tmp_path / "proj", "project") is True
+        # A real directory outside home and the process cwd is ACCEPTED — the
+        # deliberate change from the old containment rule — and named by the
+        # warning instead of being refused.
+        assert mcp_registration.validate_cwd(foreign) is True
+        assert mcp_registration.outside_root_warning(foreign) is not None
+        assert mcp_registration.validate_cwd(tmp_path / "proj") is True
 
         def _boom_resolve(self):
             raise OSError("unresolvable")
 
         monkeypatch.setattr(Path, "resolve", _boom_resolve)
-        assert mcp_registration.validate_cwd(foreign, "project") is False
-        assert mcp_registration.validate_cwd(tmp_path / "proj", "user") is False
+        assert mcp_registration.validate_cwd(foreign) is False
+        assert mcp_registration.outside_root_warning(foreign) is None
 
 
 class TestIdempotencyMatrixGaps:
