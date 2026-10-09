@@ -364,8 +364,9 @@ canalización.
 | `--ext <ext>` | `scan` | Filtra `scan` a extensiones específicas (repetible, p. ej. `--ext csv --ext jsonl`); si se omite, todos los formatos soportados. |
 | `--user USUARIO` | `init` | Usuario/org HF para `repo_id` (p. ej. `--user myuser` → `repo_id "myuser/<name>"`); obligatorio — un `--user` faltante sale con 2, los valores placeholder (`YOUR_USER`) o inseguros salen con 1, sin escribir archivos. |
 | `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`; para `codebook`, `-o`/`--output` es la ruta del archivo de salida, por defecto stdout). `publish --clean` respeta `--output` solo para `build`; `cache/` siempre en `cfg._base_dir/cache`. |
-| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
+| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|all> [--scope user\|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
 | `--cwd PATH` | `mcp add` | `cwd` absoluto para el servidor; debe ser un directorio existente (si no, sale con 1 indicando la ruta resuelta). Un árbol fuera del home y del cwd del proceso se acepta con un warning que lo nombra. |
+| `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
 
 ## Reporte asistido de fallos
@@ -702,6 +703,12 @@ Ubicaciones y formas por agente:
 | pi | `--scope user` | `$PI_CODING_AGENT_DIR/mcp.json` (por defecto `~/.pi/agent/mcp.json`) | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
 | pi | `--scope project` | `./.pi/mcp.json` | same |
 
+- **Resolución del scope user:** las rutas de abajo son la resolución **por defecto** de sofer bajo
+  `Path.home()`. Agentes como opencode leen su config del home de **cuenta** del sistema, así que cuando
+  los dos difieren la entrada puede terminar en un archivo que el agente nunca lee. Pasá
+  `--user-config PATH` para declarar el archivo explícitamente — gana sobre el override de env del
+  adapter y sobre el default del home. Cuando los dos homes difieren, `sofer` imprime un warning
+  nombrando ambos en vez de reportar un éxito limpio.
 - **Idempotencia:** volver a ejecutar con el mismo `cwd` y env no escribe y no
   crea `.bak`; el archivo queda byte-idéntico.
 - **Respaldo:** antes de la primera mutación el original se copia a `<path>.bak`

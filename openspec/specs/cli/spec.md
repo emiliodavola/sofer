@@ -322,7 +322,11 @@ SHALL fall back to a non-empty derived value.
 > Extended by change `2026-09-25-fix-mcp-native-delegation` (#167/#232) — native
 > delegation fidelity sentence.
 
-`sofer` MUST expose `mcp` with `add`/`remove`. `add` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--cwd PATH] [--dry-run]`; `remove` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--dry-run]`. Help for `sofer --help` and `sofer mcp*` MUST list these.
+`sofer` MUST expose `mcp` with `add`/`remove`. `add` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--dry-run]`. Help for `sofer --help` and `sofer mcp*` MUST list these.
+
+`add` and `remove` MUST also accept `--user-config PATH`: the explicit user-scope config **file**,
+which wins over the adapter's env override and the home default, and which MUST be rejected with
+`--agent all` because one path cannot name four different agent config files.
 
 The `sofer mcp add` help text SHALL additionally document env-forwarding behavior: codex, gemini and pi receive env forwarding with names only, and opencode entries carry no environment, so a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode` (or `all`) is chosen.
 
@@ -351,7 +355,7 @@ add the fidelity sentence.)
 
 - GIVEN `sofer mcp add --help`
 - WHEN rendered
-- THEN `--agent`, `--scope`, `--cwd`, `--dry-run` SHALL be listed
+- THEN `--agent`, `--scope`, `--cwd`, `--user-config`, `--dry-run` SHALL be listed
 - AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi` and `all`
 
 #### Scenario: remove help

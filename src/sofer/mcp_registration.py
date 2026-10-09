@@ -44,6 +44,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict
@@ -208,27 +209,39 @@ def resolve_config_path(
     agent: AgentName,
     scope: Scope,
     cwd: Path | None = None,
+    user_config: str | None = None,
 ) -> Path:
     """Resolve the config file path for *agent* and *scope*.
 
-    User scope resolves under ``Path.home()`` (Windows-aware via
-    ``Path.home()``), unless the adapter declares a ``user_env_dir`` whose
-    environment variable is set to a non-empty value — then the directory
-    it names replaces the home prefix and the file name is
-    ``user_parts[-1]`` (Pi's ``$PI_CODING_AGENT_DIR/mcp.json``). Project
-    scope resolves under *cwd* (or ``Path.cwd()`` when ``None``).
+    User scope resolves by explicit declaration first, then the adapter's
+    environment override, then the home directory (issue #274):
+
+    1. ``user_config`` — the path the caller stated with ``--user-config``,
+       returned as-is (it names the **file**, not a directory). A blank or
+       whitespace-only value counts as unset.
+    2. The adapter's ``user_env_dir`` when that variable is set to a non-empty
+       value — the directory it names replaces the home prefix and the file
+       name is ``user_parts[-1]`` (Pi's ``$PI_CODING_AGENT_DIR/mcp.json``).
+    3. ``Path.home()`` joined with ``user_parts`` — the documented default.
+
+    Project scope resolves under *cwd* (or ``Path.cwd()`` when ``None``) and
+    ignores ``user_config``: the declared file is a *user*-scope concept.
 
     Args:
         agent: Target agent name.
         scope: ``"user"`` or ``"project"``.
         cwd: Project directory anchor for ``project`` scope; ignored
             for ``user`` scope.
+        user_config: Explicit config **file** path for ``user`` scope; wins
+            over the adapter's ``user_env_dir`` and ``Path.home()``.
 
     Returns:
         Absolute path to the agent's config file.
     """
     spec = _adapter(agent)
     if scope == "user":
+        if user_config is not None and user_config.strip():
+            return Path(user_config).expanduser().resolve()
         env_dir = spec["user_env_dir"]
         override = os.environ.get(env_dir) if env_dir else None
         if override:
@@ -236,6 +249,53 @@ def resolve_config_path(
         return Path.home().joinpath(*spec["user_parts"])
     base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
     return base.joinpath(*spec["project_parts"])
+
+
+def _account_home() -> Path | None:
+    """Return the account's home directory, or ``None`` when unavailable.
+
+    ``Path.home()`` follows ``$HOME``; the passwd database does not. Agents such
+    as opencode resolve their config from the **account** home, so the two can
+    disagree — which is the reported defect (issue #274).
+
+    Returns:
+        The account home on POSIX, or ``None`` on platforms without a passwd
+        database (Windows) or for a uid that has no entry.
+    """
+    if sys.platform == "win32":  # Windows has no passwd database
+        return None
+    import pwd
+
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:  # a uid with no passwd entry
+        return None
+
+
+def home_mismatch_warning() -> str | None:
+    """Return a warning when ``$HOME`` and the account home disagree.
+
+    Informational only (issue #274). ``Path.home()`` follows ``$HOME`` while an
+    agent may read its config from the account home, so when the two differ
+    sofer can write an entry into a file the agent never reads **and report
+    success** — the silent no-op this warning exists to surface.
+
+    Returns:
+        A stderr-ready message naming both homes, or ``None`` when they agree or
+        no account home is available.
+    """
+    account = _account_home()
+    if account is None:
+        return None
+    resolved_home = Path.home().resolve()
+    resolved_account = account.resolve()
+    if resolved_home == resolved_account:
+        return None
+    return (
+        f"  !  HOME ({resolved_home}) differs from the account home "
+        f"({resolved_account}); an agent may read its config from the latter. "
+        "Pass --user-config PATH to state the file explicitly"
+    )
 
 
 def _infer_fmt(path: Path) -> str:

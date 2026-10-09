@@ -722,6 +722,25 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     _scope = cast(mcp_registration.Scope, scope)
     cwd_raw: str | None = getattr(args, "cwd", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
+    user_config: str | None = getattr(args, "user_config", None)
+
+    # `--user-config` names ONE file, so it is ambiguous for `--agent all`
+    # (each agent has its own config). Reject before any write (issue #274).
+    if user_config is not None and user_config.strip() and getattr(args, "agent") == "all":
+        print(
+            "  X  --user-config cannot be combined with --agent all: each agent "
+            "has its own config file",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Informational: `$HOME` and the account home can disagree, and the agent may
+    # read its config from the latter — so a successful write can be a silent
+    # no-op. Naming both homes is what removes the silence (issue #274).
+    if scope == "user":
+        mismatch = mcp_registration.home_mismatch_warning()
+        if mismatch is not None:
+            print(mismatch, file=sys.stderr)
 
     # Resolve desired cwd for the entry (absolute, contained)
     if cwd_raw is not None:
@@ -795,7 +814,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
         # File-edit fallback — project scope anchors on the resolved cwd; user
         # scope ignores the anchor and resolves under Path.home().
         anchor = cwd_resolved if scope == "project" else None
-        path = mcp_registration.resolve_config_path(agent, _scope, anchor)
+        path = mcp_registration.resolve_config_path(agent, _scope, anchor, user_config)
 
         try:
             existing, _fmt = mcp_registration.read_config(path)
@@ -856,7 +875,24 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
     agents: list[str] = list(mcp_registration.AGENT_NAMES) if raw_agent == "all" else [raw_agent]
     scope: str = getattr(args, "scope", "user")
     dry_run: bool = bool(getattr(args, "dry_run", False))
+    user_config: str | None = getattr(args, "user_config", None)
     overall = 0
+
+    # `--user-config` names ONE file, so it is ambiguous for `--agent all`
+    # (each agent has its own config). Reject before any write (issue #274).
+    if user_config is not None and user_config.strip() and getattr(args, "agent") == "all":
+        print(
+            "  X  --user-config cannot be combined with --agent all: each agent "
+            "has its own config file",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Informational, same contract as `add` (issue #274).
+    if scope == "user":
+        mismatch = mcp_registration.home_mismatch_warning()
+        if mismatch is not None:
+            print(mismatch, file=sys.stderr)
 
     for agent in agents:
         _scope = cast(mcp_registration.Scope, scope)
@@ -888,7 +924,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
-        path = mcp_registration.resolve_config_path(agent, _scope, None)
+        path = mcp_registration.resolve_config_path(agent, _scope, None, user_config)
         try:
             existing, _fmt2 = mcp_registration.read_config(path)
         except Exception as exc:
@@ -1670,7 +1706,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "overwrites), and writes atomically via tmp+os.replace. "
             "``--cwd`` sets the server's working directory (absolute; it must "
             "be an existing directory, and a tree outside the home is accepted "
-            "with a warning naming it). TOML edits may strip comments. "
+            "with a warning naming it). ``--user-config`` states the user-scope "
+            "config file explicitly - it wins over the adapter's env override and "
+            "the home default, and it is rejected with ``--agent all``. TOML "
+            "edits may strip comments. "
             "Env: codex, gemini and pi receive env forwarding (names only, values "
             "never written; pi uses ${KEY} references); opencode entries carry no "
             "environment, and a warning is printed on stderr when HF_TOKEN or "
@@ -1697,6 +1736,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Working directory for the MCP server (absolute, must be an existing "
             "directory; a tree outside the home is accepted with a warning)."
+        ),
+    )
+    mcp_add.add_argument(
+        "--user-config",
+        help=(
+            "Explicit user-scope config FILE for the selected agent; wins over the "
+            "adapter's env override and the home default. Rejected with --agent all."
         ),
     )
     mcp_add.add_argument(
@@ -1728,6 +1774,13 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["user", "project"],
         default="user",
         help="Config scope: 'user' (home directory) or 'project' (current directory).",
+    )
+    mcp_remove.add_argument(
+        "--user-config",
+        help=(
+            "Explicit user-scope config FILE for the selected agent; wins over the "
+            "adapter's env override and the home default. Rejected with --agent all."
+        ),
     )
     mcp_remove.add_argument(
         "--dry-run",
