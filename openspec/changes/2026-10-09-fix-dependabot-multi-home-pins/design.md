@@ -100,6 +100,30 @@ CI-14 is **amended, not replaced** (D4): one bullet added to the requirement bod
 after `uv updates ignore the coordinated ruff pin`, the header note extended with the change's
 attribution, and **one Test Mapping row** inserted after the `ruff` row.
 
+### 3.4 Cadence: `weekly` → `monthly` (both ecosystems)
+
+Maintainer-requested during implementation; not part of issue #275.
+
+```yaml
+    schedule:
+      interval: "monthly"
+```
+
+Applied to **both** update blocks (`uv` and `github-actions`). The `day: "monday"` key is
+**dropped**, not kept: the official reference scopes it to the weekly interval (*"Specify the day
+to run for a weekly interval"*), while `monthly` is documented as *"run on the first day of each
+month"*.
+
+**Why this is safe, and why it is not guarded (D5).** Security updates are alert-driven and are
+**not** governed by this schedule, so the cadence change slows routine version updates only, never
+the security signal. And the cadence is a preference rather than a constraint, so no test asserts
+it — gating it would make a scheduling choice unchangeable without editing a test. The rationale
+lives in the `dependabot.yml` policy comment, which also states that no test asserts it.
+
+**No spec impact.** The `weekly` occurrences in `openspec/specs/ci/spec.md` (CI-04) describe
+**CodeQL's cron schedule**, not Dependabot's, so the delta for this change carries no cadence
+clause.
+
 ## 4. TDD posture — stated honestly
 
 `openspec/config.yaml` sets `strict_tdd: false`, and this change declares policy rather than
@@ -119,7 +143,7 @@ declaration and its assertion.
 
 | File | Change | Est. lines |
 | --- | --- | --- |
-| `.github/dependabot.yml` | 2 ignore entries + 1 comment bullet | +8 |
+| `.github/dependabot.yml` | 2 ignore entries + 1 comment bullet + 2 schedule blocks | +12 / −6 |
 | `tests/test_ci_workflows.py` | 1 guard + docstring | +25 |
 | `openspec/specs/ci/spec.md` | 1 bullet + 1 scenario + 1 mapping row + note extension | +18 |
 | `CONTRIBUTING.md` | 1 bullet + count word | +7 / −1 |

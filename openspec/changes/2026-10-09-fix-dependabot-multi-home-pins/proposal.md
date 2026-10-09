@@ -39,6 +39,10 @@ measured instance**.
 - `openspec/specs/ci/spec.md`: CI-14 amended (one new bullet + one new scenario) and one new
   Test Mapping row.
 - One new static guard, `test_dependabot_ignores_the_coordinated_analyzer_pins`.
+- **Second part, maintainer-requested during implementation (not part of issue #275):** the
+  routine-update cadence drops from `weekly` to `monthly` for **both** ecosystems (`uv` and
+  `github-actions`), and the `day: "monday"` key is dropped with it because the official
+  reference scopes `schedule.day` to the weekly interval.
 
 ### Out of scope (non-goals, strictly respected)
 
@@ -60,6 +64,7 @@ measured instance**.
 | **D2** | The `ruff` entry and the `fastmcp` majors entry are left untouched. | Both are correct as written; the new entries are additive. |
 | **D3** | The new guard mirrors `test_dependabot_ignores_the_coordinated_ruff_pin` and hardcodes no version. | CI-08 S1/S3 discipline: guards derive versions from the declaration home and carry no literal of their own. |
 | **D4** | The record lands as a **MODIFIED** CI-14 block in the delta, not a new requirement. | CI-14 is the requirement that owns the Dependabot update policy; a fourth ignored dependency class extends it. Precedent: CI-07 and MSP-R03 were amended the same way. |
+| **D5** | The cadence change is **documented, not guarded and not spec'd**. | Every existing guard in this area encodes a *constraint* (a bump the bot cannot complete atomically). Cadence is a *preference*: gating it would make a maintainer's scheduling choice unchangeable without editing a test. The `dependabot.yml` policy comment carries the rationale and states explicitly that no test asserts it; the SDD record carries the provenance. |
 
 ## 4. Issue #275 acceptance mapping
 
@@ -101,6 +106,7 @@ measured instance**.
 | SC-4 | `ruff check`, `ruff format --check`, `mypy src/ scripts/`, `pyright` and the coverage gates unchanged and green |
 | SC-5 | `test_openspec_context_declares_the_enforced_tool_versions` byte-identical (D2) |
 | SC-6 | `pyproject.toml`, `uv.lock`, `openspec/project.md`, `openspec/config.yaml` and `src/` absent from the diff |
+| SC-7 | Both `dependabot.yml` schedule blocks declare `interval: "monthly"` and carry no `day` key; every existing Dependabot guard still passes (the cadence is not asserted by any test, by design) |
 
 ## 8. PR boundary and the wave-0 decision
 

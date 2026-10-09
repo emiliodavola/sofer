@@ -6,6 +6,12 @@
 # the repository is public. Alerts themselves are toggled in
 # Settings → Code security; this file drives the update pull requests.
 #
+# Cadence: both ecosystems run `monthly` (the first of each month). Routine
+# version updates are low-value here — with `ruff`, `mypy` and `pyright`
+# ignored, only single-home dependencies arrive — and this schedule does NOT
+# govern security updates, which are alert-driven and unaffected. The cadence is
+# deliberately a preference, not a guarded constraint: no test asserts it.
+#
 # Bump policy (CI-14, GitHub #251/#252/#253):
 #   * Minor/patch updates are grouped and automatic.
 #   * Major updates are deliberately NOT included in any group (`update-types`
@@ -29,8 +35,7 @@ updates:
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
@@ -48,8 +53,7 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"

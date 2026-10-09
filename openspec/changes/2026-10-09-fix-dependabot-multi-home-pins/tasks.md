@@ -46,11 +46,15 @@ to restructure.
 | T7 | Verify no README section documents the dependency-update policy (rule 13) | done | no README section covers it; no README edit |
 | T8 | Full gates: pytest, ruff check + format, mypy, pyright, coverage, `check_test_mapping.py` | done | verify report |
 | T9 | Work-unit commit(s) on the feature branch | done | `git log` |
+| T10 | Cadence `weekly` → `monthly` for both ecosystems, dropping `day` (maintainer-requested, not #275) | done | `git diff`; every existing Dependabot guard still green |
 
 ---
 
 ## Constraints honoured
 
+- **The cadence is not guarded and not spec'd (D5).** No test asserts `interval`; the rationale is
+  in the `dependabot.yml` policy comment. The `weekly` occurrences in `openspec/specs/ci/spec.md`
+  (CI-04) are CodeQL's cron, not Dependabot's, so the delta carries no cadence clause.
 - **No version bump:** `pyproject.toml`, `uv.lock`, `openspec/project.md` and
   `openspec/config.yaml` are absent from the diff (SC-6).
 - **The #258 guard is byte-identical** (D2): `test_openspec_context_declares_the_enforced_tool_versions`
