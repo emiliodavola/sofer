@@ -73,7 +73,7 @@ src/sofer/
 ├── workflow.py          # Typed workflow metadata + result envelopes for adapters
 ├── failure_report.py    # Assisted failure reporting: context, anonymization, gh send, persistence
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
-└── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini)
+└── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini/pi/hermes)
 ```
 
 ## Development conventions

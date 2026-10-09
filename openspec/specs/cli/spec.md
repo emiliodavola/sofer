@@ -321,14 +321,16 @@ SHALL fall back to a non-empty derived value.
 > Extended by change `2026-09-25-feat-pi-mcp-agent` (#142) — `pi` added to the agent set.
 > Extended by change `2026-09-25-fix-mcp-native-delegation` (#167/#232) — native
 > delegation fidelity sentence.
+> Extended by change `2026-10-09-feat-mcp-hermes-adapter` (#272) — `hermes` added to the agent set,
+> with the YAML preservation and single-scope sentences.
 
-`sofer` MUST expose `mcp` with `add`/`remove`. `add` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` MUST accept `--agent <opencode|codex|gemini|pi|all> [--scope user|project] [--user-config PATH] [--dry-run]`. Help for `sofer --help` and `sofer mcp*` MUST list these.
+`sofer` MUST expose `mcp` with `add`/`remove`. `add` MUST accept `--agent <opencode|codex|gemini|pi|hermes|all> [--scope user|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` MUST accept `--agent <opencode|codex|gemini|pi|hermes|all> [--scope user|project] [--user-config PATH] [--dry-run]`. Help for `sofer --help` and `sofer mcp*` MUST list these.
 
 `add` and `remove` MUST also accept `--user-config PATH`: the explicit user-scope config **file**,
 which wins over the adapter's env override and the home default, and which MUST be rejected with
 `--agent all` because one path cannot name four different agent config files.
 
-The `sofer mcp add` help text SHALL additionally document env-forwarding behavior: codex, gemini and pi receive env forwarding with names only, and opencode entries carry no environment, so a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode` (or `all`) is chosen.
+The `sofer mcp add` help text SHALL additionally document env-forwarding behavior: codex, gemini, pi and hermes receive env forwarding with names only (gemini as `$KEY` references, pi and hermes as `${KEY}` references), and opencode entries carry no environment, so a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode` (or `all`) is chosen. The help text SHALL also document that a YAML config edit preserves the rest of the document while a TOML edit may strip comments, and that `hermes` reads a single user-scope config, so `--scope project` resolves to that same file and the substitution is named on stderr.
 
 The `sofer mcp add` / `sofer mcp remove` help text SHALL also document native
 delegation fidelity: native `codex`/`gemini` delegation is used only when the
@@ -356,21 +358,28 @@ add the fidelity sentence.)
 - GIVEN `sofer mcp add --help`
 - WHEN rendered
 - THEN `--agent`, `--scope`, `--cwd`, `--user-config`, `--dry-run` SHALL be listed
-- AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi` and `all`
+- AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi`, `hermes` and `all`
 
 #### Scenario: remove help
 
 - GIVEN `sofer mcp remove --help`
 - WHEN rendered
 - THEN `--agent`, `--scope`, `--user-config`, `--dry-run` SHALL be listed
-- AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi` and `all`
+- AND the `--agent` choices SHALL include `opencode`, `codex`, `gemini`, `pi`, `hermes` and `all`
 
 #### Scenario: add help documents env forwarding
 
 - GIVEN `sofer mcp add --help`
 - WHEN rendered
-- THEN the description SHALL state that codex, gemini and pi receive env forwarding (names only)
+- THEN the description SHALL state that codex, gemini, pi and hermes receive env forwarding (names only)
 - AND the description SHALL state that opencode entries carry no environment and that a warning is emitted when `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set with `--agent opencode` (or `all`)
+
+#### Scenario: add help documents the YAML preservation and the single-scope note
+
+- GIVEN `sofer mcp add --help`
+- WHEN rendered
+- THEN the description SHALL distinguish the YAML edit (preserves the rest of the document) from the TOML edit (may strip comments)
+- AND the description SHALL state that `hermes` reads a single user-scope config and that `--scope project` resolves to it with a warning on stderr
 
 #### Scenario: help documents native delegation fidelity
 
