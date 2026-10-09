@@ -74,8 +74,9 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
 - New dependencies go in `pyproject.toml` `dependencies`, not `dev-dependencies`, unless they're test-only.
 - Prefer format-native readers over heavy dependencies (openpyxl over pandas for Excel).
 - Dependency bumps (spec `ci` CI-13/CI-14): minor/patch are grouped and automatic; majors stay
-  ungrouped and require explicit adaptation review. `ruff` is a coordinated multi-home pin and
-  `fastmcp` majors are ignored in `.github/dependabot.yml`; see CONTRIBUTING → Dependency updates
+  ungrouped and require explicit adaptation review. `ruff` is a coordinated multi-home pin, and
+  `fastmcp` majors plus the `mypy`/`pyright` analyzer pins are ignored in
+  `.github/dependabot.yml`; see CONTRIBUTING → Dependency updates
   for the manual bump procedure. Version declarations live in more than one home — move every home
   together, and let the guards in `tests/test_ci_workflows.py` catch the drift.
 
