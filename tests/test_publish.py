@@ -642,12 +642,16 @@ class TestRemoteFailClosed:
     def test_inspect_repo_returns_empty_on_repo_not_found(self, tmp_path, monkeypatch):
         """RepositoryNotFoundError (repo missing/empty) -> [] — the only
         'empty' case, exactly what _check_overwrite_protection must see."""
-        import httpx
+        # huggingface-hub 2.x moved its HTTP stack from `httpx` to `httpx2`, and
+        # `RepositoryNotFoundError` requires a response object of that stack's type
+        # (`response` is a mandatory keyword-only argument, so the exception cannot be
+        # built without one). Do not "simplify" this back to `httpx`.
+        import httpx2
         from huggingface_hub.utils import RepositoryNotFoundError
 
         def _raise_not_found(*_a, **_kw):
-            request = httpx.Request("GET", "https://huggingface.co/api/datasets/u/x")
-            response = httpx.Response(404, request=request)
+            request = httpx2.Request("GET", "https://huggingface.co/api/datasets/u/x")
+            response = httpx2.Response(404, request=request)
             raise RepositoryNotFoundError("not found", response=response)
 
         monkeypatch.setattr(publish_mod._api, "list_repo_files", _raise_not_found)
