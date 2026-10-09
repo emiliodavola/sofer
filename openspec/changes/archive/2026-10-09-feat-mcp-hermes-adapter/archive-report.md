@@ -23,9 +23,9 @@ gained the line-ending precision after the independent verifier falsified the fi
 
 - `proposal.md` — present
 - `design.md` — present
-- `tasks.md` — present, T1–T11 `done`; T12 records the push and the PR and is `pending` at archive
-  time by design — the PR cannot be cited before the commit that archives the change exists, and the
-  follow-up record commit inside the same PR closes it
+- `tasks.md` — present, **all tasks complete** (T1–T12 `done`; T12 cites PR #286, which was opened
+  from this branch after the archive commit — that is why the record names the PR only in the
+  follow-up record commit inside the same PR)
 - `specs/mcp-registration/spec.md` (delta) — present
 - `specs/cli/spec.md` (delta) — present
 

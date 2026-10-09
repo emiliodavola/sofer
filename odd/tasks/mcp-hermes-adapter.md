@@ -3,7 +3,7 @@
 **Branch:** `feat/272-mcp-hermes-adapter` from `dev@90ee69f`
 **Issue:** `emiliodavola/sofer#272` — *feat(mcp): add a `hermes` adapter to `sofer mcp add` — hand
 registration leaves the containment root at the host cwd*
-**Delivery PR:** opened against `dev` (recorded by the follow-up commit)
+**Delivery PR:** `emiliodavola/sofer#286` — `feat/272-mcp-hermes-adapter` → `dev`
 **SDD change:** `openspec/changes/archive/2026-10-09-feat-mcp-hermes-adapter/` (archived inside the PR)
 
 ## Goal
@@ -47,7 +47,7 @@ agents forward.
 | T9 | Canonical spec sync (MCP-REG-01/02, CLI-R09) | done | `0999eee` |
 | T10 | Full gate set | done | `2088 passed, 8 skipped`; TOTAL 94%; four rule-14 rows 100%; ruff/mypy/pyright clean; `check_test_mapping.py` exit 0 |
 | T11 | Archive the change inside the PR (rule 15) | done | `openspec/changes/archive/2026-10-09-feat-mcp-hermes-adapter/` + `archive-report.md` |
-| T12 | Push + PR against `dev` | pending | closed by the follow-up record commit |
+| T12 | Push + PR against `dev` | done | PR #286; checks run by CI |
 
 ## Design notes
 

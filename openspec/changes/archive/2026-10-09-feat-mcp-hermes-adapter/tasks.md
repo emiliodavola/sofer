@@ -35,7 +35,7 @@ documented splice cases and the line-ending fix the independent verifier forced.
 | T9 | One work-unit commit per unit, branch first, Conventional Commit messages | done | `621ed37`, `c23a169`, `9f0b559`, `efb439b`, `0999eee`, plus this archive commit |
 | T10 | Fix the line-ending defect the independent verifier falsified, with tests | done | RED `3 failed, 172 passed, 2 skipped` → GREEN `175 passed, 2 skipped`; commit `efb439b`; verifier re-ran the probes and closed the finding |
 | T11 | Archive the change **inside this PR** (rule 15) with a report true of the artifact | done | this folder under `openspec/changes/archive/` + `archive-report.md` |
-| T12 | Push the branch and open the PR against `dev` | pending | closed by the follow-up record commit inside the same PR — the PR cannot be cited before the commit that archives the change exists |
+| T12 | Push the branch and open the PR against `dev` | done | PR **#286** (`feat/272-mcp-hermes-adapter` → `dev`), opened after the archive commit; the record commit names it |
 
 ---
 
