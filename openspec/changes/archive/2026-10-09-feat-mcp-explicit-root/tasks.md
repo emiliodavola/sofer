@@ -40,7 +40,7 @@ no existing code to restructure.
 | T6 | Correct the false sentence in `README.md` and `README_ES.md` (same edit, rule 13) | done | diff |
 | T7 | Extend the Windows `MCP cwd param` rows and the security-model parenthetical in both READMEs | done | diff |
 | T8 | Full gates: focused pytest, ruff check, ruff format --check, mypy, pyright | done | verify report |
-| T9 | Work-unit commit(s) on the feature branch | pending | parent owns delivery |
+| T9 | Work-unit commit(s) on the feature branch | done | `45a83d6` (feature, seven tests, both READMEs), `2df3aa7` (SDD record + harness tracking); PR #279 merged as `7c30aaa` |
 
 ---
 
