@@ -6,6 +6,12 @@
 # the repository is public. Alerts themselves are toggled in
 # Settings → Code security; this file drives the update pull requests.
 #
+# Cadence: both ecosystems run `monthly` (the first of each month). Routine
+# version updates are low-value here — with `ruff`, `mypy` and `pyright`
+# ignored, only single-home dependencies arrive — and this schedule does NOT
+# govern security updates, which are alert-driven and unaffected. The cadence is
+# deliberately a preference, not a guarded constraint: no test asserts it.
+#
 # Bump policy (CI-14, GitHub #251/#252/#253):
 #   * Minor/patch updates are grouped and automatic.
 #   * Major updates are deliberately NOT included in any group (`update-types`
@@ -15,6 +21,12 @@
 #     `astral-sh/ruff-pre-commit` rev, and CONTRIBUTING.md, forced to agree by
 #     CI-08; the `uv` ecosystem can move only the first, so every PR it would
 #     open is red (#252). Bump all homes together — see CONTRIBUTING.md.
+#   * `mypy` and `pyright` are ignored entirely: each exact version is declared in
+#     the `[dependency-groups] dev` pin AND named in `openspec/project.md` and
+#     `openspec/config.yaml`, forced to agree by the tool-version guard in
+#     `tests/test_ci_workflows.py`; the `uv` ecosystem can move only the first, so
+#     every PR it would open is red (#275). Bump all three declarations plus
+#     `uv.lock` — see CONTRIBUTING.md.
 #   * `fastmcp` majors are ignored: a major changes the MCP SDK API and needs a
 #     code-adapting change, and Dependabot otherwise rewrites the declared `<5`
 #     cap itself (#253). Minor/patch fastmcp updates remain enabled.
@@ -23,13 +35,14 @@ updates:
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
     ignore:
       - dependency-name: "ruff"
+      - dependency-name: "mypy"
+      - dependency-name: "pyright"
       - dependency-name: "fastmcp"
         update-types: ["version-update:semver-major"]
     groups:
@@ -40,8 +53,7 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
