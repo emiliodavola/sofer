@@ -24,8 +24,8 @@ The `--cwd` value SHALL be an **existing directory**, and that SHALL be the whol
 > Amended by `2026-10-09-fix-mcp-user-config-resolution` (issue #274). The previous rule refused any cwd outside `Path.home()` or the process cwd. It was removed because, measured: it was undeclared in any spec (this clause did not exist); it was scope-blind (its `user` and `project` branches were the *same expression*); it was effectively untested (the only "rejection" test monkeypatched the function away); it protected no privilege boundary; it rejected legitimate trees (a dataset tree outside `$HOME`, which is the reported container case); and it still *accepted* a nonexistent path under either root, so it failed to catch the mistake that matters.
 
 The user-scope config file SHALL resolve by explicit declaration first, then the adapter's environment
-override, then the home directory: (1) `--user-config PATH` — returned as the stated **file** path, a
-blank or whitespace-only value counting as unset; (2) the adapter's `user_env_dir` when that variable
+override, then the home directory: (1) `--user-config PATH` — expanded and resolved, naming the **file**, with a blank or
+whitespace-only value counting as unset; (2) the adapter's `user_env_dir` when that variable
 is set to a non-empty value (Pi's `PI_CODING_AGENT_DIR`), whose directory replaces the home prefix and
 whose file name is `user_parts[-1]`; (3) `Path.home()` joined with `user_parts` — the documented
 default. `--user-config` SHALL be rejected when combined with `--agent all`, because each agent has

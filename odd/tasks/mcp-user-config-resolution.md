@@ -42,8 +42,8 @@ The issue is **evidence of a problem**, not a decision record. Its "Proposed sol
 
 | # | Task | State | Evidence |
 | --- | --- | --- | --- |
-| S1 | `--user-config PATH` on `mcp add`/`mcp remove`; precedence over `user_env_dir` and `Path.home()` | done | RED `10 failed, 3 passed` → GREEN `14 passed, 2 skipped` |
-| S2 | Reject `--user-config` with `--agent all` (each agent has a different file) | done | tested on **both** subcommands, before any write |
+| S1 | `--user-config PATH` on `mcp add`/`mcp remove`; precedence over `user_env_dir` and `Path.home()` | done | RED `16 failed, 2 passed, 2 skipped` → GREEN `18 passed, 2 skipped`, both with the **released** test file (20 tests; 2 POSIX-only) |
+| S2 | Reject `--user-config` with `--agent all` (each agent has a different file) | done | tested on **both** subcommands, with `dry_run=False` and an assertion that none of the four project-scope agent files exists |
 | S3 | Account-home mismatch warning (`pwd.getpwuid(os.getuid()).pw_dir` on POSIX) | done | `_account_home` + `home_mismatch_warning`; the `sys.platform == "win32"` guard is what keeps mypy clean on both platforms |
 | S4 | MCP-REG-01 resolution clause; CLI-R09 flag enumeration and help scenario | done | both specs amended; `check_test_mapping.py` exit 0 |
 | S5 | `README.md` + `README_ES.md` (rule 13): flags table + per-agent locations table | done | 3 mirrored edits each |

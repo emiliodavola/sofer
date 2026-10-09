@@ -46,10 +46,28 @@ five files above are the complete set. The verification evidence is recorded und
 Implementation: complete (`src/sofer/mcp_registration.py`, `src/sofer/cli.py`,
 `tests/test_mcp_registration.py`, both READMEs, both canonical specs).
 
-Verification: the change carries its own red-then-green — the new tests failed 10 of 13 before the
-implementation (the three that passed were the regression guards for the existing resolution) and pass
-afterwards; the full suite is `2028 passed, 8 skipped` against a base of `2012/6`. `cli.py`, an
-AGENTS.md rule-14 module, measures **100.00%** with no `# pragma: no cover`, and
+Verification: the change carries its own red-then-green, and these figures are **reproducible with the
+released test file** — the class's `skipif` guards read the *test module's* own `sys`, not the module
+under test, so the file collects against the base revision:
+
+| Run | Command | Result |
+| --- | --- | --- |
+| RED | the released `TestUserConfigResolution` against the sources of `22877b0` | **16 failed, 2 passed, 2 skipped** (the 2 that pass are the regression guards for the existing resolution) |
+| GREEN | the same class on this branch | **18 passed, 2 skipped** |
+| Full suite | `uv run pytest tests/ -q` | **2028 passed, 8 skipped** vs base `2012 passed, 6 skipped` |
+
+The class holds **20 tests**: 18 run on Windows, 2 are POSIX-only and run on the Linux coverage job.
+
+> **Correction, per rule 15's second clause.** An earlier draft of this report cited a 13-test RED of
+> `10 failed, 3 passed` and a 16-test GREEN. Those figures were true of an earlier *draft* of the test
+> class, not of the released artifact: four tests were added afterwards, two of them while closing the
+> `cli.py` coverage gap and two while removing the `skipif`'s dependency on the module under test. The
+> old RED was also not reproducible from the artifact, because the draft's `skipif` dereferenced
+> `mcp_registration.sys`, which the base module does not import — so the file could not even be
+> collected against the base. Both defects were found by the independent verifier and are fixed here,
+> before the merge, which is the whole point of archiving inside the delivering PR.
+
+`cli.py`, an AGENTS.md rule-14 module, measures **100.00%** with no `# pragma: no cover`, and
 `scripts/check_core_coverage.sh` exits 0. `ruff check`, `ruff format --check`, `mypy src/ scripts/` and
 `pyright` are clean; `check_test_mapping.py` exits 0; TOTAL coverage is 94%.
 
@@ -60,10 +78,16 @@ Two things this change states rather than hides:
   removal writes nothing and exits 0 regardless — it passed against the old code and proved nothing. It
   now asserts the declared file was mutated. The same weakness was found by an independent verifier in
   slice 1 (`"SHALL NOT write"` asserted under `dry_run=True`), which is why it was looked for here.
-- **`mcp_registration.py` measures 98% locally and 100% on Linux.** Lines 267-272 are the POSIX-only
-  `pwd` path, unreachable on the Windows development host because the two tests covering them are
-  `skipif`-guarded — unguarded they would error on `import pwd` and break the Windows test matrix.
-  `cli.py` is 100% on both platforms.
+- **`mcp_registration.py` measures 98% on this Windows host, and its 100% on Linux is INFERRED, not
+  observed here.** Lines 267-272 are the POSIX-only `pwd` path, unreachable on Windows because the two
+  tests covering them are `skipif`-guarded — unguarded they would error on `import pwd` and break the
+  Windows test matrix. The inference rests on those guards being False on Linux (so the tests run) and
+  on the locally missing set being exactly those lines. `cli.py` is 100% on both platforms.
+- **The `all` rejection's "before any write" half is test-proven, not inspected.** Two tests run the
+  rejection with `dry_run=False` and assert that none of the four project-scope agent files exists
+  afterwards. Slice 1 had the same gap (`"SHALL NOT write"` asserted under `dry_run=True`) and the
+  independent verifier caught it there; this change was checked for it in review and the gap was
+  found again, then closed.
 
 Issue #274 is closed by this change: it is the issue's own defect — the `$HOME` resolution that made a
 successful write a silent no-op — and the fix is the explicit declaration plus the warning that names a

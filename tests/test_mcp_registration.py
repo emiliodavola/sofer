@@ -524,7 +524,7 @@ class TestUserConfigResolution:
         monkeypatch.setattr(mcp_registration.sys, "platform", "win32")
         assert mcp_registration._account_home() is None
 
-    @pytest.mark.skipif(mcp_registration.sys.platform == "win32", reason="no pwd module off POSIX")
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pwd module off POSIX")
     def test_account_home_returns_the_passwd_entry(self, monkeypatch):
         import pwd as real_pwd
 
@@ -532,7 +532,7 @@ class TestUserConfigResolution:
         monkeypatch.setattr(real_pwd, "getpwuid", lambda _uid: entry)
         assert mcp_registration._account_home() == Path("/home/u")
 
-    @pytest.mark.skipif(mcp_registration.sys.platform == "win32", reason="no pwd module off POSIX")
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pwd module off POSIX")
     def test_account_home_is_none_for_a_uid_without_an_entry(self, monkeypatch):
         import pwd as real_pwd
 
@@ -600,6 +600,51 @@ class TestUserConfigResolution:
         rc = cli._cmd_mcp_remove(Namespace(agent="opencode", scope="user", dry_run=True))
         assert rc == 0
         assert str(home.resolve()) in capsys.readouterr().err
+
+    def test_cmd_add_rejects_user_config_with_agent_all_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        """The rejection precedes any write - with ``dry_run`` OFF, so the no-write
+        half of the contract is actually exercised rather than assumed."""
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="all",
+                scope="project",
+                cwd=None,
+                dry_run=False,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        for rel in (
+            "opencode.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+            ".pi/mcp.json",
+        ):
+            assert not (tmp_path / rel).exists(), rel
+
+    def test_cmd_remove_rejects_user_config_with_agent_all_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        rc = cli._cmd_mcp_remove(
+            Namespace(
+                agent="all",
+                scope="project",
+                dry_run=False,
+                user_config=str(tmp_path / "declared.json"),
+            )
+        )
+        assert rc == 1
+        for rel in (
+            "opencode.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+            ".pi/mcp.json",
+        ):
+            assert not (tmp_path / rel).exists(), rel
 
 
 class TestCwdContainment:

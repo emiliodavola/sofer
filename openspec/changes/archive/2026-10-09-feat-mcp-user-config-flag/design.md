@@ -62,10 +62,11 @@ Both are permanent declared-backlog specs: no Test Mapping rows, registry untouc
 
 ### 2.4 Tests
 
-Thirteen tests in a new `TestUserConfigResolution` class: the precedence (flag over env over home),
+**Twenty tests** in a new `TestUserConfigResolution` class: the precedence (flag over env over home),
 each step's regression guard, blank-as-unset, project-scope indifference, the `all` rejection on both
-subcommands, the declared path actually used on both subcommands, the warning naming both homes, and
-the warning's two `None` cases (homes agree; no account home).
+subcommands **with `dry_run` off** (so the no-write half is exercised), the declared path actually used
+on both subcommands, the warning naming both homes, and the warning's three `None` paths (homes agree;
+no account home; the `win32` branch of `_account_home`).
 
 ## 3. TDD posture — stated honestly
 
@@ -74,9 +75,9 @@ one. The carrier is a real red-then-green:
 
 | Gate | RED (measured) | GREEN (measured) |
 | --- | --- | --- |
-| `pytest tests/test_mcp_registration.py::TestUserConfigResolution` | **10 failed, 3 passed** | **14 passed, 2 skipped** |
-| `pytest tests/test_mcp_registration.py tests/test_cli.py` | — | `314 passed, 3 skipped` |
-| `pytest tests/ -q` | — | `2028 passed, 8 skipped` (base `2012/6`; +16 = 16 new tests, +2 POSIX-only skips) |
+| `pytest tests/test_mcp_registration.py::TestUserConfigResolution` (released file vs `22877b0` sources) | **16 failed, 2 passed, 2 skipped** | **18 passed, 2 skipped** |
+| `pytest tests/test_mcp_registration.py tests/test_cli.py` | — | `316 passed, 3 skipped` |
+| `pytest tests/ -q` | — | `2030 passed, 8 skipped` (base `2012/6`; +18 = the 20-test class minus the 2 POSIX-only ones, plus 2 skips) |
 
 **Two tests were strengthened after the fact, and one of them was vacuous.** The first draft of
 `test_cmd_remove_uses_the_declared_user_config` used `dry_run=True` with a nonexistent file, where
@@ -87,11 +88,13 @@ in slice 1 (`"SHALL NOT write"` asserted under `dry_run=True`), which is why it 
 
 ## 4. Platform-specific coverage — stated rather than hidden
 
-`mcp_registration.py` measures **98%** locally and **100%** on the Linux coverage job. Lines 267-272
-are the POSIX-only path (`import pwd`, `getpwuid`), unreachable on this Windows host because the two
-tests covering them are `skipif`-guarded — they would otherwise error on `import pwd` and break the
-Windows test matrix. `cli.py` is 100% on both platforms, and `check_core_coverage.sh` (the four
-rule-14 gates) exits 0 locally.
+`mcp_registration.py` measures **98% on this Windows host**; its 100% on Linux is **inferred, not
+observed here**. Lines 267-272 are the POSIX-only path (`import pwd`, `getpwuid`), unreachable on
+Windows because the two tests covering them are `skipif`-guarded — they would otherwise error on
+`import pwd` and break the Windows test matrix. The guards read the *test module's* `sys`, not the
+module under test, so the file also collects against the base revision and the RED above is
+reproducible. `cli.py` is 100% on both platforms, and `check_core_coverage.sh` (the four rule-14 gates)
+exits 0 locally.
 
 ## 5. Risks
 

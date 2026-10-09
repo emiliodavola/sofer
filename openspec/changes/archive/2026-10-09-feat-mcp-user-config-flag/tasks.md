@@ -25,8 +25,8 @@ resolution gains one higher-precedence step.
 
 | # | Task | State | Evidence |
 | --- | --- | --- | --- |
-| T1 | RED: the resolution, `all` rejection, warning and declared-path tests | done | `10 failed, 3 passed in 2.57s` |
-| T2 | GREEN: `resolve_config_path(..., user_config=None)` with the three-step precedence | done | `14 passed, 2 skipped` |
+| T1 | RED: the resolution, `all` rejection, warning and declared-path tests | done | `16 failed, 2 passed, 2 skipped` — the **released** test file against the sources of `22877b0` (reproducible: the `skipif` guards read the test module's own `sys`) |
+| T2 | GREEN: `resolve_config_path(..., user_config=None)` with the three-step precedence | done | `18 passed, 2 skipped` (the class holds 20 tests; 2 are POSIX-only) |
 | T3 | GREEN: `_account_home()` + `home_mismatch_warning()` | done | warning tests green |
 | T4 | GREEN: the flag on both subparsers, the `all` rejection, the warning, the help text (rule 7) | done | focused files `314 passed, 3 skipped` |
 | T5 | Strengthen `test_cmd_remove_uses_the_declared_user_config`, which passed vacuously under `dry_run=True` | done | now asserts the declared file was mutated |
@@ -37,6 +37,7 @@ resolution gains one higher-precedence step.
 | T10 | mypy clean on **both** platforms | done | `sys.platform == "win32"` guard; `Success: no issues found in 36 source files` |
 | T11 | Full gates | done | `2028 passed, 8 skipped`; ruff/format/mypy/pyright clean; TOTAL 94% |
 | T12 | Archive the change **inside this PR** (rule 15) | done | this folder + `archive-report.md`, both under `openspec/changes/archive/` |
+| T13 | Close the two gaps the independent verifier found in the record: the cited counts described an earlier draft, and the `all` rejection's "before any write" half was asserted under `dry_run=True` | done | the RED/GREEN figures now reproduce from the released file; two tests run the rejection with `dry_run=False` and assert none of the four agent files exists |
 
 ---
 
