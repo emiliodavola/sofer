@@ -2,7 +2,8 @@
 
 **Branch:** `feat/273-mcp-explicit-root` from `dev@b05d977`
 **Issue:** `emiliodavola/sofer#273` — *`sofer-mcp` accepts no explicit root (`--root` / `SOFER_MCP_ROOT`) while the README tells users to pass one*
-**SDD change:** `openspec/changes/2026-10-09-feat-mcp-explicit-root/`
+**Delivery PR:** `emiliodavola/sofer#279` — merged as `7c30aaa`; issue #273 auto-closed by the merge
+**SDD change:** `openspec/changes/2026-10-09-feat-mcp-explicit-root/` (archived)
 
 ## Goal
 
@@ -30,8 +31,8 @@ var, keep the fail-closed containment semantics, and make the documentation true
 | T2 | GREEN: argv + env resolution in `main()`, fail-closed on an invalid root | done | 7 passed; `tests/test_mcp_process.py` 14 → 21 tests |
 | T3 | MSP-R01: contract clause + scenario + attribution note | done | spec diff |
 | T4 | `README.md` + `README_ES.md` (rule 13) + Windows-notes cwd row + security-model bullet | done | 13 lines each, symmetric |
-| T5 | Independent verification of the full gate set | in progress | delegated (background) |
-| T6 | Commits + push + PR against `dev` | pending | — |
+| T5 | Independent verification of the full gate set | done | nine gates exit 0; base `1998/6` → branch `2005/6`, delta exactly +7 tests; coverage TOTAL 94% with the four rule-14 rows at 100%; startup refusal proven end-to-end through real subprocesses, with the message naming the resolved absolute path when the argument was relative |
+| T6 | Commits + push + PR against `dev` | done | PR #279 — 14/14 checks SUCCESS; merged as `7c30aaa`; commits `45a83d6`, `2df3aa7` |
 
 ## Design notes
 

@@ -1,9 +1,10 @@
 # Feature: dependabot-multi-home-pins — issue #275
 
 **Branch:** `ci/275-dependabot-multi-home-pins` from `dev@b0b6012`
-**Issue:** `emiliodavola/sofer#275` · **Evidence PR:** #271 (open, red since 2026-10-05)
-**Delivery PR:** `emiliodavola/sofer#276` — base `dev`, assigned to `emiliodavola`
-**SDD change:** `openspec/changes/2026-10-09-fix-dependabot-multi-home-pins/`
+**Issue:** `emiliodavola/sofer#275` — closed as COMPLETED
+**Evidence PR:** #271 — the red bot PR that motivated the change; closed by the maintainer
+**Delivery PR:** `emiliodavola/sofer#276` — merged as `b05d977`
+**SDD change:** `openspec/changes/archive/2026-10-09-fix-dependabot-multi-home-pins/` (archived)
 
 ## Goal
 
@@ -25,6 +26,7 @@ three text homes the `uv` ecosystem cannot move together: the `[dependency-group
 | T7 | Work-unit commits on the feature branch | done | `1c4589c`, `3f10c54`, `9596da7` |
 | T8 | Push + PR against `dev`, assigned to `emiliodavola` | done | PR #276 — 14/14 checks SUCCESS, `MERGEABLE` / `CLEAN` |
 | T9 | Cadence `weekly` → `monthly` for both ecosystems, dropping `day` | done | commit `9596da7`; parsed schedules `[('uv', {'interval': 'monthly'}), ('github-actions', {'interval': 'monthly'})]` |
+| T10 | Archive the SDD change and close out this record | done | moved to `openspec/changes/archive/2026-10-09-fix-dependabot-multi-home-pins/` with its `archive-report.md`; `openspec/changes/` now holds only `archive/` |
 
 ## Decisions taken before implementation
 
@@ -56,12 +58,13 @@ three text homes the `uv` ecosystem cannot move together: the `[dependency-group
 Base-vs-branch tally, measured back to back in the same environment: base `b0b6012` 1997 passed /
 6 skipped → branch 1998 / 6. Delta exactly +1 test, the new guard.
 
-## Open item — wave 0 (#271)
+## Wave 0 (#271) — closed by the maintainer
 
-#271 stays open and cannot be rebased in place. Two options, both after #276 merges:
+#271 was **closed** by the maintainer rather than rebased, because `maintainerCanModify=false` on
+the Dependabot branch made a rebase impossible — so option **(b)** was taken, not (c).
 
-- **(b)** Close #271; the next scheduled run opens a clean group. With the cadence now `monthly`,
-  that means the three safe bumps (`fastmcp`, `python-dotenv`, `coverage`) wait until next month.
-- **(c)** Open a replacement branch off `dev` carrying only those three single-home bumps.
-
-Decision is the maintainer's. Option (c) is the one that does not wait a month.
+Consequence, recorded: the three single-home bumps it carried (`fastmcp` 4.0.8→4.0.10,
+`python-dotenv` 1.2.3→1.2.4, `coverage` 7.16.1→7.16.2) waited for the next scheduled run — which the
+cadence change in this same change made **monthly**. They did not have to wait that long: the next
+Dependabot run after the merge opened a fresh group (#277), which carried `fastmcp`, `python-dotenv`,
+`datasets` and `coverage` and merged as `86398ab`.

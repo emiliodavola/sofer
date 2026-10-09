@@ -2,7 +2,8 @@
 
 **Branch:** `chore/278-huggingface-hub-2` from `dev@7c30aaa`
 **Source:** `emiliodavola/sofer#278` — *chore(deps): bump huggingface-hub from 1.32.0 to 2.1.1*
-**Related:** #277 (the routine group PR, green — does **not** touch `huggingface-hub`)
+**Related:** #277 — merged as `86398ab` (the routine group PR; does **not** touch `huggingface-hub`)
+**Delivery PR:** `emiliodavola/sofer#280` — merged as `b069cc5`; the superseded bot PR #278 was closed by that merge's `Closes #278` keyword
 
 ## Goal
 
@@ -77,7 +78,7 @@ to sofer but required by the exception.
 | T2 | GREEN: adapt the test from `httpx` to `httpx2` | done | `TestRemoteFailClosed` 4 passed |
 | T3 | Confirm the response object must be `httpx2` and is mandatory | done | F2 above: without `response` → `TypeError`; with `httpx2.Response` → OK |
 | T4 | Full gates + independent verification | done | suite 2005 passed / 6 skipped on branch **and** base (identical); ruff, mypy, pyright, mapping gate green; coverage TOTAL 94% with the four rule-14 rows at 100% |
-| T5 | Commits + push + PR; then close the bot PR #278 as superseded | in progress | — |
+| T5 | Commits + push + PR; the bot PR #278 closed as superseded | done | PR #280 — 13/13 checks SUCCESS; merged as `b069cc5`; commits `274643a`, `1a547e3`. `Closes #278` closed the bot PR on merge: the repository's default branch is `dev`, so the closing keyword applies to a PR reference |
 
 ## Verification findings worth recording
 
