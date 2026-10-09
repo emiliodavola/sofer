@@ -1,7 +1,7 @@
 """
-MCP registration automation for opencode, codex, gemini, and pi.
+MCP registration automation for opencode, codex, gemini, pi, and YAML-config agents.
 
-Provides per-agent adapters (path resolution, JSON/TOML I/O, merge,
+Provides per-agent adapters (path resolution, JSON/TOML/YAML I/O, merge,
 backup, atomic write, delegation probe) and entry builders. The CLI
 layer in ``sofer.cli`` orchestrates these helpers.
 
@@ -17,6 +17,9 @@ Each agent has a distinct on-disk shape:
 - codex: ``config.toml`` TOML ``[mcp_servers.sofer] command,cwd,env_vars``
 - gemini: ``settings.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
 - pi: ``mcp.json`` JSON ``mcpServers.sofer={command:"sofer-mcp",cwd,env}``
+- yaml agents: a YAML ``<key>.<name>`` mapping (``command``, ``cwd``, ``env``),
+  written by the surgical :mod:`sofer._yaml` writer instead of a
+  whole-document serialization.
 
 All writes are idempotent, preserve unrelated keys, create a single
 ``.bak`` backup before the first mutation, and use an atomic
@@ -49,7 +52,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict
 
-from . import _toml
+from . import _toml, _yaml
 
 AgentName: TypeAlias = str
 """Registry key for one supported MCP agent — the domain of :data:`ADAPTERS`.
@@ -64,6 +67,12 @@ Scope = Literal["user", "project"]
 
 _ENV_KEYS: list[str] = ["HF_TOKEN", "SOFER_MCP_APPROVAL_PHRASE"]
 
+_SOFER_ENTRY_NAME = "sofer"
+"""Entry name every adapter's servers mapping keys this tool's server under."""
+
+_YAML_SUFFIXES = (".yaml", ".yml")
+"""File suffixes that select the ``yaml`` config format."""
+
 
 class Adapter(TypedDict):
     """Single-source descriptor for one MCP agent.
@@ -74,6 +83,9 @@ class Adapter(TypedDict):
 
     Attributes:
         fmt: Config serialization format consumed by ``cli.py`` atomic writes.
+            ``"yaml"`` delegates to the surgical :mod:`sofer._yaml` writer,
+            which preserves the pre-write document; ``"json"`` / ``"toml"``
+            serialize the whole document.
         key: Config table that holds the servers mapping.
         user_parts: Path components under ``Path.home()``, also the fallback
             when ``user_env_dir`` is set but its variable is absent.
@@ -98,7 +110,7 @@ class Adapter(TypedDict):
             ``user_parts[-1]``); ``None`` for agents without such an override.
     """
 
-    fmt: Literal["json", "toml"]
+    fmt: Literal["json", "toml", "yaml"]
     key: str
     user_parts: tuple[str, ...]
     project_parts: tuple[str, ...]
@@ -299,7 +311,14 @@ def home_mismatch_warning() -> str | None:
 
 
 def _infer_fmt(path: Path) -> str:
+    """Return the config format implied by *path*'s suffix.
+
+    ``.yaml`` / ``.yml`` -> ``"yaml"``; ``.toml`` -> ``"toml"``; anything
+    else (including no suffix) -> ``"json"``.
+    """
     suffix = path.suffix.lower()
+    if suffix in _YAML_SUFFIXES:
+        return "yaml"
     if suffix == ".toml":
         return "toml"
     return "json"
@@ -317,7 +336,8 @@ def read_config(path: Path) -> tuple[dict[str, object], str]:
         path: Config file path.
 
     Returns:
-        Tuple of document dict and format string ``"json"`` or ``"toml"``.
+        Tuple of document dict and format string ``"json"``, ``"toml"`` or
+        ``"yaml"``.
     """
     fmt = _infer_fmt(path)
     if not path.exists():
@@ -328,6 +348,11 @@ def read_config(path: Path) -> tuple[dict[str, object], str]:
             if not isinstance(data, dict):
                 raise ValueError(f"config {path} is not a JSON object")
             return data, fmt
+    if fmt == "yaml":
+        try:
+            return _yaml.load(path.read_text(encoding="utf-8")), fmt
+        except ValueError as exc:
+            raise ValueError(f"config {path} is not a YAML mapping") from exc
     # toml (parser resolved once in `sofer._toml`, #192)
     with open(path, "rb") as fh:
         data = _toml.load(fh)
@@ -486,13 +511,38 @@ def backup(path: Path) -> Path | None:
     return bak
 
 
+def _yaml_config_key(pre_write: str, doc: dict[str, Any]) -> str | None:
+    """Return the top-level YAML table that holds the ``sofer`` entry.
+
+    The YAML writer must name the ``key`` table explicitly, but
+    :func:`atomic_write` receives only the merged document. The table is
+    recovered by looking for the servers mapping that contains the ``sofer``
+    entry, first in the pre-write text (a removal that drops an emptied table
+    leaves no entry in *doc*) and then in *doc* (a first-time add). ``None``
+    when neither document names one.
+    """
+    for source in (_yaml.load(pre_write), doc):
+        for key, value in source.items():
+            if isinstance(value, dict) and _SOFER_ENTRY_NAME in value:
+                return key
+    return None
+
+
 def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
     """Atomically write *doc* to *path* via tmp+os.replace.
+
+    The ``json`` and ``toml`` branches serialize *doc* wholesale. The ``yaml``
+    branch instead splices *doc* into the **pre-write** text read back from
+    *path* -- preserving the document's comments, key order and indentation
+    outside the edited entry -- and therefore MUST be called while the file
+    still holds the pre-write content. The caller reaches it after the single
+    ``.bak`` backup, and nothing mutates the file in between; when *path* does
+    not exist the merged document is rendered fresh.
 
     Args:
         path: Destination file.
         doc: Document to serialize.
-        fmt: ``"json"`` or ``"toml"``.
+        fmt: ``"json"``, ``"toml"`` or ``"yaml"``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -501,6 +551,15 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
+    elif fmt == "yaml":
+        pre_write = path.read_text(encoding="utf-8") if path.exists() else _yaml.dump(doc)
+        key = _yaml_config_key(pre_write, doc)
+        if key is None:
+            content = _yaml.dump(doc)
+        else:
+            content = _yaml.splice_entry(pre_write, key, _SOFER_ENTRY_NAME, doc)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(content)
     else:
         try:
             import tomli_w as _tomli_w

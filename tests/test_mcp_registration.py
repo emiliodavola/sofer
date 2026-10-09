@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from sofer import cli, mcp_registration
 
@@ -1408,7 +1409,7 @@ class TestSingleSourceRegistry:
         for agent in mcp_registration.AGENT_NAMES:
             spec = mcp_registration.ADAPTERS[agent]
             assert set(spec) == required, agent
-            assert spec["fmt"] in {"json", "toml"}
+            assert spec["fmt"] in {"json", "toml", "yaml"}
             assert spec["command"] in {"array", "string"}
             assert spec["env"] in {"none", "allow_list", "refs", "refs_braced"}
 
@@ -1792,3 +1793,77 @@ class TestNativeDelegationFidelity:
         monkeypatch.setattr(subprocess, "run", mock_run)
         assert mcp_registration.delegate_remove("codex", "project") is False
         mock_run.assert_not_called()
+
+
+# ── YAML config format (design §3-§4, Y-6/Y-7) ─────────────────────────
+
+
+class TestYamlFormat:
+    """``_infer_fmt``/``read_config``/``atomic_write`` learn ``fmt == "yaml"``."""
+
+    def test_infer_fmt_yaml_suffixes(self, tmp_path: Path) -> None:
+        assert mcp_registration._infer_fmt(tmp_path / "config.yaml") == "yaml"
+        assert mcp_registration._infer_fmt(tmp_path / "config.yml") == "yaml"
+        assert mcp_registration._infer_fmt(tmp_path / "CONFIG.YAML") == "yaml"
+        assert mcp_registration._infer_fmt(tmp_path / "config.toml") == "toml"
+        assert mcp_registration._infer_fmt(tmp_path / "config.json") == "json"
+        assert mcp_registration._infer_fmt(tmp_path / "config") == "json"
+
+    def test_read_config_missing_yaml_returns_empty(self, tmp_path: Path) -> None:
+        assert mcp_registration.read_config(tmp_path / "config.yaml") == ({}, "yaml")
+
+    def test_read_config_comment_only_yaml_returns_empty(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("# comment only\n", encoding="utf-8")
+        assert mcp_registration.read_config(path) == ({}, "yaml")
+
+    def test_read_config_non_mapping_yaml_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("- 1\n- 2\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="not a YAML mapping"):
+            mcp_registration.read_config(path)
+
+    def test_atomic_write_yaml_preserves_prewrite(self, tmp_path: Path) -> None:
+        path = tmp_path / "nested" / "config.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "# keep me\nuser: alice\nmcp_servers:\n  other:\n    command: other\n",
+            encoding="utf-8",
+        )
+        doc = {
+            "user": "alice",
+            "mcp_servers": {
+                "other": {"command": "other"},
+                "sofer": {
+                    "command": "sofer-mcp",
+                    "cwd": "/proj",
+                    "env": {"HF_TOKEN": "${HF_TOKEN}"},
+                },
+            },
+        }
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        text = path.read_text(encoding="utf-8")
+        assert "# keep me\n" in text
+        assert "user: alice\n" in text
+        assert not (path.with_name(path.name + ".tmp")).exists()
+        assert yaml.safe_load(text) == doc
+
+    def test_atomic_write_yaml_fresh_document_creates_parents(self, tmp_path: Path) -> None:
+        path = tmp_path / "new" / "config.yaml"
+        doc = {"mcp_servers": {"sofer": {"command": "sofer-mcp"}}}
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        assert path.exists()
+        assert not (path.with_name(path.name + ".tmp")).exists()
+        assert yaml.safe_load(path.read_text(encoding="utf-8")) == doc
+
+    def test_atomic_write_yaml_without_entry_renders_fresh(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        doc = {"other": 1}
+
+        mcp_registration.atomic_write(path, doc, "yaml")
+
+        assert yaml.safe_load(path.read_text(encoding="utf-8")) == doc
