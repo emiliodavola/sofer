@@ -46,7 +46,7 @@ three text homes the `uv` ecosystem cannot move together: the `[dependency-group
 ## Out of scope
 
 - Unblocking #271 (wave 0): `maintainerCanModify=false` on the Dependabot branch, so it cannot be
-  rebased in place. See the open item below.
+  rebased in place. Resolved by the maintainer — see the wave-0 section below.
 - Any `src/` change. This is config, policy docs, one spec delta, and one guard.
 
 ## Gates
