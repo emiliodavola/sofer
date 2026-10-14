@@ -112,6 +112,16 @@ _DEFAULTS: dict[str, Any] = {
     "failure_report_gh_timeout_seconds": 30,
     "failure_report_duplicate_limit": 5,
     "failure_report_duplicate_query_tokens": 8,
+    # ── HF upload diagnostics (issue #289) ──
+    # Number of ADDITIONAL ``upload_folder`` attempts after the first failure.
+    # ``1`` is the maintainer-settled bound (decision D2): exactly one retry,
+    # no automatic xet fallback. Env-var NAMES probed to report which Hub
+    # transfer backend is active (never hardcoded in ``publish``), and the
+    # character cap for the exception message echoed in the failure report.
+    "hf_upload_retry_count": 1,
+    "hf_backend_disable_env": "HF_HUB_DISABLE_XET",
+    "hf_backend_prefix_env": "HF_XET_",
+    "hf_upload_error_max_chars": 500,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -268,6 +278,16 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
         _val = merged.get(_key)
         if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
             raise ValueError(f"'{_key}' in [tool.sofer] must be a positive integer")
+
+    # HF upload diagnostics (issue #289): the retry count is a non-negative
+    # integer (0 disables the retry), and the error cap must be positive so a
+    # failure report is never truncated to nothing.
+    _retry = merged.get("hf_upload_retry_count")
+    if not isinstance(_retry, int) or isinstance(_retry, bool) or _retry < 0:
+        raise ValueError("'hf_upload_retry_count' in [tool.sofer] must be a non-negative integer")
+    _err_cap = merged.get("hf_upload_error_max_chars")
+    if not isinstance(_err_cap, int) or isinstance(_err_cap, bool) or _err_cap < 1:
+        raise ValueError("'hf_upload_error_max_chars' in [tool.sofer] must be a positive integer")
 
     return merged
 
@@ -431,3 +451,10 @@ FAILURE_REPORT_MANUAL_URL_MAX_CHARS: int = _DEFAULTS["failure_report_manual_url_
 FAILURE_REPORT_GH_TIMEOUT_SECONDS: int = _DEFAULTS["failure_report_gh_timeout_seconds"]
 FAILURE_REPORT_DUPLICATE_LIMIT: int = _DEFAULTS["failure_report_duplicate_limit"]
 FAILURE_REPORT_DUPLICATE_QUERY_TOKENS: int = _DEFAULTS["failure_report_duplicate_query_tokens"]
+
+# HF upload diagnostics (issue #289): bounded retry count, the env-var NAMES
+# probed for the active transfer backend, and the exception-message cap.
+HF_UPLOAD_RETRY_COUNT: int = _DEFAULTS["hf_upload_retry_count"]
+HF_BACKEND_DISABLE_ENV: str = _DEFAULTS["hf_backend_disable_env"]
+HF_BACKEND_PREFIX_ENV: str = _DEFAULTS["hf_backend_prefix_env"]
+HF_UPLOAD_ERROR_MAX_CHARS: int = _DEFAULTS["hf_upload_error_max_chars"]

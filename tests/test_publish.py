@@ -1739,6 +1739,256 @@ class TestHfUpload:
         assert result is (not raises)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Issue #289 — hf upload diagnostics (S1/S2/S4, decisions D1/D2/D3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestHfUploadDiagnostics:
+    """Upload failures name their cause, the active backend and the one retry.
+
+    The upload used to print a bare ``I/O error`` and return rc 1 with no hint
+    that the Hub transfer backend (xet) was the cause. These tests pin the
+    named cause (``type(exc).__name__: exc``), the backend note whose env-var
+    names come from ``[tool.sofer]`` (never hardcoded), the exactly-one bounded
+    retry (D2), and the message truncation cap.
+    """
+
+    @staticmethod
+    def _pkg(tmp_path: Path) -> Path:
+        """Create a one-file directory to upload."""
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "data.parquet").write_bytes(b"x")
+        return pkg
+
+    def test_failure_names_exception_type_and_message(self, tmp_path, capsys) -> None:
+        """S1: the report carries ``type(exc).__name__: exc`` verbatim."""
+        from sofer.publish import _hf_upload_folder
+
+        class _Api:
+            def upload_folder(self, **_kw: Any) -> None:
+                raise RuntimeError("boom from the hub")
+
+        result = _hf_upload_folder(
+            "u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, _Api())
+        )
+        out = capsys.readouterr().out
+        assert result is False
+        assert "RuntimeError: boom from the hub" in out, out
+
+    def test_failure_names_active_backend(self, tmp_path, capsys, monkeypatch) -> None:
+        """S1/D3: the report names whether xet is active, with the config env name."""
+        import huggingface_hub.constants as hf_constants
+
+        from sofer.publish import _hf_upload_folder
+
+        class _Api:
+            def upload_folder(self, **_kw: Any) -> None:
+                raise OSError("I/O error")
+
+        monkeypatch.setattr(hf_constants, "HF_HUB_DISABLE_XET", False)
+        monkeypatch.delenv("HF_XET_CACHE", raising=False)
+        _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, _Api()))
+        out = capsys.readouterr().out
+        assert "xet backend: enabled" in out, out
+        assert "HF_HUB_DISABLE_XET" in out, out
+
+    def test_failure_names_disabled_backend(self, tmp_path, capsys, monkeypatch) -> None:
+        """S1: a disabled xet backend is reported as the disabling cause."""
+        import huggingface_hub.constants as hf_constants
+
+        from sofer.publish import _hf_upload_folder
+
+        class _Api:
+            def upload_folder(self, **_kw: Any) -> None:
+                raise OSError("I/O error")
+
+        monkeypatch.setattr(hf_constants, "HF_HUB_DISABLE_XET", True)
+        _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, _Api()))
+        out = capsys.readouterr().out
+        assert "xet backend: disabled by HF_HUB_DISABLE_XET" in out, out
+
+    def test_failure_lists_xet_tuning_vars(self, tmp_path, capsys, monkeypatch) -> None:
+        """S1: the ``HF_XET_*`` tuning variables present are listed."""
+        import huggingface_hub.constants as hf_constants
+
+        from sofer.publish import _hf_upload_folder
+
+        class _Api:
+            def upload_folder(self, **_kw: Any) -> None:
+                raise OSError("I/O error")
+
+        monkeypatch.setattr(hf_constants, "HF_HUB_DISABLE_XET", False)
+        monkeypatch.setenv("HF_XET_CACHE", "/tmp/xet")
+        _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, _Api()))
+        out = capsys.readouterr().out
+        assert "HF_XET_* vars: HF_XET_CACHE" in out, out
+
+    def test_backend_probe_reads_names_from_config(self, tmp_path, capsys, monkeypatch) -> None:
+        """D3: overriding the config env names changes the probe, not a literal."""
+        from sofer.publish import _hf_upload_folder
+
+        class _Api:
+            def upload_folder(self, **_kw: Any) -> None:
+                raise OSError("I/O error")
+
+        monkeypatch.setattr(publish_mod.config, "HF_BACKEND_DISABLE_ENV", "MY_XET_OFF")
+        monkeypatch.setattr(publish_mod.config, "HF_BACKEND_PREFIX_ENV", "MY_XET_TUNE_")
+        monkeypatch.setenv("MY_XET_TUNE_A", "1")
+        _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, _Api()))
+        out = capsys.readouterr().out
+        assert "MY_XET_OFF" in out, out
+        assert "MY_XET_TUNE_A" in out, out
+
+    def test_failure_message_truncated_to_config_cap(self, tmp_path, capsys, monkeypatch) -> None:
+        """A huge backend error is truncated at the configured cap."""
+        from sofer.publish import _hf_upload_folder
+
+        class _Api:
+            def upload_folder(self, **_kw: Any) -> None:
+                raise RuntimeError("A" * 100)
+
+        monkeypatch.setattr(publish_mod.config, "HF_UPLOAD_ERROR_MAX_CHARS", 12)
+        _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, _Api()))
+        out = capsys.readouterr().out
+        assert "A" * 12 in out, out
+        assert "A" * 13 not in out, out
+        assert "\u2026" in out, out
+
+    def test_retries_once_then_succeeds(self, tmp_path, capsys) -> None:
+        """D2: the first attempt raises, the single retry succeeds -> True."""
+        from sofer.publish import _hf_upload_folder
+
+        class _Flaky:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def upload_folder(self, **_kw: Any) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("transient network failure")
+
+        api = _Flaky()
+        result = _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, api))
+        out = capsys.readouterr().out
+        assert result is True
+        assert api.calls == 2, "the failed attempt plus exactly one retry"
+        assert "RuntimeError: transient network failure" in out, out
+        assert "retrying upload" in out, out
+
+    def test_fails_after_exactly_one_retry(self, tmp_path, capsys) -> None:
+        """D2: both attempts raise -> False, with cause and retry named twice-once."""
+        from sofer.publish import _hf_upload_folder
+
+        class _Dead:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def upload_folder(self, **_kw: Any) -> None:
+                self.calls += 1
+                raise RuntimeError("dead hub")
+
+        api = _Dead()
+        result = _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, api))
+        out = capsys.readouterr().out
+        assert result is False
+        assert api.calls == 2, "exactly one retry — two attempts total"
+        assert "retry 1/1" in out, out
+        assert out.count("RuntimeError: dead hub") == 2, out
+
+    def test_retry_count_is_config_owned(self, tmp_path, monkeypatch) -> None:
+        """The retry count is a ``[tool.sofer]`` default, not a literal."""
+        from sofer.publish import _hf_upload_folder
+
+        class _Dead:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def upload_folder(self, **_kw: Any) -> None:
+                self.calls += 1
+                raise RuntimeError("dead hub")
+
+        monkeypatch.setattr(publish_mod.config, "HF_UPLOAD_RETRY_COUNT", 0)
+        api = _Dead()
+        result = _hf_upload_folder("u/r", self._pkg(tmp_path), "", "dataset", api=_cast(Any, api))
+        assert result is False
+        assert api.calls == 1, "retry_count=0 must disable the retry"
+
+
+class TestHfUploadConfigDefaults:
+    """Issue #289 D3: the publish-diagnostic tunables are config-owned."""
+
+    def _load(self, monkeypatch, tmp_path: Path, toml: str) -> dict[str, Any]:
+        """Load ``[tool.sofer]`` from a temp pyproject (discovery anchored)."""
+        (tmp_path / "pyproject.toml").write_text(toml, encoding="utf-8")
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
+        return publish_mod.config._load_tool_config()
+
+    def test_retry_count_must_be_non_negative(self, monkeypatch, tmp_path) -> None:
+        """A negative retry count would silently skip the upload — reject it."""
+        with pytest.raises(ValueError, match="hf_upload_retry_count"):
+            self._load(monkeypatch, tmp_path, "[tool.sofer]\nhf_upload_retry_count = -1\n")
+
+    def test_error_cap_must_be_positive(self, monkeypatch, tmp_path) -> None:
+        """A non-positive cap would blank the failure message — reject it."""
+        with pytest.raises(ValueError, match="hf_upload_error_max_chars"):
+            self._load(monkeypatch, tmp_path, "[tool.sofer]\nhf_upload_error_max_chars = 0\n")
+
+
+class TestPublishEmptyRepositoryReport:
+    """S4 (#289): a total upload failure names the created-but-empty repo."""
+
+    def _prepared_cfg(self, tmp_path: Path) -> DatasetConfig:
+        """Build a prepared package so auto-prepare stays quiet."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        prepare(cfg, tmp_path / "build")
+        return cfg
+
+    def _failing_hf(self, tmp_path, monkeypatch, existing: list[str]) -> None:
+        """Make every upload_folder call raise with the issue's I/O error."""
+
+        def _raise_upload(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError("I/O error: no such file or directory (os error 2)")
+
+        td = tmp_path / "_staging"
+        td.mkdir()
+        monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(td))
+        monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
+        monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: existing)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_upload)
+
+    def test_created_empty_repo_reported_on_total_failure(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The repo was ensured (created) and nothing landed -> say so."""
+        cfg = self._prepared_cfg(tmp_path)
+        self._failing_hf(tmp_path, monkeypatch, existing=[])
+
+        rc = publish(cfg, target="hf")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Repository created, 0 files uploaded" in out, out
+        assert "RuntimeError: I/O error" in out, out
+
+    def test_no_empty_repo_report_when_remote_has_files(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """A repo that already holds files is not reported as empty."""
+        cfg = self._prepared_cfg(tmp_path)
+        self._failing_hf(tmp_path, monkeypatch, existing=["old.parquet"])
+
+        rc = publish(cfg, target="hf")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Repository created, 0 files uploaded" not in out, out
+        assert "0 uploaded" in out, out
+
+
 class TestRepoDiffSummaryNext:
     def _many_cfg(self, tmp_path: Path, count: int = 12) -> DatasetConfig:
         files = [
