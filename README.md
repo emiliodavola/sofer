@@ -465,8 +465,10 @@ user makes with `load_dataset("user/repo")` — and compares the splits it
 returns against the ones detected from the remote file paths. The result is
 printed after the prepare summary:
 
-- **SKIPPED** — the optional `datasets` package is not installed. Install it
-  with `pip install datasets` and re-run.
+- **SKIPPED** — the optional `datasets` package is not installed, or it cannot
+  be imported (a broken `fsspec`/`xet` config, a partially installed wheel).
+  Install it with `pip install datasets` and re-run; the report names the
+  exception that stopped the import.
 - **PASSED** — `load_dataset()` succeeded and the detected splits match.
 - **FAILED** — `load_dataset()` raised, or the splits differ from what was
   detected; the report lists the errors and warnings.
