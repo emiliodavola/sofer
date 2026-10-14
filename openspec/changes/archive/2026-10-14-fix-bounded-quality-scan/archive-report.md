@@ -69,12 +69,22 @@ after; memory independence is proven structurally by
 identical accumulator sizes). The cap arithmetic was measured with `tracemalloc`
 (143 B/entry → 1 M ≈ 137 MB, under the approved ~256 MB boundary), so the default stays `1_000_000`.
 
-## Rebase note
+## Rebase note (resolved)
 
-`origin/dev` has since merged #293, which edits `_distribute_row` / `_check_duplicates` (the
-duplicate finding keeps its file and emits pairs round-robin). That is the same region this change
-touches; the parent resolves it by keeping #293's pair emission and re-applying #290's insertion cap,
-`_capped_append` and `partial` flag. Details in the archived `tasks.md` §"Rebase note".
+`origin/dev` merged #293, which edits `_distribute_row` / `_check_duplicates` (the duplicate finding
+keeps its file and emits pairs round-robin) — the same region this change touches. The parent
+resolved the conflict by grouping the pairs **per file**: `_dup_findings` is a
+`dict[str, list[tuple[int, int]]]`, each file's list capped at `REPORT_MAX_ITEMS` through the new
+`_record_duplicate_pair()`, with `_check_duplicates` keeping #293's round-robin emission and adding
+this change's cap note and `partial` flag. A single global cap in scan order would have re-broken
+#293's round-robin (the first `REPORT_MAX_ITEMS` pairs all come from the noisy file), so the bound is
+per file. The hash insertion cap (`quality_max_dup_tracking`) stays global. Details in the archived
+`tasks.md` §"Rebase note".
+
+Re-measured on the rebased base `origin/dev@0943ef1`: `uv run pytest tests/ -q` → `2129 passed,
+8 skipped`; `uv run coverage report -m` → TOTAL `94%`; `scripts/check_core_coverage.sh` → `cli`,
+`scanner`, `prepare`, `publish` each `100%`; `ruff check`, `ruff format --check`, `mypy`, `pyright`
+(0 errors, the 1 pre-existing `tomli` warning) and `check_test_mapping.py` all clean.
 
 ## Delivery
 

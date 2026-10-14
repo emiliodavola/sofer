@@ -77,8 +77,14 @@ round-robin across files). This change overlaps those exact methods:
 - `_check_duplicates`: the message is built once and gains the cap note; the pair list keeps whatever
   shape #293 gives it.
 
-Resolution rule: keep #293's file-scoped round-robin pair emission, and re-apply #290's cap
-(insertion guard + `_capped_append` + `partial` flag). The two changes are orthogonal in intent.
+Resolution as delivered: keep #293's file-scoped round-robin pair emission **and** #290's bound, by
+grouping the pairs per file — `_dup_findings` is a `dict[str, list[tuple[int, int]]]`, each file's
+list capped at `REPORT_MAX_ITEMS` through the new `_record_duplicate_pair()`, and `_check_duplicates`
+emits the round-robin over those lists while still adding the cap note and the `partial` flag (its
+`max(..., default=0)` guard covers the capped-with-no-pairs case). A single global cap applied in
+scan order would have re-broken the round-robin: the first `REPORT_MAX_ITEMS` pairs all come from the
+noisy file, which is exactly what #293 fixed. The hash insertion cap (`quality_max_dup_tracking`)
+stays global, and the two `TestAccumulatorCaps` assertions now measure the per-file lists.
 
 ---
 
