@@ -1280,7 +1280,12 @@ class TestAccumulatorCaps:
         cfg, _ = _make_csv_cfg(tmp_path, ["val"], rows)
         validator = QualityValidator(cfg)
         validator.run()
-        assert len(validator._dup_findings) == _config.REPORT_MAX_ITEMS
+        # Pairs are grouped per file (issue #293) and each file's list is capped
+        # at the report limit (issue #290), so the first N pairs are kept.
+        pairs = validator._dup_findings["data.csv"]
+        assert len(pairs) == _config.REPORT_MAX_ITEMS
+        assert pairs[0] == (1, 2)
+        assert pairs[-1] == (1, _config.REPORT_MAX_ITEMS + 1)
 
     def test_empty_rows_capped_at_report_limit(self, tmp_path):
         import sofer.config as _config
@@ -1320,7 +1325,7 @@ class TestAccumulatorCaps:
             return (
                 len(validator._dup_hashes),
                 len(validator._empty_row_numbers),
-                len(validator._dup_findings),
+                sum(len(pairs) for pairs in validator._dup_findings.values()),
             )
 
         assert _sizes(100) == _sizes(3000)
