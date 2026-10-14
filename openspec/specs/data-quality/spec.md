@@ -237,7 +237,9 @@ on the first failure — all checks run regardless. `run()` SHALL gate on text-e
 hash of each row's concatenated field values, **scoped per file**. Two identical
 rows in different files SHALL NOT be reported as duplicates. The hash key MUST
 include the filename to prevent cross-file collisions. Duplicate warnings MUST
-include the offending row number and a sample value.
+name the file each pair came from together with the offending row numbers, and
+SHALL list pairs round-robin across the affected files, so the report item cap
+cannot let one noisy file hide the others.
 
 #### Scenarios
 
@@ -256,6 +258,7 @@ GIVEN a CSV where rows 17 and 42 are identical
 WHEN _check_duplicates() runs
 THEN the report SHALL have a warning
   AND the warning SHALL mention the duplicate row numbers
+  AND the warning SHALL name the file the rows came from
 ```
 
 **Identical rows in different files are NOT duplicates**
@@ -695,7 +698,7 @@ findings.
   Errors:   1
     ✗  corrupt_records: Row 55 has 3 fields, header has 5
   Warnings: 2
-    ⚠  duplicates: Row 17 = Row 42
+    ⚠  duplicates: data.csv: Row 17 = Row 42
     ⚠  empty_rows: Row 33 is completely empty
   ✓  Quality: 5 passed, 1 failed, 2 warnings
 ```

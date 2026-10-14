@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from sofer import config
 from sofer._csv_reader import stream_csv
 from sofer.checks import ValidationReport
 from sofer.model import (
@@ -171,6 +172,49 @@ class TestCheckDuplicates:
         qr = [r for r in report.quality_results if r.check == "duplicates"]
         assert len(qr) >= 1
         assert any("duplicate" in r.message.lower() for r in qr)
+
+    def test_duplicates_finding_names_the_file(self, tmp_path):
+        """A duplicate pair names the file it came from (issue #293).
+
+        RED: _dup_findings stores only the row numbers, so the emitted message
+        cannot be traced back to a table — and the hash is namespaced per file,
+        so the envelope cannot resolve it either.
+        """
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["id", "val"],
+            [["1", "a"], ["2", "b"], ["1", "a"]],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "duplicates"]
+        assert len(qr) == 1
+        assert qr[0].message.startswith("Duplicate rows: ")
+        assert "data.csv: Row 1 = Row 3" in qr[0].message
+
+    def test_duplicates_cap_does_not_hide_another_file(self, tmp_path):
+        """A noisy file cannot fill the item cap and hide the other files.
+
+        RED: the pairs are emitted in scan order, so a.csv's pairs use the whole
+        REPORT_MAX_ITEMS budget before b.csv's single pair is reached.
+        """
+        repeated = [["1", "x"] for _ in range(config.REPORT_MAX_ITEMS + 2)]
+        p1 = _make_csv(tmp_path / "a.csv", [["id", "val"], *repeated])
+        p2 = _make_csv(tmp_path / "b.csv", [["id", "val"], ["9", "z"], ["9", "z"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=p1, remote="a.csv"),
+                FileEntry(local=p2, remote="b.csv"),
+            ],
+        )
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "duplicates"]
+        assert len(qr) == 1
+        message = qr[0].message
+        assert "a.csv: Row 1 = Row 2" in message
+        assert "b.csv: Row 1 = Row 2" in message
+        assert message.count(" = ") == config.REPORT_MAX_ITEMS
 
     def test_duplicates_file_scoped_no_cross_file(self, tmp_path):
         """Two files sharing identical row content → NO duplicate warning.

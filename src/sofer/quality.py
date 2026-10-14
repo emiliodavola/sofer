@@ -174,7 +174,9 @@ class QualityValidator:
         self._file_row_count: dict[str, int] = {}
         # duplicates
         self._dup_hashes: dict[str, int] = {}  # hash → first row number
-        self._dup_findings: list[tuple[int, int]] = []  # (first_row, dup_row)
+        # (file, first_row, dup_row) — the file keeps the finding traceable back
+        # to a table without an out-of-band bisect (issue #293)
+        self._dup_findings: list[tuple[str, int, int]] = []
         # empty rows
         self._empty_row_numbers: list[int] = []
         # empty columns — initialised per file in _process_file
@@ -332,7 +334,7 @@ class QualityValidator:
             row_str = f"{self._current_file}|{'|'.join(row)}"
             h = hashlib.md5(row_str.encode("utf-8"), usedforsecurity=False).hexdigest()
             if h in self._dup_hashes:
-                self._dup_findings.append((self._dup_hashes[h], row_number))
+                self._dup_findings.append((self._current_file, self._dup_hashes[h], row_number))
             else:
                 self._dup_hashes[h] = row_number
 
@@ -355,6 +357,13 @@ class QualityValidator:
         self._ran_checks.add(check)
 
     def _check_duplicates(self) -> None:
+        """Emit the ``duplicates`` finding, attributed to the file it came from.
+
+        The row hash is namespaced per file, so a bare row number is not
+        resolvable from the report — every pair names its file (issue #293).
+        Pairs are taken round-robin across files so one noisy file cannot spend
+        the whole ``REPORT_MAX_ITEMS`` budget and hide the other affected files.
+        """
         if "duplicates" not in self._checks:
             return
         if not self._had_eligible:
@@ -362,10 +371,20 @@ class QualityValidator:
         self._ran_checks.add("duplicates")
         if not self._dup_findings:
             return
+        by_file: dict[str, list[tuple[int, int]]] = {}
+        for fname, first, dup in self._dup_findings:
+            by_file.setdefault(fname, []).append((first, dup))
         limit = config.REPORT_MAX_ITEMS
-        pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:limit])
+        parts: list[str] = []
+        for depth in range(max(len(pairs) for pairs in by_file.values())):
+            if len(parts) >= limit:
+                break
+            for fname, pairs in by_file.items():
+                if depth < len(pairs) and len(parts) < limit:
+                    first, dup = pairs[depth]
+                    parts.append(f"{fname}: Row {first} = Row {dup}")
         sev = self._checks["duplicates"]["severity"]
-        self._add_result("duplicates", sev, f"Duplicate rows: {pairs}")
+        self._add_result("duplicates", sev, f"Duplicate rows: {'; '.join(parts)}")
 
     def _check_empty_rows(self) -> None:
         if "empty_rows" not in self._checks:
