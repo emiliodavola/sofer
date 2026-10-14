@@ -498,8 +498,10 @@ y compara los splits que devuelve con los detectados a partir de las rutas
 remotas de los archivos. El resultado se imprime después del resumen de
 `prepare`:
 
-- **SKIPPED** — el paquete opcional `datasets` no está instalado. Instálalo con
-  `pip install datasets` y vuelve a ejecutar.
+- **SKIPPED** — el paquete opcional `datasets` no está instalado, o no se puede
+  importar (una configuración rota de `fsspec`/`xet`, una instalación parcial
+  de la rueda). Instálalo con `pip install datasets` y vuelve a ejecutar; el
+  informe nombra la excepción que detuvo el import.
 - **PASSED** — `load_dataset()` tuvo éxito y los splits detectados coinciden.
 - **FAILED** — `load_dataset()` lanzó una excepción, o los splits difieren de
   lo detectado; el informe enumera los errores y avisos.
