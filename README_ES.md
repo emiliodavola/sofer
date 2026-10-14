@@ -26,6 +26,7 @@ Hugging Face Hub o en cualquier directorio local.**
 - [Perfilado y renderizado](#perfilado-y-renderizado)
 - [Referencia de comandos](#referencia-de-comandos)
 - [Banderas rápidas](#banderas-rapidas)
+- [Solución de problemas de subida a HF](#solucion-de-problemas-de-subida-a-hf)
 - [Reporte asistido de fallos](#reporte-asistido-de-fallos)
 - [Formatos de datos soportados](#formatos-de-datos-soportados)
 - [Limitaciones de conversión a Parquet](#limitaciones-de-conversion-a-parquet)
@@ -368,6 +369,32 @@ canalización.
 | `--cwd PATH` | `mcp add` | `cwd` absoluto para el servidor; debe ser un directorio existente (si no, sale con 1 indicando la ruta resuelta). Un árbol fuera del home y del cwd del proceso se acepta con un warning que lo nombra. |
 | `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
+
+### Solución de problemas de subida a HF
+
+`sofer publish --target hf` entrega el paquete completo con una sola llamada
+`upload_folder`. Cuando esa llamada falla, sofer imprime el tipo y el mensaje de
+la excepción subyacente junto con el backend de transferencia activo, y
+reintenta una vez. Un fallo total reporta `Result: 0 uploaded, N failed` y,
+cuando el repositorio queda vacío, lo indica explícitamente.
+
+Si un publish reporta `0 uploaded, N failed` con un `I/O error`, vuelve a
+ejecutarlo con el backend de transferencia xet deshabilitado **antes** de asumir
+que el paquete o el token están mal:
+
+```bash
+# macOS / Linux
+HF_HUB_DISABLE_XET=1 sofer publish my-dataset.toml
+# Windows (PowerShell)
+$env:HF_HUB_DISABLE_XET = "1"; sofer publish my-dataset.toml
+```
+
+`HF_HUB_DISABLE_XET` se lee una sola vez, cuando se importa `huggingface_hub`,
+así que debe definirse en el entorno del proceso `sofer` — definirlo después de
+que el proceso arranca no tiene efecto. La cantidad de reintentos, los nombres
+de las variables de entorno sondeadas y el tope del mensaje de error son
+defaults de `[tool.sofer]` (`hf_upload_retry_count`, `hf_backend_disable_env`,
+`hf_backend_prefix_env`, `hf_upload_error_max_chars`).
 
 ## Reporte asistido de fallos
 
