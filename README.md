@@ -483,6 +483,27 @@ Every dataset is checked before publish:
 | Cross-file types | Dtype mismatches across configs |
 | Encoding validation | File encoding issues |
 
+Quality checks run in a single streaming pass and their per-row memory is
+bounded independently of the dataset size (issue #290). Three `[tool.sofer]`
+keys control the scan — see
+[docs/configuration.md#quality-scan-bounds](docs/configuration.md#quality-scan-bounds):
+
+- `quality_full_scan` (`auto` / `always` / `never`) decides when the whole
+  file is read. `auto` (default) scans every row only for the `fail` checks
+  that actually need it (`quality_row_requiring_checks`, default
+  `corrupt_records`); an 8 KB probe such as `encoding_validation` never
+  triggers a full pass.
+- `quality_max_dup_tracking` caps the distinct row hashes tracked by the
+  `duplicates` check (default 1 000 000). When the cap is hit the finding is
+  marked **partial** and names the cap, rather than silently missing later
+  duplicates.
+- A dataset may override the policy with an optional `[quality]` table
+  (`full_scan`, `max_sample`).
+
+Findings carry a **partial** flag when their evidence comes from a sampled
+scan or a capped accumulator; `validate` prints it as `(partial)` and the
+on-disk quality report as `*(partial — sample-based)*`.
+
 ### Verify the built package (prepare --verify)
 
 `prepare --verify` runs an end-to-end load check on the freshly built package:

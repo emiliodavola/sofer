@@ -516,6 +516,28 @@ Cada conjunto de datos se comprueba antes de publicar:
 | Cross-file types | Discrepancias de dtype entre configuraciones |
 | Encoding validation | Problemas de codificación de archivos |
 
+Los controles de calidad se ejecutan en una sola pasada de streaming y su
+memoria por fila está acotada de forma independiente al tamaño del dataset
+(issue #290). Tres claves de `[tool.sofer]` controlan el escaneo — ver
+[docs/configuration.md#quality-scan-bounds](docs/configuration.md#quality-scan-bounds):
+
+- `quality_full_scan` (`auto` / `always` / `never`) decide cuándo se lee el
+  archivo completo. `auto` (por defecto) escanea todas las filas solo para los
+  controles `fail` que realmente lo necesitan (`quality_row_requiring_checks`,
+  por defecto `corrupt_records`); una sonda de 8 KB como
+  `encoding_validation` nunca dispara una pasada completa.
+- `quality_max_dup_tracking` limita los hashes de fila distintos que rastrea
+  el control `duplicates` (por defecto 1 000 000). Al alcanzar el límite el
+  hallazgo se marca **partial** y nombra el límite, en lugar de omitir
+  duplicados posteriores en silencio.
+- Un dataset puede sobrescribir la política con una tabla `[quality]`
+  opcional (`full_scan`, `max_sample`).
+
+Los hallazgos llevan una marca **partial** cuando su evidencia proviene de un
+escaneo por muestreo o de un acumulador limitado; `validate` la imprime como
+`(partial)` y el informe de calidad en disco como
+`*(partial — sample-based)*`.
+
 ### Verificar el paquete construido (prepare --verify)
 
 `prepare --verify` ejecuta una comprobación de carga integral sobre el paquete
