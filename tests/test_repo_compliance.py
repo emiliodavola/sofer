@@ -1,5 +1,6 @@
 """Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
+import re
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -1252,6 +1253,160 @@ class TestConfigsYAML:
         result = build_dataset_card(cfg, schema=[])
         fm = _parse_frontmatter(result)
         assert "configs" not in fm
+
+
+# ── 3b. mixed-schema configs (issue #292) ───────────────────────────────────
+
+
+def _col(
+    name: str,
+    origin: str,
+    dtype: str = "numeric",
+    hf_dtype: str = "int64",
+) -> ColumnSchema:
+    """Build a ColumnSchema fixture carrying an origin for grouping tests."""
+    return ColumnSchema(
+        name=name,
+        dtype=dtype,
+        nullable=False,
+        example="1",
+        unique=1,
+        missing=0.0,
+        hf_dtype=hf_dtype,
+        origin=origin,
+    )
+
+
+def _mixed_schema() -> list[ColumnSchema]:
+    """Two tables with disjoint columns (issue #292 census reproduction)."""
+    return [
+        _col("PERSONA_ID", "persona.parquet"),
+        _col("NOMBRE", "persona.parquet", "categorical/text", "string"),
+        _col("HOGAR_ID", "hogar.parquet"),
+        _col("CALLE", "hogar.parquet", "categorical/text", "string"),
+    ]
+
+
+class TestMixedSchemaConfigs:
+    """One config per column signature; never one merged config (issue #292)."""
+
+    def test_mixed_schema_emits_one_config_per_group(self):
+        """Two schemas in one train split must produce two configs + two dataset_info."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[
+                FileEntry(local=Path("persona.csv"), remote="persona.parquet"),
+                FileEntry(local=Path("hogar.csv"), remote="hogar.parquet"),
+            ],
+        )
+        card = build_dataset_card(
+            cfg,
+            schema=_mixed_schema(),
+            row_counts={"persona.parquet": 10, "hogar.parquet": 20},
+        )
+        fm = _parse_frontmatter(card)
+
+        configs = fm["configs"]
+        assert isinstance(configs, list)
+        assert len(configs) == 2
+        by_name = {c["config_name"]: c for c in configs}
+        assert set(by_name) == {"persona", "hogar"}
+        assert by_name["persona"]["data_files"] == [{"split": "train", "path": "persona.parquet"}]
+        assert by_name["hogar"]["data_files"] == [{"split": "train", "path": "hogar.parquet"}]
+
+        di = fm["dataset_info"]
+        assert isinstance(di, list)
+        assert len(di) == 2
+        rows = {d["config_name"]: d["splits"][0]["num_examples"] for d in di}
+        assert rows == {"persona": 10, "hogar": 20}
+
+    def test_single_signature_stays_one_config(self):
+        """Files sharing a schema must stay in exactly one config."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[
+                FileEntry(local=Path("a.csv"), remote="a.parquet"),
+                FileEntry(local=Path("b.csv"), remote="b.parquet"),
+            ],
+        )
+        schema = [
+            _col("ID", "a.parquet"),
+            _col("NOMBRE", "a.parquet", "categorical/text", "string"),
+        ]
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert len(fm["configs"]) == 1
+        assert fm["configs"][0]["default"] is True
+        assert fm["configs"][0]["config_name"] == "census"
+        assert isinstance(fm["dataset_info"], dict)
+
+    def test_multi_group_card_has_no_default_key(self):
+        """D4: a multi-group card carries no `default` key on any config."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[
+                FileEntry(local=Path("persona.csv"), remote="persona.parquet"),
+                FileEntry(local=Path("hogar.csv"), remote="hogar.parquet"),
+            ],
+        )
+        card = build_dataset_card(cfg, schema=_mixed_schema())
+        fm = _parse_frontmatter(card)
+        for cfg_entry in fm["configs"]:
+            assert "default" not in cfg_entry
+
+    def test_config_name_is_slug_never_pretty_name(self):
+        """S3: config_name is a validated slug, never the display string."""
+        display = "Censo Nacional de Población, Hogares y Viviendas 2010 (Argentina) - Microdatos"
+        cfg = DatasetConfig(
+            name=display,
+            pretty_name=display,
+            repo_id="user/census",
+            files=[FileEntry(local=Path("persona.csv"), remote="persona.parquet")],
+        )
+        card = build_dataset_card(cfg, schema=[_col("PERSONA_ID", "persona.parquet")])
+        fm = _parse_frontmatter(card)
+        name = fm["configs"][0]["config_name"]
+        assert name != display
+        assert name == ("censo-nacional-de-poblacion-hogares-y-viviendas-2010-argentina-microdatos")
+        assert re.fullmatch(r"[a-z0-9._-]+", name)
+
+    def test_ungroupable_corpus_emits_no_configs(self):
+        """S2/D1: without any schema, multiple remotes emit nothing (Hub infers)."""
+        cfg = DatasetConfig(
+            name="mixed",
+            repo_id="user/mixed",
+            files=[
+                FileEntry(local=Path("a.parquet"), remote="a.parquet"),
+                FileEntry(local=Path("b.parquet"), remote="b.parquet"),
+            ],
+        )
+        card = build_dataset_card(cfg, schema=[])
+        fm = _parse_frontmatter(card)
+        assert "configs" not in fm
+        assert "dataset_info" not in fm
+
+    def test_group_dataset_info_falls_back_per_group(self):
+        """D5: a group with no exact count falls back for that group only."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[
+                FileEntry(local=Path("persona.csv"), remote="persona.parquet"),
+                FileEntry(local=Path("hogar.csv"), remote="hogar.parquet"),
+            ],
+        )
+        card = build_dataset_card(
+            cfg,
+            schema=_mixed_schema(),
+            row_counts={"persona.parquet": 10},
+        )
+        fm = _parse_frontmatter(card)
+        rows = {d["config_name"]: d["splits"][0]["num_examples"] for d in fm["dataset_info"]}
+        assert rows["persona"] == 10
+        assert rows["hogar"] == config.CARD_FALLBACK_ROWS_PER_FILE
 
 
 # ── 4. size_categories validation ────────────────────────────────────────────
@@ -3229,7 +3384,9 @@ class TestExpandedCard:
         (staging / "report__ventas.parquet").touch()
         (staging / "report__costos.parquet").touch()
 
-        result = build_dataset_card(cfg, schema=[], staging_dir=staging)
+        result = build_dataset_card(
+            cfg, schema=[_col("id", "report__ventas.parquet")], staging_dir=staging
+        )
         fm = _parse_frontmatter(result)
 
         # configs.data_files should list both sheets
@@ -3240,7 +3397,9 @@ class TestExpandedCard:
         # Structure matches configs
         assert "report__ventas.parquet" in result
         assert "report__costos.parquet" in result
-        assert result.count("report__") == 4  # 2 in configs + 2 in Structure (approx)
+        # Both sheets are named by configs + Structure (the schema's Data Fields
+        # table may add another reference).
+        assert result.count("report__") >= 4
 
     def test_card_fallback_without_staging_shows_single(self, tmp_path: Path) -> None:
         """Without staging, XLSX falls back to single report.parquet placeholder."""
@@ -3269,7 +3428,9 @@ class TestExpandedCard:
         (staging / "report__a.parquet").touch()
         (staging / "report__b.parquet").touch()
 
-        result = build_dataset_card(cfg, schema=[], staging_dir=staging)
+        result = build_dataset_card(
+            cfg, schema=[_col("id", "report__a.parquet")], staging_dir=staging
+        )
         fm = _parse_frontmatter(result)
         data_files = [d["path"] for d in fm["configs"][0]["data_files"]]
         # Every data_files entry appears in Structure

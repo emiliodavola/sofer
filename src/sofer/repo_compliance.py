@@ -9,6 +9,8 @@ handles reading and writing.
 from __future__ import annotations
 
 import csv
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -1026,6 +1028,314 @@ def _infer_language(filename: str) -> str:
     return lang_map.get(ext, "")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Mixed-schema config generation (issue #292)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _feature_dtype(col: ColumnSchema) -> str:
+    """Return the HF feature dtype a column emits in ``dataset_info.features``.
+
+    Single source of truth shared by the feature list and the grouping
+    signature, so a group's signature is exactly the schema of its emitted
+    features.
+    """
+    return col.hf_dtype if col.hf_dtype is not None else _hf_feature_type(col.dtype)
+
+
+def _slugify_config_name(value: str) -> str:
+    """Return a validated HF config identifier slug (issue #292, S3/D3).
+
+    Lowercases *value*, transliterates accents to ASCII, collapses every run
+    of characters outside the configured ``[a-z0-9._-]`` set to the configured
+    separator, trims separators from both ends, and truncates to the configured
+    maximum length.  ``pretty_name`` must never be passed here (S3); callers
+    pass ``[dataset] name`` or a remote file stem.
+
+    Args:
+        value: Candidate identifier source (name or file stem).
+
+    Returns:
+        A non-empty slug matching ``[a-z0-9._-]+``, or the configured
+        fallback when nothing usable survives sanitization.
+    """
+    separator = config.CARD_CONFIG_SLUG_SEPARATOR
+    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(config.CARD_CONFIG_SLUG_INVALID_PATTERN, separator, ascii_value.lower())
+    # Collapse separator runs so a replacement beside a literal hyphen (" - ")
+    # cannot leave "---" in the identifier.
+    slug = re.sub(re.escape(separator) + "+", separator, slug)
+    slug = slug.strip(separator + "_.")
+    if len(slug) > config.CARD_CONFIG_SLUG_MAX_LENGTH:
+        slug = slug[: config.CARD_CONFIG_SLUG_MAX_LENGTH].strip(separator + "_.")
+    return slug or config.CARD_CONFIG_SLUG_FALLBACK
+
+
+def _origin_signatures(schema: list[ColumnSchema]) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Map every schema origin to its ordered ``(name, dtype)`` signature (D2).
+
+    Origins are the remote paths the schema report attributed its columns to
+    (``ColumnSchema.origin``); origin-less fixtures are ignored here and
+    handled separately by :func:`_features_for_group`.
+    """
+    by_origin: dict[str, list[tuple[str, str]]] = {}
+    for col in schema:
+        if not col.origin:
+            continue
+        by_origin.setdefault(col.origin, []).append((col.name, _feature_dtype(col)))
+    return {origin: tuple(cols) for origin, cols in by_origin.items()}
+
+
+def _remote_origin_aliases(
+    cfg: DatasetConfig,
+    remotes: list[str],
+) -> dict[str, list[str]]:
+    """Map each planned remote to the schema/row-count keys that describe it.
+
+    A staged-Parquet schema origin is the normalised ``.parquet`` remote and
+    already equals the planned remote (RC-R05).  The CSV fallback path, and
+    every ``build_schema_report_with_rows`` call without a staging mirror,
+    keys both the ``ColumnSchema.origin`` and the row count by the entry's
+    declared ``FileEntry.remote`` instead.  Returning both candidates lets
+    grouping and counts resolve with or without a mirror.
+
+    Args:
+        cfg:     Dataset configuration.
+        remotes: Planned remote paths.
+
+    Returns:
+        Mapping ``planned remote -> [candidate origin/count keys]`` in lookup
+        priority order (the remote itself first).
+    """
+    from ._converters import normalize_parquet_remote
+
+    aliases: dict[str, list[str]] = {}
+    for remote in remotes:
+        candidates = [remote]
+        for entry in cfg.files:
+            if normalize_parquet_remote(parquet_remote_for(entry.remote)) == remote:
+                if entry.remote not in candidates:
+                    candidates.append(entry.remote)
+        aliases[remote] = candidates
+    return aliases
+
+
+def group_remotes_by_schema(
+    remotes: list[str],
+    schema: list[ColumnSchema],
+    aliases: dict[str, list[str]] | None = None,
+) -> list[list[str]] | None:
+    """Group planned remotes into one config group per column signature.
+
+    Issue #292: the previous card merged every remote into one ``train`` split,
+    which is unloadable when the files do not share a schema.  This groups the
+    remotes whose ``ColumnSchema.origin`` yields the same ordered
+    ``(name, dtype)`` signature.  Remotes with no schema entry join the sole
+    signature group when there is exactly one (the schema report's
+    first-occurrence-wins dedup strips a later file whose columns all repeat an
+    earlier file — the common train/test case); otherwise they form their own
+    group.
+
+    Args:
+        remotes: Planned remote paths (declaration order).
+        schema:  Column schema report (``build_schema_report``).
+        aliases: Optional ``remote -> [origin keys]`` map
+                 (:func:`_remote_origin_aliases`); ``None`` matches the
+                 remote itself only.
+
+    Returns:
+        A list of remote-path groups, or ``None`` when the corpus is
+        **ungroupable** — it declares more than one remote and the schema
+        report carries no column for any of them, so every grouping would be a
+        guess (S2/D1); the caller then emits no ``configs``/``dataset_info``.
+    """
+    signatures = _origin_signatures(schema)
+    if not signatures:
+        # No origin attribution at all.  A non-empty schema still describes one
+        # table (hand-built fixtures); an empty one is ungroupable when it
+        # would merge several remotes on a guess (S2/D1).
+        if schema:
+            return [list(remotes)]
+        return None if len(remotes) > 1 else [list(remotes)]
+
+    lookup = aliases or {}
+    groups: dict[tuple[tuple[str, str], ...], list[str]] = {}
+    unresolved: list[str] = []
+    for remote in remotes:
+        signature: tuple[tuple[str, str], ...] | None = None
+        for candidate in lookup.get(remote, [remote]):
+            signature = signatures.get(candidate)
+            if signature is not None:
+                break
+        if signature is None:
+            unresolved.append(remote)
+        else:
+            groups.setdefault(signature, []).append(remote)
+
+    grouped = list(groups.values())
+    if len(grouped) == 1 and unresolved:
+        grouped[0].extend(unresolved)
+    elif unresolved:
+        grouped.append(unresolved)
+    return grouped
+
+
+def _config_name_for_group(
+    cfg: DatasetConfig,
+    group_remotes: list[str],
+    total_groups: int,
+) -> str:
+    """Return the slugged ``config_name`` for one group (D3).
+
+    A single group keeps ``cfg.config_names[0]`` when declared, else the slug
+    of ``[dataset] name``.  Multiple groups take the slug of the group's first
+    remote file stem.  ``pretty_name`` is never consulted (S3).
+
+    Args:
+        cfg:           Dataset configuration.
+        group_remotes: Remotes assigned to this group (declaration order).
+        total_groups:  Number of groups the card will emit.
+
+    Returns:
+        A validated config identifier slug.
+    """
+    if total_groups <= 1:
+        base = cfg.config_names[0] if cfg.config_names else cfg.name
+    else:
+        base = PurePosixPath(group_remotes[0].replace("\\", "/")).stem or cfg.name
+    return _slugify_config_name(base)
+
+
+def _name_groups(
+    cfg: DatasetConfig,
+    groups: list[list[str]],
+) -> list[tuple[str, list[str]]]:
+    """Pair each remote group with a unique slugged config name (D3).
+
+    Slugs that collide (for example two same-stem remotes in different
+    directories) get a numeric suffix so no two configs share a name.
+    """
+    names = [_config_name_for_group(cfg, group, len(groups)) for group in groups]
+    counts: dict[str, int] = {}
+    named: list[tuple[str, list[str]]] = []
+    for name, group in zip(names, groups):
+        count = counts.get(name, 0) + 1
+        counts[name] = count
+        named.append((name if count == 1 else f"{name}_{count}", group))
+    return named
+
+
+def schema_config_plan(
+    cfg: DatasetConfig,
+    schema: list[ColumnSchema],
+    keep_csv: bool = False,
+    staging_dir: Path | None = None,
+) -> list[tuple[str, list[str]]] | None:
+    """Compute the ``(config_name, remotes)`` plan the card will emit.
+
+    The single home for the remote derivation plus schema grouping shared by
+    :func:`build_dataset_card` and the prepare-time config warning (AGENTS.md
+    rule 4).
+
+    Args:
+        cfg:         Dataset configuration.
+        schema:      Column schema report.
+        keep_csv:    Whether converted CSVs are also delivered at their remote.
+        staging_dir: Mirror layout root for XLSX expansion (see
+                     :func:`sofer._mirror.expanded_planned_remotes`).
+
+    Returns:
+        One ``(config_name, remotes)`` pair per schema group, or ``None`` when
+        the corpus is ungroupable (see :func:`group_remotes_by_schema`).
+    """
+    if staging_dir is not None and staging_dir.is_dir():
+        remotes = expanded_planned_remotes(cfg, keep_csv, staging_dir)
+    else:
+        remotes = planned_remotes(cfg, keep_csv)
+    aliases = _remote_origin_aliases(cfg, remotes)
+    groups = group_remotes_by_schema(remotes, schema, aliases)
+    if groups is None:
+        return None
+    return _name_groups(cfg, groups)
+
+
+def _features_for_group(
+    group_remotes: list[str],
+    schema: list[ColumnSchema],
+    single_group: bool,
+) -> list[dict[str, str]]:
+    """Return the ``dataset_info.features`` list for one config group.
+
+    Columns are attributed structurally via :attr:`ColumnSchema.origin`
+    (RC-R06).  A single-group card keeps every schema entry — including
+    origin-less hand-built fixtures — exactly as before; a multi-group card
+    keeps only the entries whose origin is one of the group's remotes.
+    """
+    features: list[dict[str, str]] = []
+    for col in schema:
+        if not single_group and col.origin not in group_remotes:
+            continue
+        features.append({"name": col.name, "dtype": _feature_dtype(col)})
+    return features
+
+
+def _row_count_for_remote(
+    remote: str,
+    row_counts: dict[str, int] | None,
+    aliases: dict[str, list[str]] | None,
+) -> int | None:
+    """Return the exact row count recorded for *remote*, if any.
+
+    Looks under the planned remote and its origin aliases (the CSV fallback
+    keys counts by ``FileEntry.remote``, RC-R07); XLSX sheet counts are keyed
+    ``<declared file>::<sheet remote>``, so a ``::`` suffix match is the last
+    resort.
+    """
+    if not row_counts:
+        return None
+    for candidate in (aliases or {}).get(remote, [remote]):
+        if candidate in row_counts:
+            return row_counts[candidate]
+    suffix = "::" + remote
+    for key, value in row_counts.items():
+        if key.endswith(suffix):
+            return value
+    return None
+
+
+def _build_dataset_info(
+    config_name: str,
+    group_remotes: list[str],
+    schema: list[ColumnSchema],
+    row_counts: dict[str, int] | None,
+    single_group: bool,
+    aliases: dict[str, list[str]] | None = None,
+    with_splits: bool = True,
+) -> dict[str, object]:
+    """Build one ``dataset_info`` block for a config group (D5).
+
+    ``num_examples`` sums the group's exact row counts when any are known,
+    else falls back to the conservative per-file product for **that group
+    only** (RC-R12).  The single builder is shared by the single-group and
+    multi-group paths (AGENTS.md rule 4).
+    """
+    info: dict[str, object] = {
+        "config_name": config_name,
+        "features": _features_for_group(group_remotes, schema, single_group),
+    }
+
+    if not with_splits:
+        return info
+    exact = [_row_count_for_remote(remote, row_counts, aliases) for remote in group_remotes]
+    known = [count for count in exact if count is not None]
+    if known:
+        approx_rows = sum(known)
+    else:
+        approx_rows = len(group_remotes) * config.CARD_FALLBACK_ROWS_PER_FILE
+    info["splits"] = [{"name": "train", "num_examples": approx_rows}]
+    return info
+
+
 def build_dataset_card(
     cfg: DatasetConfig,
     schema: list[ColumnSchema],
@@ -1056,14 +1366,13 @@ def build_dataset_card(
         duplicate_rows:        Optional dict mapping filenames to duplicate row counts.
         row_counts:            Optional dict mapping each file's verbatim
                                remote path (``entry.remote``, POSIX-style —
-                               keys are unique per well-formed dataset; the
-                               sole consumer sums VALUES only) to its exact
-                               data-row count (from
-                               :func:`build_schema_report_with_rows`).  When
-                               given, the train split's ``num_examples`` is
-                               their sum; otherwise it falls back to
-                               ``CARD_FALLBACK_ROWS_PER_FILE`` per declared
-                               file.
+                               keys are unique per well-formed dataset) to its
+                               exact data-row count (from
+                               :func:`build_schema_report_with_rows`).  Each
+                               config group sums its own remotes' counts;
+                               a group without any exact count falls back to
+                               ``CARD_FALLBACK_ROWS_PER_FILE`` per group
+                               remote.
         keep_csv:              Whether converted CSVs are also delivered at their
                                original remote (the publish ``--keep-csv`` flag).
                                Governs the Dataset Structure listing only.
@@ -1118,53 +1427,53 @@ def build_dataset_card(
         # an institution name; we emit it but users should verify it.
         frontmatter["source_datasets"] = [cfg.source]
 
-    # -- configs (always emit when files declared) --------------------------
-    if cfg.files:
-        config_name = cfg.config_names[0] if cfg.config_names else (cfg.pretty_name or cfg.name)
-        if staging_dir is not None and staging_dir.is_dir():
-            card_remotes = expanded_planned_remotes(cfg, keep_csv, staging_dir)
-        else:
-            card_remotes = planned_remotes(cfg, keep_csv)
-        data_files: list[dict[str, object]] = [{"split": "train", "path": r} for r in card_remotes]
-        if not data_files:
-            data_files.append({"split": "train", "path": "data/*"})
-        frontmatter["configs"] = [
-            {
+    # -- configs + dataset_info (one per schema group, issue #292) ----------
+    # The card groups the planned remotes by column signature and emits one
+    # `configs` entry plus its own `dataset_info` per group.  A corpus whose
+    # remotes carry no schema at all is ungroupable: it emits neither block
+    # and lets the Hub infer per-file (S2/D1).
+    plan = schema_config_plan(cfg, schema, keep_csv, staging_dir) if cfg.files else None
+    if plan is not None and cfg.files:
+        configs: list[dict[str, object]] = []
+        for config_name, group_remotes in plan:
+            data_files: list[dict[str, object]] = [
+                {"split": "train", "path": r} for r in group_remotes
+            ]
+            if not data_files:
+                data_files.append({"split": "train", "path": "data/*"})
+            entry: dict[str, object] = {
                 "config_name": config_name,
                 "data_files": data_files,
-                "default": True,
             }
+            # D4: only a single-config card carries `default`; with several
+            # schema groups load_dataset() must not silently pick one table.
+            if len(plan) == 1:
+                entry["default"] = True
+            configs.append(entry)
+        frontmatter["configs"] = configs
+
+    # -- dataset_info (one block per config) --------------------------------
+    # Kept independent of `cfg.files` (a schema-only card still reports its
+    # features) but suppressed when the corpus is ungroupable, matching the
+    # config suppression above.
+    if schema and (plan is not None or not cfg.files):
+        if plan is None:
+            plan = [(_config_name_for_group(cfg, [], 1), [])]
+        single_group = len(plan) == 1
+        aliases = _remote_origin_aliases(cfg, [r for _n, group in plan for r in group])
+        infos = [
+            _build_dataset_info(
+                config_name,
+                group_remotes,
+                schema,
+                row_counts,
+                single_group,
+                aliases,
+                with_splits=bool(cfg.files),
+            )
+            for config_name, group_remotes in plan
         ]
-
-    # -- dataset_info -------------------------------------------------------
-    if schema:
-        # features — a LIST of {name, dtype}; every schema entry is included
-        # (attribution is structural via ColumnSchema.origin, RC-R06).
-        features_list: list[dict[str, str]] = []
-        for s in schema:
-            hf_dtype = s.hf_dtype if s.hf_dtype is not None else _hf_feature_type(s.dtype)
-            features_list.append({"name": s.name, "dtype": hf_dtype})
-
-        dataset_info: dict[str, object] = {"features": features_list}
-
-        config_name = cfg.config_names[0] if cfg.config_names else (cfg.pretty_name or cfg.name)
-        dataset_info["config_name"] = config_name
-
-        # splits — single train split; num_examples from exact row counts
-        # when available, else the conservative per-file fallback (D7).
-        # NOTE (partial counts undercount): when only SOME declared files
-        # yield exact counts (mixed schema/excluded/recursive datasets), the
-        # sum silently undercounts the dataset — the fallback product below
-        # applies only when NO file yields an exact count (RC-R12).
-        if cfg.files:
-            if row_counts:
-                approx_rows = sum(row_counts.values())
-            else:
-                approx_rows = len(cfg.files) * config.CARD_FALLBACK_ROWS_PER_FILE
-            splits = [{"name": "train", "num_examples": approx_rows}]
-            dataset_info["splits"] = splits
-
-        frontmatter["dataset_info"] = dataset_info
+        frontmatter["dataset_info"] = infos[0] if single_group else infos
 
     # -- Language -----------------------------------------------------------
     if cfg.language:

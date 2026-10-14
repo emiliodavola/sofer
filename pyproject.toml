@@ -182,6 +182,13 @@ card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries"
 card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
 card_collapse_threshold = 15
 
+# ── Mixed-schema config generation (issue #292) ──
+# One `configs` entry per column-signature group; every config_name is a slug.
+card_config_slug_invalid_pattern = "[^a-z0-9._-]+"
+card_config_slug_separator = "-"
+card_config_slug_max_length = 96
+card_config_slug_fallback = "default"
+
 # ── Assisted failure reporting (issue #244) ──
 # Directory under sofer's state home (~/.local/state/sofer by default) holding
 # one timestamped JSON report per unsent failure; the owner/repo issues are

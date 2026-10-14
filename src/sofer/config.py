@@ -101,6 +101,16 @@ _DEFAULTS: dict[str, Any] = {
     # Card collapse threshold: columns per table above which Data Fields
     # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
     "card_collapse_threshold": 15,
+    # Mixed-schema config generation (issue #292): one HF `configs` entry per
+    # column-signature group. `card_config_slug_invalid_pattern` matches every
+    # run of characters not allowed in a config identifier (HF allows
+    # ``[a-z0-9._-]``); runs collapse to `card_config_slug_separator`.
+    # `card_config_slug_max_length` caps the slug and
+    # `card_config_slug_fallback` names a group whose slug would be empty.
+    "card_config_slug_invalid_pattern": r"[^a-z0-9._-]+",
+    "card_config_slug_separator": "-",
+    "card_config_slug_max_length": 96,
+    "card_config_slug_fallback": "default",
     # Assisted failure reporting (issue #244). ``failure_report_dir`` is the
     # subdirectory under sofer's state home that holds one JSON file per
     # unsent failure; ``failure_report_repo`` is the ``owner/repo`` issues are
@@ -441,6 +451,12 @@ AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]
 OUTPUT_MAX_BYTES: int = _DEFAULTS["output_max_bytes"]
 
 CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]
+
+# Mixed-schema config generation (issue #292) — see the _DEFAULTS comments.
+CARD_CONFIG_SLUG_INVALID_PATTERN: str = _DEFAULTS["card_config_slug_invalid_pattern"]
+CARD_CONFIG_SLUG_SEPARATOR: str = _DEFAULTS["card_config_slug_separator"]
+CARD_CONFIG_SLUG_MAX_LENGTH: int = _DEFAULTS["card_config_slug_max_length"]
+CARD_CONFIG_SLUG_FALLBACK: str = _DEFAULTS["card_config_slug_fallback"]
 
 # Assisted failure reporting (issue #244): state subdirectory, target repo,
 # traceback cap, and gh timeout — read live through attribute access.

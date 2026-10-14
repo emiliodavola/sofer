@@ -353,6 +353,21 @@ class TestValidateSplitMapping:
         warnings = validate_split_mapping(["train/data.csv"])
         assert warnings == []
 
+    def test_default_warning_is_true_for_both_card_shapes(self):
+        """The default-load warning holds for one-config and multi-config cards.
+
+        The card groups files by column schema (issue #292), so the historical
+        "ALL files land in one 'train' split" claim is not true in general and
+        the warning states both outcomes instead.
+        """
+        warnings = validate_split_mapping(["a.parquet", "b.parquet"])
+        matching = [w for w in warnings if "Default-load warning" in w]
+        assert matching, warnings
+        message = matching[0]
+        assert "single-config card" in message
+        assert "multi-config card" in message
+        assert "name='<config>'" in message
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  verify_load_dataset

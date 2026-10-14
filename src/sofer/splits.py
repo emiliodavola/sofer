@@ -311,7 +311,9 @@ def validate_split_mapping(remotes: list[str]) -> list[str]:
           their filename or directory name.
         - Single-split fallback: when *multiple* files all fall into ``train``
           (no split keyword detected in any file), emit a warning about the
-          ``load_dataset()`` behaviour.
+          ``load_dataset()`` behaviour.  The generated card groups those files
+          by column schema, so the warning states what a single-config card and
+          a multi-config card each do (issue #292).
 
     Args:
         remotes: Remote file paths (existing or planned).
@@ -331,13 +333,20 @@ def validate_split_mapping(remotes: list[str]) -> list[str]:
     if len(data_files) > 1:
         has_fallback = any("No splits detected" in w for w in report.warnings)
         if has_fallback:
+            # The card groups these files by column schema, so the historical
+            # unconditional claim ("ALL files land in one 'train' split") only
+            # holds for a single-config card; a multi-config card is loaded one
+            # table at a time. State both outcomes (issue #292, S4).
             warnings.append(
                 f"Default-load warning: {len(data_files)} data files have no "
-                f"split keywords. When a user calls load_dataset() without "
-                f"data_files, ALL files will be loaded into a single 'train' split "
-                f"(which may be slow for large repos). Consider adding split "
-                f"keywords to filenames (e.g. 'train.csv', 'test.csv') or "
-                f"using directory-based splits (e.g. 'train/data.csv')."
+                f"split keywords. The generated card groups them by column "
+                f"schema: a single-config card loads every file into one 'train' "
+                f"split when load_dataset() is called without a config name "
+                f"(which may be slow for large repos), while a multi-config card "
+                f"is loaded one table at a time with load_dataset(repo, "
+                f"name='<config>'). Consider adding split keywords to filenames "
+                f"(e.g. 'train.csv', 'test.csv') or using directory-based splits "
+                f"(e.g. 'train/data.csv') to split a table across splits."
             )
 
     # ── Per-split keyword consistency ─────────────────────────────────────
