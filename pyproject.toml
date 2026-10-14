@@ -218,9 +218,21 @@ schema_sample_size = 10_000
 # warnings; above it a single summary (repo_compliance.build_schema_report).
 schema_dup_threshold = 3
 
+# ── Quality scan bounds (issue #290) ──
+# Hard cap on distinct row hashes the `duplicates` check tracks; beyond it no
+# new hashes are inserted and the finding is marked partial. Bounds memory
+# independently of the dataset size (dict entry + 32-char md5 ≈ 200 B).
+quality_max_dup_tracking = 1_000_000
+# Full-scan policy: "auto" (only the row-requiring checks below force a full
+# pass), "always", or "never" (honour [quality] max_sample even with a fail
+# check active, marking the affected findings partial).
+quality_full_scan = "auto"
+# Active fail-severity checks in this set force the full (unsampled) scan
+# under the default "auto" policy. An 8 KB probe like encoding_validation is
+# deliberately absent.
+quality_row_requiring_checks = ["corrupt_records"]
+
 # ── Report truncation limits (issue #189) ──
-# Distinct quality values per column truncate to this many chars.
-quality_value_preview_len = 50
 # Unclassified filenames listed by splits.validate_layout (slice + guard).
 splits_max_unclassified_names = 5
 

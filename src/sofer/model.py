@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from . import _toml, config
 from ._mirror import _validate_case_fold_collisions
@@ -162,11 +163,16 @@ class QualityConfig:
         checks:           Per-check overrides (empty = use all built-in defaults).
         default_severity: Fallback severity when a check has no explicit severity.
         max_sample:       Max rows to read per file for checks that sample.
+        full_scan:        Per-dataset full-scan override (``auto``/``always``/
+                          ``never``) that wins over the tool-wide
+                          ``config.QUALITY_FULL_SCAN`` when set; ``None`` means
+                          "use the tool-wide policy".
     """
 
     checks: list[QualityCheck] = field(default_factory=list)
     default_severity: str = "warn"
     max_sample: int = 100_000
+    full_scan: str | None = None
 
 
 @dataclass
@@ -479,7 +485,31 @@ class DatasetConfig:
         # -- quality checks ------------------------------------------------
         quality_checks: list[QualityCheck] = []
         valid_checks = set(QUALITY_CHECK_NAMES)
-        for entry in data.get("quality", []):
+        quality_section = data.get("quality", [])
+        quality_full_scan: str | None = None
+        quality_max_sample: int | None = None
+        if isinstance(quality_section, dict):
+            # An optional ``[quality]`` policy table. TOML forbids it in the
+            # same file as the ``[[quality]]`` per-check array, so it carries
+            # only the dataset-level scan policy.
+            raw_full_scan = quality_section.get("full_scan")
+            if raw_full_scan is not None and raw_full_scan not in config.QUALITY_FULL_SCAN_MODES:
+                print(f"  [!] Unknown quality full_scan mode: '{raw_full_scan}' — ignoring.")
+            elif raw_full_scan is not None:
+                quality_full_scan = raw_full_scan
+            raw_max_sample = quality_section.get("max_sample")
+            if raw_max_sample is not None and (
+                not isinstance(raw_max_sample, int)
+                or isinstance(raw_max_sample, bool)
+                or raw_max_sample < 1
+            ):
+                print(f"  [!] Invalid quality max_sample: '{raw_max_sample}' — ignoring.")
+            elif raw_max_sample is not None:
+                quality_max_sample = raw_max_sample
+            quality_entries: list[dict[str, Any]] = []
+        else:
+            quality_entries = quality_section
+        for entry in quality_entries:
             check_name = entry.get("check", "")
             if check_name not in valid_checks:
                 print(f"  [!] Unknown quality check: '{check_name}' — ignoring.")
@@ -496,7 +526,9 @@ class DatasetConfig:
                     ignore_values=entry.get("ignore_values"),
                 )
             )
-        quality_config = QualityConfig(checks=quality_checks)
+        quality_config = QualityConfig(checks=quality_checks, full_scan=quality_full_scan)
+        if quality_max_sample is not None:
+            quality_config.max_sample = quality_max_sample
 
         # -- thresholds ----------------------------------------------------
         min_files = 1

@@ -47,6 +47,7 @@ class TestQualityModel:
         assert cfg.checks == []
         assert cfg.default_severity == "warn"
         assert cfg.max_sample == 100_000
+        assert cfg.full_scan is None
 
     def test_quality_result_roundtrip(self):
         """QualityResult stores check, severity, message."""
@@ -116,6 +117,36 @@ class TestQualityFromToml:
         assert len(cfg.quality.checks) == 0
         captured = capsys.readouterr()
         assert "bogus_check" in captured.out or "bogus_check" in captured.err
+
+    def test_quality_policy_table_parsed(self, tmp_path):
+        """An optional ``[quality]`` table carries full_scan / max_sample."""
+        toml = (
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "d.csv"\nremote = "d.csv"\n\n'
+            '[quality]\nfull_scan = "never"\nmax_sample = 250\n'
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "d.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.quality.full_scan == "never"
+        assert cfg.quality.max_sample == 250
+        assert cfg.quality.checks == []
+
+    def test_unknown_full_scan_mode_warns(self, tmp_path, capsys):
+        """An unknown per-dataset full_scan mode is ignored with a warning."""
+        toml = (
+            '[dataset]\nname = "t"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "d.csv"\nremote = "d.csv"\n\n'
+            '[quality]\nfull_scan = "sometimes"\n'
+        )
+        p = tmp_path / "t.toml"
+        p.write_text(toml)
+        (tmp_path / "d.csv").touch()
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.quality.full_scan is None
+        captured = capsys.readouterr()
+        assert "sometimes" in captured.out
 
 
 # ── QualityValidator — all 9 P0 checks ──────────────────────────────────────────
@@ -690,23 +721,26 @@ class TestFullFileCoverage:
 
     def test_warn_check_partial_when_max_sample_applied(self, tmp_path):
         """warn-severity findings are marked partial when max_sample is used."""
-        rows = [[str(i)] for i in range(200)]
+        # Sampling only happens when no row-requiring fail check is active
+        # (issue #290), so both default fail checks are downgraded to warn.
+        rows = [["", ""]] * 200
         cfg, _ = _make_csv_cfg(
             tmp_path,
-            ["val"],
+            ["a", "b"],
             rows,
             quality_checks=[
                 QualityCheck(check="null_profiling", severity="warn"),
+                QualityCheck(check="corrupt_records", severity="warn"),
+                QualityCheck(check="encoding_validation", severity="warn"),
             ],
         )
         cfg.quality.max_sample = 50
-        # Force all values to be null so we get a finding
         report = _run_quality(cfg)
         qr = [r for r in report.quality_results if r.check == "null_profiling"]
-        if qr:
-            assert qr[0].partial is True, (
-                f"Expected partial=True for warn check with max_sample, got partial={qr[0].partial}"
-            )
+        assert qr, "expected a null_profiling finding"
+        assert qr[0].partial is True, (
+            f"Expected partial=True for warn check with max_sample, got partial={qr[0].partial}"
+        )
 
 
 class TestPrintSummaryQuality:
@@ -1132,29 +1166,258 @@ class TestMixedAndRanChecksAndEncoding:
 # ── Quality value preview cap (issue #189) ────────────────────────────────────
 
 
-class TestValuePreviewLen:
-    """Distinct quality values truncate to ``config.QUALITY_VALUE_PREVIEW_LEN``."""
+class TestColNonemptyBoolean:
+    """``empty_columns`` bookkeeping is a per-column boolean (issue #290).
 
-    LONG_VALUE = "x" * 60
+    Replaces the old ``TestValuePreviewLen`` class: the accumulator no longer
+    stores distinct values (so ``config.QUALITY_VALUE_PREVIEW_LEN`` has no
+    reader and was removed), it stores a single "seen non-empty" flag keyed
+    ``file::col``.
+    """
 
-    def _stored_value(self, tmp_path, monkeypatch=None, preview_len=None):
-        import sofer.config as _config
-
-        if preview_len is not None:
-            monkeypatch.setattr(_config, "QUALITY_VALUE_PREVIEW_LEN", preview_len)
-        cfg, _ = _make_csv_cfg(tmp_path, ["note"], [[self.LONG_VALUE]])
+    def test_seen_flag_is_a_bool_not_a_value_set(self, tmp_path):
+        """A populated column stores a single ``True`` flag, not a value set."""
+        cfg, _ = _make_csv_cfg(tmp_path, ["note"], [["a"], ["a"], ["b"]])
         validator = QualityValidator(cfg)
         validator.run()
-        stored = validator._col_nonempty["data.csv::note"]
-        assert len(stored) == 1
-        return next(iter(stored))
+        assert validator._col_nonempty == {"data.csv::note": True}
+        assert isinstance(validator._col_nonempty["data.csv::note"], bool)
 
-    def test_default_truncates_to_fifty(self, tmp_path):
-        """Default cap (50) truncates a 60-char value to 50 chars."""
-        stored = self._stored_value(tmp_path)
-        assert stored == "x" * 50
+    def test_empty_column_stays_false_and_is_reported(self, tmp_path):
+        """A fully empty column keeps ``False`` and still produces a finding."""
+        cfg, _ = _make_csv_cfg(tmp_path, ["note"], [[""], ["  "]])
+        validator = QualityValidator(cfg)
+        report = validator.run()
+        assert validator._col_nonempty["data.csv::note"] is False
+        assert any(r.check == "empty_columns" for r in report.quality_results)
 
-    def test_override_changes_stored_length(self, tmp_path, monkeypatch):
-        """Overriding the cap changes the stored value length."""
-        stored = self._stored_value(tmp_path, monkeypatch, preview_len=7)
-        assert stored == "x" * 7
+    def test_memory_is_o_columns_not_o_rows(self, tmp_path):
+        """A 5000-row stream over one column keeps exactly one boolean."""
+        rows = [[f"value-{i}-" + "x" * 40] for i in range(5000)]
+        cfg, _ = _make_csv_cfg(tmp_path, ["note"], rows)
+        validator = QualityValidator(cfg)
+        validator.run()
+        assert len(validator._col_nonempty) == 1
+        assert validator._col_nonempty["data.csv::note"] is True
+
+
+# ── Bounded quality scan (issue #290) ─────────────────────────────────────────
+
+
+def _corrupt_csv_cfg(
+    tmp_path,
+    corrupt_rows: list[int],
+    *,
+    row_count: int = 150,
+    max_sample: int = 50,
+    severity: str = "fail",
+) -> DatasetConfig:
+    """Build a 2-column CSV config where the named 1-based rows are corrupt."""
+    rows: list[list[str]] = [["col1", "col2"]]
+    for i in range(1, row_count + 1):
+        rows.append(["only_one_field"] if i in corrupt_rows else [str(i), "b"])
+    p = _make_csv(tmp_path / "data.csv", rows)
+    return DatasetConfig(
+        name="test",
+        repo_id="u/test",
+        files=[FileEntry(local=p, remote="data.csv")],
+        quality=QualityConfig(
+            checks=[QualityCheck(check="corrupt_records", severity=severity)],
+            max_sample=max_sample,
+        ),
+    )
+
+
+class TestDuplicateTrackingCap:
+    """S2/D2/D5: ``_dup_hashes`` is capped and the cap is named as partial."""
+
+    def test_cap_marks_partial_and_names_the_cap(self, tmp_path, monkeypatch):
+        """Hitting the cap marks ``duplicates`` partial and names the cap."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_MAX_DUP_TRACKING", 3)
+        rows = [["a"], ["b"], ["c"], ["d"], ["e"], ["a"]]
+        cfg, _ = _make_csv_cfg(tmp_path, ["val"], rows)
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "duplicates"]
+        assert len(qr) == 1
+        assert qr[0].partial is True
+        assert "3" in qr[0].message
+
+    def test_cap_without_duplicates_reports_partial(self, tmp_path, monkeypatch):
+        """An all-unique corpus stops at the cap and is still reported partial."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_MAX_DUP_TRACKING", 5)
+        rows = [[f"v{i}"] for i in range(20)]
+        cfg, _ = _make_csv_cfg(tmp_path, ["val"], rows)
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "duplicates"]
+        assert len(qr) == 1
+        assert qr[0].partial is True
+        assert "5" in qr[0].message
+
+    def test_tracking_dict_never_exceeds_the_cap(self, tmp_path, monkeypatch):
+        """A 200-row unique stream leaves exactly ``cap`` tracked hashes."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_MAX_DUP_TRACKING", 10)
+        rows = [[f"v{i}"] for i in range(200)]
+        cfg, _ = _make_csv_cfg(tmp_path, ["val"], rows)
+        validator = QualityValidator(cfg)
+        validator.run()
+        assert len(validator._dup_hashes) == 10
+        assert validator._dup_hashes_capped is True
+
+
+class TestAccumulatorCaps:
+    """S7/T6: the three per-row finding lists stop growing at report limits."""
+
+    def test_duplicate_findings_capped_at_report_limit(self, tmp_path):
+        import sofer.config as _config
+
+        rows = [["x"]] * (_config.REPORT_MAX_ITEMS + 5)
+        cfg, _ = _make_csv_cfg(tmp_path, ["val"], rows)
+        validator = QualityValidator(cfg)
+        validator.run()
+        assert len(validator._dup_findings) == _config.REPORT_MAX_ITEMS
+
+    def test_empty_rows_capped_at_report_limit(self, tmp_path):
+        import sofer.config as _config
+
+        rows = [["", ""]] * (_config.REPORT_MAX_ITEMS + 5) + [["v", "v"]]
+        cfg, _ = _make_csv_cfg(tmp_path, ["a", "b"], rows)
+        validator = QualityValidator(cfg)
+        validator.run()
+        assert len(validator._empty_row_numbers) == _config.REPORT_MAX_ITEMS
+
+    def test_corrupt_findings_capped_at_report_limit(self, tmp_path):
+        import sofer.config as _config
+
+        limit = _config.REPORT_MAX_CORRUPT_RECORDS
+        rows = [["only_one"]] * (limit + 5)
+        p = _make_csv(tmp_path / "data.csv", [["a", "b"], *rows])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=p, remote="data.csv")],
+        )
+        validator = QualityValidator(cfg)
+        validator.run()
+        assert len(validator._corrupt_findings) == limit
+
+    def test_accumulator_sizes_do_not_grow_with_dataset_size(self, tmp_path, monkeypatch):
+        """Two stream sizes produce identical (capped) accumulator sizes."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_MAX_DUP_TRACKING", 25)
+
+        def _sizes(n: int) -> tuple[int, int, int]:
+            rows = [["", ""]] * n + [["v", "v"]]
+            cfg, _ = _make_csv_cfg(tmp_path / f"n{n}", ["a", "b"], rows)
+            validator = QualityValidator(cfg)
+            validator.run()
+            return (
+                len(validator._dup_hashes),
+                len(validator._empty_row_numbers),
+                len(validator._dup_findings),
+            )
+
+        assert _sizes(100) == _sizes(3000)
+
+
+class TestFullScanPolicy:
+    """S3/S4/D3/D4: the full-scan decision is explicit and config-owned."""
+
+    def test_needs_full_scan_is_false_for_encoding_probe_only(self, tmp_path):
+        """Only a *row-requiring* fail check turns ``_needs_full_scan`` on."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[],
+            quality=QualityConfig(
+                checks=[
+                    QualityCheck(check="corrupt_records", severity="warn"),
+                    QualityCheck(check="encoding_validation", severity="fail"),
+                ]
+            ),
+        )
+        assert QualityValidator(cfg)._needs_full_scan() is False
+
+    def test_needs_full_scan_true_for_default_corrupt_records(self, tmp_path):
+        """The built-in ``corrupt_records`` fail check is row-requiring."""
+        cfg, _ = _make_csv_cfg(tmp_path, ["val"], [["1"]])
+        assert QualityValidator(cfg)._needs_full_scan() is True
+
+    def test_encoding_probe_does_not_force_full_scan(self, tmp_path):
+        """A 120th-row corrupt record is missed when only the probe fails."""
+        import sofer.config as _config
+
+        cfg = _corrupt_csv_cfg(tmp_path, [120], severity="warn")
+        cfg.quality.checks.append(QualityCheck(check="encoding_validation", severity="fail"))
+        report = _run_quality(cfg)
+        assert [r for r in report.quality_results if r.check == "corrupt_records"] == []
+        assert _config.QUALITY_ROW_REQUIRING_CHECKS == ["corrupt_records"]
+
+    def test_row_requiring_fail_check_still_scans_full_file(self, tmp_path):
+        """The default ``corrupt_records`` fail check sees the 120th row."""
+        cfg = _corrupt_csv_cfg(tmp_path, [120], severity="fail")
+        report = _run_quality(cfg)
+        assert any(r.check == "corrupt_records" for r in report.quality_results)
+
+    def test_never_honours_max_sample_with_fail_check(self, tmp_path, monkeypatch):
+        """``never`` samples even with a fail check, and marks it partial."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_FULL_SCAN", "never")
+        cfg = _corrupt_csv_cfg(tmp_path, [10, 120], severity="fail")
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert len(qr) == 1, f"row 120 must not be seen, got {qr}"
+        assert qr[0].partial is True
+
+    def test_encoding_probe_finding_is_never_partial(self, tmp_path, monkeypatch):
+        """A fixed-size probe finding is never marked partial by sampling."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_FULL_SCAN", "never")
+        good = _make_csv(tmp_path / "good.csv", [["a"], *[[str(i)] for i in range(100)]])
+        bad = tmp_path / "bad.csv"
+        bad.write_bytes(b"PK\x03\x04\xff\xfe\xfd\xfc mislabeled")
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=good, remote="good.csv"),
+                FileEntry(local=bad, remote="bad.csv"),
+            ],
+            quality=QualityConfig(
+                checks=[
+                    QualityCheck(check="corrupt_records", severity="warn"),
+                    QualityCheck(check="encoding_validation", severity="fail"),
+                ],
+                max_sample=10,
+            ),
+        )
+        report = _run_quality(cfg)
+        enc = [r for r in report.quality_results if r.check == "encoding_validation"]
+        assert enc, "expected an encoding_validation finding"
+        assert all(r.partial is False for r in enc)
+
+    def test_always_scans_everything(self, tmp_path, monkeypatch):
+        """``always`` scans the full file and leaves findings non-partial."""
+        import sofer.config as _config
+
+        monkeypatch.setattr(_config, "QUALITY_FULL_SCAN", "always")
+        cfg = _corrupt_csv_cfg(tmp_path, [120], severity="warn")
+        report = _run_quality(cfg)
+        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert len(qr) == 1
+        assert qr[0].partial is False
+
+    def test_per_dataset_override_wins_over_tool_default(self, tmp_path):
+        """``cfg.quality.full_scan`` wins over the tool-wide default."""
+        cfg = _corrupt_csv_cfg(tmp_path, [120], severity="warn")
+        cfg.quality.full_scan = "always"
+        report = _run_quality(cfg)
+        assert any(r.check == "corrupt_records" for r in report.quality_results)

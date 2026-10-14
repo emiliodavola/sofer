@@ -786,13 +786,83 @@ class TestTc11ProfileRenderDir:
         assert any("render_dir" in e and "outside" in e for e in errors)
 
 
-class TestReportTruncationLimitsConfig:
-    """Issue #189 — quality/splits truncation caps are ``[tool.sofer]`` keys."""
+class TestQualityScanBoundsConfig:
+    """Issue #290 — quality scan bounds are ``[tool.sofer]`` keys."""
 
-    def test_quality_value_preview_len_default(self):
-        """Distinct quality values truncate to 50 chars by default."""
-        assert config._DEFAULTS["quality_value_preview_len"] == 50
-        assert config.QUALITY_VALUE_PREVIEW_LEN == 50
+    def test_quality_max_dup_tracking_default(self):
+        """The duplicate hash cap is a bounded 1 M-row default."""
+        assert config._DEFAULTS["quality_max_dup_tracking"] == 1_000_000
+        assert config.QUALITY_MAX_DUP_TRACKING == 1_000_000
+
+    def test_quality_full_scan_default_is_auto(self):
+        """Today's heuristic is the default tri-state value."""
+        assert config._DEFAULTS["quality_full_scan"] == "auto"
+        assert config.QUALITY_FULL_SCAN == "auto"
+
+    def test_row_requiring_checks_default(self):
+        """Only ``corrupt_records`` needs every row by default."""
+        assert config._DEFAULTS["quality_row_requiring_checks"] == ["corrupt_records"]
+        assert config.QUALITY_ROW_REQUIRING_CHECKS == ["corrupt_records"]
+
+    def test_quality_value_preview_len_key_removed(self):
+        """The dead preview cap is gone from ``_DEFAULTS`` and the module."""
+        assert "quality_value_preview_len" not in config._DEFAULTS
+        assert not hasattr(config, "QUALITY_VALUE_PREVIEW_LEN")
+
+    def test_toml_overrides_quality_bounds(self, monkeypatch, tmp_path):
+        """All three bounds are overridable from ``[tool.sofer]``."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.sofer]\n"
+            "quality_max_dup_tracking = 500\n"
+            'quality_full_scan = "never"\n'
+            'quality_row_requiring_checks = ["corrupt_records", "value_range"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
+        merged = config._load_tool_config()
+        assert merged["quality_max_dup_tracking"] == 500
+        assert merged["quality_full_scan"] == "never"
+        assert merged["quality_row_requiring_checks"] == ["corrupt_records", "value_range"]
+
+    def test_rejects_unknown_full_scan_mode(self, monkeypatch, tmp_path):
+        """A tri-state value outside the declared set must be rejected."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\nquality_full_scan = "sometimes"\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
+        with pytest.raises(ValueError, match="quality_full_scan"):
+            config._load_tool_config()
+
+    def test_rejects_non_positive_dup_cap(self, monkeypatch, tmp_path):
+        """A zero cap would silently disable duplicate detection."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.sofer]\nquality_max_dup_tracking = 0\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
+        )
+        with pytest.raises(ValueError, match="quality_max_dup_tracking"):
+            config._load_tool_config()
+
+    def test_reload_rebinds_quality_bounds(self, restore_tool_config, pytree):
+        """reload() rebinds the new bounds as module constants."""
+        root = pytree('[tool.sofer]\nquality_max_dup_tracking = 77\nquality_full_scan = "always"\n')
+        config.reload(root)
+        assert config.QUALITY_MAX_DUP_TRACKING == 77
+        assert config.QUALITY_FULL_SCAN == "always"
+
+
+class TestReportTruncationLimitsConfig:
+    """Issue #189 — quality/splits truncation caps are ``[tool.sofer]`` keys.
+
+    ``quality_value_preview_len`` was removed by issue #290: with
+    ``_col_nonempty`` reduced to a per-column boolean it had no reader left.
+    The reload/override vehicles below re-point to ``schema_sample_size``.
+    """
 
     def test_splits_max_unclassified_names_default(self):
         """validate_layout lists 5 unclassified names by default."""
@@ -802,23 +872,21 @@ class TestReportTruncationLimitsConfig:
     def test_toml_overrides_new_keys(self, monkeypatch, tmp_path):
         """Both caps are overridable from ``[tool.sofer]``."""
         (tmp_path / "pyproject.toml").write_text(
-            "[tool.sofer]\nquality_value_preview_len = 12\nsplits_max_unclassified_names = 2\n",
+            "[tool.sofer]\nschema_sample_size = 12\nsplits_max_unclassified_names = 2\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(
             "sofer.config._find_project_root", lambda start=None, stop_at=None: tmp_path
         )
         merged = config._load_tool_config()
-        assert merged["quality_value_preview_len"] == 12
+        assert merged["schema_sample_size"] == 12
         assert merged["splits_max_unclassified_names"] == 2
 
     def test_reload_rebinds_new_keys(self, restore_tool_config, pytree):
         """reload() rebinds both caps as module constants."""
-        root = pytree(
-            "[tool.sofer]\nquality_value_preview_len = 12\nsplits_max_unclassified_names = 2\n"
-        )
+        root = pytree("[tool.sofer]\nschema_sample_size = 12\nsplits_max_unclassified_names = 2\n")
         config.reload(root)
-        assert config.QUALITY_VALUE_PREVIEW_LEN == 12
+        assert config.SCHEMA_SAMPLE_SIZE == 12
         assert config.SPLITS_MAX_UNCLASSIFIED_NAMES == 2
 
     def test_repo_pyproject_declares_every_default_key(self):
