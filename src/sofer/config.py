@@ -70,10 +70,16 @@ _DEFAULTS: dict[str, Any] = {
     # (repo_compliance.build_schema_report). Balances statistical confidence
     # against read-time cost; also surfaced in the card's stats footnote.
     "schema_sample_size": 10_000,
-    # Cap for distinct quality values tracked per column (issue #189):
-    # values stored in the per-file non-empty set are truncated to this
-    # many characters to bound memory on wide free-text columns.
-    "quality_value_preview_len": 50,
+    # Quality-scan bounds (issue #290). ``quality_max_dup_tracking`` is a hard
+    # cap on the distinct row hashes the ``duplicates`` check tracks (a dict
+    # entry + 32-char md5 hexdigest ≈ 200 B, so 1 M tracked rows ≈ 200 MB —
+    # bounded, and that bound is the whole reason the cap exists).
+    # ``quality_full_scan`` is the tri-state policy (``QUALITY_FULL_SCAN_MODES``)
+    # and ``quality_row_requiring_checks`` names the active fail checks that
+    # actually need every row before ``auto`` chooses the full scan.
+    "quality_max_dup_tracking": 1_000_000,
+    "quality_full_scan": "auto",
+    "quality_row_requiring_checks": ["corrupt_records"],
     # Cap for unclassified filenames listed by splits.validate_layout
     # (issue #189): the slice and its ellipsis guard derive from this one value.
     "splits_max_unclassified_names": 5,
@@ -299,6 +305,18 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     if not isinstance(_err_cap, int) or isinstance(_err_cap, bool) or _err_cap < 1:
         raise ValueError("'hf_upload_error_max_chars' in [tool.sofer] must be a positive integer")
 
+    # Quality scan bounds (issue #290): the full-scan policy is a closed
+    # tri-state, and the duplicate cap must be a positive integer — 0 would
+    # silently disable duplicate detection instead of bounding it.
+    if merged.get("quality_full_scan") not in QUALITY_FULL_SCAN_MODES:
+        raise ValueError(
+            "'quality_full_scan' in [tool.sofer] must be one of "
+            f"{', '.join(repr(mode) for mode in QUALITY_FULL_SCAN_MODES)}"
+        )
+    _dup_cap = merged.get("quality_max_dup_tracking")
+    if not isinstance(_dup_cap, int) or isinstance(_dup_cap, bool) or _dup_cap < 1:
+        raise ValueError("'quality_max_dup_tracking' in [tool.sofer] must be a positive integer")
+
     return merged
 
 
@@ -433,8 +451,19 @@ CARD_BOOLEAN_VALUES: list[str] = _DEFAULTS["card_boolean_values"]
 SCHEMA_DUP_THRESHOLD: int = _DEFAULTS["schema_dup_threshold"]
 SCHEMA_SAMPLE_SIZE: int = _DEFAULTS["schema_sample_size"]
 
-QUALITY_VALUE_PREVIEW_LEN: int = _DEFAULTS["quality_value_preview_len"]
+QUALITY_MAX_DUP_TRACKING: int = _DEFAULTS["quality_max_dup_tracking"]
+QUALITY_FULL_SCAN: str = _DEFAULTS["quality_full_scan"]
+QUALITY_ROW_REQUIRING_CHECKS: list[str] = _DEFAULTS["quality_row_requiring_checks"]
 SPLITS_MAX_UNCLASSIFIED_NAMES: int = _DEFAULTS["splits_max_unclassified_names"]
+
+QUALITY_FULL_SCAN_MODES: tuple[str, ...] = ("auto", "always", "never")
+"""Closed set of ``quality_full_scan`` values (issue #290).
+
+Deliberately NOT a ``_DEFAULTS`` entry: this is the policy vocabulary the
+value is validated against, not a tunable user option — adding it to
+``_DEFAULTS`` would make ``[tool.sofer] quality_full_scan_modes`` settable and
+detach the validator from the tri-state it is meant to enforce.
+"""
 
 # Metadata-core (profile/render) inference knobs.
 SEMANTIC_PRIORS: dict[str, float] = _DEFAULTS["semantic_priors"]

@@ -137,6 +137,21 @@ profile_dir = "profiles"   # profiles/Labels/etiquetas_a.metadata.yaml
 render_dir = "renders"     # renders/Labels/etiquetas_a.README.md
 ```
 
+## Quality scan bounds
+
+The content-quality validator is single-pass and bounded (issue #290):
+
+| Key | Default | What it does |
+|---|---|---|
+| `quality_max_dup_tracking` | `1000000` | Hard cap on the distinct row hashes the `duplicates` check tracks. Beyond the cap no new hashes are inserted and the finding is marked **partial** (the cap is named in the message). A dict entry plus a 32-char md5 hexdigest is ≈ 200 B, so 1 M tracked rows ≈ 200 MB — the cap exists precisely so a multi-GB corpus cannot grow it without bound. |
+| `quality_full_scan` | `"auto"` | Full-scan policy. `auto`: scan every row only when an active `fail` check is in `quality_row_requiring_checks`; `always`: scan every row; `never`: honour `[quality] max_sample` even with a `fail` check active, marking the affected findings `partial`. |
+| `quality_row_requiring_checks` | `["corrupt_records"]` | The active `fail`-severity checks that genuinely need every row. A fixed-size probe such as `encoding_validation` (8 KB) is deliberately absent, so it can never force an unsampled pass. |
+
+A dataset may override the tool-wide policy with an optional `[quality]` table
+(`full_scan`, `max_sample`); note that TOML forbids `[quality]` and
+`[[quality]]` in the same file, so the policy table and per-check overrides
+are mutually exclusive.
+
 ## Assisted failure reporting
 
 The state directory and the target repository of the assisted failure reporter
