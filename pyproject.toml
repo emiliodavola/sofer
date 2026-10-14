@@ -194,6 +194,16 @@ failure_report_gh_timeout_seconds = 30
 failure_report_duplicate_limit = 5
 failure_report_duplicate_query_tokens = 8
 
+# ── HF upload diagnostics (issue #289) ──
+# Additional upload_folder attempts after the first failure (1 = one bounded
+# retry, decision D2). The env-var NAMES probed to report the active transfer
+# backend (xet on/off, never hardcoded at the call site), and the character cap
+# for the exception message echoed in the failure report.
+hf_upload_retry_count = 1
+hf_backend_disable_env = "HF_HUB_DISABLE_XET"
+hf_backend_prefix_env = "HF_XET_"
+hf_upload_error_max_chars = 500
+
 # ── Schema report ──
 # Rows sampled per file for schema inference (schema report + card footnote).
 schema_sample_size = 10_000

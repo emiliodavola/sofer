@@ -24,6 +24,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Profiling and rendering](#profiling-and-rendering)
 - [Command reference](#command-reference)
 - [Flags at a glance](#flags-at-a-glance)
+- [Troubleshooting HF uploads](#troubleshooting-hf-uploads)
 - [Assisted failure reporting](#assisted-failure-reporting)
 - [Data format support](#data-format-support)
 - [Parquet conversion limitations](#parquet-conversion-limitations)
@@ -356,6 +357,31 @@ detector class, no changes to the pipeline.
 | `--cwd PATH` | `mcp add` | Absolute cwd for the server; must be an existing directory (otherwise exit 1 naming the resolved path). A tree outside the home and the process cwd is accepted with a warning naming it. |
 | `--user-config PATH` | `mcp add`, `mcp remove` | Explicit user-scope config **file** for the selected agent; wins over the adapter's env override (Pi's `PI_CODING_AGENT_DIR`) and the `Path.home()` default. Rejected with `--agent all` — one path cannot name four different files. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
+
+### Troubleshooting HF uploads
+
+`sofer publish --target hf` delivers the whole package with a single
+`upload_folder` call. When that call fails, sofer prints the underlying
+exception type and message plus the active transfer backend, and retries once.
+A total failure reports `Result: 0 uploaded, N failed` and, when the repository
+ends up empty, says so explicitly.
+
+If a publish reports `0 uploaded, N failed` with an `I/O error`, re-run it with
+the xet transfer backend disabled **before** assuming the package or the token
+is wrong:
+
+```bash
+# macOS / Linux
+HF_HUB_DISABLE_XET=1 sofer publish my-dataset.toml
+# Windows (PowerShell)
+$env:HF_HUB_DISABLE_XET = "1"; sofer publish my-dataset.toml
+```
+
+`HF_HUB_DISABLE_XET` is read once, when `huggingface_hub` is imported, so it must
+be set in the environment of the `sofer` process — setting it after the process
+starts has no effect. The retry count, the probed environment-variable names and
+the error-message cap are `[tool.sofer]` defaults (`hf_upload_retry_count`,
+`hf_backend_disable_env`, `hf_backend_prefix_env`, `hf_upload_error_max_chars`).
 
 ## Assisted failure reporting
 
