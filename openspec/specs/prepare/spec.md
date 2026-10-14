@@ -279,7 +279,12 @@ in `dataset.toml` (default `"build"`).
 
 `prepare --verify` SHALL run `datasets.load_dataset()` against the generated
 output directory and print a verification report with PASSED/FAILED status.
-Verification failure SHALL be reported but SHALL NOT block generation.
+Verification failure SHALL be reported but SHALL NOT block generation. When the
+optional `datasets` package cannot be imported — because it is not installed, or
+because importing it raises for any other reason (a broken transitive
+configuration, an ABI error, a partially installed wheel) — verification SHALL be
+reported as SKIPPED, SHALL name the exception when one was raised, and SHALL NOT
+block generation.
 
 #### Scenario: Successful local verification
 
@@ -293,6 +298,15 @@ Verification failure SHALL be reported but SHALL NOT block generation.
 - GIVEN the generated package cannot be loaded
 - WHEN `prepare --verify` completes
 - THEN the report SHALL state FAILED
+- AND the exit code SHALL still be 0
+
+#### Scenario: Unimportable optional dependency is skipped, never fatal
+
+- GIVEN the optional `datasets` package is not importable, whether because it is
+  not installed or because its import raises for another reason
+- WHEN `prepare --verify` completes
+- THEN the report SHALL state SKIPPED
+- AND the report SHALL name the raised exception when the import raised one
 - AND the exit code SHALL still be 0
 
 ---

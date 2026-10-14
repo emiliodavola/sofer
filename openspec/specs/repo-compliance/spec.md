@@ -1199,7 +1199,7 @@ single entry triggers at most one of the two.
 - WHEN schema report builds
 - THEN exactly one `[!]` warning naming `a.parquet` SHALL be emitted and columns SHALL come from TSV fallback
 
-### 4.20 Card data_files reflect universal normalized remotes (RC-Universal-Card) — Modified 2026-08-29, fix-multisheet-parquet-publish
+### 4.20 Card data_files reflect universal normalized remotes (RC-Universal-Card) — Modified 2026-08-29, fix-multisheet-parquet-publish; Modified 2026-10-13, fix-mixed-schema-configs
 
 `build_dataset_card` MUST list `configs.data_files` and `Dataset Structure` via `expanded_planned_remotes` when staging directory is available, otherwise via `planned_remotes` fallback. TSV/XLSX/JSONL SHALL appear as normalized `.parquet` remotes; `report.xlsx` with N sheets SHALL appear as N `stem__sheet.parquet` entries. No local-disk paths SHALL leak. `num_examples` row-count dict SHALL remain keyed by verbatim `entry.remote`; `configs.data_files` SHALL be keyed by normalized remotes.
 
@@ -1229,6 +1229,31 @@ single entry triggers at most one of the two.
 - GIVEN `report.xlsx` 2 sheets
 - WHEN card with staging
 - THEN data_files equals Structure
+
+> Modified by `2026-10-13-fix-mixed-schema-configs` (issue #292). The
+> "unconditional single config" reading of this section is superseded by
+> RC-R23: `build_dataset_card` SHALL NOT merge remotes whose column signatures
+> differ into one `configs` entry. It SHALL group the planned remotes by the
+> ordered `(name, dtype)` signature of their `ColumnSchema` entries and emit
+> **one** `configs` entry per group, each with its own `dataset_info` (RC-R23).
+> When the schema report carries no column for any planned remote and more than
+> one remote is planned, the card is **ungroupable** and SHALL emit neither
+> `configs` nor `dataset_info`, leaving the Hub to infer per file.
+
+#### Scenario: Mixed-schema corpus emits one config per signature
+
+- GIVEN two remotes whose `ColumnSchema` origins carry different ordered
+  `(name, dtype)` signatures
+- WHEN the card is generated
+- THEN `configs` SHALL contain two entries, one per group
+- AND `dataset_info` SHALL contain one block per config, each with its own
+  `num_examples`
+
+#### Scenario: Same-signature corpus stays one config
+
+- GIVEN remotes that share one column signature
+- WHEN the card is generated
+- THEN `configs` SHALL contain exactly one entry carrying `default: True`
 
 ---
 
@@ -1401,6 +1426,84 @@ duality regression guard for `test_mirror`/`TestExpandedCard` stubs).*
 - AND sheet 2+ columns and per-sheet row counts SHALL NOT be attributed
 
 *Test: `test_multi_sheet_missing_staged_parquet_still_warns_once` (new).*
+
+---
+
+### Requirement: Mixed-schema config grouping (RC-R23)
+
+> Added by change `2026-10-13-fix-mixed-schema-configs` (issue #292).
+
+`build_dataset_card` SHALL derive its `configs` and `dataset_info` from a
+schema-grouping plan, never from a single unconditional merged config:
+
+- **Grouping (D2).** Group planned remotes by the ordered `(name, dtype)`
+  signature of the `ColumnSchema` entries attributed to them via
+  `ColumnSchema.origin`; sheet origins group per sheet.
+- **`config_name` (D3).** Each `config_name` SHALL be a slug matching
+  `[a-z0-9._-]`, derived from `[dataset] name` (or `cfg.config_names[0]`) for a
+  single group and from the remote's file stem for multiple groups. The slug
+  rule (invalid-character pattern, separator, maximum length, empty fallback)
+  SHALL be config-owned (`config.CARD_CONFIG_*`, `[tool.sofer]`), never a
+  literal in the function body. `pretty_name` SHALL NEVER be passed to the slug
+  builder.
+- **`default` (D4).** `default: True` SHALL appear on the config **only** when
+  the card emits exactly one config. A multi-group card SHALL carry no
+  `default` key on any config.
+- **`dataset_info` (D5).** One block per config, each with the group's
+  `features` and a `train` split whose `num_examples` sums the group's exact
+  row counts, falling back to `card_fallback_rows_per_file` × group remote
+  count **for that group only**. The single-group dict shape is preserved; the
+  multi-group shape is the HF list of `DatasetInfo` dicts.
+- **Ungroupable guard (S2/D1).** When the schema report carries no column for
+  any planned remote and more than one remote is planned, the card SHALL emit
+  neither `configs` nor `dataset_info`.
+- **Actionable warning (S4).** `validate_split_mapping(remotes)` SHALL warn, for
+  a multi-file corpus with no split keywords, that the card groups those files by
+  column schema — every file into one `train` split for a single-config card,
+  and one table at a time via `load_dataset(repo, name=...)` for a multi-config
+  card. The clause SHALL NOT claim a single merged split in general, because the
+  card no longer emits one.
+
+#### Scenario: Mixed-schema corpus is never one merged config — issue #292
+
+- GIVEN two census tables with different columns declared without split keywords
+- WHEN the card is generated
+- THEN the two tables SHALL NOT share one `train` config
+- AND each config's `data_files` SHALL contain only its own group's remotes
+
+#### Scenario: config_name is a validated slug
+
+- GIVEN `[dataset] name = "Censo Nacional de Población, Hogares y Viviendas 2010 (Argentina) - Microdatos"`
+- WHEN the card is generated
+- THEN `config_name` SHALL match `[a-z0-9._-]+`
+- AND it SHALL NOT equal `pretty_name`
+
+#### Scenario: Multi-group card carries no default key
+
+- GIVEN remotes that fall into two or more schema groups
+- WHEN the card is generated
+- THEN no `configs` entry SHALL contain a `default` key
+
+#### Scenario: Ungroupable corpus emits neither block
+
+- GIVEN more than one planned remote and a schema report with no columns
+- WHEN the card is generated
+- THEN `configs` SHALL be absent
+- AND `dataset_info` SHALL be absent
+
+#### Scenario: Per-group num_examples
+
+- GIVEN two groups, one with exact row counts and one without
+- WHEN the card is generated
+- THEN each `dataset_info` block's `num_examples` SHALL use its own group's
+  counts, or the per-file fallback for that group only
+
+#### Scenario: Dry-run warning is true for both card shapes
+
+- GIVEN multiple files without split keywords
+- WHEN `validate_split_mapping(remotes)` runs
+- THEN the warning SHALL state the single-config outcome (every file in one
+  `train` split) and the multi-config outcome (`load_dataset(repo, name=...)`)
 
 ---
 

@@ -14,7 +14,11 @@ it to a target:
   does not exist reads as empty, but any OTHER inspection or ``create_repo``
   failure aborts the publish with rc 1 before upload — inspection failure is
   never treated as an empty repo, so overwrite protection always sees the
-  true remote state.  A post-upload split report is printed.
+  true remote state.  A post-upload split report is printed.  An upload that
+  fails names its cause (``type(exc).__name__: exc``) and the active Hub
+  transfer backend, retries at most ``[tool.sofer] hf_upload_retry_count``
+  times (default 1 — decision D2), and reports a created-but-empty repository
+  explicitly when nothing landed (S4, issue #289).
 - ``target="local"``: copies the package to ``--output`` with zero network
   access; without ``--output``, prints an in-place package summary without
   mutating anything (PUB-02).
@@ -40,7 +44,7 @@ Orchestration flow (delivery half of the legacy ``uploader.upload``):
        -> diff summary (expanded, PUB-10) -> overwrite protection (per-sheet)
        -> split-mapping validation (count N) -> stage expanded artifacts
        from the output directory -> single ``_hf_upload_folder`` call
-       -> post-upload split report.
+       (bounded retry on failure, issue #289) -> post-upload split report.
 
 The planned set is derived via :func:`sofer._mirror.expanded_planned_remotes`
 when the mirror exists (ground truth for multi-sheet XLSX, PUB-10), else via
@@ -55,6 +59,7 @@ module (moved from ``uploader.py`` in PR 4).  The shared ``HfApi`` instance
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -173,6 +178,51 @@ def _hf_upload(
         return False
 
 
+def _hf_backend_note() -> str:
+    """Return the Hub transfer-backend state for an upload-failure report.
+
+    Reads the environment-variable *names* from ``[tool.sofer]``
+    (``hf_backend_disable_env`` / ``hf_backend_prefix_env``) and the
+    authoritative disable flag from ``huggingface_hub.constants`` — the
+    import-time constant recorded by decision D1, so a mid-process flip cannot
+    be reported as effective. Present ``HF_XET_*`` tuning variables are listed
+    so the caller sees exactly what the SDK will read.
+
+    Returns:
+        A one-line description, e.g.
+        ``xet backend: enabled (HF_HUB_DISABLE_XET unset or falsy)``.
+    """
+    from huggingface_hub import constants as hf_constants
+
+    disable_env = config.HF_BACKEND_DISABLE_ENV
+    prefix_env = config.HF_BACKEND_PREFIX_ENV
+    if bool(getattr(hf_constants, disable_env, False)):
+        note = f"xet backend: disabled by {disable_env}"
+    else:
+        note = f"xet backend: enabled ({disable_env} unset or falsy)"
+    tuning = sorted(name for name in os.environ if name.startswith(prefix_env))
+    if tuning:
+        note += f"; {prefix_env}* vars: {', '.join(tuning)}"
+    return note
+
+
+def _print_upload_failure(exc: Exception) -> None:
+    """Print an upload failure naming its cause and the active backend (S1).
+
+    The bare ``✗ <exc>`` the caller used to print left the user guessing which
+    backend failed; this prints ``<type>: <message>`` (truncated at
+    ``config.HF_UPLOAD_ERROR_MAX_CHARS``) followed by the backend note.
+
+    Args:
+        exc: The exception raised by the Hub upload call.
+    """
+    message = str(exc).strip()
+    if len(message) > config.HF_UPLOAD_ERROR_MAX_CHARS:
+        message = message[: config.HF_UPLOAD_ERROR_MAX_CHARS] + "\u2026"
+    print(f"  \u2717  {type(exc).__name__}: {message}")
+    print(f"     {_hf_backend_note()}")
+
+
 def _hf_upload_folder(
     repo_id: str,
     local_path: str | Path,
@@ -182,6 +232,14 @@ def _hf_upload_folder(
 ) -> bool:
     """Upload a directory recursively via ``HfApi.upload_folder()``.
 
+    A failed call is reported with its exception type and message plus the
+    active backend (:func:`_hf_backend_note`), then retried at most
+    ``config.HF_UPLOAD_RETRY_COUNT`` times (default 1 — the bounded retry of
+    decision D2). No automatic fallback to the non-xet path is attempted: the
+    disable flag is an import-time constant and ``upload_folder`` exposes no
+    backend kwarg (D1), so the documented workaround is a re-run with
+    ``HF_HUB_DISABLE_XET=1``.
+
     Args:
         repo_id:     Target repository (``user/repo``).
         local_path:  Local directory whose contents are uploaded.
@@ -190,23 +248,28 @@ def _hf_upload_folder(
         api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
 
     Returns:
-        ``True`` on success, ``False`` on failure (error already printed).
+        ``True`` on success (including success on a retry), ``False`` when
+        every attempt failed (error already printed).
     """
     target_api = api if api is not None else _api
     label = Path(local_path).name
     print(f"  \u2191  {label}/  \u2192  {remote_path}")
-    try:
-        target_api.upload_folder(
-            folder_path=str(local_path),
-            path_in_repo=remote_path,
-            repo_id=repo_id,
-            repo_type=repo_type,
-        )
-        print(f"  \u2713  {label}/")
-        return True
-    except Exception as exc:
-        print(f"  \u2717  {exc}")
-        return False
+    retry_count = config.HF_UPLOAD_RETRY_COUNT
+    for attempt in range(1, retry_count + 2):
+        try:
+            target_api.upload_folder(
+                folder_path=str(local_path),
+                path_in_repo=remote_path,
+                repo_id=repo_id,
+                repo_type=repo_type,
+            )
+            print(f"  \u2713  {label}/")
+            return True
+        except Exception as exc:
+            _print_upload_failure(exc)
+            if attempt <= retry_count:
+                print(f"  \u21bb  retrying upload (retry {attempt}/{retry_count}) \u2026")
+    return False
 
 
 def _inspect_repo(cfg: DatasetConfig, api: HfApi | None = None) -> list[str]:
@@ -862,6 +925,13 @@ def publish(
 
     print(f"\n{'=' * 60}")
     print(f"  Result: {ok} uploaded, {fail} failed")
+    # S4 (issue #289): the repository is ensured BEFORE the upload, so a total
+    # upload failure leaves it created-but-empty unless it already held files
+    # (``existing_files`` non-empty). Name that state explicitly so the caller
+    # never reads the failure as a flaky network with an undefined outcome.
+    if ok == 0 and not existing_files:
+        print(f"  \u26a0  Repository created, 0 files uploaded: {cfg.repo_id} exists but is empty.")
+        print("     Re-run `sofer publish` once the upload failure is resolved.")
     print(f"{'=' * 60}\n")
 
     # ── 7. PUB-11 gated cleanup: --clean deletes build only on success ──

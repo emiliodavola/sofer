@@ -182,6 +182,13 @@ card_modality_tags = ["tabular", "text", "image", "audio", "video", "timeseries"
 card_boolean_values = ["true", "false", "1", "0", "yes", "no"]
 card_collapse_threshold = 15
 
+# ── Mixed-schema config generation (issue #292) ──
+# One `configs` entry per column-signature group; every config_name is a slug.
+card_config_slug_invalid_pattern = "[^a-z0-9._-]+"
+card_config_slug_separator = "-"
+card_config_slug_max_length = 96
+card_config_slug_fallback = "default"
+
 # ── Assisted failure reporting (issue #244) ──
 # Directory under sofer's state home (~/.local/state/sofer by default) holding
 # one timestamped JSON report per unsent failure; the owner/repo issues are
@@ -194,6 +201,16 @@ failure_report_gh_timeout_seconds = 30
 failure_report_duplicate_limit = 5
 failure_report_duplicate_query_tokens = 8
 
+# ── HF upload diagnostics (issue #289) ──
+# Additional upload_folder attempts after the first failure (1 = one bounded
+# retry, decision D2). The env-var NAMES probed to report the active transfer
+# backend (xet on/off, never hardcoded at the call site), and the character cap
+# for the exception message echoed in the failure report.
+hf_upload_retry_count = 1
+hf_backend_disable_env = "HF_HUB_DISABLE_XET"
+hf_backend_prefix_env = "HF_XET_"
+hf_upload_error_max_chars = 500
+
 # ── Schema report ──
 # Rows sampled per file for schema inference (schema report + card footnote).
 schema_sample_size = 10_000
@@ -201,9 +218,21 @@ schema_sample_size = 10_000
 # warnings; above it a single summary (repo_compliance.build_schema_report).
 schema_dup_threshold = 3
 
+# ── Quality scan bounds (issue #290) ──
+# Hard cap on distinct row hashes the `duplicates` check tracks; beyond it no
+# new hashes are inserted and the finding is marked partial. Bounds memory
+# independently of the dataset size (dict entry + 32-char md5 ≈ 200 B).
+quality_max_dup_tracking = 1_000_000
+# Full-scan policy: "auto" (only the row-requiring checks below force a full
+# pass), "always", or "never" (honour [quality] max_sample even with a fail
+# check active, marking the affected findings partial).
+quality_full_scan = "auto"
+# Active fail-severity checks in this set force the full (unsampled) scan
+# under the default "auto" policy. An 8 KB probe like encoding_validation is
+# deliberately absent.
+quality_row_requiring_checks = ["corrupt_records"]
+
 # ── Report truncation limits (issue #189) ──
-# Distinct quality values per column truncate to this many chars.
-quality_value_preview_len = 50
 # Unclassified filenames listed by splits.validate_layout (slice + guard).
 splits_max_unclassified_names = 5
 

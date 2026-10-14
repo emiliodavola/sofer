@@ -5,6 +5,15 @@ The :class:`QualityValidator` runs all active P0 checks in a **single pass**
 per file — each eligible file is opened once and every row is distributed to
 all active accumulators simultaneously.
 
+Per-row memory is bounded and independent of the dataset size (issue #290):
+the ``empty_columns`` bookkeeping is a per-column "seen non-empty" boolean,
+the ``duplicates`` hash table is capped at ``config.QUALITY_MAX_DUP_TRACKING``,
+and the per-row finding lists stop growing at their report limits. The
+full-scan decision is explicit and config-owned (``config.QUALITY_FULL_SCAN``,
+with an optional per-dataset override): ``auto`` scans every row only for the
+config-declared row-requiring checks, ``always`` scans every row, and ``never``
+honours ``max_sample`` even with a ``fail`` check active.
+
 Only text-eligible files (``.csv`` / ``.tsv``, case-insensitive via
 ``is_text_eligible`` from :mod:`sofer._formats`) are scanned.  Non-eligible
 suffixes (``.xlsx``, ``.parquet``, ``.jsonl``, ``.gz``, no extension) are
@@ -52,6 +61,22 @@ def _is_empty(value: str) -> bool:
     """Return True when *value* should be considered empty / missing."""
     cleaned = value.strip()
     return not cleaned or cleaned.upper() in MISSING_VALUE_SENTINELS
+
+
+def _capped_append(target: list[Any], item: Any, limit: int) -> None:
+    """Append *item* to *target* only while it holds fewer than *limit* items.
+
+    Bounds the per-row finding lists so their memory is independent of the
+    dataset size (issue #290): the report only ever prints the first *limit*
+    entries, so anything beyond that is dead weight.
+
+    Args:
+        target: The list accumulator to grow.
+        item: The finding to append.
+        limit: Maximum length of *target*.
+    """
+    if len(target) < limit:
+        target.append(item)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +136,12 @@ class QualityValidator:
         self._max_sample = cfg.quality.max_sample
         self._had_eligible: bool = False
 
+        # Full-scan policy and duplicate cap — re-read from config in run()
+        # (call-site read, never frozen at import); the per-dataset
+        # ``quality.full_scan`` override wins over the tool-wide default.
+        self._full_scan_mode: str = cfg.quality.full_scan or config.QUALITY_FULL_SCAN
+        self._dup_tracking_cap: int = config.QUALITY_MAX_DUP_TRACKING
+
         # ── Accumulator state (reset per run) ───────────────────────────
         self._reset_accumulators()
 
@@ -131,6 +162,8 @@ class QualityValidator:
             every finding.
         """
         self._reset_accumulators()
+        self._full_scan_mode = self.cfg.quality.full_scan or config.QUALITY_FULL_SCAN
+        self._dup_tracking_cap = config.QUALITY_MAX_DUP_TRACKING
         base = self.cfg._base_dir if self.cfg._base_dir else Path.cwd()
 
         for entry in self.cfg.files:
@@ -174,11 +207,16 @@ class QualityValidator:
         self._file_row_count: dict[str, int] = {}
         # duplicates
         self._dup_hashes: dict[str, int] = {}  # hash → first row number
-        self._dup_findings: list[tuple[int, int]] = []  # (first_row, dup_row)
+        # Duplicate pairs grouped by file: naming the file keeps the finding
+        # traceable back to a table (issue #293), and capping each file's list at
+        # the report limit keeps memory independent of the dataset size while
+        # every affected file can still reach the report (issue #290).
+        self._dup_findings: dict[str, list[tuple[int, int]]] = {}
+        self._dup_hashes_capped: bool = False  # cap hit → finding is partial
         # empty rows
         self._empty_row_numbers: list[int] = []
-        # empty columns — initialised per file in _process_file
-        self._col_nonempty: dict[str, set[str]] = defaultdict(set)
+        # empty columns — per-column "seen non-empty" boolean, keyed file::col
+        self._col_nonempty: dict[str, bool] = {}
         # null profiling
         self._null_counts: dict[str, tuple[int, int]] = {}  # col → (total, null)
         # format consistency
@@ -199,9 +237,19 @@ class QualityValidator:
         # ran checks tracking (Issue #14)
         self._ran_checks: set[str] = set()
 
-    def _has_fail_checks(self) -> bool:
-        """Return True when any active check has ``fail`` severity."""
-        return any(cfg.get("severity") == "fail" for cfg in self._checks.values())
+    def _needs_full_scan(self) -> bool:
+        """Return True when an active ``fail`` check needs every row.
+
+        The row-requiring names are config-declared
+        (``config.QUALITY_ROW_REQUIRING_CHECKS``), so a cheap fixed-size probe
+        such as the 8 KB ``encoding_validation`` check never turns a ``fail``
+        severity into an unsampled pass over every row (issue #290).
+        """
+        row_requiring = set(config.QUALITY_ROW_REQUIRING_CHECKS)
+        return any(
+            cfg.get("severity") == "fail" and name in row_requiring
+            for name, cfg in self._checks.items()
+        )
 
     # ------------------------------------------------------------------
     #  File processing (single pass, interleaved)
@@ -219,11 +267,19 @@ class QualityValidator:
         self._current_file = fname
         self._file_row_count[fname] = 0
 
-        # Fail-severity checks always scan the full file (Issue #14)
-        effective_max_sample: int | None = self._max_sample
-        if self._has_fail_checks():
+        # Full-scan decision (issue #290): the tri-state policy decides, not
+        # severity alone. ``auto`` scans every row only when an active fail
+        # check is in the declared row-requiring set.
+        effective_max_sample: int | None
+        if self._full_scan_mode == "always":
             effective_max_sample = None
-        elif self._max_sample is not None:
+        elif self._full_scan_mode == "never":
+            effective_max_sample = self._max_sample
+        elif self._needs_full_scan():
+            effective_max_sample = None
+        else:
+            effective_max_sample = self._max_sample
+        if effective_max_sample is not None:
             self._scan_is_partial = True
 
         try:
@@ -254,7 +310,7 @@ class QualityValidator:
         # Initialise per-column accumulators for this file's header
         # Key includes fname to avoid cross-file collision (Issue #14)
         for col_name in header:
-            _ = self._col_nonempty[f"{fname}::{col_name}"]  # ensure entry exists
+            self._col_nonempty.setdefault(f"{fname}::{col_name}", False)
 
         row_number = 0
         for _header, row in gen:
@@ -272,8 +328,10 @@ class QualityValidator:
         # corrupt_records — needs raw row length first
         if "corrupt_records" in self._checks:
             if len(row) != len(self._current_header):
-                self._corrupt_findings.append(
-                    (self._current_file, row_number, len(row), len(self._current_header))
+                _capped_append(
+                    self._corrupt_findings,
+                    (self._current_file, row_number, len(row), len(self._current_header)),
+                    config.REPORT_MAX_CORRUPT_RECORDS,
                 )
                 return  # skip other checks for corrupt rows
 
@@ -290,12 +348,10 @@ class QualityValidator:
             if not is_missing:
                 has_any_nonempty = True
 
-            # empty_columns — track if we've seen any non-empty value
-            # Key with file prefix to isolate per-file (Issue #14)
+            # empty_columns — per-column "seen non-empty" boolean (issue #290):
+            # a value set here was the largest per-row accumulator.
             if not is_missing:
-                self._col_nonempty[f"{self._current_file}::{col_name}"].add(
-                    value[: config.QUALITY_VALUE_PREVIEW_LEN]
-                )
+                self._col_nonempty[f"{self._current_file}::{col_name}"] = True
 
             # null_profiling
             key_n = f"{self._current_file}:{col_name}"
@@ -327,45 +383,119 @@ class QualityValidator:
                         except ValueError:
                             pass
 
-        # duplicates — hash the entire row (scoped per file to avoid cross-file false positives)
+        # duplicates — hash the entire row (scoped per file to avoid cross-file
+        # false positives). New hashes stop at the cap; the cap is reported as
+        # a partial finding instead of silently evicting tracked rows (issue #290).
         if "duplicates" in self._checks:
             row_str = f"{self._current_file}|{'|'.join(row)}"
             h = hashlib.md5(row_str.encode("utf-8"), usedforsecurity=False).hexdigest()
             if h in self._dup_hashes:
-                self._dup_findings.append((self._dup_hashes[h], row_number))
-            else:
+                self._record_duplicate_pair(self._dup_hashes[h], row_number)
+            elif len(self._dup_hashes) < self._dup_tracking_cap:
                 self._dup_hashes[h] = row_number
+            else:
+                self._dup_hashes_capped = True
 
         # empty_rows
         if not has_any_nonempty:
-            self._empty_row_numbers.append(row_number)
+            _capped_append(self._empty_row_numbers, row_number, config.REPORT_MAX_ITEMS)
 
     # ------------------------------------------------------------------
     #  Post-scan check methods (produce QualityResult entries)
     # ------------------------------------------------------------------
 
-    def _add_result(self, check: str, severity: str, message: str) -> None:
-        partial = False
-        if severity == "warn" and self._scan_is_partial:
-            partial = True
+    def _add_result(
+        self,
+        check: str,
+        severity: str,
+        message: str,
+        *,
+        from_sample: bool = False,
+        partial: bool = False,
+    ) -> None:
+        """Append one finding to the report.
+
+        Args:
+            check: Check name identifier.
+            severity: ``"warn"`` or ``"fail"``.
+            message: Human-readable description of the finding.
+            from_sample: ``True`` when the evidence comes from the per-row
+                streaming pass (not from a fixed-size probe such as the 8 KB
+                encoding check). A sampled scan makes streaming ``warn``
+                findings partial as before, and streaming ``fail`` findings
+                partial under ``quality_full_scan = "never"``.
+            partial: Force the partial flag regardless of scan mode — used when
+                an accumulator was itself capped (the duplicate-tracking cap).
+        """
+        if not partial and self._scan_is_partial:
+            if severity == "warn":
+                partial = True
+            elif from_sample and self._full_scan_mode == "never":
+                partial = True
         self._results.append(
             QualityResult(check=check, severity=severity, message=message, partial=partial)
         )
         # Track that this check actually ran (Issue #14)
         self._ran_checks.add(check)
 
+    def _record_duplicate_pair(self, first_row: int, dup_row: int) -> None:
+        """Record one duplicate pair under its file, capped at the report limit.
+
+        The list is per file so the report can attribute every pair (issue #293)
+        while the cap keeps memory bounded and still lets every affected file
+        reach the report (issue #290).
+
+        Args:
+            first_row: Row number of the first occurrence.
+            dup_row:   Row number of the duplicate occurrence.
+        """
+        pairs = self._dup_findings.setdefault(self._current_file, [])
+        _capped_append(pairs, (first_row, dup_row), config.REPORT_MAX_ITEMS)
+
     def _check_duplicates(self) -> None:
+        """Emit the ``duplicates`` finding, attributed to the file it came from.
+
+        The row hash is namespaced per file, so a bare row number is not
+        resolvable from the report — every pair names its file (issue #293).
+        Pairs are taken round-robin across files so one noisy file cannot spend
+        the whole ``REPORT_MAX_ITEMS`` budget and hide the other affected files,
+        and when the hash-tracking cap was hit the finding is marked partial and
+        the cap is named (issue #290).
+        """
         if "duplicates" not in self._checks:
             return
         if not self._had_eligible:
             return
         self._ran_checks.add("duplicates")
-        if not self._dup_findings:
+        if not self._dup_findings and not self._dup_hashes_capped:
             return
         limit = config.REPORT_MAX_ITEMS
-        pairs = "; ".join(f"Row {a} = Row {b}" for a, b in self._dup_findings[:limit])
+        parts: list[str] = []
+        for depth in range(max((len(p) for p in self._dup_findings.values()), default=0)):
+            if len(parts) >= limit:
+                break
+            for fname, pairs in self._dup_findings.items():
+                if depth < len(pairs) and len(parts) < limit:
+                    first, dup = pairs[depth]
+                    parts.append(f"{fname}: Row {first} = Row {dup}")
         sev = self._checks["duplicates"]["severity"]
-        self._add_result("duplicates", sev, f"Duplicate rows: {pairs}")
+        pairs_str = "; ".join(parts)
+        if self._dup_hashes_capped:
+            cap_note = f"partial — tracking capped at {self._dup_tracking_cap} distinct rows"
+            message = (
+                f"Duplicate rows: {pairs_str} ({cap_note})"
+                if parts
+                else f"Duplicates: none found within the cap ({cap_note})"
+            )
+        else:
+            message = f"Duplicate rows: {pairs_str}"
+        self._add_result(
+            "duplicates",
+            sev,
+            message,
+            from_sample=True,
+            partial=self._dup_hashes_capped,
+        )
 
     def _check_empty_rows(self) -> None:
         if "empty_rows" not in self._checks:
@@ -377,7 +507,7 @@ class QualityValidator:
             return
         sample = ", ".join(str(r) for r in self._empty_row_numbers[: config.REPORT_MAX_ITEMS])
         sev = self._checks["empty_rows"]["severity"]
-        self._add_result("empty_rows", sev, f"Empty rows: {sample}")
+        self._add_result("empty_rows", sev, f"Empty rows: {sample}", from_sample=True)
 
     def _check_empty_columns(self) -> None:
         if "empty_columns" not in self._checks:
@@ -387,11 +517,10 @@ class QualityValidator:
         self._ran_checks.add("empty_columns")
         # Group empty columns per-file using the "fname::col" key format
         per_file: dict[str, list[str]] = defaultdict(list)
-        for key, vals in self._col_nonempty.items():
-            if not vals:
-                if "::" in key:
-                    fname, col = key.split("::", 1)
-                    per_file[fname].append(col)
+        for key, seen_nonempty in self._col_nonempty.items():
+            if not seen_nonempty and "::" in key:
+                fname, col = key.split("::", 1)
+                per_file[fname].append(col)
         if not per_file:
             return
         sev = self._checks["empty_columns"]["severity"]
@@ -403,6 +532,7 @@ class QualityValidator:
                 "empty_columns",
                 sev,
                 f"Fully empty columns in '{fname}': {', '.join(cols)}",
+                from_sample=True,
             )
 
     def _check_null_profiling(self) -> None:
@@ -438,7 +568,7 @@ class QualityValidator:
             return
         sev = self._checks["null_profiling"]["severity"]
         msg = f"Columns exceeding {threshold}% nulls: {'; '.join(over_limit)}"
-        self._add_result("null_profiling", sev, msg)
+        self._add_result("null_profiling", sev, msg, from_sample=True)
 
     def _check_format_consistency(self) -> None:
         if "format_consistency" not in self._checks:
@@ -462,7 +592,12 @@ class QualityValidator:
         if not mixed_cols:
             return
         sev = self._checks["format_consistency"]["severity"]
-        self._add_result("format_consistency", sev, f"Mixed-type columns: {', '.join(mixed_cols)}")
+        self._add_result(
+            "format_consistency",
+            sev,
+            f"Mixed-type columns: {', '.join(mixed_cols)}",
+            from_sample=True,
+        )
 
     def _check_corrupt_records(self) -> None:
         if "corrupt_records" not in self._checks:
@@ -479,6 +614,7 @@ class QualityValidator:
                 "corrupt_records",
                 sev,
                 f"Row {row} in '{fname}' has {actual} fields, header has {expected}",
+                from_sample=True,
             )
 
     def _check_value_range(self) -> None:
@@ -504,7 +640,7 @@ class QualityValidator:
         if not over:
             return
         for msg in over:
-            self._add_result("value_range", sev, f"Out of range — {msg}")
+            self._add_result("value_range", sev, f"Out of range — {msg}", from_sample=True)
 
     def _check_cross_file_types(self) -> None:
         if "cross_file_types" not in self._checks:
@@ -529,7 +665,12 @@ class QualityValidator:
             unique_types = set(types_found.values())
             if len(unique_types) > 1:
                 details = "; ".join(f"{f}={t}" for f, t in types_found.items())
-                self._add_result("cross_file_types", sev, f"Type mismatch for '{col}': {details}")
+                self._add_result(
+                    "cross_file_types",
+                    sev,
+                    f"Type mismatch for '{col}': {details}",
+                    from_sample=True,
+                )
 
     def _check_encoding_validation(self, resolved: Path) -> None:
         """Probe the first 8 KB with ``utf-8-sig → utf-8``.

@@ -26,6 +26,7 @@ Hugging Face Hub o en cualquier directorio local.**
 - [Perfilado y renderizado](#perfilado-y-renderizado)
 - [Referencia de comandos](#referencia-de-comandos)
 - [Banderas rápidas](#banderas-rapidas)
+- [Solución de problemas de subida a HF](#solucion-de-problemas-de-subida-a-hf)
 - [Reporte asistido de fallos](#reporte-asistido-de-fallos)
 - [Formatos de datos soportados](#formatos-de-datos-soportados)
 - [Limitaciones de conversión a Parquet](#limitaciones-de-conversion-a-parquet)
@@ -369,6 +370,32 @@ canalización.
 | `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
 
+### Solución de problemas de subida a HF
+
+`sofer publish --target hf` entrega el paquete completo con una sola llamada
+`upload_folder`. Cuando esa llamada falla, sofer imprime el tipo y el mensaje de
+la excepción subyacente junto con el backend de transferencia activo, y
+reintenta una vez. Un fallo total reporta `Result: 0 uploaded, N failed` y,
+cuando el repositorio queda vacío, lo indica explícitamente.
+
+Si un publish reporta `0 uploaded, N failed` con un `I/O error`, vuelve a
+ejecutarlo con el backend de transferencia xet deshabilitado **antes** de asumir
+que el paquete o el token están mal:
+
+```bash
+# macOS / Linux
+HF_HUB_DISABLE_XET=1 sofer publish my-dataset.toml
+# Windows (PowerShell)
+$env:HF_HUB_DISABLE_XET = "1"; sofer publish my-dataset.toml
+```
+
+`HF_HUB_DISABLE_XET` se lee una sola vez, cuando se importa `huggingface_hub`,
+así que debe definirse en el entorno del proceso `sofer` — definirlo después de
+que el proceso arranca no tiene efecto. La cantidad de reintentos, los nombres
+de las variables de entorno sondeadas y el tope del mensaje de error son
+defaults de `[tool.sofer]` (`hf_upload_retry_count`, `hf_backend_disable_env`,
+`hf_backend_prefix_env`, `hf_upload_error_max_chars`).
+
 ## Reporte asistido de fallos
 
 Cuando un comando de la CLI falla con un error no capturado, sofer imprime el
@@ -489,6 +516,28 @@ Cada conjunto de datos se comprueba antes de publicar:
 | Cross-file types | Discrepancias de dtype entre configuraciones |
 | Encoding validation | Problemas de codificación de archivos |
 
+Los controles de calidad se ejecutan en una sola pasada de streaming y su
+memoria por fila está acotada de forma independiente al tamaño del dataset
+(issue #290). Tres claves de `[tool.sofer]` controlan el escaneo — ver
+[docs/configuration.md#quality-scan-bounds](docs/configuration.md#quality-scan-bounds):
+
+- `quality_full_scan` (`auto` / `always` / `never`) decide cuándo se lee el
+  archivo completo. `auto` (por defecto) escanea todas las filas solo para los
+  controles `fail` que realmente lo necesitan (`quality_row_requiring_checks`,
+  por defecto `corrupt_records`); una sonda de 8 KB como
+  `encoding_validation` nunca dispara una pasada completa.
+- `quality_max_dup_tracking` limita los hashes de fila distintos que rastrea
+  el control `duplicates` (por defecto 1 000 000). Al alcanzar el límite el
+  hallazgo se marca **partial** y nombra el límite, en lugar de omitir
+  duplicados posteriores en silencio.
+- Un dataset puede sobrescribir la política con una tabla `[quality]`
+  opcional (`full_scan`, `max_sample`).
+
+Los hallazgos llevan una marca **partial** cuando su evidencia proviene de un
+escaneo por muestreo o de un acumulador limitado; `validate` la imprime como
+`(partial)` y el informe de calidad en disco como
+`*(partial — sample-based)*`.
+
 ### Verificar el paquete construido (prepare --verify)
 
 `prepare --verify` ejecuta una comprobación de carga integral sobre el paquete
@@ -498,8 +547,10 @@ y compara los splits que devuelve con los detectados a partir de las rutas
 remotas de los archivos. El resultado se imprime después del resumen de
 `prepare`:
 
-- **SKIPPED** — el paquete opcional `datasets` no está instalado. Instálalo con
-  `pip install datasets` y vuelve a ejecutar.
+- **SKIPPED** — el paquete opcional `datasets` no está instalado, o no se puede
+  importar (una configuración rota de `fsspec`/`xet`, una instalación parcial
+  de la rueda). Instálalo con `pip install datasets` y vuelve a ejecutar; el
+  informe nombra la excepción que detuvo el import.
 - **PASSED** — `load_dataset()` tuvo éxito y los splits detectados coinciden.
 - **FAILED** — `load_dataset()` lanzó una excepción, o los splits difieren de
   lo detectado; el informe enumera los errores y avisos.

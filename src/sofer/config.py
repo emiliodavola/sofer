@@ -70,10 +70,16 @@ _DEFAULTS: dict[str, Any] = {
     # (repo_compliance.build_schema_report). Balances statistical confidence
     # against read-time cost; also surfaced in the card's stats footnote.
     "schema_sample_size": 10_000,
-    # Cap for distinct quality values tracked per column (issue #189):
-    # values stored in the per-file non-empty set are truncated to this
-    # many characters to bound memory on wide free-text columns.
-    "quality_value_preview_len": 50,
+    # Quality-scan bounds (issue #290). ``quality_max_dup_tracking`` is a hard
+    # cap on the distinct row hashes the ``duplicates`` check tracks (a dict
+    # entry + 32-char md5 hexdigest ≈ 200 B, so 1 M tracked rows ≈ 200 MB —
+    # bounded, and that bound is the whole reason the cap exists).
+    # ``quality_full_scan`` is the tri-state policy (``QUALITY_FULL_SCAN_MODES``)
+    # and ``quality_row_requiring_checks`` names the active fail checks that
+    # actually need every row before ``auto`` chooses the full scan.
+    "quality_max_dup_tracking": 1_000_000,
+    "quality_full_scan": "auto",
+    "quality_row_requiring_checks": ["corrupt_records"],
     # Cap for unclassified filenames listed by splits.validate_layout
     # (issue #189): the slice and its ellipsis guard derive from this one value.
     "splits_max_unclassified_names": 5,
@@ -101,6 +107,16 @@ _DEFAULTS: dict[str, Any] = {
     # Card collapse threshold: columns per table above which Data Fields
     # collapses; multi-table datasets always per-sheet collapsible. Tool-wide.
     "card_collapse_threshold": 15,
+    # Mixed-schema config generation (issue #292): one HF `configs` entry per
+    # column-signature group. `card_config_slug_invalid_pattern` matches every
+    # run of characters not allowed in a config identifier (HF allows
+    # ``[a-z0-9._-]``); runs collapse to `card_config_slug_separator`.
+    # `card_config_slug_max_length` caps the slug and
+    # `card_config_slug_fallback` names a group whose slug would be empty.
+    "card_config_slug_invalid_pattern": r"[^a-z0-9._-]+",
+    "card_config_slug_separator": "-",
+    "card_config_slug_max_length": 96,
+    "card_config_slug_fallback": "default",
     # Assisted failure reporting (issue #244). ``failure_report_dir`` is the
     # subdirectory under sofer's state home that holds one JSON file per
     # unsent failure; ``failure_report_repo`` is the ``owner/repo`` issues are
@@ -112,6 +128,16 @@ _DEFAULTS: dict[str, Any] = {
     "failure_report_gh_timeout_seconds": 30,
     "failure_report_duplicate_limit": 5,
     "failure_report_duplicate_query_tokens": 8,
+    # ── HF upload diagnostics (issue #289) ──
+    # Number of ADDITIONAL ``upload_folder`` attempts after the first failure.
+    # ``1`` is the maintainer-settled bound (decision D2): exactly one retry,
+    # no automatic xet fallback. Env-var NAMES probed to report which Hub
+    # transfer backend is active (never hardcoded in ``publish``), and the
+    # character cap for the exception message echoed in the failure report.
+    "hf_upload_retry_count": 1,
+    "hf_backend_disable_env": "HF_HUB_DISABLE_XET",
+    "hf_backend_prefix_env": "HF_XET_",
+    "hf_upload_error_max_chars": 500,
 }
 
 # Guard around constant rebinding in :func:`reload` — concurrent readers see
@@ -269,6 +295,28 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
         if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
             raise ValueError(f"'{_key}' in [tool.sofer] must be a positive integer")
 
+    # HF upload diagnostics (issue #289): the retry count is a non-negative
+    # integer (0 disables the retry), and the error cap must be positive so a
+    # failure report is never truncated to nothing.
+    _retry = merged.get("hf_upload_retry_count")
+    if not isinstance(_retry, int) or isinstance(_retry, bool) or _retry < 0:
+        raise ValueError("'hf_upload_retry_count' in [tool.sofer] must be a non-negative integer")
+    _err_cap = merged.get("hf_upload_error_max_chars")
+    if not isinstance(_err_cap, int) or isinstance(_err_cap, bool) or _err_cap < 1:
+        raise ValueError("'hf_upload_error_max_chars' in [tool.sofer] must be a positive integer")
+
+    # Quality scan bounds (issue #290): the full-scan policy is a closed
+    # tri-state, and the duplicate cap must be a positive integer — 0 would
+    # silently disable duplicate detection instead of bounding it.
+    if merged.get("quality_full_scan") not in QUALITY_FULL_SCAN_MODES:
+        raise ValueError(
+            "'quality_full_scan' in [tool.sofer] must be one of "
+            f"{', '.join(repr(mode) for mode in QUALITY_FULL_SCAN_MODES)}"
+        )
+    _dup_cap = merged.get("quality_max_dup_tracking")
+    if not isinstance(_dup_cap, int) or isinstance(_dup_cap, bool) or _dup_cap < 1:
+        raise ValueError("'quality_max_dup_tracking' in [tool.sofer] must be a positive integer")
+
     return merged
 
 
@@ -403,8 +451,19 @@ CARD_BOOLEAN_VALUES: list[str] = _DEFAULTS["card_boolean_values"]
 SCHEMA_DUP_THRESHOLD: int = _DEFAULTS["schema_dup_threshold"]
 SCHEMA_SAMPLE_SIZE: int = _DEFAULTS["schema_sample_size"]
 
-QUALITY_VALUE_PREVIEW_LEN: int = _DEFAULTS["quality_value_preview_len"]
+QUALITY_MAX_DUP_TRACKING: int = _DEFAULTS["quality_max_dup_tracking"]
+QUALITY_FULL_SCAN: str = _DEFAULTS["quality_full_scan"]
+QUALITY_ROW_REQUIRING_CHECKS: list[str] = _DEFAULTS["quality_row_requiring_checks"]
 SPLITS_MAX_UNCLASSIFIED_NAMES: int = _DEFAULTS["splits_max_unclassified_names"]
+
+QUALITY_FULL_SCAN_MODES: tuple[str, ...] = ("auto", "always", "never")
+"""Closed set of ``quality_full_scan`` values (issue #290).
+
+Deliberately NOT a ``_DEFAULTS`` entry: this is the policy vocabulary the
+value is validated against, not a tunable user option — adding it to
+``_DEFAULTS`` would make ``[tool.sofer] quality_full_scan_modes`` settable and
+detach the validator from the tri-state it is meant to enforce.
+"""
 
 # Metadata-core (profile/render) inference knobs.
 SEMANTIC_PRIORS: dict[str, float] = _DEFAULTS["semantic_priors"]
@@ -422,6 +481,12 @@ OUTPUT_MAX_BYTES: int = _DEFAULTS["output_max_bytes"]
 
 CARD_COLLAPSE_THRESHOLD: int = _DEFAULTS["card_collapse_threshold"]
 
+# Mixed-schema config generation (issue #292) — see the _DEFAULTS comments.
+CARD_CONFIG_SLUG_INVALID_PATTERN: str = _DEFAULTS["card_config_slug_invalid_pattern"]
+CARD_CONFIG_SLUG_SEPARATOR: str = _DEFAULTS["card_config_slug_separator"]
+CARD_CONFIG_SLUG_MAX_LENGTH: int = _DEFAULTS["card_config_slug_max_length"]
+CARD_CONFIG_SLUG_FALLBACK: str = _DEFAULTS["card_config_slug_fallback"]
+
 # Assisted failure reporting (issue #244): state subdirectory, target repo,
 # traceback cap, and gh timeout — read live through attribute access.
 FAILURE_REPORT_DIR: str = _DEFAULTS["failure_report_dir"]
@@ -431,3 +496,10 @@ FAILURE_REPORT_MANUAL_URL_MAX_CHARS: int = _DEFAULTS["failure_report_manual_url_
 FAILURE_REPORT_GH_TIMEOUT_SECONDS: int = _DEFAULTS["failure_report_gh_timeout_seconds"]
 FAILURE_REPORT_DUPLICATE_LIMIT: int = _DEFAULTS["failure_report_duplicate_limit"]
 FAILURE_REPORT_DUPLICATE_QUERY_TOKENS: int = _DEFAULTS["failure_report_duplicate_query_tokens"]
+
+# HF upload diagnostics (issue #289): bounded retry count, the env-var NAMES
+# probed for the active transfer backend, and the exception-message cap.
+HF_UPLOAD_RETRY_COUNT: int = _DEFAULTS["hf_upload_retry_count"]
+HF_BACKEND_DISABLE_ENV: str = _DEFAULTS["hf_backend_disable_env"]
+HF_BACKEND_PREFIX_ENV: str = _DEFAULTS["hf_backend_prefix_env"]
+HF_UPLOAD_ERROR_MAX_CHARS: int = _DEFAULTS["hf_upload_error_max_chars"]

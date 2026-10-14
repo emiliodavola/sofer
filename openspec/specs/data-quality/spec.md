@@ -31,6 +31,12 @@ upload()                → HF push
 - **100K sample cap** — checks that don't require full scan read at most `max_sample` rows (default 100 000).
 - **Severity model** — `fail` blocks upload (exit 1), `warn` is advisory.
 - **Sensible defaults** — quality checks run even without `[[quality]]` TOML section.
+- **Bounded per-row memory (issue #290)** — the `empty_columns` state is a per-column boolean, the
+  `duplicates` hash table is capped at `quality_max_dup_tracking`, and the finding lists stop growing
+  at their report limits; per-row memory SHALL be independent of the dataset size.
+- **Explicit full-scan policy (issue #290)** — the full/unsampled pass is a config-owned tri-state
+  (`quality_full_scan`), forced only by the config-declared row-requiring checks; a fixed-size probe
+  (`encoding_validation`, 8 KB) never triggers it.
 
 ---
 
@@ -58,6 +64,7 @@ Added to `src/sofer/model.py`:
 | `checks` | `list[QualityCheck]` | `field(default_factory=list)` | Per-check overrides. |
 | `default_severity` | `str` | `"warn"` | Fallback severity when a check has no explicit severity. |
 | `max_sample` | `int` | `100_000` | Max rows to read per file for checks that sample. |
+| `full_scan` | `str \| None` | `None` | Per-dataset full-scan override (`auto`/`always`/`never`); `None` = use the tool-wide `quality_full_scan`. |
 
 ### 2.3 `from_toml()` update
 
@@ -237,7 +244,14 @@ on the first failure — all checks run regardless. `run()` SHALL gate on text-e
 hash of each row's concatenated field values, **scoped per file**. Two identical
 rows in different files SHALL NOT be reported as duplicates. The hash key MUST
 include the filename to prevent cross-file collisions. Duplicate warnings MUST
-include the offending row number and a sample value.
+name the file each pair came from together with the offending row numbers, and
+SHALL list pairs round-robin across the affected files, so the report item cap
+cannot let one noisy file hide the others.
+
+The number of distinct row hashes tracked SHALL be capped at `quality_max_dup_tracking`
+(`[tool.sofer]`, default 1 000 000). Once the cap is reached the system MUST stop inserting new
+hashes and MUST NOT evict a tracked hash; a finding produced under the cap SHALL be marked `partial`
+and SHALL name the cap. Duplicate pairs among already-tracked hashes MUST continue to be reported.
 
 #### Scenarios
 
@@ -256,6 +270,7 @@ GIVEN a CSV where rows 17 and 42 are identical
 WHEN _check_duplicates() runs
 THEN the report SHALL have a warning
   AND the warning SHALL mention the duplicate row numbers
+  AND the warning SHALL name the file the rows came from
 ```
 
 **Identical rows in different files are NOT duplicates**
@@ -265,6 +280,18 @@ GIVEN file_a.csv row 1 equals file_b.csv row 1
 WHEN QualityValidator.run() processes both files
 THEN no duplicate warning SHALL be produced for those rows
 ```
+
+**Duplicate tracking cap is reached**
+
+```
+GIVEN a CSV whose distinct rows exceed quality_max_dup_tracking
+WHEN QualityValidator.run() completes
+THEN the hash table SHALL hold at most quality_max_dup_tracking entries
+  AND a duplicates finding SHALL be marked partial
+  AND its message SHALL name the cap
+```
+
+**Evidence:** `test: tests/test_quality.py::TestDuplicateTrackingCap::test_tracking_dict_never_exceeds_the_cap`, `test: tests/test_quality.py::TestDuplicateTrackingCap::test_cap_marks_partial_and_names_the_cap`, `test: tests/test_quality.py::TestDuplicateTrackingCap::test_cap_without_duplicates_reports_partial`
 
 ### 4.2 Empty rows — all fields empty/NA/null
 
@@ -296,6 +323,10 @@ sampled rows is empty, `NA`, `NULL`, or `N/A`. Files with zero data rows
 (header-only) SHALL be excluded from this check to avoid false positives
 where `_col_nonempty` has no entries.
 
+The `empty_columns` bookkeeping SHALL be a per-column "seen non-empty" boolean keyed `file::col`,
+not a distinct-value set. Memory for this accumulator SHALL be O(columns), independent of the row
+count.
+
 #### Scenarios
 
 **All columns populated**
@@ -322,6 +353,17 @@ GIVEN a CSV with a header but zero data rows
 WHEN _check_empty_columns() runs
 THEN no warning SHALL be appended for that file
 ```
+
+**Populated column bookkeeping is a boolean**
+
+```
+GIVEN a column with several distinct non-empty values
+WHEN QualityValidator.run() completes
+THEN the per-column state SHALL be a single True flag, not a set of values
+  AND its size SHALL NOT grow with the number of distinct values
+```
+
+**Evidence:** `test: tests/test_quality.py::TestColNonemptyBoolean::test_seen_flag_is_a_bool_not_a_value_set`, `test: tests/test_quality.py::TestColNonemptyBoolean::test_memory_is_o_columns_not_o_rows`, `test: tests/test_quality.py::TestColNonemptyBoolean::test_empty_column_stays_false_and_is_reported`
 
 ### 4.4 Null profiling — per-column null percentage threshold
 
@@ -614,6 +656,105 @@ WHEN encoding validation runs
 THEN a `fail` finding naming the file SHALL be appended
 ```
 
+### 4.13 Explicit full-scan policy (issue #290)
+
+**Requirement:** `QualityValidator` SHALL decide whether to read every row from an explicit,
+config-owned policy rather than from severity alone. The policy is tri-state (`quality_full_scan`,
+`[tool.sofer]`, default `"auto"`; an optional per-dataset `[quality] full_scan` table value wins over
+it when set):
+
+- `auto` — a full scan is forced only when an active `fail`-severity check is named in
+  `quality_row_requiring_checks` (`[tool.sofer]`, default `["corrupt_records"]`); otherwise the
+  `[quality] max_sample` applies.
+- `always` — every eligible file is read in full.
+- `never` — `[quality] max_sample` is honoured even with a `fail` check active.
+
+A fixed-size probe such as `encoding_validation` (8 KB) MUST NOT force a full scan. The validator
+SHALL remain single-pass; per-check multi-pass scanning is explicitly out of scope.
+
+**Encoding probe does not force the full scan**
+
+```
+GIVEN corrupt_records at warn, encoding_validation at fail, and a corrupt row beyond max_sample
+WHEN QualityValidator.run() executes under the default auto policy
+THEN the corrupt row SHALL NOT be detected (the scan was sampled)
+```
+
+**Evidence:** `test: tests/test_quality.py::TestFullScanPolicy::test_encoding_probe_does_not_force_full_scan`, `test: tests/test_quality.py::TestFullScanPolicy::test_needs_full_scan_is_false_for_encoding_probe_only`
+
+**Row-requiring fail check still scans every row**
+
+```
+GIVEN corrupt_records at fail and a corrupt row beyond max_sample
+WHEN QualityValidator.run() executes under the default auto policy
+THEN the corrupt row SHALL be detected
+```
+
+**Evidence:** `test: tests/test_quality.py::TestFullScanPolicy::test_row_requiring_fail_check_still_scans_full_file`, `test: tests/test_quality.py::TestFullScanPolicy::test_needs_full_scan_true_for_default_corrupt_records`
+
+**never honours max_sample with a fail check attached**
+
+```
+GIVEN quality_full_scan = "never" with a fail row-requiring check and a small max_sample
+WHEN QualityValidator.run() executes
+THEN a corrupt row within the sample SHALL be reported and marked partial
+  AND a corrupt row beyond the sample SHALL NOT be read
+```
+
+**Evidence:** `test: tests/test_quality.py::TestFullScanPolicy::test_never_honours_max_sample_with_fail_check`
+
+**always scans the full file**
+
+```
+GIVEN quality_full_scan = "always" with a small max_sample
+WHEN QualityValidator.run() executes
+THEN a corrupt row beyond max_sample SHALL be detected
+  AND the finding SHALL NOT be marked partial
+```
+
+**Evidence:** `test: tests/test_quality.py::TestFullScanPolicy::test_always_scans_everything`
+
+**Per-dataset override wins over the tool default**
+
+```
+GIVEN [quality] full_scan = "always" and a tool-wide quality_full_scan = "auto"
+WHEN QualityValidator.run() executes
+THEN the dataset override SHALL decide the scan
+```
+
+**Evidence:** `test: tests/test_quality.py::TestFullScanPolicy::test_per_dataset_override_wins_over_tool_default`, `test: tests/test_quality.py::TestQualityFromToml::test_quality_policy_table_parsed`, `test: tests/test_quality.py::TestQualityFromToml::test_unknown_full_scan_mode_warns`
+
+### 4.14 Bounded per-row accumulators (issue #290)
+
+**Requirement:** Every per-row accumulator SHALL have a bound independent of the dataset size. The
+duplicate finding list SHALL stop growing at `REPORT_MAX_ITEMS`, the empty-row list SHALL stop
+growing at `REPORT_MAX_ITEMS`, and the corrupt-record list SHALL stop growing at
+`REPORT_MAX_CORRUPT_RECORDS` — all at accumulation time, not report time. The `duplicates` hash
+table SHALL be bounded by `quality_max_dup_tracking` and the `empty_columns` state by the column
+count.
+
+**Finding lists stop growing at their report limits**
+
+```
+GIVEN a stream with more duplicates, empty rows or corrupt records than the relevant report limit
+WHEN QualityValidator.run() completes
+THEN each finding list SHALL hold exactly its report limit
+  AND two stream sizes SHALL produce identical accumulator sizes
+```
+
+**Evidence:** `test: tests/test_quality.py::TestAccumulatorCaps::test_duplicate_findings_capped_at_report_limit`, `test: tests/test_quality.py::TestAccumulatorCaps::test_empty_rows_capped_at_report_limit`, `test: tests/test_quality.py::TestAccumulatorCaps::test_corrupt_findings_capped_at_report_limit`, `test: tests/test_quality.py::TestAccumulatorCaps::test_accumulator_sizes_do_not_grow_with_dataset_size`
+
+**Optional per-dataset `[quality]` policy table**
+
+```
+GIVEN a dataset TOML with a [quality] table carrying full_scan and max_sample
+WHEN DatasetConfig.from_toml() runs
+THEN QualityConfig.full_scan / .max_sample SHALL reflect the table
+  AND an unknown full_scan mode SHALL be warned and ignored
+```
+
+**Evidence:** `test: tests/test_quality.py::TestQualityFromToml::test_quality_policy_table_parsed`, `test: tests/test_quality.py::TestQualityFromToml::test_unknown_full_scan_mode_warns`
+
 ---
 
 ## 5. Integration
@@ -695,7 +836,7 @@ findings.
   Errors:   1
     ✗  corrupt_records: Row 55 has 3 fields, header has 5
   Warnings: 2
-    ⚠  duplicates: Row 17 = Row 42
+    ⚠  duplicates: data.csv: Row 17 = Row 42
     ⚠  empty_rows: Row 33 is completely empty
   ✓  Quality: 5 passed, 1 failed, 2 warnings
 ```
@@ -718,6 +859,14 @@ field, initially empty. `QualityValidator.run()` SHALL append `QualityResult`
 instances directly — it SHALL NOT merge into `report.errors` / `report.warnings`.
 The `print_summary()` method SHALL iterate `quality_results` in a dedicated
 `─── Quality checks ───` section (§ 5.2).
+
+`QualityResult.partial` SHALL be `True` when the finding's evidence is not a complete view: when the
+scan was sampled and the finding is a streaming `warn` finding; when the scan was sampled under
+`quality_full_scan = "never"` and the finding is streaming; or when an accumulator was capped (the
+duplicate-tracking cap). A fixed-size probe finding (`encoding_validation`) SHALL NEVER be marked
+`partial` by sampling.
+
+**Evidence:** `test: tests/test_quality.py::TestFullFileCoverage::test_warn_check_partial_when_max_sample_applied`, `test: tests/test_quality.py::TestFullScanPolicy::test_never_honours_max_sample_with_fail_check`, `test: tests/test_quality.py::TestFullScanPolicy::test_encoding_probe_finding_is_never_partial`
 
 ---
 
@@ -771,7 +920,7 @@ Python 3.10+ standard library. Permitted stdlib modules: `csv`, `statistics`,
 - **Cross-file type consistency on large schemas**: If a dataset has 200+
   columns across 10 files, the type-compatibility report could be verbose.
   Tolerate as P0; paginate or summarise if feedback shows it's overwhelming.
-- **(Resolved)** `max_sample` interaction with row-hash duplicates: the
-  design uses set-of-hashes within the 100K sample. For P0 this covers
-  typical CSVs; for multi-GB files a Bloom-filter approximation can be
-  explored as P1.
+- **(Resolved by issue #290)** `max_sample` interaction with row-hash duplicates: the hash
+  table is capped at `quality_max_dup_tracking` (default 1 000 000), insertion stops at the cap, and
+  the capped finding is marked `partial` with the cap named. Per-row memory is therefore bounded and
+  independent of the dataset size — no Bloom-filter approximation is required for P0.

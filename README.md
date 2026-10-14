@@ -24,6 +24,7 @@ knowledge, and publishable to Hugging Face Hub or any local directory.**
 - [Profiling and rendering](#profiling-and-rendering)
 - [Command reference](#command-reference)
 - [Flags at a glance](#flags-at-a-glance)
+- [Troubleshooting HF uploads](#troubleshooting-hf-uploads)
 - [Assisted failure reporting](#assisted-failure-reporting)
 - [Data format support](#data-format-support)
 - [Parquet conversion limitations](#parquet-conversion-limitations)
@@ -357,6 +358,31 @@ detector class, no changes to the pipeline.
 | `--user-config PATH` | `mcp add`, `mcp remove` | Explicit user-scope config **file** for the selected agent; wins over the adapter's env override (Pi's `PI_CODING_AGENT_DIR`) and the `Path.home()` default. Rejected with `--agent all` — one path cannot name four different files. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
 
+### Troubleshooting HF uploads
+
+`sofer publish --target hf` delivers the whole package with a single
+`upload_folder` call. When that call fails, sofer prints the underlying
+exception type and message plus the active transfer backend, and retries once.
+A total failure reports `Result: 0 uploaded, N failed` and, when the repository
+ends up empty, says so explicitly.
+
+If a publish reports `0 uploaded, N failed` with an `I/O error`, re-run it with
+the xet transfer backend disabled **before** assuming the package or the token
+is wrong:
+
+```bash
+# macOS / Linux
+HF_HUB_DISABLE_XET=1 sofer publish my-dataset.toml
+# Windows (PowerShell)
+$env:HF_HUB_DISABLE_XET = "1"; sofer publish my-dataset.toml
+```
+
+`HF_HUB_DISABLE_XET` is read once, when `huggingface_hub` is imported, so it must
+be set in the environment of the `sofer` process — setting it after the process
+starts has no effect. The retry count, the probed environment-variable names and
+the error-message cap are `[tool.sofer]` defaults (`hf_upload_retry_count`,
+`hf_backend_disable_env`, `hf_backend_prefix_env`, `hf_upload_error_max_chars`).
+
 ## Assisted failure reporting
 
 When a CLI command fails with an uncaught error, sofer prints the traceback and —
@@ -457,6 +483,27 @@ Every dataset is checked before publish:
 | Cross-file types | Dtype mismatches across configs |
 | Encoding validation | File encoding issues |
 
+Quality checks run in a single streaming pass and their per-row memory is
+bounded independently of the dataset size (issue #290). Three `[tool.sofer]`
+keys control the scan — see
+[docs/configuration.md#quality-scan-bounds](docs/configuration.md#quality-scan-bounds):
+
+- `quality_full_scan` (`auto` / `always` / `never`) decides when the whole
+  file is read. `auto` (default) scans every row only for the `fail` checks
+  that actually need it (`quality_row_requiring_checks`, default
+  `corrupt_records`); an 8 KB probe such as `encoding_validation` never
+  triggers a full pass.
+- `quality_max_dup_tracking` caps the distinct row hashes tracked by the
+  `duplicates` check (default 1 000 000). When the cap is hit the finding is
+  marked **partial** and names the cap, rather than silently missing later
+  duplicates.
+- A dataset may override the policy with an optional `[quality]` table
+  (`full_scan`, `max_sample`).
+
+Findings carry a **partial** flag when their evidence comes from a sampled
+scan or a capped accumulator; `validate` prints it as `(partial)` and the
+on-disk quality report as `*(partial — sample-based)*`.
+
 ### Verify the built package (prepare --verify)
 
 `prepare --verify` runs an end-to-end load check on the freshly built package:
@@ -465,8 +512,10 @@ user makes with `load_dataset("user/repo")` — and compares the splits it
 returns against the ones detected from the remote file paths. The result is
 printed after the prepare summary:
 
-- **SKIPPED** — the optional `datasets` package is not installed. Install it
-  with `pip install datasets` and re-run.
+- **SKIPPED** — the optional `datasets` package is not installed, or it cannot
+  be imported (a broken `fsspec`/`xet` config, a partially installed wheel).
+  Install it with `pip install datasets` and re-run; the report names the
+  exception that stopped the import.
 - **PASSED** — `load_dataset()` succeeded and the detected splits match.
 - **FAILED** — `load_dataset()` raised, or the splits differ from what was
   detected; the report lists the errors and warnings.

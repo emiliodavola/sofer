@@ -10,11 +10,33 @@ verify, and keep CSVs.
 
 ## Requirements
 
-### Requirement: hf target uploads via upload_folder (PUB-01) — Universal (Modified 2026-08-29, fix-multisheet-parquet-publish)
+### Requirement: hf target uploads via upload_folder (PUB-01) — Universal (Modified 2026-08-29, fix-multisheet-parquet-publish; Modified 2026-10-13, fix-hf-xet-upload-diagnostics)
 
 `publish --target hf` SHALL ensure the repository exists, run the quality gate, and push via single `upload_folder`. The system MUST derive remotes via `expanded_planned_remotes` when staging is resolvable else `planned_remotes`. `_repo_diff_summary`, `_copy_package`, `_check_overwrite_protection`, `_print_split_mapping_validation`/`detect_splits`, and dry-run MUST share the expanded set. `keep_csv` SHALL remain CSV-only.
 
+When `upload_folder` fails, the system SHALL report the underlying exception as
+`<type(exc).__name__>: <str(exc)>`, truncating the message at `[tool.sofer]`
+`hf_upload_error_max_chars`, and SHALL name whether the xet transfer backend is active.
+The backend probe SHALL read the `HF_HUB_DISABLE_XET` and `HF_XET_*` environment-variable
+names from `[tool.sofer]` (`hf_backend_disable_env` / `hf_backend_prefix_env`), never
+hardcoded, and SHALL take the effective disable flag from the `huggingface_hub` import-time
+constant — an in-process environment flip is NOT reliable. The system SHALL retry the
+upload at most `[tool.sofer] hf_upload_retry_count` times (default 1) and SHALL NOT attempt
+an automatic non-xet fallback: `upload_folder` exposes no backend kwarg and the disable
+flag is an import-time constant, so the documented recovery is a re-run with
+`HF_HUB_DISABLE_XET=1`. When the repository held no files and no file was uploaded, the
+system SHALL report the created-but-empty repository state explicitly ("Repository created,
+0 files uploaded").
+
 (Previously: only `_copy_package` globbed; diff/protection/splits hid sheets behind single `stem.parquet`.)
+
+> Amended by `2026-10-13-fix-hf-xet-upload-diagnostics` (issue #289). The upload used to
+> print a bare `I/O error` for every file and leave a created-but-empty repository with an
+> outcome the caller could not distinguish from a flaky push. A runtime `--no-xet` flag or
+> an automatic in-process fallback is deliberately NOT provided (decision D1): the disable
+> flag is an import-time constant and `upload_folder` has no backend kwarg, so the bounded
+> retry plus the named cause and the documented environment workaround are the reliable
+> surface.
 
 #### Scenario: Diff universal remotes
 - GIVEN `DATA/GOT Ano.csv`, `Data/B.tsv`
@@ -45,6 +67,28 @@ verify, and keep CSVs.
 - GIVEN upload_folder raises
 - WHEN publish runs
 - THEN error, exit 1
+
+#### Scenario: Upload failure names the cause and the backend
+
+- GIVEN a prepared package and an `upload_folder` call that raises `I/O error: No such file or directory (os error 2)`
+- WHEN `publish --target hf` runs
+- THEN the report SHALL name the exception type and message (`<type>: <message>`) and whether the xet backend is active
+- AND it SHALL NOT print a bare, unnamed `I/O error`
+
+#### Scenario: Upload retried once
+
+- GIVEN an `upload_folder` call that raises on its first attempt and succeeds on its second
+- WHEN `publish --target hf` runs
+- THEN the upload SHALL be attempted exactly twice and SHALL be reported as a success
+- AND GIVEN an `upload_folder` call that raises on every attempt
+- THEN it SHALL be attempted at most `hf_upload_retry_count + 1` times, the failure SHALL name the cause, and rc 1 SHALL be returned
+
+#### Scenario: Created-but-empty repository reported
+
+- GIVEN a repository that held no files and an `upload_folder` call that uploads nothing
+- WHEN `publish --target hf` runs
+- THEN the report SHALL state `Repository created, 0 files uploaded`
+- AND GIVEN a repository that already held files, that statement SHALL NOT be printed
 
 #### Scenario: Missing files
 - GIVEN absent file

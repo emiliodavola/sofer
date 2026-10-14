@@ -353,6 +353,21 @@ class TestValidateSplitMapping:
         warnings = validate_split_mapping(["train/data.csv"])
         assert warnings == []
 
+    def test_default_warning_is_true_for_both_card_shapes(self):
+        """The default-load warning holds for one-config and multi-config cards.
+
+        The card groups files by column schema (issue #292), so the historical
+        "ALL files land in one 'train' split" claim is not true in general and
+        the warning states both outcomes instead.
+        """
+        warnings = validate_split_mapping(["a.parquet", "b.parquet"])
+        matching = [w for w in warnings if "Default-load warning" in w]
+        assert matching, warnings
+        message = matching[0]
+        assert "single-config card" in message
+        assert "multi-config card" in message
+        assert "name='<config>'" in message
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  verify_load_dataset
@@ -371,7 +386,40 @@ class TestVerifyLoadDataset:
         with patch.dict(sys.modules, {"datasets": None}):
             report = verify_load_dataset(tmp_path, cfg)
         assert report.skipped is True
-        assert any("not installed" in w for w in report.warnings)
+        # The skipped report names the exception the import raised (its exact
+        # class varies by interpreter) and keeps the install hint.
+        assert len(report.warnings) == 1
+        assert "could not be imported (" in report.warnings[0]
+        assert "pip install datasets" in report.warnings[0]
+
+    def test_skips_when_datasets_import_raises_non_importerror(self, tmp_path, monkeypatch):
+        """Any error while importing `datasets` skips verification, never crashes.
+
+        `import datasets` can fail on a transitive dependency (a broken fsspec
+        config, an ABI error, a partial wheel) with something other than
+        ImportError. verify is optional and non-blocking, so that must skip
+        with the reason named instead of propagating (issue #297).
+        """
+        (tmp_path / "datasets.py").write_text(
+            'import json\nraise json.JSONDecodeError("Expecting value", "{\\"a\\": }", 5)\n',
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "datasets", raising=False)
+
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+        report = verify_load_dataset(tmp_path, cfg)
+
+        assert report.passed is False
+        assert report.skipped is True
+        assert any("JSONDecodeError" in w for w in report.warnings)
+        assert any("Expecting value" in w for w in report.warnings)
 
     def test_loads_parquet_files_and_detects_splits(self, tmp_path):
         """When datasets is available and parquet files exist, load succeeds."""
