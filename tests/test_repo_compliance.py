@@ -22,6 +22,7 @@ from sofer.repo_compliance import (
     build_schema_report,
     build_schema_report_with_rows,
     normalize_header,
+    schema_config_plan,
 )
 
 # ── ColumnSchema ──────────────────────────────────────────────────────────────
@@ -198,8 +199,8 @@ class TestBuildSchemaReport:
         )
         schema = build_schema_report(cfg)
         names = [s.name for s in schema]
-        # Only first occurrence kept; second duplicate skipped
-        assert names == ["value"]
+        # One entry per origin (#304)
+        assert names == ["value", "value"]
 
     def test_file_not_found_skipped_silently(self, tmp_path):
         """A missing CSV file should be skipped without raising."""
@@ -964,8 +965,8 @@ class TestBuildSchemaReportDisambiguationParquet:
 
         schema = build_schema_report(cfg, staging_dir=tmp_path)
         names = [s.name for s in schema]
-        # Only first occurrence kept
-        assert names == ["value"]
+        # One entry per origin (#304)
+        assert names == ["value", "value"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1407,6 +1408,230 @@ class TestMixedSchemaConfigs:
         rows = {d["config_name"]: d["splits"][0]["num_examples"] for d in fm["dataset_info"]}
         assert rows["persona"] == 10
         assert rows["hogar"] == config.CARD_FALLBACK_ROWS_PER_FILE
+
+
+# ── Per-origin schema relation map (RC-R05/R06/R23, issue #304) ──────────────
+
+_PERSONA_2010 = "PROV;ANO\n1;2010\n2;2010\n"
+_PERSONA_2022 = "PROV;ANO\n1;2022\n2;2022\n"
+_HOGAR_2010 = "PROV;HOGAR\n1;7\n2;8\n"
+
+
+def _csv_corpus(tmp_path, sheets: dict[str, str]) -> DatasetConfig:
+    """Write ``remote -> CSV text`` files under *tmp_path* and return the config.
+
+    Remotes keep a convertible suffix (``.csv``) because the schema collection
+    loop decides eligibility from ``entry.remote``, and ``planned_remotes`` then
+    maps each one to its normalized ``.parquet`` remote — the CSV-fallback
+    origin/remote split this suite exists to pin (RC-R05, #304).
+    """
+    entries = []
+    for remote, text in sheets.items():
+        local = tmp_path / PurePosixPath(remote).name
+        local.write_text(text, encoding="utf-8-sig")
+        entries.append(FileEntry(local=local, remote=remote, convert_to_parquet=True))
+    return DatasetConfig(name="census", repo_id="user/census", files=entries, _base_dir=tmp_path)
+
+
+class TestSchemaRelationMap:
+    """One entry per ``(origin, name)``; one origin resolution for grouping,
+    features and row counts (issue #304)."""
+
+    def test_same_schema_table_pair_shares_one_config(self, tmp_path):
+        """Two tables with an identical schema land in ONE config (#304).
+
+        persona_2010 and persona_2022 declare the same columns; hogar_2010
+        differs. Today persona_2022 gets no schema entry, is treated as an
+        empty signature, and is split into a third config of its own.
+        """
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        plan = schema_config_plan(cfg, schema)
+        assert plan is not None
+        assert [name for name, _remotes in plan] == ["persona_2010", "hogar_2010"]
+        assert plan[0][1] == ["persona_2010.parquet", "persona_2022.parquet"]
+        assert plan[1][1] == ["hogar_2010.parquet"]
+
+    def test_every_origin_carries_its_own_entries(self, tmp_path):
+        """All three origins contribute entries; a repeated name appears once
+        per origin (RC-R05)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        assert [c.origin for c in schema] == [
+            "persona_2010.csv",
+            "persona_2010.csv",
+            "hogar_2010.csv",
+            "hogar_2010.csv",
+            "persona_2022.csv",
+            "persona_2022.csv",
+        ]
+        assert [c.name for c in schema] == ["PROV", "ANO", "PROV", "HOGAR", "PROV", "ANO"]
+
+    def test_group_features_are_scoped_and_deduped(self, tmp_path):
+        """dataset_info.features resolves each group's declared ``.csv``
+        origins (S6) and lists a shared column once (RC-R23 D5)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        by_name = {d["config_name"]: d for d in fm["dataset_info"]}
+        assert set(by_name) == {"persona_2010", "hogar_2010"}
+        assert [f["name"] for f in by_name["persona_2010"]["features"]] == ["PROV", "ANO"]
+        assert [f["name"] for f in by_name["hogar_2010"]["features"]] == ["PROV", "HOGAR"]
+
+    def test_single_config_features_are_deduped(self, tmp_path):
+        """A single config fed by two same-schema tables lists each column once."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "persona_2022.csv": _PERSONA_2022},
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert [f["name"] for f in fm["dataset_info"]["features"]] == ["PROV", "ANO"]
+
+    def test_unreadable_remote_makes_the_corpus_ungroupable(self, tmp_path):
+        """An eligible-but-unassessed remote never invents a group: with two
+        known signatures the corpus is ungroupable (S4, D1)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "hogar_2010.csv": _HOGAR_2010},
+        )
+        ghost = tmp_path / "ghost.csv"
+        cfg.files.append(FileEntry(local=ghost, remote="ghost.csv", convert_to_parquet=True))
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        assert schema_config_plan(cfg, schema) is None
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert "configs" not in fm
+        assert "dataset_info" not in fm
+
+    def test_unreadable_remote_joins_the_sole_signature_group(self, tmp_path):
+        """With exactly one known signature the unassessed remote joins it
+        instead of creating a group of its own (S4, D1)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "persona_2022.csv": _PERSONA_2022},
+        )
+        cfg.files.append(
+            FileEntry(local=tmp_path / "ghost.csv", remote="ghost.csv", convert_to_parquet=True)
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        plan = schema_config_plan(cfg, schema)
+        assert plan is not None
+        assert len(plan) == 1
+        assert plan[0][1] == [
+            "persona_2010.parquet",
+            "persona_2022.parquet",
+            "ghost.parquet",
+        ]
+
+    def test_declared_non_schema_remote_keeps_its_own_group(self, tmp_path):
+        """``include_in_schema = false`` is a declared opt-out, not an unknown
+        signature: the file keeps its own config and stays in data_files
+        (RC-R03, RC-R12, D1)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "hogar_2010.csv": _HOGAR_2010},
+        )
+        labels = tmp_path / "labels.csv"
+        labels.write_text("CODIGO;ETIQUETA\n1;uno\n", encoding="utf-8-sig")
+        cfg.files.append(
+            FileEntry(
+                local=labels,
+                remote="labels.csv",
+                convert_to_parquet=True,
+                include_in_schema=False,
+            )
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        plan = schema_config_plan(cfg, schema)
+        assert plan is not None
+        assert [name for name, _remotes in plan] == [
+            "persona_2010",
+            "hogar_2010",
+            "labels",
+        ]
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert {c["config_name"] for c in fm["configs"]} == {
+            "persona_2010",
+            "hogar_2010",
+            "labels",
+        }
+        assert "labels.parquet" in card
+        assert "CODIGO" not in card
+
+    def test_data_fields_lists_every_table(self, tmp_path):
+        """RC-R06/RC-R21: one Data Fields table per origin, no table dropped and
+        a repeated name shown once per table that declares it (S2)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        card = build_dataset_card(cfg, schema=schema)
+        body = card.split("\n---\n", 1)[1]
+        assert body.count("</summary>") == 3
+        assert "Data Fields -- persona_2010" in body
+        assert "Data Fields -- persona_2022" in body
+        assert body.count("`PROV`") == 3
+
+    def test_empty_columns_note_dedups_repeated_names(self):
+        """Data Quality Notes names a repeated empty column once."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[FileEntry(local=Path("a.csv"), remote="a.parquet")],
+        )
+        schema = [
+            ColumnSchema(
+                name="VACIO",
+                dtype="numeric",
+                nullable=True,
+                example="",
+                unique=0,
+                missing=100.0,
+                origin="a.parquet",
+            ),
+            ColumnSchema(
+                name="VACIO",
+                dtype="numeric",
+                nullable=True,
+                example="",
+                unique=0,
+                missing=100.0,
+                origin="b.parquet",
+            ),
+        ]
+        card = build_dataset_card(cfg, schema=schema)
+        line = next(ln for ln in card.splitlines() if ln.startswith("- **Empty columns:**"))
+        assert line == "- **Empty columns:** `VACIO`"
 
 
 # ── 4. size_categories validation ────────────────────────────────────────────
@@ -2151,9 +2376,14 @@ class TestColumnOriginAttribution:
         )
         assert cs.origin == ""
 
-    def test_duplicate_name_keeps_first_occurrence_origin(self, tmp_path):
-        """A column name in two files yields ONE entry attributed to its first
-        source — with remotes differing from basenames (S9)."""
+    def test_duplicate_name_yields_one_entry_per_origin(self, tmp_path):
+        """A column name in two files yields ONE entry PER source, each carrying
+        its own origin — with remotes differing from basenames (S9, #304).
+
+        Returning a single first-occurrence entry destroyed the per-origin
+        attribution the config grouping needs: a file whose columns all repeat
+        an earlier file's contributed no entry at all.
+        """
         first = tmp_path / "first.csv"
         first.write_text("value\na\n", encoding="utf-8-sig")
         second = tmp_path / "second.csv"
@@ -2169,8 +2399,7 @@ class TestColumnOriginAttribution:
         )
         schema = build_schema_report(cfg)
         value_cols = [s for s in schema if s.name == "value"]
-        assert len(value_cols) == 1
-        assert value_cols[0].origin == "data/first.csv"
+        assert [s.origin for s in value_cols] == ["data/first.csv", "other/second.csv"]
 
     def test_multi_file_origins_are_remotes_not_basenames(self, tmp_path):
         """S8 (RC-R05): every origin is a declared remote, never a bare
@@ -3277,7 +3506,7 @@ class TestDuplicateWarningRouting:
             _base_dir=tmp_path,
         )
         schema = build_schema_report(cfg)
-        assert len(schema) == 1  # only first occurrence kept
+        assert len(schema) == 2  # one entry per origin (#304)
         captured = capsys.readouterr()
         assert "[!] Duplicate column" in captured.out
         assert "value" in captured.out
@@ -3300,8 +3529,8 @@ class TestDuplicateWarningRouting:
             _base_dir=tmp_path,
         )
         schema = build_schema_report(cfg)
-        # Only the first file's a, b, c, d → 4 columns + 5 unique columns = 9
-        assert len(schema) == 9
+        # Every file contributes its own entries (#304): 5 files x 5 columns = 25
+        assert len(schema) == 25
         captured = capsys.readouterr()
         # Summary mode because 4 > threshold 3
         assert "[i]" in captured.out

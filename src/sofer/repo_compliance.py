@@ -23,7 +23,7 @@ from ._mirror import expanded_planned_remotes, parquet_remote_for, planned_remot
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 from .codebook import infer_column_type
-from .model import DatasetConfig
+from .model import DatasetConfig, FileEntry
 
 
 def normalize_header(col_name: str) -> str:
@@ -491,6 +491,58 @@ def _staged_xlsx_sheet_parquets(staging_dir: Path, parquet_key: str) -> list[Pat
     return [p for p in alt if p.is_file() and p.stem != base_stem]
 
 
+def _is_convertible_entry(entry: FileEntry) -> bool:
+    """Whether *entry* names a table the schema report can read (RC-R05).
+
+    The single definition of "convertible" shared by the schema collection loop
+    and the planned-remote classifier (AGENTS.md rule 4): a declared ``.csv`` /
+    ``.tsv`` / ``.xlsx`` / ``.jsonl`` remote that is not a recursive tree.
+    """
+    if entry.recursive:
+        return False
+    from ._converters import CONVERTIBLE_SUFFIXES
+
+    suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
+    return suffix in CONVERTIBLE_SUFFIXES
+
+
+def _is_schema_eligible(entry: FileEntry) -> bool:
+    """Whether the schema report *attempts* to read *entry* (RC-R05/RC-R12).
+
+    Convertible and not opted out.  A planned remote whose declaring entry is
+    not eligible can never carry a signature **by declaration** (recursive
+    tree, non-convertible remote, ``include_in_schema = false``); one that is
+    eligible but yields no column **could not be read**.  Those two cases must
+    not share a grouping policy (#304 D1).
+    """
+    return _is_convertible_entry(entry) and entry.include_in_schema
+
+
+def _note_column_origin(
+    seen_names: dict[str, str],
+    dup_map: dict[str, list[str]],
+    col_name: str,
+    origin: str,
+) -> None:
+    """Record *origin* as one source of *col_name* for the RC-R02 warning.
+
+    Purely informational bookkeeping: the caller always emits its own
+    ``ColumnSchema`` entry for the column, so a name repeated across files
+    yields one entry per origin (#304) while the duplicate report keeps naming
+    every repetition.
+
+    Args:
+        seen_names: First origin seen for each column name (mutated).
+        dup_map:    Column name -> every origin declaring it (mutated).
+        col_name:   Header as collected.
+        origin:     The declaring origin (staged Parquet key or remote).
+    """
+    if col_name in seen_names:
+        dup_map.setdefault(col_name, [seen_names[col_name]]).append(origin)
+    else:
+        seen_names[col_name] = origin
+
+
 def _build_schema_report_impl(
     cfg: DatasetConfig,
     csv_delimiter: str | None,
@@ -529,23 +581,24 @@ def _build_schema_report_impl(
     csv_encoding = csv_encoding or cfg.csv_encoding
     columns: list[ColumnSchema] = []
     row_counts: dict[str, int] = {}
-    seen_names: dict[str, tuple[str, int]] = {}
+    seen_names: dict[str, str] = {}
     _dup_map: dict[str, list[str]] = {}
     _had_potential_csv_entries = False
     _warned_missing: set[str] = set()
     _warned_unreadable: set[str] = set()
 
-    from ._converters import CONVERTIBLE_SUFFIXES, normalize_parquet_remote
+    from ._converters import normalize_parquet_remote
 
     for entry in cfg.files:
-        suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
-        if entry.recursive or suffix not in CONVERTIBLE_SUFFIXES:
+        if not _is_convertible_entry(entry):
             continue
 
         _had_potential_csv_entries = True
 
         if not entry.include_in_schema:
             continue
+
+        suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
 
         local = entry.resolve(base)
 
@@ -631,12 +684,9 @@ def _build_schema_report_impl(
                 # Also keep primary remote count as sum? Keep per-sheet counts only
                 for idx, col in enumerate(headers_s):
                     col_name = col
-                    if col_name in seen_names:
-                        prev_origin, _ = seen_names[col_name]
-                        _dup_map.setdefault(col_name, [prev_origin]).append(sheet_origin)
-                        continue
-                    else:
-                        seen_names[col_name] = (sheet_origin, len(columns))
+                    # Every origin keeps its own entry; the name only feeds the
+                    # RC-R02 duplicate warning (#304).
+                    _note_column_origin(seen_names, _dup_map, col_name, sheet_origin)
                     pa_field = pf_s.schema_arrow.field(idx)
                     dtype = _map_parquet_type(pa_field.type)
                     nullable = pa_field.nullable
@@ -684,13 +734,9 @@ def _build_schema_report_impl(
             for idx, col in enumerate(headers):
                 col_name = col
 
-                # disambiguate duplicate column names across files
-                if col_name in seen_names:
-                    prev_origin, _ = seen_names[col_name]
-                    _dup_map.setdefault(col_name, [prev_origin]).append(origin_name)
-                    continue
-                else:
-                    seen_names[col_name] = (origin_name, len(columns))
+                # Every origin keeps its own entry; the name only feeds the
+                # RC-R02 duplicate warning (#304).
+                _note_column_origin(seen_names, _dup_map, col_name, origin_name)
 
                 # dtype from Parquet physical type
                 pa_field = pf.schema_arrow.field(idx)
@@ -796,13 +842,9 @@ def _build_schema_report_impl(
             for idx, col in enumerate(headers):
                 col_name = col
 
-                # disambiguate duplicate column names across files
-                if col_name in seen_names:
-                    prev_origin, _ = seen_names[col_name]
-                    _dup_map.setdefault(col_name, [prev_origin]).append(entry.remote)
-                    continue
-                else:
-                    seen_names[col_name] = (entry.remote, len(columns))
+                # Every origin keeps its own entry; the name only feeds the
+                # RC-R02 duplicate warning (#304).
+                _note_column_origin(seen_names, _dup_map, col_name, entry.remote)
 
                 col_values = []
                 for row in sample:
@@ -859,7 +901,7 @@ def _build_schema_report_impl(
                     print(
                         f"  [!] Duplicate column '{col_name}' across files "
                         f"({prev_origin}, {other_origin}); "
-                        f"using first occurrence."
+                        f"each file keeps its own schema entries."
                     )
         else:
             # Sort by frequency (most duplicated first), honouring the
@@ -902,11 +944,12 @@ def build_schema_report(
                        entry before falling back to CSV reading.
 
     Returns:
-        A list of :class:`ColumnSchema` entries — one per column across all
-        files, each carrying its source file in :attr:`ColumnSchema.origin`.
-        Duplicate names keep only their first occurrence (first-occurrence-wins;
-        see the duplicate warnings emitted below).  Callers that also need exact
-        per-file row counts should use :func:`build_schema_report_with_rows`.
+        A list of :class:`ColumnSchema` entries — one per ``(origin, name)``
+        pair, so a column name declared by several files yields one entry per
+        file, each carrying its source file in :attr:`ColumnSchema.origin`.
+        The duplicate warnings emitted below are informational and never remove
+        an entry (#304).  Callers that also need exact per-file row counts
+        should use :func:`build_schema_report_with_rows`.
     """
     columns, _row_counts = _build_schema_report_impl(cfg, csv_delimiter, csv_encoding, staging_dir)
     return columns
@@ -1120,21 +1163,66 @@ def _remote_origin_aliases(
     return aliases
 
 
+def _schema_eligible_remotes(
+    cfg: DatasetConfig,
+    remotes: list[str],
+    aliases: dict[str, list[str]] | None = None,
+) -> set[str]:
+    """Return the planned remotes the schema report *attempts* to read (#304).
+
+    A remote is schema-eligible when a declaring ``[[file]]`` entry that maps to
+    it (:func:`_remote_origin_aliases`) is convertible and not
+    ``include_in_schema = false`` (:func:`_is_schema_eligible`).  The grouping
+    uses this to separate "eligible but could not be read" — signature unknown —
+    from "declared non-schema" (recursive tree, non-convertible remote,
+    explicit opt-out), which keeps its own config group (RC-R03/RC-R12).
+
+    Args:
+        cfg:     Dataset configuration.
+        remotes: Planned remote paths.
+        aliases: Pre-computed alias map (``None`` to derive it here).
+
+    Returns:
+        The subset of *remotes* that the schema report attempts to read.
+    """
+    from ._converters import normalize_parquet_remote
+
+    lookup = aliases if aliases is not None else _remote_origin_aliases(cfg, remotes)
+    eligible_keys: set[str] = set()
+    for entry in cfg.files:
+        if not _is_schema_eligible(entry):
+            continue
+        eligible_keys.add(entry.remote)
+        eligible_keys.add(normalize_parquet_remote(parquet_remote_for(entry.remote)))
+
+    return {
+        remote
+        for remote in remotes
+        if any(key in eligible_keys for key in lookup.get(remote, [remote]))
+    }
+
+
 def group_remotes_by_schema(
     remotes: list[str],
     schema: list[ColumnSchema],
     aliases: dict[str, list[str]] | None = None,
+    schema_eligible: set[str] | None = None,
 ) -> list[list[str]] | None:
     """Group planned remotes into one config group per column signature.
 
     Issue #292: the previous card merged every remote into one ``train`` split,
     which is unloadable when the files do not share a schema.  This groups the
     remotes whose ``ColumnSchema.origin`` yields the same ordered
-    ``(name, dtype)`` signature.  Remotes with no schema entry join the sole
-    signature group when there is exactly one (the schema report's
-    first-occurrence-wins dedup strips a later file whose columns all repeat an
-    earlier file — the common train/test case); otherwise they form their own
-    group.
+    ``(name, dtype)`` signature.  A remote with no schema entry is classified
+    before it is grouped (#304):
+
+    - **declared non-schema** (recursive tree, non-convertible suffix, or
+      ``include_in_schema = false``) keeps its own group, as before
+      (RC-R03/RC-R12).  These are the remotes absent from *schema_eligible*.
+    - **unassessed** (schema-eligible, yet no column: the file could not be
+      read) is *signature unknown*.  It joins the sole signature group when
+      exactly one exists, and otherwise makes the corpus ungroupable — an
+      unknown signature never invents a group of its own.
 
     Args:
         remotes: Planned remote paths (declaration order).
@@ -1142,6 +1230,9 @@ def group_remotes_by_schema(
         aliases: Optional ``remote -> [origin keys]`` map
                  (:func:`_remote_origin_aliases`); ``None`` matches the
                  remote itself only.
+        schema_eligible: Remotes the schema report attempted to read
+                 (:func:`_schema_eligible_remotes`); ``None``/empty treats every
+                 unresolved remote as declared non-schema.
 
     Returns:
         A list of remote-path groups, or ``None`` when the corpus is
@@ -1172,11 +1263,26 @@ def group_remotes_by_schema(
         else:
             groups.setdefault(signature, []).append(remote)
 
+    eligible = schema_eligible or set()
+    unknown = [remote for remote in unresolved if remote in eligible]
+    declared = [remote for remote in unresolved if remote not in eligible]
+
     grouped = list(groups.values())
-    if len(grouped) == 1 and unresolved:
-        grouped[0].extend(unresolved)
-    elif unresolved:
-        grouped.append(unresolved)
+    if not grouped:
+        # Signatures exist but none is attributable to a planned remote
+        # (origin-less hand-built fixtures): one group for every remote.
+        return [list(remotes)]
+    if unknown and len(grouped) > 1:
+        # A schema-eligible remote yielded no column, so it could not be read
+        # and no grouping can be vouched for (#304 D1).
+        return None
+    if len(grouped) == 1:
+        # A sole signature group absorbs both kinds of unresolved remote.
+        grouped[0].extend(unknown)
+        grouped[0].extend(declared)
+        return grouped
+    if declared:
+        grouped.append(declared)
     return grouped
 
 
@@ -1253,7 +1359,9 @@ def schema_config_plan(
     else:
         remotes = planned_remotes(cfg, keep_csv)
     aliases = _remote_origin_aliases(cfg, remotes)
-    groups = group_remotes_by_schema(remotes, schema, aliases)
+    groups = group_remotes_by_schema(
+        remotes, schema, aliases, _schema_eligible_remotes(cfg, remotes, aliases)
+    )
     if groups is None:
         return None
     return _name_groups(cfg, groups)
@@ -1263,18 +1371,45 @@ def _features_for_group(
     group_remotes: list[str],
     schema: list[ColumnSchema],
     single_group: bool,
+    aliases: dict[str, list[str]] | None = None,
 ) -> list[dict[str, str]]:
     """Return the ``dataset_info.features`` list for one config group.
 
     Columns are attributed structurally via :attr:`ColumnSchema.origin`
-    (RC-R06).  A single-group card keeps every schema entry — including
-    origin-less hand-built fixtures — exactly as before; a multi-group card
-    keeps only the entries whose origin is one of the group's remotes.
+    (RC-R06), resolved through the same alias map grouping and row counts use
+    (:func:`_remote_origin_aliases`), so a CSV-fallback schema whose origins are
+    the declared ``.csv`` remotes still matches its planned ``.parquet`` remote
+    (#304 S6).  A single-group card keeps every schema entry — including
+    origin-less hand-built fixtures — exactly as before.
+
+    A config's features describe ONE schema, so a name repeated across the
+    group's files is listed once, at its first occurrence.  Since #304 the
+    schema report carries one entry per ``(origin, name)``, so that repetition
+    is real data rather than a healed display artifact.
+
+    Args:
+        group_remotes: Planned remotes assigned to this config group.
+        schema:        Column schema report.
+        single_group:  Whether the card emits exactly one config.
+        aliases:       Optional ``remote -> [origin keys]`` map.
+
+    Returns:
+        One ``{"name": ..., "dtype": ...}`` dict per distinct column name.
     """
+    allowed: set[str] | None = None
+    if not single_group:
+        allowed = set()
+        for remote in group_remotes:
+            allowed.update((aliases or {}).get(remote, [remote]))
+
     features: list[dict[str, str]] = []
+    seen: set[str] = set()
     for col in schema:
-        if not single_group and col.origin not in group_remotes:
+        if allowed is not None and col.origin not in allowed:
             continue
+        if col.name in seen:
+            continue
+        seen.add(col.name)
         features.append({"name": col.name, "dtype": _feature_dtype(col)})
     return features
 
@@ -1321,7 +1456,7 @@ def _build_dataset_info(
     """
     info: dict[str, object] = {
         "config_name": config_name,
-        "features": _features_for_group(group_remotes, schema, single_group),
+        "features": _features_for_group(group_remotes, schema, single_group, aliases),
     }
 
     if not with_splits:
@@ -1654,8 +1789,12 @@ def build_dataset_card(
             lines.append("")
 
     # ── Data Quality Notes (empty columns, duplicate rows) ──────────────────
-    schema_empty = [s.name for s in schema if s.missing == 100.0]
-    all_empty = schema_empty
+    # One entry per (origin, name) means a repeated empty name would otherwise
+    # be listed once per file that declares it (#304).
+    all_empty: list[str] = []
+    for s in schema:
+        if s.missing == 100.0 and s.name not in all_empty:
+            all_empty.append(s.name)
     if empty_columns:
         for col in empty_columns:
             if col not in all_empty:
