@@ -525,9 +525,8 @@ GIVEN two CSV files: "a.csv" and "b.csv"
   AND both have a column named "value"
   AND both are converted to Parquet
 WHEN build_schema_report(cfg, staging_dir=tmpdir) is called
-THEN the returned list SHALL contain
-  "a.parquet::value" and "b.parquet::value"
-  (filename prefix uses the Parquet filename)
+THEN the returned list SHALL contain two entries named "value"
+  (one per source file, origin "a.parquet" and "b.parquet" — RC-R05)
 ```
 
 #### 3.3.7 Duplicate column summary threshold (RC-R02)
@@ -676,21 +675,24 @@ directories SHALL stage zero files without error.
 
 ---
 
-### 4.6 Column origin attribution (RC-R05)
+### 4.6 Column origin attribution (RC-R05) — Modified 2026-10-15, fix-schema-relation-map
 
 > Added by change `publish-readme-bugs` (archived 2026-08-24). Modified by
-> change `staged-parquet-stem-collision` (archived 2026-08-26).
+> change `staged-parquet-stem-collision` (archived 2026-08-26) and by
+> `2026-10-15-fix-schema-relation-map` (issue #304), which replaces the global
+> first-occurrence-wins dedup with one entry per `(origin, name)`.
 
 `ColumnSchema` SHALL keep its optional `origin: str = ""` field, now holding
 the source file's **remote-relative POSIX path**: on the Parquet path, the
 remote-derived `.parquet` key (e.g. `"data/survey.parquet"`); on the CSV
 path, `entry.remote`. `build_schema_report()` SHALL populate `origin` for
-every collected column, on both paths. Duplicate-name resolution remains
-first-occurrence-wins: a column name appearing in several files SHALL yield
-ONE entry attributed to its first source file via `origin`, and the duplicate
-warnings of § 3.3.7 remain unchanged. This also supersedes RC-R07's clause
-calling origin "basename-based": origin is display provenance only and is
-never joined against row-count keys.
+every collected column, on both paths. Each file's columns SHALL yield their
+**own** entries: the report SHALL carry one entry per `(origin, name)` pair, so
+a column name appearing in several files yields one entry **per source file**,
+each attributed to its own `origin`. The duplicate warnings of § 3.3.7 remain
+unchanged and SHALL never remove an entry. This also supersedes RC-R07's clause
+calling origin "basename-based": origin is display and grouping provenance only
+and is never joined against row-count keys.
 
 (Previously: `origin` held the source file's basename — `"survey.csv"` /
 `"survey.parquet"` — which is ambiguous for same-stem files under different
@@ -703,12 +705,13 @@ remotes.)
 - THEN every returned ColumnSchema SHALL carry `origin` set to its source
       file's remote-relative path
 
-#### Scenario: Duplicate name keeps first occurrence with its origin
+#### Scenario: Duplicate name yields one entry per origin
 
 - GIVEN two files that both contain a column "value"
 - WHEN `build_schema_report()` runs
-- THEN exactly one "value" entry SHALL be returned
-- AND its `origin` SHALL be the first-declared file that provided the column
+- THEN the returned list SHALL contain two "value" entries
+- AND their `origin` values SHALL be the two declaring files, in declaration
+      order
 
 #### Scenario: Nested Parquet origins distinguish same-stem files
 
@@ -716,21 +719,24 @@ remotes.)
 - WHEN origins are assigned
 - THEN they SHALL be `survey.parquet` and `data/survey.parquet` respectively
 
-### 4.7 Data Fields renders per-file attribution (RC-R06)
+### 4.7 Data Fields renders per-file attribution (RC-R06) — Modified 2026-10-15, fix-schema-relation-map
 
 > Added by change `publish-readme-bugs` (archived 2026-08-24). Supersedes the
-> `file::` disambiguation prefixes described in § 3.3.3 step 3.
+> `file::` disambiguation prefixes described in § 3.3.3 step 3. Modified by
+> `2026-10-15-fix-schema-relation-map` (issue #304): one row per schema entry.
 
 The Dataset Card's "Data Fields" table SHALL include a **File** column whose cell
 contains the column's `origin`. The card MUST NOT drop any included column, and
 column names SHALL be displayed without the `file::` disambiguation prefix, since
 attribution is now structural.
 
-Design decision — File column over grouped-by-file sections: because duplicate
-names collapse to their first occurrence, at most one row exists per distinct
-column name, so one flat table with an explicit File column stays accurate;
-grouped sections would visually imply each file exclusively owns its rows and
-would repeat table headers per group.
+Design decision — one row per schema entry, File column carries attribution: the
+schema report carries one entry per `(origin, name)` pair (RC-R05), so the Data
+Fields section renders one row per entry — as the flat `### Data Fields` table in
+a single-origin card, and as one `<details>` block per origin in a card with more
+than one origin (RC-R21). A name declared by several files therefore appears once
+per declaring file, each row naming its source in the File column; no table's
+columns are dropped, and the section is exact about each table's own schema.
 
 (Previously: one undifferentiated table mixing columns across files with no
 attribution.)
@@ -747,6 +753,13 @@ attribution.)
 - GIVEN a schema built from one file
 - WHEN the card is rendered
 - THEN the File column SHALL be present and populated for every row
+
+#### Scenario: Repeated name appears once per declaring file
+
+- GIVEN two files that both declare a column "PROV"
+- WHEN the card is rendered
+- THEN "PROV" SHALL appear in each declaring file's table
+- AND no table SHALL lose its other columns
 
 ### 4.8 Real num_examples in YAML splits (RC-R07)
 
@@ -1257,7 +1270,7 @@ single entry triggers at most one of the two.
 
 ---
 
-### Requirement: Collapsible Data Fields per sheet with threshold (RC-R21)
+### Requirement: Collapsible Data Fields per sheet with threshold (RC-R21) — Modified 2026-10-15, fix-schema-relation-map
 
 The system MUST render the Dataset Card's Data Fields as per-sheet collapsible tables. `build_dataset_card(cfg, schema, row_counts)` SHALL group `ColumnSchema` entries by `origin` sheet fragment (derived from `origin`/`staging_dir` normalized `stem__sheet.parquet` key; when grouping yields one label it is the file stem). Each group SHALL be rendered as its own `<details><summary>Data Fields -- <label> (N columns)</summary>` block containing that group's `| Column | Type | File | … |` table, with a **blank line after `</summary>`** so HF/GFM renders the table inside the details (HF `<details>` requirement). Wrapping SHALL be gated by `config.CARD_COLLAPSE_THRESHOLD` (default 15) via dynamic `config` read at call time:
 
@@ -1266,6 +1279,7 @@ The system MUST render the Dataset Card's Data Fields as per-sheet collapsible t
 - Single-group above threshold SHALL also wrap in one `<details>` (per-table threshold applies even for single-file).
 - `dataset_info.features` SHALL stay flat (no collapse); collapse affects only the body Data Fields section.
 - Section titles MUST match staged artifact stems `__<sanitized>` (post-sanitize, using same `sanitize_sheet_name` contract as codebook/prepare), and both sheets MUST appear when multisheet data is present.
+- Grouping for display SHALL be by `origin` (one block per table), NEVER by config group: two origins that share one column signature still render one independent block each, so every table's own columns stay visible (`2026-10-15-fix-schema-relation-map`, issue #304).
 
 #### Scenario: RC-R21.01 single-file below threshold stays unwrapped
 
@@ -1321,6 +1335,13 @@ The system MUST render the Dataset Card's Data Fields as per-sheet collapsible t
 - GIVEN two sheets each with 5 columns (both below threshold) and `threshold=15`
 - WHEN the card is generated
 - THEN both tables SHALL still be wrapped (each in its own `<details>`) because `len(groups)>1`
+
+#### Scenario: RC-R21.09 same-schema tables keep one block each
+
+- GIVEN two origins whose ordered column lists are identical
+- WHEN the card is generated
+- THEN both origins SHALL render their own `<details>` block
+- AND each block SHALL list that origin's full column list
 
 ### Requirement: Staged per-sheet Parquet lookup accepts collapsed single-underscore names (RC-R22)
 
@@ -1429,16 +1450,30 @@ duality regression guard for `test_mirror`/`TestExpandedCard` stubs).*
 
 ---
 
-### Requirement: Mixed-schema config grouping (RC-R23)
+### Requirement: Mixed-schema config grouping (RC-R23) — Modified 2026-10-15, fix-schema-relation-map
 
-> Added by change `2026-10-13-fix-mixed-schema-configs` (issue #292).
+> Added by change `2026-10-13-fix-mixed-schema-configs` (issue #292). Modified
+> by `2026-10-15-fix-schema-relation-map` (issue #304): one entry per
+> `(origin, name)`, one origin relation for grouping/features/row counts, and
+> the remote-class policy for schema-less remotes.
 
 `build_dataset_card` SHALL derive its `configs` and `dataset_info` from a
 schema-grouping plan, never from a single unconditional merged config:
 
 - **Grouping (D2).** Group planned remotes by the ordered `(name, dtype)`
-  signature of the `ColumnSchema` entries attributed to them via
-  `ColumnSchema.origin`; sheet origins group per sheet.
+  signature of the entries attributed to them through the resolved origin of the
+  group's remote (`_remote_origin_aliases`), so grouping,
+  `dataset_info.features` and row counts all resolve the SAME `origin -> remote`
+  relation; sheet origins group per sheet.
+- **Remote classes (D1).** A planned remote whose declaring entry is not
+  schema-eligible (recursive tree, non-convertible suffix, or
+  `include_in_schema = false`) SHALL keep its own config group and stay listed in
+  `configs.data_files` (RC-R03, RC-R12). A planned remote that IS schema-eligible
+  but yielded no column — the file could not be read — SHALL be treated as
+  *signature unknown*: it SHALL join the sole signature group when exactly one
+  exists, and otherwise the corpus SHALL be ungroupable (neither `configs` nor
+  `dataset_info`). An unknown signature SHALL NEVER invent a config group of its
+  own.
 - **`config_name` (D3).** Each `config_name` SHALL be a slug matching
   `[a-z0-9._-]`, derived from `[dataset] name` (or `cfg.config_names[0]`) for a
   single group and from the remote's file stem for multiple groups. The slug
@@ -1452,8 +1487,11 @@ schema-grouping plan, never from a single unconditional merged config:
 - **`dataset_info` (D5).** One block per config, each with the group's
   `features` and a `train` split whose `num_examples` sums the group's exact
   row counts, falling back to `card_fallback_rows_per_file` × group remote
-  count **for that group only**. The single-group dict shape is preserved; the
-  multi-group shape is the HF list of `DatasetInfo` dicts.
+  count **for that group only**. A group's `features` SHALL list the distinct
+  column names attributed to that group's remotes through the same origin
+  relation, once each — a name repeated across the group's files is one feature.
+  The single-group dict shape is preserved; the multi-group shape is the HF list
+  of `DatasetInfo` dicts.
 - **Ungroupable guard (S2/D1).** When the schema report carries no column for
   any planned remote and more than one remote is planned, the card SHALL emit
   neither `configs` nor `dataset_info`.
@@ -1470,6 +1508,14 @@ schema-grouping plan, never from a single unconditional merged config:
 - WHEN the card is generated
 - THEN the two tables SHALL NOT share one `train` config
 - AND each config's `data_files` SHALL contain only its own group's remotes
+
+#### Scenario: Same-schema table pair shares one config — issue #304
+
+- GIVEN three tables where two declare an identical ordered column list and the
+  third differs
+- WHEN the card is generated
+- THEN `configs` SHALL contain exactly two entries
+- AND the two identical-schema tables SHALL share one config's `data_files`
 
 #### Scenario: config_name is a validated slug
 
@@ -1490,6 +1536,28 @@ schema-grouping plan, never from a single unconditional merged config:
 - WHEN the card is generated
 - THEN `configs` SHALL be absent
 - AND `dataset_info` SHALL be absent
+
+#### Scenario: Unknown-signature remote never invents a group
+
+- GIVEN two known signatures and a planned remote whose file cannot be read
+- WHEN the card is generated
+- THEN `configs` SHALL be absent
+- AND `dataset_info` SHALL be absent
+
+#### Scenario: Unknown-signature remote joins the sole group
+
+- GIVEN one known signature and a planned remote whose file cannot be read
+- WHEN the card is generated
+- THEN `configs` SHALL contain exactly one entry
+- AND its `data_files` SHALL include the unreadable remote
+
+#### Scenario: Declared non-schema remote keeps its own config
+
+- GIVEN a `[[file]]` entry with `include_in_schema = false` beside two
+  schema-assessed tables
+- WHEN the card is generated
+- THEN the opted-out file SHALL keep its own `configs` entry
+- AND the file SHALL stay listed in `configs.data_files` (RC-R03)
 
 #### Scenario: Per-group num_examples
 
