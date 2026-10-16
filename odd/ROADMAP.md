@@ -130,17 +130,26 @@ acts on `$CODEX_HOME` while the adapter resolves `~/.codex`, so "delegate then p
 different file than the native writer — the #274 defect class, still live for codex). The four remaining
 `type:feature` issues (#320, #322, #323, #324) were checked too and every premise still holds.
 
-### Batch A — bug/chore (this branch, `fix/316-321-bug-chore-followups`)
+### Batch A — bug/chore — **delivered**
 
-| ID | Issue | Size | Route |
+| ID | Issue | Delivered in | Evidence |
 | --- | --- | --- | --- |
-| T1 | #316 split-mapping warning prints one message per file | S | ad-hoc fix, test-first; the summary clause `RC-Universal-Card` S4 is unchanged |
-| T2 | #319 the `verify:` hatch size excludes the backlogged specs | S | inline; PB-15 pins what is reported, so option 2 of the issue, widened |
-| T3 | #318 README lists 3 of 26 `[meta]` keys | S | docs pointer, README + README_ES (AGENTS.md rule 13) |
-| T4 | #317.2 the RSS sampler reads a trampoline | S | ad-hoc fix, test-first |
-| T5 | #317.1 the corpus never reaches the dup cap | S | recipe change + re-run, no `src/` change |
-| T6 | #317.3 the 20 M row run | — | recorded as not performed; no host available |
-| T7 | #321 native codex/gemini delegation declines by default | M | **decision required** — see below |
+| T1 | #316 split-mapping warning prints one message per file | #327 (`4c68cef`) | RED was 66 warnings for 65 files, GREEN is 1. The per-file message's *mixed* case turns out to be structurally unreachable — `detect_splits` attributes a file by its keyword — so the guard is pinned with a synthetic split instead of being deleted |
+| T2 | #319 the `verify:` hatch size excludes the backlogged specs | #327 (`e1bc04f`) | option 2: the line states its own scope. Option 1 (a second counter) was measured and rejected — the whole backlog holds exactly one such line and no row syntax |
+| T3 | #318 README lists 3 of 26 `[meta]` keys | #327 (`14d9131`) | a pointer to §2.1.1 in both READMEs rather than a drifting second copy |
+| T4 | #317.2 the RSS sampler reads a trampoline | #327 (`2e77c51`) | calibration `(False, 5.2 MiB)` → `(True, 216.6 MiB)`. **Two** reader sites, not one: fixing only the calibration left the published figure at 5.2 MiB, and only a smoke run caught it |
+| T5 | #317.1 the corpus never reaches the dup cap | #327 (`2e77c51`) | a third case holds the default policy with a cap the corpus reaches; the peak does not move across a 100× range of cap |
+| T6 | #317.3 the 20 M row run | — | recorded as **not performed** in the spec and the archive report; no host with the space and patience |
+| T7 | #321 native codex/gemini delegation declines by default | #328 (`967964d`) | the decision was to keep the decline and name the trade-off; option 1 was rejected on measurement, and the rejection is recorded in the change folder |
+| — | #325 codex resolves `~/.codex` while its CLI acts on `$CODEX_HOME` | #328 (`2eda0af`) | found while working T7, and its prerequisite. One adapter field; the issue's own proposed fix would have moved the default |
+
+Both PRs are merged — #327 as `2451763`, #328 as `397e7e2` — and both branches are deleted.
+
+**One debt this batch created and then closed:** #328 merged without the archive move AGENTS.md rule 15
+requires, leaving both change folders at `openspec/changes/` and their `tasks.md` files carrying `pending`
+rows for work already done. `chore/sdd-close-v0.7.0-record` closes it; each archive report now carries a
+"Late archive" section recording the miss, its cause and the remedy, because that record is the only thing
+a future reader has.
 
 ### Finding raised by this batch (not in any issue)
 
@@ -164,4 +173,4 @@ real Windows evidence) → T5 → T6 → T7 (blocked on a maintainer decision).
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D5 | #321: delegate natively and then patch the timeout keys into the same file (the issue's option 1), or keep the decline and make `--no-timeout` louder (option 3)? | Option 1 **after** the #321 prerequisite lands: give the codex adapter `user_env_dir = "CODEX_HOME"` so sofer's resolution matches the native CLI's. Option 1 alone would reintroduce the #274 defect class, and it reverses an MCP-REG-05 clause the maintainer decided two days earlier, so it is not an implementation step to take unilaterally. |
+| D5 | #321: delegate natively and then patch the timeout keys into the same file (the issue's option 1), or keep the decline and make `--no-timeout` louder (option 3)? | **Decided: option 3, made honest** — keep the decline, and name the trade-off at the point a user meets it. Option 1 was rejected *after measuring*, not as a preference: `atomic_write` rewrites the whole document for TOML and JSON while only YAML splices, and `merge()` replaces the `sofer` entry wholesale, so "delegate then patch" produces the same document as the direct file edit — a `subprocess` and an extra `.bak` for nothing, with the claimed comment preservation undelivered. The prerequisite this row predicted was real and shipped anyway, as #325. |

@@ -1,7 +1,8 @@
 # Feature: bug-chore-followups — issues #316, #317, #318, #319, #321
 
-**Branch:** `fix/316-321-bug-chore-followups` from `dev@eaf56f5`. **Issues:** `emiliodavola/sofer#316`,
-`#317`, `#318`, `#319`, `#321`. **Delivery PR:** (pending — user decision) → `dev`.
+**Branch:** `fix/316-321-bug-chore-followups` from `dev@eaf56f5`, plus `fix/325-codex-home-and-321-delegation`
+for the `#321` follow-up. **Issues:** `emiliodavola/sofer#316`, `#317`, `#318`, `#319`, `#321`, `#325`.
+**Delivery PRs:** **#327 merged** (`2451763`) and **#328 merged** (`397e7e2`) → `dev`.
 **Milestone:** v0.7.0 — follow-up defects from the v0.6.0 batch. **Store:** hybrid
 (`odd/tasks/bug-chore-followups.md` + `openspec/changes/<date>-<type>-<name>/` per issue that carries a
 spec delta, archived inside the delivering PR per AGENTS.md rule 15).
@@ -309,15 +310,16 @@ issue and its own change.
 
 | ID | Issue | Route | Spec | State |
 | --- | --- | --- | --- | --- |
-| T1 | #316 | inline, test-first | S3 | delivered |
-| T2 | #319 | inline | S8, S9 | delivered |
-| T3 | #318 | inline | S7 | delivered |
-| T4 | #317 | inline, test-first | S5 | delivered |
-| T5 | #317 | inline, recipe + re-run | S4 | delivered |
-| T6 | #317 | record only | S6 | delivered |
-| T7 | #321 | decision | S10, S11, S12 | blocked — maintainer decision (D5) |
-| T8 | #320/#321 | analysis | S2 | delivered (see the section above) |
-| T9 | — | issue hygiene | S2 | delivered — nothing merits closing (see the section above) |
+| T1 | #316 | inline, test-first | S3 | delivered — #327 `4c68cef` |
+| T2 | #319 | inline | S8, S9 | delivered — #327 `e1bc04f` |
+| T3 | #318 | inline | S7 | delivered — #327 `14d9131` |
+| T4 | #317 | inline, test-first | S5 | delivered — #327 `2e77c51` |
+| T5 | #317 | inline, recipe + re-run | S4 | delivered — #327 `2e77c51` |
+| T6 | #317 | record only | S6 | delivered — #327 `2e77c51` (recorded as **not performed**) |
+| T7 | #321 | decision | S10, S11, S12 | delivered — #328 `967964d` (option 3 made honest; option 1 rejected on measurement, not preference) |
+| T8 | #320/#321 | analysis | S2 | delivered — see the overlap section above |
+| T9 | — | issue hygiene | S2 | delivered — nothing merits closing |
+| T10 | #325 | inline, test-first | — | delivered — #328 `2eda0af` (found while working T7, and its prerequisite) |
 
 ## Log
 
@@ -350,15 +352,30 @@ T12), and this host's absolute wall times are ~2.5× the recorded ones, so the t
 ratio and not the seconds.
 
 L6 (evidence, the batch commits): `ec7d083` tracking · `4c68cef` #316 · `e1bc04f` #319 · `14d9131` #318 ·
-`2e77c51` #317 items 1 and 2 · `b461164` their record. All six are on
-`fix/316-321-bug-chore-followups`, branched from `dev@eaf56f5` and pushed to `origin`. The change folder
-was moved to `openspec/changes/archive/2026-10-16-chore-complete-bounded-scan-evidence/` in its own
-commit, because AGENTS.md rule 15 puts the archive inside the PR that delivers the change.
+`2e77c51` #317 items 1 and 2 · `b461164` their record — all merged to `dev` in **#327** (`2451763`). The
+next two, `2eda0af` (#325) and `967964d` (the #321 trade-off), were rebased onto `dev` after #327 merged
+and merged in **#328** (`397e7e2`); the rebase was proven content-preserving by an identical tree hash
+(`ffff9f24…`), so the suite taken before it transfers exactly. The `#317` change folder was moved to
+`openspec/changes/archive/` inside its own PR, per AGENTS.md rule 15.
 
 L7 (published): the correction comment on #317 (the wrong diagnosis), the one on #319 (the stale probe),
-and the two new issues this batch surfaced — **#325** (codex resolves `~/.codex` while its own adapter
-notes say codex's native commands act on `$CODEX_HOME`; reproduced) and **#326** (`QualityValidator.run()`
-transiently allocates ~1× the corpus, so the validate peak is not independent of the dataset size).
+the one on **#321** (the option-1 rejection with its measurements, `6221654849`), and the two new issues
+this batch surfaced — **#325** (codex resolves `~/.codex` while its own adapter notes say codex's native
+commands act on `$CODEX_HOME`; reproduced) and **#326** (`QualityValidator.run()` transiently allocates ~1×
+the corpus, so the validate peak is not independent of the dataset size).
 
-L8 (open): T7 (#321) is **blocked on D5**, the maintainer's decision between delegating-then-patching and
-keeping the decline. **#325 is its prerequisite.** Nothing else is pending on this branch.
+L8 (resolved): D5 was decided as **option 3, made honest** — the decline stays, the trade-off is named at
+the point a user meets it, and the flag is named only when it actually restores delegation. `#325`, the
+prerequisite this row predicted, shipped as its own fix.
+
+L9 (a debt this batch created, and closed): #328 merged **without** the rule-15 archive move, leaving both
+its change folders at `openspec/changes/` and their `tasks.md` files carrying `pending` rows for work
+already done — the defect class rule 15 names by quoting the #281 correction in #282. `chore/sdd-close-v0.7.0-record`
+closes it: both folders moved to `archive/`, the five rows corrected, and a "Late archive" section added to
+each report. The cause was conflating *the folder is in the PR's diff* with *the folder is in `archive/`*.
+
+L10 (open, and not mine to take): **#326** needs a read-only instrumentation before any fix (snapshot *at*
+the peak, not at the end) to name what allocates ~1× the corpus inside `QualityValidator.run()`. **#320**,
+**#322**, **#323** and **#324** are `type:feature` and untouched. The *surgical TOML splice* — the only way
+to deliver #321's claim 1 without sofer rewriting codex's file — lives only in that change folder's design
+and is not filed as an issue.

@@ -12,9 +12,9 @@
 | TT-5 | Implement the hint, conditioned on the exact predicate | D2 | done | `src/sofer/cli.py`, with the measurement in the comment |
 | TT-6 | The flag's `--help` states the trade-off | D3 | done | `--no-timeout` help text |
 | TT-7 | Both READMEs state it too (rule 13) | D3 | done | `README.md` `--no-timeout` row and timeout paragraph; `README_ES.md` the same two |
-| TT-8 | Full suite on the frozen revision | — | pending | |
-| TT-9 | Publish the #321 framing correction | — | pending | |
-| TT-10 | Archive report | — | pending | |
+| TT-8 | Full suite on the frozen revision | — | done | 2238 passed / 9 skipped — the #325 revision's 2236 plus the two tests this change adds; `cli.py` re-verified at 100.00% because this change adds a branch to it |
+| TT-9 | Publish the #321 framing correction | — | done | comment `6221654849` on #321 |
+| TT-10 | Archive report | — | done | this folder's `archive-report.md` — archived late, see its §7 |
 
 ## Explicit non-deliveries
 

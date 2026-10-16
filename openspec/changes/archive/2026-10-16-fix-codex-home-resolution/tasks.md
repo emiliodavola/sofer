@@ -10,8 +10,8 @@
 | CH-3 | Declare `user_env_dir = "CODEX_HOME"` on the codex adapter, leaving `user_parts` alone | D1 | done | `src/sofer/mcp_registration.py`, with the comment tying it to `native_scope: False` (D4) |
 | CH-4 | GREEN on the resolution surface | D3 | done | `uv run pytest tests/test_mcp_registration.py -k "resolve_config or UserConfigResolution"` → 22 passed, 2 skipped |
 | CH-5 | Both READMEs name the override, as they already do for Pi and Hermes | — | done | `README.md:720` and `README_ES.md:756` (the per-agent table); `README.md:360` and `README_ES.md:372` (`--user-config`) now name both env-override agents |
-| CH-6 | Full suite and the type gates | — | pending | |
-| CH-7 | Archive report | — | pending | |
+| CH-6 | Full suite and the type gates | — | done | 2236 passed / 9 skipped on this revision; ruff, mypy and pyright clean via the pre-commit hooks |
+| CH-7 | Archive report | — | done | this folder's `archive-report.md` — archived late, see its §8 |
 
 ## Explicit non-deliveries
 

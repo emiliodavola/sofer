@@ -1,8 +1,10 @@
 # Feature: approval-phrase-agent-coverage — issue #295
 
 **Branch:** `fix/295-approval-phrase-agent-coverage` from `dev@b7dea51`. **Issue:** `emiliodavola/sofer#295`
-**Delivery PR:** (pending — user decision) → `dev`. **SDD change:**
+**Delivery PR:** **#309 merged** (`7f37227`) → `dev`. **SDD change:**
 `openspec/changes/2026-10-15-fix-approval-phrase-agent-coverage/` (archived inside this branch, rule 15).
+**Ledger:** the Tasks table below still reads `pending` on every row — it was never updated after the
+merge, and the merge commit is the record of what landed.
 **Risk:** low in code, real in contract — it adds two keys to the `sofer_auth_status` unconfigured
 `hints` payload (`approval_phrase_setup_pi`, `approval_phrase_setup_hermes`) and deletes a dead table.
 
