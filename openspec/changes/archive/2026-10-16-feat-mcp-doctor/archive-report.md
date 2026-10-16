@@ -43,7 +43,8 @@ Every task in `tasks.md` is `done` (T1–T11). No `pending` row remains.
 | Types | `uv run --python 3.13 mypy src/ scripts/`, `uv run pyright` | 0 errors / 0 errors (1 pre-existing `tomli` warning in `_toml.py`) |
 | Test-mapping contract | `uv run python scripts/check_test_mapping.py` | `OK` |
 | The command itself | `uv run sofer mcp doctor` | **1806 ms** measured, exit 0, all five agent rows correct — see §5.1 |
-| Delivery | — | **commit and pull request pending maintainer authorization.** Branch pushed state: not yet |
+| Delivery | `git show --stat c683d29` | 15 files changed, **+1644 / −6**, all four pre-commit hooks `Passed`; pushed, `origin/feat/322-mcp-doctor` verified equal to local |
+| Pull request | — | **#332**, open against `dev`, label `type:feature`, assigned to `emiliodavola` |
 
 The suite delta is arithmetic, not reconciliation: 2247 + 35 = 2282 passed, and 2256 + 35 = 2291
 collected.
@@ -77,17 +78,31 @@ recorded in `design.md` §4.
    happened (exit 0, the rest of the output intact). Left unchanged and recorded.
 4. **Two lint/type defects of mine, fixed before the gates ran clean.** `int(round(...))` (RUF046) and
    an `Any` return in `_stderr_tail` where mypy could not hold the attribute narrowing.
-5. **The 16–32 s cold-start figure is deliberately NOT touched.** This change measured 1.7–1.9 s on its
-   own machine (and 1806 ms through the finished command). Two runs on one machine with a warm page
-   cache cannot falsify a figure that may have been taken cold, on slower hardware, or before a
-   dependency left the import path. Revising a measurement a spec states as fact needs its own
-   measurement — cold cache, and ideally a second machine. Named in `design.md` §6 and in
-   `odd/ROADMAP.md` so the omission is deliberate and visible rather than overlooked.
+5. **The 16–32 s figure was removed from both READMEs; it stands everywhere else.** The maintainer's
+   instruction was to stop measuring it and to drop it from the README if it was not doing work — and it
+   was not: what a user needs is the *reason* a connect deadline is written (a first launch after an
+   install or upgrade is slower than a warm one, and a connect timeout reads exactly like a broken
+   registration), while the numbers are a measurement of one environment stated as a general fact. This
+   change also ships `sofer mcp doctor`, which prints ~1.8 s on this machine: a README asserting 16–32 s
+   beside a command printing 1800 ms makes the user trust neither. Both READMEs now carry the reason, a
+   pointer at the command, and the statement that the written value comes from `[tool.sofer]` rather
+   than from a number frozen in a document.
+
+   The figure is **still asserted** in `pyproject.toml:238`, `src/sofer/config.py:150`,
+   `src/sofer/mcp_registration.py:288` and `openspec/specs/mcp-registration/spec.md:395` — the last of
+   which is the contract of record. Those are reported rather than changed: the spec asserts a
+   measurement as fact, and rewriting a contract clause is a scope this instruction did not cover. See
+   §6.
 
 ## 6. Follow-ups this change creates
 
-- **The 16–32 s figure needs its own verification** (`odd/ROADMAP.md`, "Finding raised by Batch B").
-  Until then, the doctor's verdict on a machine like this one will read "fine" with ~60× headroom.
+- **Four sites still assert the 16–32 s figure** (`pyproject.toml:238`, `src/sofer/config.py:150`,
+  `src/sofer/mcp_registration.py:288`, `openspec/specs/mcp-registration/spec.md:395`). Three are
+  comments justifying the default's magnitude; the fourth is the contract of record and states the
+  figure as the reason the clause exists. Deciding between removing the number everywhere, restating it
+  as the environment it was measured in, or measuring it properly is open — the maintainer's
+  instruction covered the README only. Until then the doctor and the spec can disagree in front of a
+  user, which is the one thing this change was supposed to end.
 - **#320's opencode work should consume this command's output.** The doctor already names the missing
   key per agent; whatever shape is chosen for opencode must arrive here as another adapter capability,
   not as a second hand-written table.
