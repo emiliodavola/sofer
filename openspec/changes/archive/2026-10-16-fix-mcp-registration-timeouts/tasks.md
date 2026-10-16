@@ -33,8 +33,19 @@ registration.
 
 ## Close-out
 
-Filled in as the tasks were verified; the measured numbers are recorded in the closing report rather
-than restated here.
+| Gate | Command | Result |
+| --- | --- | --- |
+| Full suite | `uv run coverage run -m pytest tests/ -q` | 2185 passed, 9 skipped |
+| `cli.py` 100.00% (rule 14) | `uv run coverage report --include=src/sofer/cli.py --fail-under=100 -m` | 100% |
+| `scanner.py` / `prepare.py` / `publish.py` | same, per file | 100% each |
+| TOTAL floor | `uv run coverage report` | 94% |
+| Lint / format | `uv run ruff check src/ tests/ scripts/`, `uv run ruff format --check src/ tests/` | clean |
+| Types | `uv run mypy src/ scripts/`, `uv run pyright` | 0 errors |
+| Test-mapping contract | `uv run python scripts/check_test_mapping.py` | `OK` |
+| Commits | branch `fix/287-296-mcp-registration-timeouts` | `cb237d9` (entry), `6b833a7` (progress) |
+
+Not delivered, and not claimed by any row above: the optional `sofer mcp doctor` diagnostic of #287 §3.
+It is recorded in `archive-report.md` §5 as a deviation and §6 as a follow-up.
 
 ## TDD posture — stated honestly
 
