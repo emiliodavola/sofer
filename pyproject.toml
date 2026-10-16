@@ -232,9 +232,34 @@ quality_full_scan = "auto"
 # deliberately absent.
 quality_row_requiring_checks = ["corrupt_records"]
 
+# ── MCP registration timeouts (issues #287, #296) ──
+# Host-side deadlines `sofer mcp add` writes into the `sofer` entry, in
+# seconds. The cold start of `sofer-mcp` exceeded hosts' default connect
+# deadline (16-32 s measured) and a long tool exceeded the 60 s default
+# per-request deadline (~680 s `prepare` on a 3.2 GB corpus).
+mcp_request_timeout_seconds = 900
+mcp_connect_timeout_seconds = 120
+# How often a long MCP tool re-announces progress, which is what resets a
+# host's per-request deadline (issue #296 §3). Must stay well under the
+# smallest host default (60 s).
+mcp_progress_heartbeat_seconds = 20
+
+# ── Group-aware default-load warning (issue #303) ──
+# How many emitted config names the dry-run default-load warning lists before
+# eliding the rest, so a corpus with dozens of column-signature groups still
+# gets a readable instruction instead of a wall of names.
+card_config_group_warn_limit = 5
+
 # ── Report truncation limits (issue #189) ──
 # Unclassified filenames listed by splits.validate_layout (slice + guard).
 splits_max_unclassified_names = 5
+
+# ── Agent-facing metadata gate (issue #288) ──
+# A [meta] value that is empty or begins with one of these prefixes
+# (case-insensitive) is reported as a template placeholder by `sofer validate`,
+# the pre-prepare run and the MCP `sofer_validate` tool. A warning, never a
+# failure: a `fail` would break every existing config that already carries one.
+meta_placeholder_prefixes = ["TODO", "YOUR_", "example"]
 
 # ── Metadata core (profile / render) ──
 # All keys optional — these mirror the code defaults in src/sofer/config.py.

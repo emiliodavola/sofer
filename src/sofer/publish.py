@@ -77,6 +77,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 from . import config
 from ._mirror import copy_to_mirror, expanded_planned_remotes, planned_remotes
 from .prepare import prepare, resolve_output_dir
+from .repo_compliance import card_config_names
 from .splits import detect_splits, validate_layout, validate_split_mapping
 
 _api = HfApi()
@@ -484,13 +485,21 @@ def _print_split_report(report: object) -> None:
         print(f"    [!] {w}")
 
 
-def _print_split_mapping_validation(remotes: list[str]) -> None:
+def _print_split_mapping_validation(
+    remotes: list[str], config_names: list[str] | None = None
+) -> None:
     """Print split mapping compatibility warnings for the planned upload.
 
     Args:
         remotes: Planned remote paths being delivered.
+        config_names: ``configs[].config_name`` values read back from the built
+            card (:func:`sofer.repo_compliance.card_config_names`), so the
+            default-load warning tells the user which config names to pass
+            instead of leaving ``name='<config>'`` unresolved (issue #303).
+            ``None`` when no built card is on disk — the warning then states
+            both card shapes without naming them.
     """
-    mapping_warnings = validate_split_mapping(remotes)
+    mapping_warnings = validate_split_mapping(remotes, config_names)
     if mapping_warnings:
         print("\n  Split mapping validation:")
         for w in mapping_warnings:
@@ -785,7 +794,9 @@ def publish(
         )
         print(diff)
         print()
-        _print_split_mapping_validation(planned)
+        _print_split_mapping_validation(
+            planned, card_config_names(source) if source.is_dir() else None
+        )
         report = detect_splits(planned)
         _print_split_report(report)
         print(f"\n{'=' * 60}")
@@ -876,7 +887,7 @@ def publish(
     protected = _check_overwrite_protection(existing_files, force, planned_files=planned)
     if protected_out is not None:
         protected_out.update(protected)
-    _print_split_mapping_validation(planned)
+    _print_split_mapping_validation(planned, card_config_names(source))
 
     # ── 5. Staging + single upload_folder call ───────────────────────────
     tmpdir = Path(tempfile.mkdtemp())

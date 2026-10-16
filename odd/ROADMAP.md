@@ -1,0 +1,111 @@
+# Roadmap — v0.6.0, agent surface & card completeness
+
+**Milestone:** [v0.6.0 — agent surface & card completeness](https://github.com/emiliodavola/sofer/milestone/1)
+**Issues:** #287, #288, #291, #296, #303, #306
+**Verified against:** `dev@6786ba1`, working tree clean, no open PRs and no open `openspec/changes/`.
+
+This file is the plan of record for the milestone. Each phase is its own SDD change on its own
+branch, archived inside its own delivery PR (AGENTS.md rule 15). The per-phase feature documents
+live under `odd/tasks/` and carry the task list, the decisions and the commit evidence.
+
+## Verification of the reported defects
+
+Every claim in the six issues was checked against the code, not against the issue text.
+
+| Issue | Reproduces | Current-code evidence |
+| --- | --- | --- |
+| #287 | yes | `grep -rn connect_timeout src/ README.md docs/` → 0 hits. `ADAPTERS` (`mcp_registration.py:88-215`) carries `native_env`/`native_scope` only. The README per-agent table (lines 711-722) documents `command, cwd, env` and no timeout. `mcp_server.py` imports `.cli` at module load, so `scanner`/`prepare`/`publish`/pandas/pyarrow are all imported before `initialize` can be answered. No `doctor` subcommand exists. |
+| #288 | yes | The `init` template is entirely placeholders (`cli.py:994-998`). No placeholder detection in `checks.py`/`quality.py` (`grep TODO` → 0 hits). No `sofer_meta_set`/`sofer_meta_check` in `mcp_server.py`. `sofer_validate`'s `Requires:` (`mcp_server.py:1172`) never mentions `[meta]`, and the canonical chain has no metadata step. |
+| #291 | yes | All seven sentinel sites exist today: `_ns` at `repo_compliance.py:1522`, `- **Repository:** _ns` at 1691, Direct Use at 1699, Out-of-Scope Use at 1703, Curation Rationale at 1826, Bias/Risks/Limitations at 1853, Dataset Card Contact at 1892. The issue's line numbers are from v0.5.0 and have drifted; the substance holds. |
+| #296 | yes | No `timeout` in `ADAPTERS`; no `Context`/progress usage anywhere in `mcp_server.py`; `specs/mcp-registration` and `specs/mcp-server` say nothing about timeouts. Pi's own `docs/mcp.md:68` documents a per-server `timeout` (default 60, reset by progress notifications), so the registered entry can carry it. |
+| #303 | yes | `splits.py:303` → `validate_split_mapping(remotes)`, no config names. `publish.py:487` → `_print_split_mapping_validation(remotes)`, which never sees the card. The warning text (`splits.py:340-350`) is generic. `openspec/changes/archive/2026-10-13-fix-mixed-schema-configs/design.md` §3.3 and R2 record the removal and name this a follow-up. |
+| #306 | yes | The memory clauses in `openspec/specs/data-quality/spec.md:34-38` cite structural tests only (`test_memory_is_o_columns_not_o_rows`, accumulator-size comparisons). The only RSS figure in the repository is the pre-fix 16.1 GB in the archived design/proposal/task document. No measurement of the fixed code exists. |
+
+### One correction to the issues as written
+
+#291 proposes *omitting* an unconfigured section as its first option. That is **not a code-only
+fix**: `openspec/specs/repo-compliance/spec.md:82` requires the placeholder (`"[Not specified]"`),
+and the *Minimal config* scenario at `:199` requires it again. Choosing omission means the change
+also carries a spec delta and rewrites the tests that today assert the sentinel.
+
+## Coupling map
+
+```
+287 ─┬─ same file, same defect class ─┐
+296 ─┘   (host-side timeouts)          ├─→ one change, two specs
+                                       │
+303 ─── independent, cheap ────────────┘
+291 ──→ 288   (the [meta] key set defines what the gate validates)
+306 ─── independent, no src change, parallelizable
+```
+
+Nothing else overlaps. `mcp_registration.py` is the bottleneck for 287+296; `repo_compliance.py`
+serves 291 and 303, which share `build_dataset_card()` but no concern.
+
+## Phases
+
+### Fase 1 — `fix/mcp-registration-timeouts` (#287 + #296) — size M
+
+One branch, one SDD change (`openspec/changes/<date>-fix-mcp-registration-timeouts/`), spec
+`mcp-registration`, two work-unit commits so either issue can be cherry-picked alone.
+
+- New `ADAPTERS` capabilities beside `native_env`/`native_scope` — `native_timeout` and
+  `native_connect_timeout` — so the registry stays the single source of truth.
+- `--timeout` / `--connect-timeout` flags with `[tool.sofer]` defaults (AGENTS.md rule 1).
+- README + README_ES: a per-agent row in the table, a cold-start paragraph (#287 §1) and the list
+  of tools expected to run for minutes (#296 §2).
+- #296 §3 (progress notifications) is a **separate change**: it touches every `sofer_*` tool and
+  the `mcp-server` spec. Tracked as Fase 1b, not folded in.
+- Cost to budget: `cli.py` is one of the four modules under the 100.00% line-coverage mandate
+  (rule 14), so the new flags need real coverage, not pragmas.
+- Risk: additive optional field on a contract others consume, which the Task Size rule excludes
+  from high risk. Reported as item 3-adjacent in the closing line.
+
+### Fase 2 — `fix/303-card-config-group-warning` (#303) — size S
+
+`build_dataset_card()` already computes `plan = schema_config_plan(...)` at
+`repo_compliance.py:1570` and discards it by returning `str`. Return the plan (or a small
+`CardPlan`) so `prepare`/`publish` can print the warning with the emitted config names, instead of
+the generic two-shape message. Spec `repo-compliance` → RC-Universal-Card S4.
+
+### Fase 1b — `feat/mcp-progress-notifications` (#296 §3) — size M
+
+Emit progress notifications from the long-running tools so a host deadline is reset instead of
+raised by configuration, which also covers hosts whose timeout is not user-configurable. Spec
+`mcp-server`.
+
+### Fase 3 — `feat/291-card-section-keys` (#291) — size L, blocked by D1
+
+Either add the `[meta]` keys the generator cannot currently fill (`repository`, `direct_use`,
+`out_of_scope_use`, `bias_risks_limitations`, `contact`, plus `study_design` promoted to the
+obvious path) and fall back `- **Repository:**` to `source`/`source_url`; or omit unconfigured
+sections, which carries a `repo-compliance` spec delta at `:82` and `:199` plus rewritten tests.
+
+### Fase 4 — `feat/288-agent-metadata-flow` (#288) — size M/L, after Fase 3
+
+After the key set is settled, so the gate and the tool cover the new keys once. Adds the metadata
+step to the canonical chain the agent reads, a template-placeholder detector (force decided by
+D3), and optionally `sofer_meta_set` / `sofer_meta_check`. Specs `mcp-server` and the home of the
+new check.
+
+### Fase 5 — `chore/306-bounded-quality-scan-evidence` (#306) — size M, parallelizable
+
+No `src/` change, so no coverage risk. A synthetic corpus in a temp dir, `sofer validate` with
+default quality settings, peak RSS and wall time recorded, then the same run with
+`full_scan = "never"` and a lowered `max_dup_tracking`. Output: a `verify:` row in
+`specs/data-quality` plus corrections to any sentence the measurement falsifies.
+
+## Order of execution
+
+By user impact, not by issue number: Fase 1 (a lost MCP envelope is the only failure that makes an
+agent reason on a lie) → Fase 2 (cheap, closes a declared R2) → Fase 1b → Fase 5 (cheap, no code
+risk, parallelizable) → Fase 3 → Fase 4.
+
+## Decisions required from the maintainer
+
+| # | Decision | Recommendation |
+| --- | --- | --- |
+| D1 | #291: omit unconfigured sections (spec change) or add the `[meta]` keys? | Add the keys plus the `repository` → `source` fallback: it fixes a fully-filled config without touching the spec or the *Minimal config* tests. Omission is the more expensive option B. |
+| D2 | #296: write the timeout and document it now, or also emit progress notifications? | Timeout + docs in Fase 1; notifications as its own change (Fase 1b). |
+| D3 | #288: should the placeholder gate `warn` or `fail`? | `warn`. A `fail` breaks every existing config that still carries a placeholder, which is a contract change, not a fix. |
+| D4 | #306: is 20 M rows honest enough, and on which machine does the run happen? | 20 M rows plus one repetition with the knobs lowered, on the 65 GB host named in #290. |

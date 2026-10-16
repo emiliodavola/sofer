@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from sofer import config
 from sofer._mirror import _validate_remote_paths
 from sofer.model import DatasetConfig, FileEntry
 from sofer.splits import (
@@ -678,3 +679,63 @@ class TestUnclassifiedNamesLimit:
         warning = self._unclassified_warning()
         assert warning.count("mystery-") == 7
         assert "\u2026" not in warning
+
+
+class TestConfigNameHintInWarning:
+    """#303: the default-load warning names the emitted configs when known.
+
+    The instruction ``load_dataset(repo, name='<config>')`` is not actionable
+    without opening the card's frontmatter, and an MCP caller receives the
+    warning in the tool result without the card at all.
+    """
+
+    def test_names_the_configs_when_supplied(self) -> None:
+        warnings = validate_split_mapping(
+            ["data/a.parquet", "data/b.parquet"], ["persona", "hogar"]
+        )
+        default_load = [w for w in warnings if "Default-load warning" in w]
+        assert len(default_load) == 1
+        assert "name='persona'" in default_load[0]
+        assert "name='hogar'" in default_load[0]
+        assert "name='<config>'" not in default_load[0]
+
+    def test_falls_back_to_the_placeholder_without_names(self) -> None:
+        warnings = validate_split_mapping(["data/a.parquet", "data/b.parquet"])
+        assert "name='<config>'" in warnings[0]
+
+    def test_empty_name_list_is_the_placeholder_form(self) -> None:
+        warnings = validate_split_mapping(["data/a.parquet", "data/b.parquet"], [])
+        assert "name='<config>'" in warnings[0]
+
+    def test_elides_past_the_configured_limit(self) -> None:
+        warnings = validate_split_mapping(
+            ["data/a.parquet", "data/b.parquet"],
+            ["g1", "g2", "g3", "g4", "g5", "g6", "g7"],
+            warn_limit=3,
+        )
+        default_load = next(w for w in warnings if "Default-load warning" in w)
+        assert "name='g3'" in default_load
+        assert "name='g4'" not in default_load
+        assert "... and 4 more" in default_load
+
+    def test_no_ellipsis_when_every_name_fits(self) -> None:
+        warnings = validate_split_mapping(
+            ["data/a.parquet", "data/b.parquet"], ["g1", "g2"], warn_limit=5
+        )
+        default_load = next(w for w in warnings if "Default-load warning" in w)
+        assert "more" not in default_load
+
+    def test_default_limit_is_read_from_config(self) -> None:
+        """The cap is a [tool.sofer] value, never a literal in the call path."""
+        names = [f"g{i}" for i in range(config.CARD_CONFIG_GROUP_WARN_LIMIT + 4)]
+        warnings = validate_split_mapping(["data/a.parquet", "data/b.parquet"], names)
+        default_load = next(w for w in warnings if "Default-load warning" in w)
+        assert "... and 4 more" in default_load
+        assert f"name='g{config.CARD_CONFIG_GROUP_WARN_LIMIT - 1}'" in default_load
+
+    def test_named_warning_only_fires_on_the_default_load_path(self) -> None:
+        """Split keywords present: no default-load warning, named or not."""
+        warnings = validate_split_mapping(
+            ["train/a.parquet", "test/b.parquet"], ["persona", "hogar"]
+        )
+        assert not any("Default-load" in w for w in warnings)

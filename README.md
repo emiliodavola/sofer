@@ -321,7 +321,7 @@ detector class, no changes to the pipeline.
 | --- | --- |
 | `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
-| `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute, must be an existing directory), `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefers native `mcp add` when available. |
+| `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute, must be an existing directory), `--timeout SECONDS`, `--connect-timeout SECONDS`, `--no-timeout`, `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) and per-agent host timeouts. Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` or `__<sanitized>.metadata.yaml` per sheet for `.xlsx` N>1, `PurePath.suffixes`, sanitization + `seen _{n}`, normalized `__+`→`_` collision `ValueError` with `::sheet`), `--force` (overwrite guard), `--config` (TOML path for batch), `--delimiter D` / `--encoding E` (explicit CSV dialect, wins over config). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
 | `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` or `__<sanitized>.README.md` per sheet for `.xlsx` N>1 with same sanitization/dedup/collision parity, skip missing `metadata.yaml`), `--force`, `--config`. |
@@ -357,6 +357,9 @@ detector class, no changes to the pipeline.
 | `--cwd PATH` | `mcp add` | Absolute cwd for the server; must be an existing directory (otherwise exit 1 naming the resolved path). A tree outside the home and the process cwd is accepted with a warning naming it. |
 | `--user-config PATH` | `mcp add`, `mcp remove` | Explicit user-scope config **file** for the selected agent; wins over the adapter's env override (Pi's `PI_CODING_AGENT_DIR`) and the `Path.home()` default. Rejected with `--agent all` — one path cannot name four different files. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
+| `--timeout SECONDS` | `mcp add` | Per-request (tool call) deadline written into the entry, in seconds. Default: `[tool.sofer] mcp_request_timeout_seconds`. A non-positive value exits 2. |
+| `--connect-timeout SECONDS` | `mcp add` | Initial-connection / cold-start deadline written into the entry, in seconds. Default: `[tool.sofer] mcp_connect_timeout_seconds`. |
+| `--no-timeout` | `mcp add` | Omit the timeout keys entirely, restoring the pre-#287/#296 entry shape (and, with it, native codex/gemini delegation). |
 
 ### Troubleshooting HF uploads
 
@@ -721,6 +724,44 @@ Per-agent locations and shapes:
 | hermes | `--scope user` | `$HERMES_HOME/config.yaml` (default `~/.hermes/config.yaml`) | `mcp_servers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
 | hermes | `--scope project` | the same user-scope file — Hermes has no project-scope config, and the substitution is named on stderr | same |
 
+- **Host timeouts (issues #287, #296).** `sofer mcp add` also writes the host's **per-request**
+  and **connect/startup** deadlines into the `sofer` entry, so two measured failures stop looking
+  like a broken registration. Both are real: `sofer-mcp` imports pandas, pyarrow, datasets and
+  fastmcp before it can answer `initialize`, so a **first launch after an install or upgrade takes
+  16–32 s** (cold bytecode and page cache) and hosts report `Connection failed … timed out`; and a
+  tool call on a real corpus runs for minutes (`sofer_prepare` measured ~680 s, `sofer_codebook_all`
+  ~100 s on 3.2 GB / 66.2 M rows) against a documented 60 s default, where the server **finishes,
+  writes its artifacts and loses only the response** — so the caller cannot tell a failure from an
+  unheard success. The key name and the unit are per agent:
+
+  | Agent | Per-request key | Connect/startup key | Unit | Host default |
+  | ------- | ------- | ------- | ------- | ------- |
+  | pi | `timeout` | — (connects in the background) | seconds | 60, reset by progress notifications |
+  | hermes | `timeout` | `connect_timeout` | seconds | 300 / 60 |
+  | codex | `tool_timeout_sec` | `startup_timeout_sec` | seconds | 60 / 10 |
+  | gemini | `timeout` | — (same key covers discovery) | **milliseconds** | 600 000 |
+  | opencode | — (none written) | — | — | 30 000 startup / 12 h execution |
+
+  Defaults come from `[tool.sofer] mcp_request_timeout_seconds` (900) and
+  `mcp_connect_timeout_seconds` (120); override per invocation with `--timeout` / `--connect-timeout`,
+  or omit both keys with `--no-timeout`. Writing a timeout is also why native codex/gemini delegation
+  now declines with the reason `timeout` — neither `<agent> mcp add` takes a timeout flag — and
+  `--no-timeout` is what restores that path. An agent whose entry accepts no timeout is named on
+  stderr: **opencode** declares `timeout` differently across its releases (an integer in its zod
+  schema, a `{startup, catalog, execution}` object in milliseconds in its current docs), so writing
+  the wrong shape could fail validation of the whole `mcp` block; set its `timeout` by hand.
+- **Long calls reset their own deadline.** Every long tool (`sofer_prepare`, `sofer_codebook_all`,
+  `sofer_profile_all`, `sofer_render_all`, `sofer_publish_confirm`) re-announces progress while it
+  runs, which is what resets a host's per-request timeout — so a long tool also survives a host whose
+  timeout cannot be configured. Their `tools/list` descriptions say so, and name the expected
+  duration.
+- **Who fills `[meta]` (issue #288).** `sofer init` writes a `[meta]` block whose values are
+  placeholders. Filling them is a **required step between bootstrap and Phase 1**, and it is the one
+  step a human and an agent share: on an MCP-driven run the **agent** completes what the data can
+  determine (description, tags), and the **human** supplies what it cannot (license, source).
+  `sofer_validate` warns while any `[meta]` value is still empty or still starts with `TODO`, `YOUR_`
+  or `example`, so the step reaches the agent through the envelope instead of appearing only in the
+  generated card. The warning never changes the exit code.
 - **User-scope resolution:** the paths below are sofer's **default** resolution under `Path.home()`.
   Agents such as opencode read their config from the system **account** home instead, so when the two
   differ the entry can land in a file the agent never reads. Pass `--user-config PATH` to state the
