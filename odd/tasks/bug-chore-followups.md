@@ -178,7 +178,7 @@ maintainer's action): #317.2's "the Windows branch is effectively dead" is a wro
 
 | ID | Issue | Route | Spec | State |
 | --- | --- | --- | --- | --- |
-| T1 | #316 | inline, test-first | S3 | pending |
+| T1 | #316 | inline, test-first | S3 | delivered |
 | T2 | #319 | inline | S8, S9 | pending |
 | T3 | #318 | inline | S7 | pending |
 | T4 | #317 | inline, test-first | S5 | pending |

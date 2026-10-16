@@ -331,6 +331,29 @@ def _config_name_hint(config_names: list[str] | None, warn_limit: int | None = N
     return listed
 
 
+def _carries_split_keyword(path: str) -> bool:
+    """Test whether *path* names the split it was assigned to.
+
+    The same predicate the per-file consistency message is built on: the last
+    path segment's name, or the first directory segment, must carry a keyword.
+    It is factored out so the split-level and the per-file readings cannot
+    disagree.
+
+    Args:
+        path: Remote file path, possibly directory-qualified.
+
+    Returns:
+        ``True`` when the filename or its first directory names a split.
+    """
+    basename = path.rsplit("/", 1)[-1] if "/" in path else path
+    if detect_split_keyword(basename) is not None:
+        return True
+    if "/" in path or "\\" in path:
+        first_dir = re.split(r"[/\\]", path)[0].lower()
+        return detect_split_keyword(first_dir) is not None
+    return False
+
+
 def validate_split_mapping(
     remotes: list[str],
     config_names: list[str] | None = None,
@@ -343,7 +366,12 @@ def validate_split_mapping(
           (``detect_split_keyword`` already enforces this — files that pass
           detection are valid).
         - Files within a detected split must all contain the split keyword in
-          their filename or directory name.
+          their filename or directory name.  This message is emitted only when
+          the split carries a keyword in *some* of its files: a split whose
+          files all lack one is the single-split fallback the next bullet
+          already describes, and restating that once per file would scale the
+          warning with the corpus size — 65 tables printed 66 lines for one
+          problem (issue #316).
         - Single-split fallback: when *multiple* files all fall into ``train``
           (no split keyword detected in any file), emit a warning about the
           ``load_dataset()`` behaviour.  The generated card groups those files
@@ -390,20 +418,16 @@ def validate_split_mapping(
             )
 
     # ── Per-split keyword consistency ─────────────────────────────────────
+    # Only a split that carries a keyword in *some* of its files can have a
+    # genuinely inconsistent file. A split where none of the files carries one
+    # is the fallback split the summary above already describes, so restating
+    # it per file adds nothing and makes the warning count grow with the corpus
+    # (issue #316).
     for s in report.splits:
+        if not any(_carries_split_keyword(f) for f in s.files):
+            continue
         for f in s.files:
-            basename = f.rsplit("/", 1)[-1] if "/" in f else f
-            kw = detect_split_keyword(basename)
-
-            # Check directory name as well (dir-based splits)
-            dir_kw: str | None = None
-            if "/" in f or "\\" in f:
-                import re as _re
-
-                first_dir = _re.split(r"[/\\]", f)[0].lower()
-                dir_kw = detect_split_keyword(first_dir)
-
-            if kw is None and dir_kw is None:
+            if not _carries_split_keyword(f):
                 warnings.append(
                     f"File '{f}' was assigned to split '{s.name}' but does "
                     f"not contain a detectable split keyword. It may not be "
