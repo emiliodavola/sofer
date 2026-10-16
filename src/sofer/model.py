@@ -355,6 +355,14 @@ class DatasetConfig:
     paper_url: str = ""
     demo_url: str = ""
     dataset_card_authors: str = ""
+    # Card sections the generator emitted as a sentinel because nothing could
+    # fill them (issue #291). Each is free text, so a multi-line string is a
+    # normal value; empty keeps today's sentinel.
+    repository: str = ""
+    direct_use: str = ""
+    out_of_scope_use: str = ""
+    bias_risks_limitations: str = ""
+    contact: str = ""
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
@@ -586,6 +594,11 @@ class DatasetConfig:
             paper_url=meta.get("paper_url", ""),
             demo_url=meta.get("demo_url", ""),
             dataset_card_authors=meta.get("dataset_card_authors", ""),
+            repository=meta.get("repository", ""),
+            direct_use=meta.get("direct_use", ""),
+            out_of_scope_use=meta.get("out_of_scope_use", ""),
+            bias_risks_limitations=meta.get("bias_risks_limitations", ""),
+            contact=meta.get("contact", ""),
             _base_dir=base_dir,
             _config_path=path.resolve(),
         )
