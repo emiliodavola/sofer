@@ -63,11 +63,16 @@ any single row. The floor SHALL be verified as verify-phase runtime evidence on
 the CI interpreter (ubuntu / Python 3.13), which is the arbiter because
 statement counts and branch arcs vary across Python versions; the measured rows
 SHALL be recorded with an observed margin above the floor. The change MAY
-additionally guard the floors with a skip-if-absent `tests/test_coverage_contract.py`
+additionally guard the floors with a `tests/test_coverage_contract.py`
 regression guard that asserts the three rows and TOTAL from a local `.coverage`
-data file when one is present, and SHALL skip on a clean checkout (the data
-file is gitignored local state — a clean checkout SHALL never fail on its
-absence). The top-tier CLI-core modules (`cli.py`, `scanner.py`, `prepare.py`,
+data file when one is present **and the guard can vouch for it**, and SHALL skip
+otherwise: on a clean checkout (the data file is gitignored local state — a clean
+checkout SHALL never fail on its absence), when a measurement is in flight
+(`COVERAGE_RUN` is set — `coverage run` flushes its data file at process exit, so
+during the run the file on disk belongs to a previous run), and when the database
+is older than any file it measured (`db_mtime >= max(measured mtime)`, comparing
+with `>=` because filesystem timestamps have limited granularity).  The skip SHALL
+name the condition that failed (issue #305). The top-tier CLI-core modules (`cli.py`, `scanner.py`, `prepare.py`,
 `publish.py`) are NOT governed by this ≥90 floor: they carry an absolute 100%
 mandate under COV-06, enforced by the scoped CI gates.
 
@@ -88,6 +93,13 @@ mandate under COV-06, enforced by the scoped CI gates.
 - GIVEN `tests/test_coverage_contract.py` present and a checkout with no local `.coverage` data file
 - WHEN the suite runs
 - THEN the contract test SHALL skip, and the suite SHALL pass without it — the three floors remain verify-phase evidence (COV-01), never a hard test dependency on absent local state
+
+#### Scenario: Contract guard skips an unvouchable database — issue #305
+
+- GIVEN a local `.coverage` data file that either predates a file it measured, was measured by a run still in flight, or measured a path that no longer exists
+- WHEN the suite runs
+- THEN the contract test SHALL skip, naming the failed condition
+- AND the suite SHALL pass without it — a spurious floor failure on numbers that describe a different tree is exactly the defect this skip prevents
 
 ---
 
@@ -280,7 +292,7 @@ edited in this scoped pass.
 
 ---
 
-### Requirement: Second-tier per-file floors are deliberately verify-phase-only (COV-07)
+### Requirement: Second-tier per-file floors are deliberately verify-phase-only (COV-07) — Modified 2026-10-15, fix-coverage-guard-freshness
 
 The three COV-01 floors — `src/sofer/profile.py`, `src/sofer/mcp_registration.py`,
 and `src/sofer/verification.py` — SHALL remain **verify-phase-evidenced only**: no
@@ -290,8 +302,10 @@ for three in-repo reasons: (a) coverage.py cannot express a per-file floor in
 config — `[tool.coverage.report] fail_under` is a single scalar owned by the TOTAL
 gate (CI-01 / COV-02); (b) the only executable in-repo ≥90 check,
 `tests/test_coverage_contract.py`, skips when no local `.coverage` data file is
-present, which is exactly the state the CI coverage job collects in, and COV-01-S3
-declares that skip intended; and (c) the CLI-core 100% mandate (COV-06) already
+present **or when it cannot vouch for the one that is — a measurement in flight,
+or a database older than the files it measured (issue #305)** — which is exactly
+the state the CI coverage job collects in, and COV-01-S3 declares that skip
+intended; and (c) the CLI-core 100% mandate (COV-06) already
 consumes the repository's per-file gate machinery, and its S1 floor-literal ban is
 the boundary this repository chose.
 
@@ -358,6 +372,7 @@ and `tests/test_ci_workflows.py` additions/modifications as mapped below.
 | COV-01 | Three second-tier rows meet the floor on the regenerated baseline | verify:Verify-phase runtime evidence — `uv run coverage report -m` rows for `profile.py`/`mcp_registration.py`/`verification.py`, each ≥90 (CI-01-S2 precedent; percentages not pytest-assertable); optionally pinned by `tests/test_coverage_contract.py` (skip-if-absent, asserts the three rows + TOTAL from a local `.coverage` file when present) |
 | COV-01 | The CI interpreter is the arbiter | verify:Verify-phase runtime evidence — per-file rows reproduced on ubuntu/Python 3.13 in the CI coverage job log and the verify report, with the observed margin recorded |
 | COV-01 | Optional contract guard skips on a clean checkout | test:tests/test_coverage_contract.py (skip-if-absent semantics) — runs green with `.coverage` absent |
+| COV-01 | Contract guard skips an unvouchable database — issue #305 | test:tests/test_coverage_contract.py::test_vouch_rejects_stale_database — the staleness policy test, plus its five siblings (missing file, in-flight run, vanished measured path, and the two vouched-for cases); the guard itself keeps the COV-01-S3 skip behaviour |
 | COV-02 | TOTAL meets the floor and the gate exits 0 | verify:Verify-phase runtime evidence — TOTAL row ≥90 and `coverage report -m` exit code 0 on the CI interpreter (CI-01-S2 precedent; percentage not pytest-assertable) |
 | COV-02 | CI coverage job turns green on the PR | verify:Verify-phase evidence — CI coverage job result on the PR (ubuntu, Python 3.13) with `fail_under = 90` untouched and the four COV-06 gates additionally green |
 | COV-02 | Gate value untouched | test:tests/test_ci_workflows.py::test_pyproject_declares_coverage_fail_under_90 (existing, unchanged) |
