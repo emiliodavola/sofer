@@ -1,8 +1,10 @@
 # Feature: schema-relation-map — issue #304
 
 **Branch:** `fix/304-schema-relation-map` from `dev@fad1b00`. **Issue:** `emiliodavola/sofer#304`
-**Delivery PR:** (pending — user decision) → `dev`. **SDD change:**
+**Delivery PR:** **#307 merged** (`f2d9327`) → `dev`. **SDD change:**
 `openspec/changes/2026-10-15-fix-schema-relation-map/` (archived inside this branch, AGENTS.md rule 15).
+**Ledger:** the Tasks table below still reads `pending` on every row — it was never updated after the
+merge, and the merge commit is the record of what landed.
 **Risk:** high — it changes the card artifact users load with `load_dataset()`, and it modifies the
 published `repo-compliance` clauses RC-R05 / RC-R06.
 
@@ -121,4 +123,4 @@ passed`); behaviour work unit committed as `03eb052` (`fix(schema): keep one col
 same-schema tables share a config`), pre-commit green (ruff/format/mypy/pyright); full suite `2144
 passed, 9 skipped`; `check_test_mapping.py` OK. End-to-end card check over a three-table corpus: 2
 configs (`persona_2010` + `persona_2022` sharing one, `hogar_2010` alone), per-group `features`
-without duplicates, one Data Fields block per table. Pending: push + PR (user decision).
+without duplicates, one Data Fields block per table. Delivered by **#307** (`f2d9327`).

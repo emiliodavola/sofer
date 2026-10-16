@@ -1,9 +1,11 @@
 # Feature: coverage-guard-freshness — issue #305
 
 **Branch:** `fix/305-coverage-guard-freshness` from `dev@01a141c1`-era `dev` (`fad1b00`).
-**Issue:** `emiliodavola/sofer#305`. **Delivery PR:** (pending — user decision) → `dev`.
+**Issue:** `emiliodavola/sofer#305`. **Delivery PR:** **#308 merged** (`b7dea51`) → `dev`.
 **SDD change:** `openspec/changes/2026-10-15-fix-coverage-guard-freshness/` (archived inside this
 branch, AGENTS.md rule 15). **Risk:** low — test-only, no `src/` change, no gate added or removed.
+**Ledger:** the Tasks table below still reads `pending` on every row — it was never updated after the
+merge, and the merge commit is the record of what landed.
 
 ## Goal
 

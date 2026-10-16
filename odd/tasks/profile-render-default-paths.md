@@ -1,8 +1,10 @@
 # Feature: profile-render-default-paths — issue #294
 
 **Branch:** `fix/294-profile-render-default-paths` from `dev@b7dea51`. **Issue:** `emiliodavola/sofer#294`
-**Delivery PR:** (pending — user decision) → `dev`. **SDD change:**
+**Delivery PR:** **#310 merged** (`6786ba1`) → `dev`. **SDD change:**
 `openspec/changes/2026-10-15-fix-profile-render-default-paths/` (archived inside this branch, rule 15).
+**Ledger:** the Tasks table below still reads `pending` on every row — it was never updated after the
+merge, and the merge commit is the record of what landed.
 **Risk:** low — documentation and docstring text plus one derived string; no path, default or contract
 changes.
 
