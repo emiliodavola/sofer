@@ -33,7 +33,9 @@ upload()                → HF push
 - **Sensible defaults** — quality checks run even without `[[quality]]` TOML section.
 - **Bounded per-row memory (issue #290)** — the `empty_columns` state is a per-column boolean, the
   `duplicates` hash table is capped at `quality_max_dup_tracking`, and the finding lists stop growing
-  at their report limits; per-row memory SHALL be independent of the dataset size.
+  at their report limits; per-row memory SHALL be independent of the dataset size. The encoding probe
+  SHALL read at most `probe_chunk_bytes` of the file it judges, never the whole file (issue #326), so
+  the pass's peak does not follow the corpus size.
 - **Explicit full-scan policy (issue #290)** — the full/unsampled pass is a config-owned tri-state
   (`quality_full_scan`), forced only by the config-declared row-requiring checks; a fixed-size probe
   (`encoding_validation`, 8 KB) never triggers it.
@@ -44,6 +46,8 @@ upload()                → HF push
   `empty_columns` state does not grow with the row count.
 - `test: tests/test_quality.py::TestDuplicateTrackingCap::test_tracking_dict_never_exceeds_the_cap` —
   the hash table stops at `quality_max_dup_tracking`.
+- `test: tests/test_quality.py::TestEncodingProbePeak::test_peak_does_not_track_the_corpus_size` — the
+  pass's peak stays within a 1 MiB slack across corpora 100× apart in size (issue #326).
 - `verify: end-to-end memory measurement, scripts/measure_quality_scan_rss.py --rows 5000000`
   (issues #306, #317). Measured on a synthetic corpus of 5 000 000 rows x 6 columns (160.0 MiB) plus a
   50 000-row second schema, with a duplicate value every 17 rows:
@@ -70,24 +74,47 @@ upload()                → HF push
   host-specific — this host is ~2.5× slower than the one behind the first table, so the ratio is the
   transferable claim and the seconds are not.
 
-  **The peak is not set by the capped hash table, and it is not independent of the corpus size.** The
+  **The peak was not set by the capped hash table, and it was not independent of the corpus size.** The
   same script measured the peak on smaller corpora of the same shape:
 
-  | Corpus | CSV size | peak `tracemalloc` |
+  | Corpus | CSV size | peak `tracemalloc` (pre-#326) |
   | --- | --- | --- |
   | 1 000 000 rows | 31.2 MiB | 44.0 MiB |
   | 2 000 000 rows | 63.4 MiB | 63.4 MiB |
   | 5 000 000 rows | 160.0 MiB | 160.1 MiB |
 
-  Above ~60 MiB the peak is ≈1× the CSV. Instrumenting the two phases separately places all of it in the
-  quality pass: on a 1 000 000-row / 31.2 MiB corpus, `DatasetValidator.run_all()` peaks at 0.0 MiB and
-  `QualityValidator.run()` at 44.0 MiB, and a `tracemalloc` snapshot taken after the pass retains almost
-  nothing — the spike is **transient**, not accumulating state. What the #290 fix demonstrates is therefore
-  that the pre-fix unbounded climb (16.1 GB reported in #290) is gone — **not** that memory is independent
-  of the dataset size, and not that a multi-GB corpus runs in a fixed budget. Until the allocator is
-  identified, a corpus of N bytes should be assumed to need on the order of N bytes of RAM, and the root
-  cause is filed separately. The row is written as 5 000 000; the 20 000 000-row scale #306 suggested was
-  **not** run, and nothing here is evidence about it.
+  Above ~60 MiB the peak was ≈1× the CSV. Instrumenting the two phases separately placed all of it in the
+  quality pass: on a 1 000 000-row / 31.2 MiB corpus, `DatasetValidator.run_all()` peaked at 0.0 MiB and
+  `QualityValidator.run()` at 44.0 MiB, and a `tracemalloc` snapshot taken after the pass retained almost
+  nothing — the spike was **transient**, not accumulating state. What the #290 fix demonstrates is therefore
+  that the pre-fix unbounded climb (16.1 GB reported in #290) is gone — it did **not** show memory to be
+  independent of the dataset size. The row is written as 5 000 000; the 20 000 000-row scale #306 suggested
+  was **not** run, and nothing here is evidence about it.
+
+  **Issue #326 named the allocator and bounded it.** A sampling thread that snapshots when
+  `get_traced_memory()` is highest (the issue's own instrument) puts a single site at the peak:
+  `Path.read_bytes` inside `_check_encoding_validation`, which read the **whole file** and then sliced its
+  first `probe_chunk_bytes` — a transient allocation of 1:1 the file size, while §4.9 had always required an
+  8 KB read. Measured with the corpus generator of `scripts/measure_quality_scan_rss.py` plus a peak-time
+  `tracemalloc` snapshot (the instrument issue #326 §1 describes: a sampling thread that snapshots when
+  `get_traced_memory()` is highest), under the script's bounded case (`quality_full_scan = "never"`,
+  `quality_max_dup_tracking = 10 000`) with `max_sample` at its 100 000 default; the figures above come
+  from the tracked script and its own two cases, so the tables are not comparable cell-by-cell:
+
+  | Corpus | CSV size | peak `tracemalloc`, pre-#326 | peak `tracemalloc`, post-#326 |
+  | --- | --- | --- | --- |
+  | 300 000 rows | 9.3 MiB | 37.07 MiB | 37.07 MiB |
+  | 1 000 000 rows | 31.2 MiB | 37.07 MiB | 37.07 MiB |
+  | 2 000 000 rows | 63.4 MiB | 63.41 MiB | 37.07 MiB |
+
+  The probe alone peaked at 63.39 MiB on the 63.38 MiB CSV and at 31.17 MiB on the 31.16 MiB one — 1:1, which
+  is the identification; on the fixed code the same probe peaks at 0.02 MiB. With the read bounded the peak
+  is **flat at 37.07 MiB across a 200× corpus range**, and what sets it is the *capped* sample state that
+  `max_sample` owns (`format_consistency` retains at most `max_sample` values per column, ≈34 MiB at the
+  100 000 default) — a fixed budget that saturates, not a term that follows the corpus. The 2 000 000-row
+  peak falls from 63.41 to 37.07 MiB. Flatness is pinned by
+  `tests/test_quality.py::TestEncodingProbePeak::test_peak_does_not_track_the_corpus_size`, which holds two
+  corpora 100× apart in size within a 1 MiB slack.
 
   **Peak RSS is published now.** The sampler self-calibrates against a child holding a known 200 MiB and
   refuses a figure it cannot confirm. That guard had always failed on Windows — not because the platform
@@ -576,7 +603,9 @@ THEN no cross-file type mismatch SHALL be reported for "CPV2010_REF_ID"
 **Requirement:** The system MUST verify each text-eligible (`.csv`/`.tsv`, case-insensitive)
 file is decodable via `["utf-8-sig", "utf-8"]` by reading `config.PROBE_CHUNK_BYTES` (8 KB)
 and trying `chunk.decode(enc)` in order. If any succeeds the check SHALL pass; only if all
-fail SHALL a `fail` error naming the file be appended. Non-eligible files (`.xlsx`, `.parquet`,
+fail SHALL a `fail` error naming the file be appended. The read MUST be bounded: the probe
+SHALL NOT materialize a file larger than `PROBE_CHUNK_BYTES` in order to slice it (issue #326),
+so the pass's peak never follows the file size. Non-eligible files (`.xlsx`, `.parquet`,
 `.jsonl`, `.csv.gz` → `.gz`, no extension) SHALL be skipped with no finding and no `ran_checks`
 entry. `latin-1`/`cp1252` SHALL NOT be retried.
 
@@ -608,6 +637,16 @@ GIVEN a `.xlsx` whose first 8 KB happens to be valid UTF-8 (or not)
 WHEN _check_encoding_validation runs via `run()` or direct call
 THEN no error SHALL be appended and `ran_checks` SHALL not gain `encoding_validation`
 ```
+
+**The probe reads a bounded prefix, never the whole file**
+
+```
+GIVEN a text-eligible file much larger than PROBE_CHUNK_BYTES
+WHEN QualityValidator.run() scans it
+THEN the pass's tracemalloc peak SHALL NOT follow the file size
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbePeak::test_peak_does_not_track_the_corpus_size`
 
 > **Known limitation:** The 8 KB peek may not detect binary files with
 > UTF-8-like prologues (e.g., a PNG or PDF whose first 8 KB happen to be valid
