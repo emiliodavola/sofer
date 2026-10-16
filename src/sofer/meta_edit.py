@@ -139,11 +139,12 @@ surfaces cannot accept different keys or disagree on a value's kind.
 
 _META_TABLE = "meta"
 _META_HEADER = f"[{_META_TABLE}]"
-_META_HEADER_RE = re.compile(r"^\[(?:meta|\"meta\"|'meta')\](?:\s*#.*)?$")
+_META_HEADER_RE = re.compile(r"^\[\s*(?:meta|\"meta\"|'meta')\s*\](?:\s*#.*)?$")
 """The ``[meta]`` table header, with an optional trailing comment.
 
-Quoted spellings count: ``["meta"]`` is the same table, and refusing it would
-mean appending a second one (which TOML rejects) for a document that is valid.
+Quoted spellings (``["meta"]``) and inner whitespace (``[ meta ]``) count: they
+are the same table, and refusing one would mean appending a second ``[meta]``
+table (which TOML rejects) for a document that is perfectly valid.
 """
 
 _TABLE_LINE_RE = re.compile(r"^\s*\[")
@@ -345,6 +346,22 @@ def parse_meta_value(key: str, raw: str) -> Any:
     )
 
 
+def _literal_value(literal: str) -> Any:
+    """Return the Python value a TOML literal denotes.
+
+    The comparison key for "does this key already hold the requested value?" and
+    for the edit's own read-back gate: both ask what the literal MEANS, never how
+    it is spelled.
+
+    Args:
+        literal: A TOML literal produced by :func:`format_meta_value`.
+
+    Returns:
+        The parsed value.
+    """
+    return tomllib.loads(f"v = {literal}")["v"]
+
+
 # ---------------------------------------------------------------------------
 #  Block and value location
 # ---------------------------------------------------------------------------
@@ -520,15 +537,33 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
     if not rendered:
         return text
     document = _parse(text)
-    _meta_table(document)
+    current = _meta_table(document)
     lines = text.splitlines(keepends=True)
     header = _find_meta_header(lines)
     if header is None:
+        if _META_TABLE in document:
+            # A top-level `meta = { ... }` or `meta.description = ...` is the
+            # same table in a form this editor does not address line by line.
+            # Refusing with the reason beats appending a `[meta]` header and
+            # letting `tomllib` report a duplicate declaration on a document
+            # that is itself valid.
+            raise MetaEditError(
+                f"the document declares '{_META_TABLE}' without a [{_META_TABLE}] table "
+                "header (an inline table or dotted keys); edit that form by hand"
+            )
         return _append_meta_table(text, rendered)
 
     touched = False
     insertions: list[str] = []
     for key, literal in rendered.items():
+        # The VALUE decides, not the line's bytes. A key that already holds the
+        # requested value is left exactly as the author wrote it —
+        # `description = """New"""`, `"description" = "New"` and
+        # `description="New"` are all already correct, and rewriting them would
+        # be formatting work the caller did not ask for (the verifier's
+        # "stable only after one normalization write" counterexample).
+        if key in current and current[key] == _literal_value(literal):
+            continue
         end = _meta_body_end(lines, header)
         start = _find_assignment(lines, header, end, key)
         if start is None:
@@ -536,8 +571,12 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
             continue
         stop = _value_end(lines, start, end, key)
         # The replacement carries the terminator the assignment already had, so
-        # rewriting a value can never change the document's line endings.
-        new_line = f"{key} = {literal}{_eol_of(lines[start])}"
+        # rewriting a value can never change the document's line endings — and a
+        # value that ended the file without a newline stays that way.
+        terminator = _eol_of(lines[start])
+        if stop > start + 1 and not _eol_of(lines[stop - 1]):
+            terminator = ""
+        new_line = f"{key} = {literal}{terminator}"
         if stop - start == 1 and lines[start] == new_line:
             continue
         lines = [*lines[:start], new_line, *lines[stop:]]
@@ -619,7 +658,7 @@ def _verify_edit(text: str, rendered: Mapping[str, str]) -> None:
     document = _parse(text)
     table = _meta_table(document)
     for key, literal in rendered.items():
-        expected = tomllib.loads(f"v = {literal}")["v"]
+        expected = _literal_value(literal)
         if key not in table:
             raise MetaEditError(f"the edit would drop [meta] {key}; nothing written")
         if table[key] != expected:

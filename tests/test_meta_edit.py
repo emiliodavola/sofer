@@ -410,3 +410,85 @@ class TestBytePreservation:
         self._write(path, before)
         meta_edit.set_meta(path, {"description": "New"})
         assert path.read_bytes() == before.replace(b'"old"', b'"New"')
+
+
+class TestValueEqualityDecides:
+    """The editor writes a VALUE; it is not a formatter (second verifier round).
+
+    Comparing the line's bytes made an equal value in another spelling look like
+    a change: `changed: true` with `written: []`, a `"wrote: "` message, and a
+    first run that rewrote the author's line — contradicting the promise that
+    re-running with the values the file already holds writes nothing. Comparing
+    the parsed value closes it, and the byte-level consequences of that decision
+    (a value that ended the file stays unterminated) are pinned here too.
+    """
+
+    def test_an_equal_value_in_another_spelling_is_not_rewritten(self, tmp_path: Path) -> None:
+        for spelling in (
+            b'description = """New"""',
+            b'"description" = "New"',
+            b'description="New"',
+            b"description  =  'New'",
+        ):
+            path = tmp_path / "dataset.toml"
+            before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\n' + spelling + b"\n"
+            path.write_bytes(before)
+            result = meta_edit.set_meta(path, {"description": "New"})
+            assert result.changed is False, spelling
+            assert result.written == (), spelling
+            assert result.unchanged == ("description",), spelling
+            assert path.read_bytes() == before, spelling
+
+    def test_a_changed_value_is_still_written_in_the_canonical_form(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = """old"""\n'
+        path.write_bytes(before)
+        result = meta_edit.set_meta(path, {"description": "New"})
+        assert result.written == ("description",)
+        assert path.read_bytes() == before.replace(b'"""old"""', b'"New"')
+
+    def test_a_multiline_value_at_eof_keeps_the_missing_terminator(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = """\nline2"""'
+        path.write_bytes(before)
+        meta_edit.set_meta(path, {"description": "New"})
+        assert path.read_bytes() == (
+            b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = "New"'
+        )
+
+    def test_a_spaced_or_quoted_header_is_the_same_table(self, tmp_path: Path) -> None:
+        for header in (b"[ meta ]", b'[ "meta" ]', b"[\tmeta\t]"):
+            path = tmp_path / "dataset.toml"
+            before = (
+                b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n' + header + b'\ndescription = "old"\n'
+            )
+            path.write_bytes(before)
+            meta_edit.set_meta(path, {"description": "New"})
+            assert path.read_bytes() == before.replace(b'"old"', b'"New"'), header
+
+    def test_a_dotted_or_inline_meta_table_is_refused_not_corrupted(self, tmp_path: Path) -> None:
+        """Shapes the editor does not address: the refusal is total and named.
+
+        Note the position: AFTER ``[dataset]`` the same lines are keys *of*
+        ``[dataset]``, so the append is correct there and no refusal applies.
+        """
+        for before in (
+            b'meta = { description = "old" }\n[dataset]\nname = "d"\nrepo_id = "u/d"\n',
+            b'meta.description = "old"\n[dataset]\nname = "d"\nrepo_id = "u/d"\n',
+            b'meta = {}\n[dataset]\nname = "d"\nrepo_id = "u/d"\n',
+        ):
+            path = tmp_path / "dataset.toml"
+            path.write_bytes(before)
+            with pytest.raises(MetaEditError, match="without a \\[meta\\] table header"):
+                meta_edit.set_meta(path, {"description": "New"})
+            assert path.read_bytes() == before
+
+    def test_a_meta_key_of_another_table_is_not_our_table(self, tmp_path: Path) -> None:
+        """``[dataset] meta = {...}`` is an unrelated key, not a declaration."""
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\nmeta = { description = "no" }\n'
+        path.write_bytes(before)
+        meta_edit.set_meta(path, {"description": "New"})
+        after = path.read_bytes()
+        assert after.startswith(before)
+        assert after.endswith(b'[meta]\ndescription = "New"\n')
