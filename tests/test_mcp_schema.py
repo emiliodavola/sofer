@@ -404,10 +404,8 @@ class TestEnvelope:
             "approval_phrase_where",
             "approval_phrase_restart",
             "approval_phrase_restart_required",
-            "approval_phrase_setup_opencode",
-            "approval_phrase_setup_codex",
-            "approval_phrase_setup_gemini",
             "approval_phrase_verify",
+            *(f"approval_phrase_setup_{agent}" for agent in mcp_registration.AGENT_NAMES),
         }
         assert guidance_keys <= set(envelope["hints"])
         assert envelope["hints"]["approval_phrase_env_var"] == "SOFER_MCP_APPROVAL_PHRASE"
