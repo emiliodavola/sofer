@@ -323,6 +323,8 @@ detector class, no changes to the pipeline.
 | --- | --- |
 | `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
 | `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then flatten `raw/DPTO.csv` → `cache/DPTO.csv`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
+| `meta check <config.toml>` | Report the `[meta]` fields that still carry an `init` placeholder (empty, or starting with `TODO`, `YOUR_`, `example` — `meta_placeholder_prefixes`). Read-only, and informational: the exit code is 0 whatever it reports, exactly like the `sofer validate` warning it mirrors; only an unreadable config exits 1. `--json` emits the stable status object. |
+| `meta set <config.toml> --set KEY=VALUE` | Write `[meta]` keys into the dataset TOML, preserving every other key, comment and table. `--set` is repeatable and reads the value per the key's kind: text verbatim, a list as comma-separated items (`--set tags=a,b`), a flag as `true`/`false`. `--dry-run` reports the plan and writes nothing; `--json` emits the stable status object. The write is atomic, a refusal writes nothing, and re-running with the values the file already holds writes nothing. 38 keys are settable — every `[meta]` key the pipeline reads. |
 | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute, must be an existing directory), `--timeout SECONDS`, `--connect-timeout SECONDS`, `--no-timeout`, `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) and per-agent host timeouts. Prefers native `mcp add` when available. |
 | `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
 | `mcp doctor [--agent <...\|all>] [--json]` | Measure the **real** cold start: spawn `sofer-mcp` (or the module entry point when the console script is not on `PATH`) and time the stdio `initialize` round trip, printing it beside the per-agent entry key and the value `mcp add` writes there. Budget: `[tool.sofer] mcp_connect_timeout_seconds`. Informational — exceeding the budget never changes the exit code, because a slow machine is not a broken registration. Reads and writes nothing. |
@@ -605,7 +607,8 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 15 tool callables (`sofer_validate`, `sofer_prepare`,
+The server exposes 17 tool callables (`sofer_validate`, `sofer_meta_check`,
+`sofer_meta_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
@@ -628,7 +631,10 @@ server posture snapshot (`approval_configured`, `phrase_source`, `root`,
 
 ```
 Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]
-  sofer_init → sofer_scan_dry_run / sofer_scan_apply
+  sofer_init → sofer_scan_dry_run / sofer_scan_apply → sofer_meta_set
+  Metadata step (between bootstrap and Phase 1): sofer_meta_check reports the
+  placeholders, sofer_meta_set writes [meta] description, license, source, tags
+  and any other card key
 Phase 1 Build: sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all
 Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer_publish_confirm
 ```
@@ -641,6 +647,8 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 | ------ | ------ | ---------- | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Greenfield bootstrap; creates TOML + `raw/` (Windows: `cwd` must stay under server root via `_contained_path`; `raw/example.csv` is NTFS-safe). |
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Phase 0 preview/apply after `init`. |
+| M | `sofer_meta_check` | `config` | Read the metadata state without running the validator; `readOnlyHint:true`. Reports the same warning `sofer_validate` prints. |
+| M | `sofer_meta_set` | `config`, `values`, `dry_run` | Write `[meta]` before Phase 1 (the only way over MCP): description/license/source/tags, plus any other card key. Preserves every other key and comment; `build_stale` names a `build/` tree that predates the write. Called with no `values` it writes nothing and returns a continuation asking for them. |
 | 1 | `sofer_validate` | `config` | Quick check; always first for existing datasets. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | After validate; writes Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | After prepare; batch codebooks. |
@@ -772,9 +780,11 @@ Per-agent locations and shapes:
   placeholders. Filling them is a **required step between bootstrap and Phase 1**, and it is the one
   step a human and an agent share: on an MCP-driven run the **agent** completes what the data can
   determine (description, tags), and the **human** supplies what it cannot (license, source).
-  `sofer_validate` warns while any `[meta]` value is still empty or still starts with `TODO`, `YOUR_`
-  or `example`, so the step reaches the agent through the envelope instead of appearing only in the
-  generated card. The warning never changes the exit code.
+  `sofer_meta_check` reports the state on demand and `sofer_meta_set` is the write a tool can perform
+  (issue #323) — before those existed the step was only prose, since an MCP client has no file writer.
+  `sofer_validate` also warns while any `[meta]` value is still empty or still starts with `TODO`,
+  `YOUR_` or `example`, so the step reaches the agent through the envelope instead of appearing only
+  in the generated card. The warning never changes the exit code, and neither does `sofer_meta_check`.
 - **User-scope resolution:** the paths below are sofer's **default** resolution under `Path.home()`.
   Agents such as opencode read their config from the system **account** home instead, so when the two
   differ the entry can land in a file the agent never reads. Pass `--user-config PATH` to state the
