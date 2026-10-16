@@ -198,7 +198,7 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | --- | --- | --- | --- | --- | --- |
 | 1 | #324 Curation Rationale needs a file | **S** | `2026-10-16-feat-curation-rationale-key` | [`tasks/curation-rationale-key.md`](tasks/curation-rationale-key.md) | **delivered** on `feat/324-curation-rationale-key` |
 | 2 | #322 `sofer mcp doctor` measures the cold start | **M** | `2026-10-16-feat-mcp-doctor` | [`tasks/mcp-doctor.md`](tasks/mcp-doctor.md) | **delivered** on `feat/322-mcp-doctor` (PR pending) |
-| 3 | #323 the metadata step's tool surface — check + set + CLI | **L** | none (ODD-only, see the flow note above) | [`tasks/meta-tools.md`](tasks/meta-tools.md) | 4 work-unit commits on `feat/323-meta-tools`; rule-14 gates and an independent verifier in flight |
+| 3 | #323 the metadata step's tool surface — check + set + CLI | **L** | none (ODD-only, see the flow note above) | [`tasks/meta-tools.md`](tasks/meta-tools.md) | **delivered** on `feat/323-meta-tools` — 9 commits, head `073275a`, three independent verification rounds (the first falsified two byte-preservation defects), rule-14 gates 100.00%, suite 2376 passed / 9 skipped; PR pending the maintainer |
 | 4 | #320 opencode receives no timeout key | **M** | none (ODD-only) | — | **research gate discharged** (see below); next on the branch |
 
 **Order of execution, and why it is not the issue order:**
@@ -273,3 +273,9 @@ its substrings, so "the metadata step" cannot exist in prose alone without also 
 (`WORKFLOW_METADATA`), in the parity declarations, and in the roster count the spec pins. #323's own
 closing paragraph named the parity tests and the instructions; the registry and the pinned roster count
 were the two it did not. A future issue that adds a tool should budget all four.
+
+The other finding is about this repository's test style, and it cost two verification rounds: a promise
+made in prose ("preserving every other key and the file's formatting") had **no test that wrote and
+compared bytes** — the tests compared bytes only on the no-op and `--dry-run` paths, where nothing is
+written. `tomllib`-level equality passed while the file was rewritten whole on Windows. Any future
+format-preservation claim needs `read_bytes` on a real write, on both chain endings, or it is untested.
