@@ -765,11 +765,14 @@ Ubicaciones y formas por agente:
 | hermes | `--scope project` | el mismo archivo de scope user — hermes no tiene config de proyecto, y la sustitución se nombra en stderr | same |
 
 - **Timeouts de host (issues #287, #296).** `sofer mcp add` también escribe en la entrada `sofer` el
-  deadline **por request** y el de **conexión/arranque** del host, para que dos fallos medidos dejen de
+  deadline **por request** y el de **conexión/arranque** del host, para que dos fallos dejen de
   parecer una registración rota. Los dos son reales: `sofer-mcp` importa pandas, pyarrow, datasets y
   fastmcp antes de poder responder `initialize`, así que un **primer arranque tras instalar o
-  actualizar tarda 16–32 s** (caché de bytecode y de páginas en frío) y el host reporta
-  `Connection failed … timed out`; y una llamada a un tool sobre un corpus real corre minutos
+  actualizar es más lento que uno en caliente**, y cuando excede el deadline de conexión del host este
+  reporta `Connection failed … timed out` — que se lee igual que una registración rota. Medí ese primer
+  arranque **en tu máquina** con `sofer mcp doctor`, que lo imprime junto a la clave y el valor
+  escritos acá y nombra los flags que los suben; el valor escrito sale de `[tool.sofer]`, nunca de un
+  número congelado en este documento. Una llamada a un tool sobre un corpus real corre minutos
   (`sofer_prepare` medido ~680 s, `sofer_codebook_all` ~100 s sobre 3.2 GB / 66.2 M filas) contra un
   default documentado de 60 s, donde el servidor **termina, escribe sus artefactos y pierde solo la
   respuesta** — así que quien llama no puede distinguir una falla de un éxito que no escuchó. El

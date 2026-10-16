@@ -729,14 +729,18 @@ Per-agent locations and shapes:
 | hermes | `--scope project` | the same user-scope file — Hermes has no project-scope config, and the substitution is named on stderr | same |
 
 - **Host timeouts (issues #287, #296).** `sofer mcp add` also writes the host's **per-request**
-  and **connect/startup** deadlines into the `sofer` entry, so two measured failures stop looking
-  like a broken registration. Both are real: `sofer-mcp` imports pandas, pyarrow, datasets and
-  fastmcp before it can answer `initialize`, so a **first launch after an install or upgrade takes
-  16–32 s** (cold bytecode and page cache) and hosts report `Connection failed … timed out`; and a
-  tool call on a real corpus runs for minutes (`sofer_prepare` measured ~680 s, `sofer_codebook_all`
-  ~100 s on 3.2 GB / 66.2 M rows) against a documented 60 s default, where the server **finishes,
-  writes its artifacts and loses only the response** — so the caller cannot tell a failure from an
-  unheard success. The key name and the unit are per agent:
+  and **connect/startup** deadlines into the `sofer` entry, so two failures stop looking like a
+  broken registration. Both are real: `sofer-mcp` imports pandas, pyarrow, datasets and fastmcp
+  before it can answer `initialize`, so a **first launch after an install or upgrade is slower than a
+  warm one**, and when it exceeds the host's connect deadline the host reports
+  `Connection failed … timed out` — which reads exactly like a broken registration. Measure that first
+  launch **on your machine** with `sofer mcp doctor`, which prints it beside the key and the value
+  written here and names the flags that raise them; the written value comes from `[tool.sofer]`, never
+  from a number frozen in this document. A tool call on a real corpus runs for minutes
+  (`sofer_prepare` measured ~680 s, `sofer_codebook_all` ~100 s on 3.2 GB / 66.2 M rows) against a
+  documented 60 s default, where the server **finishes, writes its artifacts and loses only the
+  response** — so the caller cannot tell a failure from an unheard success. The key name and the unit
+  are per agent:
 
   | Agent | Per-request key | Connect/startup key | Unit | Host default |
   | ------- | ------- | ------- | ------- | ------- |
