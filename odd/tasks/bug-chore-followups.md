@@ -115,7 +115,7 @@ comment at `mcp_registration.py:127` states that codex's native commands "always
 | --- | --- | --- |
 | D1 | #316 ships as an **ad-hoc fix**, no `openspec/changes/` folder. | Its requirement `S4` and the scenario at `spec.md:1616` constrain only the **summary** warning, which the fix leaves byte-identical. The per-file message is not a spec'd clause, so suppressing it changes no contract of record. Verified by `grep -rn "detectable split keyword" openspec/specs/` → 0 hits. |
 | D2 | #319 takes **option 2 of S8** — one clause stating what the count covers — and **not** option 1's second counter. | S9 pins that the checker reports "the number of `verify:` rows it **accepted**". Measured: the 17 backlogged specs carry **1** `verify:` line in the whole tree (`openspec/specs/data-quality/spec.md:47`) and have no row syntax at all, so a second counter would be ceremony over a population of one and would print a number that means something different from "accepted". Stating the exclusion removes the false impression that 65 is the tree's total, with no new syntax and no new semantics. **This corrects this document's first reading of the decision, which chose both halves** — the measurement is what settled it. |
-| D3 | #317.2 is fixed by sampling the **subtree**, not by dropping the Windows branch. | S5 offers "fix it or drop it honestly"; the probe above proves it is fixable, so the honest branch is the one that publishes a real Windows number. |
+| D3 | #317.2 is fixed by sampling the **subtree**, not by dropping the Windows branch. | S5 offers "fix it or drop it honestly"; the probe above proves it is fixable, so the honest branch is the one that publishes a real Windows number. Because `openspec/specs/data-quality/spec.md` §1 records the Windows `n/a` and the "silent constant" diagnosis as **declared evidence**, this fix is a spec change and carries its own `openspec/changes/` folder. |
 | D4 | #321 is **not** delivered in this batch. | S10 reverses a spec'd requirement (MCP-REG-05 "Native delegation declines when it cannot reproduce the timeouts") and decision D4 of `2026-10-16-fix-mcp-registration-timeouts/design.md`, taken by the maintainer two days earlier — and S12 adds a prerequisite the issue did not know about. That is a product decision, not an implementation step. Filed back as a decision. |
 
 ## Non-goals
@@ -179,10 +179,9 @@ maintainer's action): #317.2's "the Windows branch is effectively dead" is a wro
 | ID | Issue | Route | Spec | State |
 | --- | --- | --- | --- | --- |
 | T1 | #316 | inline, test-first | S3 | delivered |
-| T2 | #319 | inline | S8, S9 | pending |
+| T2 | #319 | inline | S8, S9 | delivered |
 | T3 | #318 | inline | S7 | pending |
-| T4 | #317 | inline, test-first | S5 | pending |
-| T5 | #317 | inline, recipe + re-run | S4 | pending |
+| T4 | #317 | inline, test-first | S5 | pending || T5 | #317 | inline, recipe + re-run | S4 | pending |
 | T6 | #317 | record only | S6 | pending |
 | T7 | #321 | decision | S10, S11, S12 | pending |
 | T8 | #320/#321 | analysis | S2 | delivered (see the section above) |
@@ -201,3 +200,12 @@ L3 (evidence): the audited open bug/chore set is exactly five issues; the recent
 fixed** (schema-grouped configs, `_check_duplicates` per-file attribution, the wider `datasets` import
 guard, the stale-`.coverage` guard, and `resolve_config_path`'s `--user-config` / `user_env_dir` branches
 all present).
+
+L4 (evidence, raised while implementing T4): `openspec/specs/data-quality/spec.md` §1 does not merely omit
+the Windows figure — it **declares** the omission as evidence ("**No peak RSS is published.** ... on the
+Windows host this was run on it reported 5.2 MiB for that child — a silent constant, confirmed
+independently with `tasklist` ... so the script prints `n/a` instead"). Two things follow. First, T4 is a
+spec change, not an ad-hoc fix: publishing a real Windows number falsifies that sentence. Second, the
+sentence's *diagnosis* is wrong in the same way the issue body was — `tasklist` agreeing with ctypes is
+not independent confirmation, it is two readings of the same 5.2 MiB trampoline; the interpreter holding
+the memory is its child. The spec delta must correct the claim, not just the outcome.
