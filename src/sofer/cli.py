@@ -865,9 +865,20 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
                 )
             )
             if reasons:
+                # Name the escape hatch only when it actually restores delegation.
+                # Measured (issue #321): with no env key present the reasons are
+                # exactly ["timeout"] and --no-timeout clears them, but with an
+                # env key present they are ["env forwarding", "timeout"] and
+                # the flag removes only the second, so the hint would point at a
+                # flag that changes nothing.
+                hint = (
+                    "; pass --no-timeout to keep native delegation at the cost of the deadlines"
+                    if reasons == ["timeout"]
+                    else ""
+                )
                 print(
                     f"  !  {agent} native mcp add cannot express "
-                    f"{', '.join(reasons)}; falling back to file edit",
+                    f"{', '.join(reasons)}; falling back to file edit{hint}",
                     file=sys.stderr,
                 )
             else:
@@ -1858,7 +1869,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Omit the timeout keys entirely, restoring the pre-#287/#296 entry "
-            "shape (and, with it, native codex/gemini delegation)."
+            "shape. For codex and gemini this is also the only path where sofer "
+            "does not rewrite the config file: with the timeouts, native "
+            "delegation declines and the file edit rewrites the whole document."
         ),
     )
     mcp_add.add_argument(

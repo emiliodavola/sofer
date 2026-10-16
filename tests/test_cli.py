@@ -3232,6 +3232,62 @@ class TestMcpRegistrationTimeoutsCli:
         cfg = tmp_path / "home" / ".codex" / "config.toml"
         assert "tool_timeout_sec" in cfg.read_text("utf-8")
 
+    def test_decline_names_no_timeout_when_timeout_is_the_only_reason(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The escape hatch is named where the user hits the trade-off.
+
+        Measured: with no env key present `timeout` is the *sole* decline reason
+        (`native_delegation_decline_reasons("codex", [], "user", timeouts)` ->
+        `["timeout"]`), so `--no-timeout` really does restore delegation here
+        and the hint is true.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        assert (
+            cli._cmd_mcp_add(
+                Namespace(agent="codex", scope="user", cwd=str(tmp_path), dry_run=False)
+            )
+            == 0
+        )
+        err = capsys.readouterr().err
+        assert "cannot express timeout" in err
+        assert "--no-timeout" in err
+
+    def test_decline_does_not_name_no_timeout_when_env_also_blocks(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Naming the flag there would be a lie, and the measurement says so.
+
+        With an env key present the reasons are `["env forwarding", "timeout"]`
+        and `--no-timeout` removes only the second
+        (`native_delegation_decline_reasons("codex", ["HF_TOKEN"], "user", None)`
+        -> `["env forwarding"]`). Sending the user to a flag that changes nothing
+        is the same class of defect as the wrong diagnosis this batch already
+        corrected twice.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.setenv("HF_TOKEN", "hf123")
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        assert (
+            cli._cmd_mcp_add(
+                Namespace(agent="codex", scope="user", cwd=str(tmp_path), dry_run=False)
+            )
+            == 0
+        )
+        err = capsys.readouterr().err
+        assert "env forwarding" in err
+        assert "--no-timeout" not in err
+
     def test_no_timeout_restores_native_delegation(self, tmp_path, monkeypatch, capsys) -> None:
         """--no-timeout is what keeps codex/gemini delegation reachable."""
         monkeypatch.chdir(tmp_path)

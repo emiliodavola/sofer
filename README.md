@@ -361,7 +361,7 @@ detector class, no changes to the pipeline.
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
 | `--timeout SECONDS` | `mcp add` | Per-request (tool call) deadline written into the entry, in seconds. Default: `[tool.sofer] mcp_request_timeout_seconds`. A non-positive value exits 2. |
 | `--connect-timeout SECONDS` | `mcp add` | Initial-connection / cold-start deadline written into the entry, in seconds. Default: `[tool.sofer] mcp_connect_timeout_seconds`. |
-| `--no-timeout` | `mcp add` | Omit the timeout keys entirely, restoring the pre-#287/#296 entry shape (and, with it, native codex/gemini delegation). |
+| `--no-timeout` | `mcp add` | Omit the timeout keys entirely, restoring the pre-#287/#296 entry shape and, with it, native codex/gemini delegation — the only path where sofer does not rewrite the config file, because a TOML or JSON edit rewrites the whole document (a TOML edit may strip comments). |
 
 ### Troubleshooting HF uploads
 
@@ -748,7 +748,12 @@ Per-agent locations and shapes:
   `mcp_connect_timeout_seconds` (120); override per invocation with `--timeout` / `--connect-timeout`,
   or omit both keys with `--no-timeout`. Writing a timeout is also why native codex/gemini delegation
   now declines with the reason `timeout` — neither `<agent> mcp add` takes a timeout flag — and
-  `--no-timeout` is what restores that path. An agent whose entry accepts no timeout is named on
+  `--no-timeout` is what restores that path. The decline names that flag on stderr, but only when
+  `timeout` is the *sole* reason: with an env key present the reasons are `env forwarding, timeout` and
+  the flag clears only the second, so naming it there would send the user to a flag that changes
+  nothing. The trade-off itself is not avoidable by doing both — writing the timeouts after a native
+  write would go through sofer's writer anyway, and for codex that is a whole-document `tomli_w`
+  rewrite, which is exactly what `--no-timeout` avoids. An agent whose entry accepts no timeout is named on
   stderr: **opencode** declares `timeout` differently across its releases (an integer in its zod
   schema, a `{startup, catalog, execution}` object in milliseconds in its current docs), so writing
   the wrong shape could fail validation of the whole `mcp` block; set its `timeout` by hand.
