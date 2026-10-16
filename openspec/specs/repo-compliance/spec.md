@@ -74,6 +74,20 @@ source = "Example Organization — Customer Experience Team"
 collection_method = "Online survey — email invite"
 csv_delimiter = ","
 # csv_encoding = "utf-8-sig"  # override for Latin-1/Windows-1252 files
+
+# Card sections that had no key until issue #291, so a fully-filled config
+# still shipped a placeholder card. Free text; a multi-line string is normal.
+repository = "https://github.com/example/customer-survey"
+direct_use = """
+Tabular benchmarking of survey response models.
+"""
+out_of_scope_use = """
+Not for individual-level inference about respondents.
+"""
+bias_risks_limitations = """
+Rural districts are under-sampled; the 2025 wave excludes offshore units.
+"""
+contact = "data@example.org"
 ```
 
 #### 2.1.2 Resolution rules
@@ -87,6 +101,20 @@ empty value, with these exceptions:
 - `pretty_name` — fall back to `cfg.name` when empty.
 - `task_categories` — omit when the list is empty.
 - `size_categories` — omit when empty.
+
+**Card sections with a dedicated key (issue #291).** `repository`, `direct_use`,
+`out_of_scope_use`, `bias_risks_limitations` and `contact` SHALL each fill the card
+section they name, and SHALL fall back to that section's placeholder when empty or
+whitespace-only — a value that is only whitespace is not content. `repository`
+SHALL fall back to `source` before the placeholder, because `source` is
+conventionally the organisation and is the best available value for a repo link.
+`### Curation Rationale` SHALL continue to be filled by `[meta] study_design`,
+whose content the caller resolves; it has no free-text key of its own.
+
+> Added by `2026-10-16-feat-card-section-keys` (issue #291). Before the keys
+existed, `build_dataset_card()` hardcoded those seven sites to a sentinel with no
+TOML key and no tool argument that could reach them, so a config with every ROTW
+field filled still produced a card that read as unfinished.
 
 ### 2.2 `from_toml` changes
 
