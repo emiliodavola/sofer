@@ -191,6 +191,8 @@ build_dir = "build"   # prepare output directory (default: "build")
 description = "Short description"
 license = "MIT"
 tags = ["tag1", "tag2"]
+# Those three are an example, not the whole set: every [meta] key the card
+# reads is listed in openspec/specs/repo-compliance/spec.md §2.1.1.
 
 # Every file or directory to publish gets its own [[file]] section.
 # Source files live in raw/; scan copies to cache/ (cache/ is what prepare reads).
