@@ -283,12 +283,9 @@ class TestHintContentActionable:
             "approval_phrase_where",
             "approval_phrase_restart",
             "approval_phrase_restart_required",
-            "approval_phrase_setup_opencode",
-            "approval_phrase_setup_codex",
-            "approval_phrase_setup_gemini",
             "approval_phrase_verify",
         }
-    )
+    ) | frozenset(f"approval_phrase_setup_{agent}" for agent in registration.AGENT_NAMES)
 
     def _unconfigured_hints(self, tmp_path: Path, monkeypatch: Any) -> dict[str, Any]:
         """Return the ``sofer_auth_status`` hints of a no-phrase server.
@@ -359,22 +356,69 @@ class TestHintContentActionable:
     def test_auth_status_unconfigured_hint_uses_verified_registration_keys(
         self, tmp_path, monkeypatch, restore_tool_config
     ) -> None:
-        """Per-agent guidance claims only the keys registration really writes.
+        """Per-agent guidance covers EVERY registered agent and claims only the
+        shapes registration really writes (issue #295).
 
-        The claimed key table is asserted against the real
-        :func:`sofer.mcp_registration.build_entry` output, and opencode's value
-        must state that no environment is forwarded (it writes no env field).
+        Each fact is cross-checked against the real
+        :func:`sofer.mcp_registration.build_entry` output for that agent: the
+        environment field the fact names must be the field the entry carries,
+        the reference form must be the one the entry persists (``$NAME`` for
+        ``refs``, ``${NAME}`` for ``refs_braced``), and an agent with no
+        environment forwarding must say so.
         """
         hints = self._unconfigured_hints(tmp_path, monkeypatch)
         env = {"HF_TOKEN": "hf_test_token", "SOFER_MCP_APPROVAL_PHRASE": "a-phrase"}
-        for agent, keys in ms._APPROVAL_PHRASE_AGENT_ENTRY_KEYS.items():
-            entry = registration.build_entry(agent, tmp_path, env)  # type: ignore[arg-type]
-            for key in keys:
-                assert key in entry, (agent, key, sorted(entry))
-                assert key in hints[f"approval_phrase_setup_{agent}"], (agent, key)
-        assert "env" not in ms._APPROVAL_PHRASE_AGENT_ENTRY_KEYS["opencode"]
+        assert registration.AGENT_NAMES, "the registry must not be empty"
+        for agent in registration.AGENT_NAMES:
+            fact = hints[f"approval_phrase_setup_{agent}"]
+            entry = registration.build_entry(agent, tmp_path, env)
+            capability = registration.ADAPTERS[agent]["env"]
+            if capability == "none":
+                assert "env" not in entry and "env_vars" not in entry, (agent, sorted(entry))
+                assert "no environment is forwarded" in fact, (agent, fact)
+            elif capability == "allow_list":
+                assert ms._APPROVAL_PHRASE_ENV_VAR in entry["env_vars"], agent
+                assert "env_vars" in fact and "NAMES" in fact, (agent, fact)
+            else:
+                reference = entry["env"][ms._APPROVAL_PHRASE_ENV_VAR]
+                assert "env" in fact, (agent, fact)
+                if capability == "refs":
+                    assert reference == f"${ms._APPROVAL_PHRASE_ENV_VAR}", agent
+                    assert "$NAME" in fact and "${" not in fact, (agent, fact)
+                else:
+                    assert reference == "${" + ms._APPROVAL_PHRASE_ENV_VAR + "}", agent
+                    assert "${NAME}" in fact, (agent, fact)
         opencode_setup = hints["approval_phrase_setup_opencode"]
         assert "no environment is forwarded" in opencode_setup
+
+    def test_capability_table_covers_every_registry_capability(self) -> None:
+        """A new registration capability fails this guard, not the preflight.
+
+        The capability enum is the single source the guidance prose branches
+        on; an unlisted capability would mean a missing template (issue #295).
+        """
+        capabilities = {spec["env"] for spec in registration.ADAPTERS.values()}
+        missing = capabilities - set(ms._ENV_CAPABILITY_FACTS)
+        assert not missing, f"no setup fact for capabilities: {sorted(missing)}"
+
+    def test_guidance_follows_a_sentinel_registry_agent(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Adding an agent to ADAPTERS is the only edit the guidance needs.
+
+        The registry is patched the same way the single-source guard in
+        ``tests/test_mcp_registration.py`` patches it, so a new agent cannot
+        leave the guidance behind (issue #295).
+        """
+        sentinel = {**registration.ADAPTERS["pi"], "env": "refs_braced"}
+        patched = {**registration.ADAPTERS, "sentinel": sentinel}
+        monkeypatch.setattr(registration, "ADAPTERS", patched)
+        monkeypatch.setattr(registration, "AGENT_NAMES", tuple(patched))
+
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        fact = hints["approval_phrase_setup_sentinel"]
+        assert "sentinel" in fact
+        assert "${NAME}" in fact
 
     def test_auth_status_unconfigured_guidance_has_no_phrase_material(
         self, tmp_path, monkeypatch, restore_tool_config

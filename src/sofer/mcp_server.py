@@ -87,6 +87,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
 
 from . import _toml, failure_report, workflow
 from . import config as sofer_config
+from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
@@ -229,30 +230,44 @@ _PHRASE_RESTART_FACT: str = (
 )
 _PHRASE_VERIFY_FACT: str = "after the restart sofer_auth_status reports approval_configured:true"
 
-# Per-agent registration shapes the setup guidance is composed from, verified
-# against ``mcp_registration.build_entry``: opencode's ``mcp.sofer`` entry
-# carries only ``type``/``command``/``cwd`` (NO environment forwarding), codex
-# persists an ``env_vars`` allow-list of NAMES, gemini persists an ``env``
-# mapping of NAME -> ``$NAME`` references. Secret VALUES are never on disk.
-_APPROVAL_PHRASE_AGENT_ENTRY_KEYS: dict[str, tuple[str, ...]] = {
-    "opencode": ("type", "command", "cwd"),
-    "codex": ("env_vars",),
-    "gemini": ("env",),
+# Per-agent setup guidance is DERIVED from the registration registry (issue
+# #295): ``mcp_registration.ADAPTERS[agent]["env"]`` is the capability
+# ``build_entry`` itself branches on, so the prose cannot describe a shape the
+# tooling does not write. One template per capability replaces one hand-kept
+# constant per agent - ``pi`` and ``hermes`` share ``refs_braced``, which is
+# exactly the fact that was missing.
+#
+# Each entry is ``(reference form the registration persists, prose template)``:
+# the form is interpolated as ``{form}`` rather than written into the template,
+# because the braced form contains literal braces that ``str.format`` would
+# read as a field. Secret VALUES are never on disk, and no template may name an
+# on-disk agent config file or directory (APX-01).
+_ENV_CAPABILITY_FACTS: dict[str, tuple[str, str]] = {
+    "none": (
+        "",
+        "{agent} ({invocation}): the entry carries only type, command and cwd - "
+        "no environment is forwarded, so set the variable in the terminal that "
+        "launches {agent} itself",
+    ),
+    "allow_list": (
+        "",
+        "{agent} ({invocation}): the entry persists an env_vars allow-list of "
+        "variable NAMES - set the variable before launching {agent}, and values "
+        "are never written to disk",
+    ),
+    "refs": (
+        "$NAME",
+        "{agent} ({invocation}): the entry persists an env mapping of NAME to "
+        "{form} references expanded at launch - values are never written to disk",
+    ),
+    "refs_braced": (
+        "${NAME}",
+        "{agent} ({invocation}): the entry persists an env mapping of NAME to "
+        "{form} references that {agent} expands from its own launch environment "
+        "- set the variable in the terminal or process that launches {agent}, "
+        "and values are never written to disk",
+    ),
 }
-_OPENCODE_SETUP_FACT: str = (
-    "opencode (sofer mcp add --agent opencode): the entry carries only type, "
-    "command and cwd - no environment is forwarded, so set the variable in the "
-    "terminal that launches opencode itself"
-)
-_CODEX_SETUP_FACT: str = (
-    "codex (sofer mcp add --agent codex): the entry persists an env_vars "
-    "allow-list of variable NAMES - set the variable before launching codex, and "
-    "values are never written to disk"
-)
-_GEMINI_SETUP_FACT: str = (
-    "gemini (sofer mcp add --agent gemini): the entry persists an env mapping of "
-    "NAME to $NAME references expanded at launch - values are never written to disk"
-)
 
 # Composed fail-closed refusal message: verbatim "publish is disabled" prefix,
 # each process-start fact exactly once, ASCII ``-`` separators only, no phrase
@@ -949,6 +964,39 @@ def _workflow_description(fn: Callable[..., Any]) -> str:
     return f"{doc}\n\n{line}" if line else doc
 
 
+def _approval_phrase_setup_fact(agent: str) -> str:
+    """Compose one agent's approval-phrase setup fact from its registry entry.
+
+    The ``env`` capability of :data:`sofer.mcp_registration.ADAPTERS` selects
+    both the persisted reference form and the prose template (issue #295).
+
+    Args:
+        agent: A registered agent name (``AGENT_NAMES`` member).
+
+    Returns:
+        The flat, single-line setup fact for *agent*.
+    """
+    reference, template = _ENV_CAPABILITY_FACTS[registration.ADAPTERS[agent]["env"]]
+    return template.format(agent=agent, invocation=f"sofer mcp add --agent {agent}", form=reference)
+
+
+def _approval_phrase_setup_facts() -> dict[str, str]:
+    """Return ``agent -> per-agent setup fact`` for every registered agent.
+
+    Derived at CALL time from :data:`sofer.mcp_registration.ADAPTERS`, never
+    from a parallel table (issue #295): adding an agent to the registry is the
+    only edit the guidance needs, and its ``env`` capability selects the prose
+    template. :data:`sofer.mcp_registration.AGENT_NAMES` is ``tuple(ADAPTERS)``
+    by definition, so the lookup cannot miss; a capability with no template is
+    caught by ``TestHintContentActionable::test_capability_table_covers_every_registry_capability``
+    before it can ship.
+
+    Returns:
+        A fresh ``{agent: fact}`` dict in registry order.
+    """
+    return {agent: _approval_phrase_setup_fact(agent) for agent in registration.AGENT_NAMES}
+
+
 def _approval_phrase_guidance_hints() -> dict[str, Any]:
     """Return the flat unconfigured-approval guidance hints (issue #144).
 
@@ -965,6 +1013,9 @@ def _approval_phrase_guidance_hints() -> dict[str, Any]:
         - every value is a flat scalar (``str`` or ``True``) - no nested dict
           or list anywhere, i.e. the MSP-R13 flatness invariant asserted by
           ``tests/test_mcp_server.py::TestNextHintContract._is_flat_hint_dict``;
+        - the per-agent setup block is derived from the registration registry
+          (:func:`_approval_phrase_setup_facts`), so it covers every registered
+          agent and cannot describe a shape ``build_entry`` does not write;
         - only the approval-phrase variable NAME is ever exposed: never the
           phrase, a phrase-derived signal, or an on-disk agent config file or
           directory path.
@@ -981,9 +1032,10 @@ def _approval_phrase_guidance_hints() -> dict[str, Any]:
         "approval_phrase_where": _PHRASE_LAUNCH_ENV_FACT,
         "approval_phrase_restart": _PHRASE_RESTART_FACT,
         "approval_phrase_restart_required": True,
-        "approval_phrase_setup_opencode": _OPENCODE_SETUP_FACT,
-        "approval_phrase_setup_codex": _CODEX_SETUP_FACT,
-        "approval_phrase_setup_gemini": _GEMINI_SETUP_FACT,
+        **{
+            f"approval_phrase_setup_{agent}": fact
+            for agent, fact in _approval_phrase_setup_facts().items()
+        },
         "approval_phrase_verify": _PHRASE_VERIFY_FACT,
     }
 
