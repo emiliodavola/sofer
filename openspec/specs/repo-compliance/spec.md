@@ -88,6 +88,12 @@ bias_risks_limitations = """
 Rural districts are under-sampled; the 2025 wave excludes offshore units.
 """
 contact = "data@example.org"
+# Issue #324: this section's only fill path used to be a *file* (`study_design`),
+# while every neighbouring section takes inline text. Inline text now wins over
+# that file; `study_design` alone still works exactly as it did.
+curation_rationale = """
+Why this dataset exists, typed here instead of in a file.
+"""
 ```
 
 #### 2.1.2 Resolution rules
@@ -108,8 +114,23 @@ section they name, and SHALL fall back to that section's placeholder when empty 
 whitespace-only — a value that is only whitespace is not content. `repository`
 SHALL fall back to `source` before the placeholder, because `source` is
 conventionally the organisation and is the best available value for a repo link.
-`### Curation Rationale` SHALL continue to be filled by `[meta] study_design`,
-whose content the caller resolves; it has no free-text key of its own.
+Curation Rationale is the one section whose fill paths are governed by the rule
+below instead, because it had a file path and now also has a key.
+
+**Curation Rationale (issues #291, #324).** `### Curation Rationale` SHALL be filled by
+`[meta] curation_rationale` when that key holds non-whitespace content, otherwise
+by the resolved content of the file `[meta] study_design` points at, otherwise by
+that section's placeholder. The key SHALL win over the file, so declaring both is
+unambiguous. When `curation_rationale` is absent the branch taken SHALL be the
+pre-#324 one unchanged: a whitespace-only `study_design` file keeps the outcome it
+had (an empty section, not the placeholder), because the caller decided there was
+a file.
+
+> Amended by change `2026-10-16-feat-curation-rationale-key` (issue #324). The section
+was the only card section whose sole fill path was a *path* to a markdown file
+while every neighbour took inline text, so a user with three paragraphs of
+rationale and nothing else to say had to create a file. The key is additive: a
+config that declares neither source emits the same card it did before.
 
 > Added by `2026-10-16-feat-card-section-keys` (issue #291). Before the keys
 existed, `build_dataset_card()` hardcoded those seven sites to a sentinel with no

@@ -3979,10 +3979,10 @@ class TestCardSectionKeys:
     def test_a_fully_filled_config_emits_no_sentinel(self) -> None:
         """The issue's acceptance: nothing left `[More Information Needed]`.
 
-        Curation Rationale is filled through `[meta] study_design` (a file whose
-        content the caller resolves and passes), which is the issue's "promoted
-        from the documented-but-obscure path to the obvious one" — it has no
-        free-text key of its own.
+        Curation Rationale is filled here through `[meta] study_design` (a file
+        whose content the caller resolves and passes). Since #324 that section
+        also has a free-text key of its own; `TestCurationRationaleKey` covers
+        that path, and this test keeps the file path working.
         """
         card = build_dataset_card(
             self._filled(), schema=[], study_design_content="Curation rationale text."
@@ -3992,7 +3992,12 @@ class TestCardSectionKeys:
         assert "Curation rationale text." in card
 
     def test_curation_rationale_needs_study_design(self) -> None:
-        """Without it, that one section keeps its sentinel — and only that one."""
+        """The #291 fixture declares neither fill path for that one section.
+
+        `self._filled()` sets the five #291 keys only, so neither
+        `study_design_content` nor `[meta] curation_rationale` is set and one
+        sentinel survives — and only that one.
+        """
         card = build_dataset_card(self._filled(), schema=[])
         assert card.count(_MORE_INFO) == 1
         assert "### Curation Rationale\n\n" + _MORE_INFO in card
@@ -4056,6 +4061,87 @@ class TestCardSectionKeys:
         assert source.count("_MORE_INFO") == 4
 
 
+class TestCurationRationaleKey:
+    """#324: `[meta] curation_rationale` fills the section without a file.
+
+    Curation Rationale was the one card section whose only fill path was
+    `[meta] study_design` — a *path* to a markdown file — while every
+    neighbouring section takes a plain multi-line string. A user with three
+    paragraphs of rationale and nothing else to say had to create a file.
+
+    The key is additive: a config that declares neither `curation_rationale`
+    nor `study_design` is unchanged, and `study_design` keeps working alone.
+    """
+
+    @staticmethod
+    def _section(card: str) -> str:
+        """Return the Curation Rationale section body (between headings)."""
+        return card.split("### Curation Rationale")[1].split("###")[0]
+
+    def test_the_key_fills_the_section_without_a_file(self) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="Collected by stratified random sampling.",
+        )
+        card = build_dataset_card(cfg, schema=[])
+        section = self._section(card)
+        assert "Collected by stratified random sampling." in section
+        assert _MORE_INFO not in section
+
+    def test_the_key_wins_over_the_study_design_file(self) -> None:
+        """Precedence: key, then file, then sentinel (issue #324 option 1)."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="Inline rationale.",
+            study_design="design.md",
+        )
+        card = build_dataset_card(cfg, schema=[], study_design_content="From the file.")
+        section = self._section(card)
+        assert "Inline rationale." in section
+        assert "From the file." not in section
+
+    def test_a_whitespace_only_key_falls_back_to_the_file(self) -> None:
+        """A value that is only whitespace is not content (spec §2.1.2)."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="  \n\t ",
+        )
+        card = build_dataset_card(cfg, schema=[], study_design_content="From the file.")
+        section = self._section(card)
+        assert "From the file." in section
+        assert _MORE_INFO not in section
+
+    def test_a_whitespace_only_key_alone_keeps_the_sentinel(self) -> None:
+        cfg = DatasetConfig(name="census", repo_id="user/census", curation_rationale=" \n ")
+        card = build_dataset_card(cfg, schema=[])
+        assert "### Curation Rationale\n\n" + _MORE_INFO in card
+
+    def test_neither_source_keeps_the_sentinel(self) -> None:
+        cfg = DatasetConfig(name="census", repo_id="user/census")
+        card = build_dataset_card(cfg, schema=[])
+        assert "### Curation Rationale\n\n" + _MORE_INFO in card
+
+    def test_declaring_study_design_alone_is_unchanged(self) -> None:
+        """The only fill path that existed before #324 still behaves as it did."""
+        cfg = DatasetConfig(name="census", repo_id="user/census", study_design="design.md")
+        card = build_dataset_card(cfg, schema=[], study_design_content="From the file.")
+        assert "### Curation Rationale\n\nFrom the file." in card
+
+    def test_an_undeclared_study_design_with_a_key_is_enough(self) -> None:
+        """The key needs no `study_design` path to be declared alongside it."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="Only the key is declared.",
+            study_design=None,
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert "Only the key is declared." in self._section(card)
+
+
 class TestCardSectionKeysFromToml:
     """The keys are read from `[meta]`, so a TOML can carry them."""
 
@@ -4072,6 +4158,7 @@ class TestCardSectionKeysFromToml:
             'out_of_scope_use = "None."\n'
             'bias_risks_limitations = "Sampling bias."\n'
             'contact = "data@example.org"\n'
+            'curation_rationale = """\nWhy this dataset exists.\n"""\n'
             "\n"
             "[[file]]\n"
             'local = "a.csv"\n'
@@ -4084,6 +4171,7 @@ class TestCardSectionKeysFromToml:
         assert cfg.out_of_scope_use == "None."
         assert cfg.bias_risks_limitations == "Sampling bias."
         assert cfg.contact == "data@example.org"
+        assert cfg.curation_rationale.strip() == "Why this dataset exists."
 
     def test_absent_meta_keys_default_to_empty(self, tmp_path: Path) -> None:
         toml = tmp_path / "dataset.toml"
@@ -4103,3 +4191,4 @@ class TestCardSectionKeysFromToml:
         assert cfg.out_of_scope_use == ""
         assert cfg.bias_risks_limitations == ""
         assert cfg.contact == ""
+        assert cfg.curation_rationale == ""

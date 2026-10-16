@@ -174,3 +174,58 @@ real Windows evidence) → T5 → T6 → T7 (blocked on a maintainer decision).
 | # | Decision | Recommendation |
 | --- | --- | --- |
 | D5 | #321: delegate natively and then patch the timeout keys into the same file (the issue's option 1), or keep the decline and make `--no-timeout` louder (option 3)? | **Decided: option 3, made honest** — keep the decline, and name the trade-off at the point a user meets it. Option 1 was rejected *after measuring*, not as a preference: `atomic_write` rewrites the whole document for TOML and JSON while only YAML splices, and `merge()` replaces the `sofer` entry wholesale, so "delegate then patch" produces the same document as the direct file edit — a `subprocess` and an extra `.bak` for nothing, with the claimed comment preservation undelivered. The prerequisite this row predicted was real and shipped anyway, as #325. |
+
+### Batch B — the four features (#320, #322, #323, #324) — **in progress**
+
+The four `type:feature` issues Batch A explicitly left out of its bug/chore scope. Each is its own SDD
+change on its own branch, archived inside its own delivery PR (AGENTS.md rule 15), with its own feature
+document under `odd/tasks/`. Every premise was re-checked against the code on 2026-10-16 and **none**
+was already implemented: no `doctor` subcommand (`cli.py` has `mcp add` and `mcp remove` only), neither
+`sofer_meta_set` nor `sofer_meta_check` in the 15-tool roster, no `curation_rationale` token anywhere
+under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registration.py:195`).
+
+| Order | Issue | Size | Change folder | Feature doc | State |
+| --- | --- | --- | --- | --- | --- |
+| 1 | #324 Curation Rationale needs a file | **S** | `2026-10-16-feat-curation-rationale-key` | [`tasks/curation-rationale-key.md`](tasks/curation-rationale-key.md) | **delivered** on `feat/324-curation-rationale-key` |
+| 2 | #322 `sofer mcp doctor` measures the cold start | **M** | — | — | pending |
+| 3 | #323a `sofer_meta_check` (read-only half) | **S/M** | — | — | pending |
+| 4 | #320 opencode receives no timeout key | **M/L** | — | — | pending, **research-gated** |
+| 5 | #323b `sofer_meta_set` (+ the CLI counterpart) | **L** | — | — | pending, **blocked on a design decision** |
+
+**Order of execution, and why it is not the issue order:**
+
+- **#324 first** — cheapest, no unknown, and it closes a defect the previous delivery recorded against
+  itself (`2026-10-16-feat-card-section-keys/archive-report.md` §6 and `odd/tasks/card-section-keys.md` D4).
+- **#322 second** — the highest value per cost, and it is the *input* #320 needs: #320's own body says the
+  doctor's output "would be the most useful input". It also answers, with a number from this machine,
+  whether opencode's 30 s startup default actually bites against the measured 16–32 s cold start.
+- **#323a third** — read-only, reuses `meta_placeholder_warnings()` verbatim, and closes the "the agent
+  cannot see the state" half of #323 without touching the tool-inventory write surface.
+- **#320 fourth** — **research-gated, and its three options are not equivalent.** Option 3 (a
+  startup-only capability) *requires* the nested `{startup,catalog,execution}` shape, so it re-imports
+  exactly the risk decision D5 avoided when it wrote no key at all. Option 1 (detect the shape from the
+  existing file) only helps a user who already has a nested timeout — not the case that bites. Option 2
+  (pin a version, write that version's shape, make an upgrade visible) is the only one that resolves the
+  contradiction, and it depends on a premise **not verifiable from this repository**: whether the pinned
+  opencode zod schema still declares `timeout` as a positive integer, and in which unit. First task is
+  that verification, not an implementation.
+- **#323b last** — the largest, and blocked on a decision the issue does **not** name: there is no
+  format-preserving TOML writer in this repository. `_toml.py` only reads, `tomli-w` serialises the whole
+  document, and the surgical splice exists only for YAML (`_yaml.py`). Writing `[meta]` keys with
+  `tomli-w` therefore destroys the comments in a hand-written dataset TOML. Choosing between a
+  `tomlkit` dependency, a new surgical `_toml_editor.py`, and accepting the rewrite is the gate.
+
+**Cost, as measured against this repository's own obligations** (rule 14's 100.00% per-file gates on
+`cli.py`, rule 6's test mapping, rules 7/13's README pair, rule 15's in-PR archive):
+
+| Issue | Dominated by |
+| --- | --- |
+| #324 | one field, one branch, 7 tests — small |
+| #322 | a new `cli.py` handler under the rule-14 100.00% mandate, including the no-binary-on-`PATH` fallback and the child-kill path; Windows process handling in CI |
+| #323a | tool description contract (MSP-R04), `readOnlyHint`, typed `output_schema`, `_PHASED_INSTRUCTIONS`, `test_fifteen_tools`, a new `AREAS` entry in `test_parity.py` |
+| #320 | the external shape/unit verification, then nested-shape support in `_timeout_keys()`, `_timeout_keys_equal()`, the note, MCP-REG-05 and the README |
+| #323b | the TOML-writer decision, containment, atomic write, the "may it run while a build exists?" question, parity, and the CLI counterpart |
+
+One coupling worth honouring: **#320 and #322 amend the same spec clause (MCP-REG-05)**. They should
+share one change folder with two PRs rather than amend that clause twice — but not one PR, because #320
+is gated and #322 is not.
