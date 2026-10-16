@@ -12,8 +12,10 @@ import io
 import json
 import sys
 from argparse import Namespace
+from pathlib import Path
 
 import pytest as _pytest
+import yaml
 from conftest import run_cli
 
 from sofer import cli, config, mcp_registration
@@ -2685,7 +2687,7 @@ class TestMcpNativeDelegationFidelityCli:
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
         seen: list[tuple[str, str]] = []
 
-        def _delegate(agent, cwd, env_keys, scope):
+        def _delegate(agent, cwd, env_keys, scope, timeouts=None):
             seen.append((agent, scope))
             return True
 
@@ -2710,7 +2712,12 @@ class TestMcpNativeDelegationFidelityCli:
         monkeypatch.setattr(mcp_registration, "delegate_add", lambda *a, **kw: False)
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
-        rc = cli._cmd_mcp_add(Namespace(agent="codex", scope="user", cwd=None, dry_run=False))
+        # --no-timeout keeps this case about the *generic* fallback message:
+        # with a timeout requested, codex always declines with the `timeout`
+        # reason (its native `mcp add` takes no timeout flag, issues #287/#296).
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="codex", scope="user", cwd=None, dry_run=False, no_timeout=True)
+        )
         assert rc == 0
         err = capsys.readouterr().err
         assert "native delegation failed, falling back to file edit" in err
@@ -3095,3 +3102,221 @@ class TestExplicitCsvDialectOverride:
 
         assert result.returncode == 0, result.stderr
         assert "Explicit dialect" not in result.stderr, result.stderr
+
+
+class TestMcpRegistrationTimeoutsCli:
+    """CLI halves of issues #287/#296: the entry's host deadlines.
+
+    ``sofer mcp add`` writes the host's per-request and connect/startup
+    deadlines, because both failure modes (16-32 s cold start, ~680 s
+    ``prepare``) surfaced as ``Connection failed`` / ``request timed out`` and
+    looked like a broken registration.
+    """
+
+    def test_add_writes_the_default_timeout_keys(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="hermes", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        data = yaml.safe_load((hermes_home / "config.yaml").read_text("utf-8"))
+        entry = data["mcp_servers"]["sofer"]
+        assert entry["timeout"] == config.MCP_REQUEST_TIMEOUT_SECONDS
+        assert entry["connect_timeout"] == config.MCP_CONNECT_TIMEOUT_SECONDS
+
+    def test_timeout_flags_override_the_defaults(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="hermes",
+                scope="project",
+                cwd=str(tmp_path),
+                dry_run=False,
+                timeout=1800,
+                connect_timeout=300,
+            )
+        )
+        assert rc == 0
+        data = yaml.safe_load((hermes_home / "config.yaml").read_text("utf-8"))
+        entry = data["mcp_servers"]["sofer"]
+        assert entry["timeout"] == 1800
+        assert entry["connect_timeout"] == 300
+
+    def test_no_timeout_omits_the_keys(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="hermes",
+                scope="project",
+                cwd=str(tmp_path),
+                dry_run=False,
+                no_timeout=True,
+            )
+        )
+        assert rc == 0
+        data = yaml.safe_load((hermes_home / "config.yaml").read_text("utf-8"))
+        entry = data["mcp_servers"]["sofer"]
+        assert "timeout" not in entry
+        assert "connect_timeout" not in entry
+
+    def test_gemini_timeout_is_written_in_milliseconds(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="gemini", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        data = json.loads((tmp_path / ".gemini" / "settings.json").read_text("utf-8"))
+        assert data["mcpServers"]["sofer"]["timeout"] == (config.MCP_REQUEST_TIMEOUT_SECONDS * 1000)
+
+    def test_changed_timeout_rewrites_the_entry_and_backs_up(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        path = hermes_home / "config.yaml"
+        assert (
+            cli._cmd_mcp_add(
+                Namespace(agent="hermes", scope="project", cwd=str(tmp_path), dry_run=False)
+            )
+            == 0
+        )
+        first = path.read_text("utf-8")
+        assert str(config.MCP_REQUEST_TIMEOUT_SECONDS) in first
+        assert (
+            cli._cmd_mcp_add(
+                Namespace(
+                    agent="hermes",
+                    scope="project",
+                    cwd=str(tmp_path),
+                    dry_run=False,
+                    timeout=42,
+                )
+            )
+            == 0
+        )
+        assert "timeout: 42" in path.read_text("utf-8")
+        assert Path(str(path) + ".bak").exists()
+
+    def test_timeouts_decline_native_delegation_naming_the_reason(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="codex", scope="user", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "cannot express timeout" in err
+        # The file edit ran and carries the keys the delegation would have lost.
+        cfg = tmp_path / "home" / ".codex" / "config.toml"
+        assert "tool_timeout_sec" in cfg.read_text("utf-8")
+
+    def test_no_timeout_restores_native_delegation(self, tmp_path, monkeypatch, capsys) -> None:
+        """--no-timeout is what keeps codex/gemini delegation reachable."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: True)
+        seen: list[str] = []
+
+        def _delegate(agent, cwd, env_keys, scope, timeouts=None):
+            seen.append(agent)
+            return True
+
+        monkeypatch.setattr(mcp_registration, "delegate_add", _delegate)
+        rc = cli._cmd_mcp_add(
+            Namespace(
+                agent="gemini",
+                scope="project",
+                cwd=str(tmp_path),
+                dry_run=False,
+                no_timeout=True,
+            )
+        )
+        assert rc == 0
+        assert seen == ["gemini"]
+        assert not (tmp_path / ".gemini" / "settings.json").exists()
+
+    def test_opencode_names_the_missing_timeout_key_on_stderr(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(tmp_path), dry_run=False)
+        )
+        assert rc == 0
+        assert "opencode registration carries no timeout key" in capsys.readouterr().err
+        data = json.loads((tmp_path / "opencode.json").read_text("utf-8"))
+        assert "timeout" not in data["mcp"]["sofer"]
+
+    def test_dry_run_with_timeouts_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        hermes_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="hermes", scope="project", cwd=str(tmp_path), dry_run=True)
+        )
+        assert rc == 0
+        assert not (hermes_home / "config.yaml").exists()
+
+    @_pytest.mark.parametrize("bad", ["0", "-1", "abc", "1.5"])
+    def test_parser_rejects_a_non_positive_timeout(self, capsys, bad) -> None:
+        """The parser refuses it before any config is touched (in-process).
+
+        In-process rather than only through ``run_cli``: the subprocess boundary
+        is covered separately below, and a coverage gate cannot see the lines a
+        child process executes.
+        """
+        with _pytest.raises(SystemExit) as excinfo:
+            cli._build_parser().parse_args(["mcp", "add", "--agent", "pi", "--timeout", bad])
+        assert excinfo.value.code == 2
+        assert "--timeout" in capsys.readouterr().err
+
+    @_pytest.mark.parametrize("flag", ["--timeout", "--connect-timeout"])
+    def test_positive_seconds_accepts_a_positive_int(self, flag) -> None:
+        parsed = cli._build_parser().parse_args(["mcp", "add", "--agent", "pi", flag, "900"])
+        assert getattr(parsed, flag.lstrip("-").replace("-", "_")) == 900
+
+    def test_subprocess_boundary_exit_code_for_a_bad_timeout(self, tmp_path) -> None:
+        """PB-02: the user-visible exit code and message, through the CLI."""
+        result = run_cli(["mcp", "add", "--agent", "pi", "--timeout", "0"], cwd=tmp_path)
+        assert result.returncode == 2
+        assert "--timeout" in result.stderr
+
+    def test_no_timeout_flag_parses_as_a_boolean(self) -> None:
+        parsed = cli._build_parser().parse_args(["mcp", "add", "--agent", "pi", "--no-timeout"])
+        assert parsed.no_timeout is True
+        assert parsed.timeout is None
+        assert parsed.connect_timeout is None
+
+    def test_add_help_documents_the_timeout_flags(self, capsys) -> None:
+        import pytest
+
+        with pytest.raises(SystemExit):
+            cli._build_parser().parse_args(["mcp", "add", "--help"])
+        out = capsys.readouterr().out
+        for flag in ("--timeout", "--connect-timeout", "--no-timeout"):
+            assert flag in out
+        assert "mcp_request_timeout_seconds" in out

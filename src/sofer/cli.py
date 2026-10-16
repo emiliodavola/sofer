@@ -92,6 +92,35 @@ def _load_and_validate(
     return cfg, report
 
 
+def _positive_seconds(text: str) -> int:
+    """Argparse type for a positive whole number of seconds.
+
+    Used by ``sofer mcp add``'s host-timeout flags (issues #287, #296). A
+    non-positive host deadline would make the registered server unusable —
+    exactly the failure the flags exist to prevent — so argparse rejects it
+    with exit 2 and a usage message instead of writing it into the config.
+
+    Args:
+        text: Raw command-line value.
+
+    Returns:
+        The parsed positive integer.
+
+    Raises:
+        argparse.ArgumentTypeError: When *text* is not a whole number, or is
+            less than 1.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of seconds, got {text!r}"
+        ) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive number of seconds, got {value}")
+    return value
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     """Validate the local dataset against its TOML configuration and quality checks.
 
@@ -693,20 +722,22 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
            ``mcp_registration.probe_native`` (``which`` + ``mcp --help``
            timeout 3s); when available, try ``delegate_add`` first — on
            success skip file-edit. Delegation is fidelity-gated (#167, #232):
-           when the native CLI cannot forward the same env NAMES and scope as
-           the file edit, ``delegate_add`` declines without spawning, a stderr
-           warning names the reason (``env forwarding`` / ``project scope``,
-           NAMES only), and the file-edit path runs; any other native failure
-           (raise or non-zero exit) falls back with the generic message.
+           when the native CLI cannot forward the same env NAMES, scope and
+           timeouts as the file edit, ``delegate_add`` declines without
+           spawning, a stderr warning names the reason (``env forwarding`` /
+           ``project scope`` / ``timeout``, NAMES only), and the file-edit path
+           runs; any other native failure (raise or non-zero exit) falls back
+           with the generic message.
         5. File-edit path: ``resolve_config_path`` → ``single_scope_note``
            (a single-scope agent under ``--scope project`` prints the
            substitution to stderr here, before the read/merge/dry-run branch) →
            ``read_config`` (unreadable/malformed → print to stderr, return 1,
            no backup/write) → ``build_entry`` (absolute cwd, env forwarding per
-           agent) → ``merge`` (normalize Codex command string/array, preserve
-           other servers, no write when unchanged) → ``--dry-run`` guard (no
-           mutation) → ``backup`` (single ``.bak`` copy2 overwrite) →
-           ``atomic_write`` (tmp in same dir + ``os.replace``).
+           agent, host timeout keys per agent) → ``merge`` (normalize Codex
+           command string/array, preserve other servers, no write when
+           unchanged) → ``--dry-run`` guard (no mutation) → ``backup`` (single
+           ``.bak`` copy2 overwrite) → ``atomic_write`` (tmp in same dir +
+           ``os.replace``).
         6. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
 
         Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
@@ -716,6 +747,16 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
         opencode receives no env. When opencode (or the opencode member of
         ``all``) is chosen with known env keys present, the step-3 warning is
         printed once per run and names the variables that cannot be forwarded.
+
+        Host timeouts (issues #287, #296): the entry carries the host's
+        per-request and connect/startup deadlines so a cold start (16-32 s
+        measured) and a long call (~680 s ``prepare`` measured) do not fail
+        against a host default and look like a broken registration. The values
+        default to ``[tool.sofer] mcp_request_timeout_seconds`` /
+        ``mcp_connect_timeout_seconds``, are overridable per invocation, and are
+        omitted entirely by ``--no-timeout``. The key name and the unit come
+        from the adapter; an agent whose entry accepts none is named on stderr
+        by ``mcp_registration.dropped_timeout_note``.
     """
     # Expand agent
     raw_agent: str = getattr(args, "agent")
@@ -725,6 +766,24 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     cwd_raw: str | None = getattr(args, "cwd", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
     user_config: str | None = getattr(args, "user_config", None)
+
+    # Host timeouts for the entry (issues #287, #296). Values default to the
+    # live [tool.sofer] keys (AGENTS.md rule 1 — never a literal here), the
+    # flags override per invocation, and --no-timeout writes none at all.
+    timeouts: mcp_registration.Timeouts | None
+    if bool(getattr(args, "no_timeout", False)):
+        timeouts = None
+    else:
+        raw_request = getattr(args, "timeout", None)
+        raw_connect = getattr(args, "connect_timeout", None)
+        timeouts = mcp_registration.Timeouts(
+            request_seconds=(
+                config.MCP_REQUEST_TIMEOUT_SECONDS if raw_request is None else raw_request
+            ),
+            connect_seconds=(
+                config.MCP_CONNECT_TIMEOUT_SECONDS if raw_connect is None else raw_connect
+            ),
+        )
 
     # `--user-config` names ONE file, so it is ambiguous for `--agent all`
     # (each agent has its own config). Reject before any write (issue #274).
@@ -779,12 +838,16 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
                 "'environment' literal in opencode.json.",
                 file=sys.stderr,
             )
+        # Informational timeout-drop note for a host whose entry accepts none.
+        timeout_note = mcp_registration.dropped_timeout_note(agent, timeouts)
+        if timeout_note is not None:
+            print(timeout_note, file=sys.stderr)
         # Prefer native delegation for codex/gemini — but only when it is
         # faithful (#167, #232). A decline warns with the reason and falls back.
         if mcp_registration.probe_native(agent, timeout=3.0):
             try:
                 delegated = mcp_registration.delegate_add(
-                    agent, cwd_resolved, list(env.keys()), _scope
+                    agent, cwd_resolved, list(env.keys()), _scope, timeouts
                 )
             except Exception:
                 delegated = False
@@ -798,7 +861,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
                 []
                 if native_error
                 else mcp_registration.native_delegation_decline_reasons(
-                    agent, list(env.keys()), _scope
+                    agent, list(env.keys()), _scope, timeouts
                 )
             )
             if reasons:
@@ -831,7 +894,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
             overall = 1
             continue
 
-        desired = mcp_registration.build_entry(agent, cwd_resolved, env)
+        desired = mcp_registration.build_entry(agent, cwd_resolved, env, timeouts)
         new_doc, changed = mcp_registration.merge(agent, existing, desired)
         if not changed:
             print(f"  OK  {agent} already registered (idempotent)")
@@ -1735,8 +1798,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "hermes reads a single user-scope config, so --scope project resolves "
             "to that same file and the substitution is named on stderr. "
             "Native codex/gemini delegation is used only when it can forward the "
-            "same env NAMES and scope as the file edit; otherwise the config file "
-            "is edited and a warning naming the reason is printed on stderr."
+            "same env NAMES, scope and timeouts as the file edit; otherwise the "
+            "config file is edited and a warning naming the reason is printed on "
+            "stderr. "
+            "Host timeouts (issues #287, #296): a first launch of sofer-mcp can "
+            "take tens of seconds while its imports warm up, and a tool call on a "
+            "large dataset can run for minutes, so the entry carries the host's "
+            "per-request and connect/startup deadlines (--timeout / "
+            "--connect-timeout, or --no-timeout to omit them). The key name and "
+            "unit are per agent; opencode accepts none and is named on stderr."
         ),
     )
     mcp_add.add_argument(
@@ -1763,6 +1833,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Explicit user-scope config FILE for the selected agent; wins over the "
             "adapter's env override and the home default. Rejected with --agent all."
+        ),
+    )
+    mcp_add.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "Per-request (tool call) deadline in seconds written into the entry. "
+            "Default: [tool.sofer] mcp_request_timeout_seconds."
+        ),
+    )
+    mcp_add.add_argument(
+        "--connect-timeout",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "Initial-connection / cold-start deadline in seconds written into the "
+            "entry. Default: [tool.sofer] mcp_connect_timeout_seconds."
+        ),
+    )
+    mcp_add.add_argument(
+        "--no-timeout",
+        action="store_true",
+        help=(
+            "Omit the timeout keys entirely, restoring the pre-#287/#296 entry "
+            "shape (and, with it, native codex/gemini delegation)."
         ),
     )
     mcp_add.add_argument(
