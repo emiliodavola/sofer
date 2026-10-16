@@ -15,6 +15,7 @@ import pytest
 from conftest import call_tool
 from fastmcp import Client
 
+from sofer import config as sofer_config
 from sofer import mcp_registration
 from sofer import mcp_server as ms
 from sofer.mcp_server import build_server
@@ -59,6 +60,25 @@ def _schema_has_description(schema: Any) -> bool:
             if _schema_has_description(sub):
                 return True
     return False
+
+
+def _schema_description(schema: Any) -> str:
+    """Return the first description found at any nesting level (or ``""``).
+
+    Mirrors :func:`_schema_has_description`'s version-independent walk: Python
+    3.10 nests an optional parameter's ``description`` inside the ``anyOf``
+    branch while 3.11+ keeps it at the property's top level.
+    """
+    if not isinstance(schema, dict):
+        return ""
+    if schema.get("description"):
+        return str(schema["description"])
+    for key in ("anyOf", "allOf", "oneOf"):
+        for sub in schema.get(key, []):
+            found = _schema_description(sub)
+            if found:
+                return found
+    return ""
 
 
 class TestToolCount:
@@ -121,6 +141,35 @@ class TestDescriptions:
             desc = tools[name].description or ""
             assert "Not part of canonical" not in desc, f"{name} still has deprecated phrasing"
             assert "Phase 0" in desc or "Bootstrap" in desc, f"{name} missing Phase 0"
+
+
+class TestBatchOutputDirDescription:
+    """The batch tools name the path the pipeline really writes (issue #294)."""
+
+    @pytest.mark.parametrize(
+        ("tool_name", "configured_dir"),
+        [
+            ("sofer_profile_all", sofer_config.PROFILE_DIR),
+            ("sofer_render_all", sofer_config.RENDER_DIR),
+        ],
+    )
+    def test_output_dir_description_names_the_resolved_default(
+        self, tmp_path: Path, tool_name: str, configured_dir: str
+    ):
+        """Both the default and the override semantics are stated (#294).
+
+        The write root is the artifact cache plus the configured sub-directory,
+        and an override replaces that root, so files land in
+        ``<output_dir>/<sub-directory>`` - never in the bare directory name the
+        description used to advertise.
+        """
+        tools = _tools_dict(tmp_path)
+        schema = tools[tool_name].inputSchema or {}
+        description = _schema_description(schema["properties"]["output_dir"])
+        assert description, f"{tool_name}.output_dir has no description"
+        assert f"{sofer_config.OUTPUT_DIR}/{configured_dir}" in description, description
+        assert f"<output_dir>/{configured_dir}" in description, description
+        assert "server root" in description, description
 
 
 class TestParamDescriptions:

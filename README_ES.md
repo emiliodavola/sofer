@@ -676,9 +676,9 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | Tras validate; escribe Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | Tras prepare; codebooks en lote. |
 | 4a | `sofer_profile` | `dataset`, `output_dir`, `force`, `delimiter`, `encoding` | Triage de un archivo (`assess_dataset`). |
-| 4b | `sofer_profile_all` | `config`, `output_dir`, `delimiter`, `encoding` | Fase 1 paso 4 en lote (`profiles/`). |
+| 4b | `sofer_profile_all` | `config`, `output_dir`, `delimiter`, `encoding` | Fase 1 paso 4 en lote (`cache/profiles/`). |
 | 5a | `sofer_render` | `package`, `output_dir`, `force` | Render de un archivo tras `sofer_profile`. |
-| 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`renders/`); requiere `profile_all`. |
+| 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`cache/renders/`); requiere `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` previsualiza; **STOP** antes de confirm. |
 | 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Solo tras aprobación humana. |
 | * | `sofer_auth_status` | `config` | Preflight sin publicar; `readOnlyHint:true`. |

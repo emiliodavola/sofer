@@ -964,6 +964,35 @@ def _workflow_description(fn: Callable[..., Any]) -> str:
     return f"{doc}\n\n{line}" if line else doc
 
 
+def _batch_output_dir_description(kind: str, configured_dir: str) -> str:
+    """Compose the ``output_dir`` description for a batch tool (issue #294).
+
+    Names the RESOLVED default path - the artifact-cache write root
+    (:data:`sofer_config.OUTPUT_DIR`) plus the configured sub-directory - instead
+    of the bare directory name, which sent readers to a path the pipeline never
+    writes and the default ``.gitignore`` excludes.  It also states the override
+    semantics: ``output_dir`` replaces the write root, so the artifacts land in
+    ``<output_dir>/<sub-directory>``.
+
+    The value is built when the tool function is DEFINED, i.e. from the
+    import-time ``config`` constants; that is the text the schema ships, and
+    ``tests/test_mcp_schema.py::TestBatchOutputDirDescription`` compares against
+    the same constants.
+
+    Args:
+        kind: Human word for the artifacts (``"profiles"`` / ``"renders"``).
+        configured_dir: The ``[tool.sofer]`` sub-directory value in use.
+
+    Returns:
+        The single-line parameter description.
+    """
+    return (
+        f"Override directory for batch {kind} (default: "
+        f"{sofer_config.OUTPUT_DIR}/{configured_dir}); the files land in "
+        f"<output_dir>/{configured_dir}. Must stay under server root."
+    )
+
+
 def _approval_phrase_setup_fact(agent: str) -> str:
     """Compose one agent's approval-phrase setup fact from its registry entry.
 
@@ -1830,9 +1859,7 @@ def sofer_profile_all(
     ],
     output_dir: Annotated[
         str | None,
-        Field(
-            description="Override directory for batch profiles (default: profiles). Must stay under server root."
-        ),
+        Field(description=_batch_output_dir_description("profiles", sofer_config.PROFILE_DIR)),
     ] = None,
     delimiter: Annotated[
         str | None,
@@ -1856,7 +1883,8 @@ def sofer_profile_all(
 ) -> dict[str, Any]:
     """Profile every [[file]] entry in a dataset config and write metadata.yaml documents.
 
-    Side effects: batch writes profiles/<rel_stem>.metadata.yaml under the write root.
+    Side effects: batch writes one metadata.yaml per [[file]] under the
+    configured profile_dir, inside the artifact-cache write root.
     Network usage: none.
 
     When to use: Phase 1 step 4 batch; single-file triage use sofer_profile.
@@ -1987,14 +2015,13 @@ def sofer_render_all(
     ],
     output_dir: Annotated[
         str | None,
-        Field(
-            description="Override directory for batch renders (default: renders). Must stay under server root."
-        ),
+        Field(description=_batch_output_dir_description("renders", sofer_config.RENDER_DIR)),
     ] = None,
 ) -> dict[str, Any]:
     """Render README.md for every [[file]] entry from its metadata.yaml.
 
-    Side effects: batch writes renders/<rel_stem>.README.md.
+    Side effects: batch writes one README.md per [[file]] under the configured
+    render_dir, inside the artifact-cache write root.
     Network usage: none.
 
     When to use: Phase 1 step 5 batch after sofer_profile_all.
