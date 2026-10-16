@@ -2349,3 +2349,22 @@ class TestHfLegacyPackageAdvisory:
         out = capsys.readouterr().out
         assert rc == 0
         assert "No codebooks found in this package" in out
+
+
+class TestSplitMappingValidationNamesConfigsNext:
+    """#303: the dry-run warning reaches the user with the emitted names."""
+
+    def test_print_mapping_validation_passes_the_names_through(self, capsys) -> None:
+        from sofer.publish import _print_split_mapping_validation
+
+        _print_split_mapping_validation(["data/a.parquet", "data/b.parquet"], ["persona", "hogar"])
+        out = capsys.readouterr().out
+        assert "name='persona'" in out
+        assert "name='hogar'" in out
+        assert "name='<config>'" not in out
+
+    def test_print_mapping_validation_without_names_keeps_the_placeholder(self, capsys) -> None:
+        from sofer.publish import _print_split_mapping_validation
+
+        _print_split_mapping_validation(["data/a.parquet", "data/b.parquet"])
+        assert "name='<config>'" in capsys.readouterr().out

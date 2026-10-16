@@ -117,6 +117,11 @@ _DEFAULTS: dict[str, Any] = {
     "card_config_slug_separator": "-",
     "card_config_slug_max_length": 96,
     "card_config_slug_fallback": "default",
+    # Group-aware default-load warning (issue #303): how many emitted config
+    # names the warning lists before eliding the rest. A corpus with dozens of
+    # column-signature groups would otherwise print an unreadable wall of names
+    # in the one message that tells the user how to load the repo.
+    "card_config_group_warn_limit": 5,
     # Assisted failure reporting (issue #244). ``failure_report_dir`` is the
     # subdirectory under sofer's state home that holds one JSON file per
     # unsent failure; ``failure_report_repo`` is the ``owner/repo`` issues are
@@ -344,6 +349,14 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
         if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
             raise ValueError(f"'{_key}' in [tool.sofer] must be a positive integer")
 
+    # The group-aware warning cap must be a positive integer: 0 would name no
+    # config at all, which is the defect the cap exists inside of (issue #303).
+    _warn_limit = merged.get("card_config_group_warn_limit")
+    if not isinstance(_warn_limit, int) or isinstance(_warn_limit, bool) or _warn_limit < 1:
+        raise ValueError(
+            "'card_config_group_warn_limit' in [tool.sofer] must be a positive integer"
+        )
+
     return merged
 
 
@@ -513,6 +526,9 @@ CARD_CONFIG_SLUG_INVALID_PATTERN: str = _DEFAULTS["card_config_slug_invalid_patt
 CARD_CONFIG_SLUG_SEPARATOR: str = _DEFAULTS["card_config_slug_separator"]
 CARD_CONFIG_SLUG_MAX_LENGTH: int = _DEFAULTS["card_config_slug_max_length"]
 CARD_CONFIG_SLUG_FALLBACK: str = _DEFAULTS["card_config_slug_fallback"]
+
+# Group-aware default-load warning cap (issue #303) — see the _DEFAULTS comment.
+CARD_CONFIG_GROUP_WARN_LIMIT: int = _DEFAULTS["card_config_group_warn_limit"]
 
 # Assisted failure reporting (issue #244): state subdirectory, target repo,
 # traceback cap, and gh timeout — read live through attribute access.

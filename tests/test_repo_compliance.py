@@ -21,6 +21,7 @@ from sofer.repo_compliance import (
     build_license_file,
     build_schema_report,
     build_schema_report_with_rows,
+    card_config_names,
     normalize_header,
     schema_config_plan,
 )
@@ -3857,3 +3858,83 @@ class TestReadCsvSampleConfiguredFallback:
         headers, rows = _read_csv_sample(f, delimiter=",", encoding="latin-1")
         assert headers == ["name"]
         assert rows == [["caf\u00e9"]]
+
+
+class TestCardConfigNames:
+    """#303: the dry-run warning names the configs the card actually emitted.
+
+    The names are computed inside ``build_dataset_card``, which returns only the
+    card text; reading them back from the artifact is the only way the caller
+    that prints the warning can name them without a second derivation that could
+    disagree with what shipped.
+    """
+
+    @staticmethod
+    def _write_card(tmp_path: Path, card: str) -> Path:
+        build = tmp_path / "build"
+        build.mkdir(exist_ok=True)
+        (build / "README.md").write_text(card, encoding="utf-8")
+        return build
+
+    def test_reads_the_names_a_real_card_emitted(self, tmp_path) -> None:
+        """Writer and reader agree, through the public card builder."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[
+                FileEntry(local=Path("persona.csv"), remote="persona.parquet"),
+                FileEntry(local=Path("hogar.csv"), remote="hogar.parquet"),
+            ],
+        )
+        card = build_dataset_card(cfg, schema=_mixed_schema())
+        build = self._write_card(tmp_path, card)
+
+        emitted = _parse_frontmatter(card)["configs"]
+        assert isinstance(emitted, list)
+        expected = [c["config_name"] for c in emitted]
+        assert card_config_names(build) == expected
+        assert len(expected) == 2
+
+    def test_single_config_card_names_its_one_config(self, tmp_path) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[FileEntry(local=Path("a.csv"), remote="a.parquet")],
+        )
+        schema = [_col("ID", "a.parquet")]
+        build = self._write_card(tmp_path, build_dataset_card(cfg, schema=schema))
+        assert card_config_names(build) == ["census"]
+
+    def test_missing_card_returns_empty(self, tmp_path) -> None:
+        assert card_config_names(tmp_path / "absent") == []
+
+    def test_valid_frontmatter_without_configs_returns_empty(self, tmp_path) -> None:
+        """An ungroupable corpus emits no `configs` block (S2/D1)."""
+        build = self._write_card(tmp_path, "---\npretty_name: x\n---\n\n# Card\n")
+        assert card_config_names(build) == []
+
+    def test_unfenced_card_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "# Card\n\nNo frontmatter here.\n")
+        assert card_config_names(build) == []
+
+    def test_prose_before_the_fence_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "junk\n---\nconfigs: []\n---\n")
+        assert card_config_names(build) == []
+
+    def test_malformed_yaml_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "---\nconfigs: [unclosed\n---\n")
+        assert card_config_names(build) == []
+
+    def test_non_mapping_frontmatter_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "---\n- a\n- b\n---\n")
+        assert card_config_names(build) == []
+
+    def test_entry_without_a_string_config_name_returns_empty(self, tmp_path) -> None:
+        """A guess is worse than the placeholder: name nothing, fall back."""
+        for configs in ('[{"data_files": []}]', '[{"config_name": 7}]', '[{"config_name": ""}]'):
+            build = self._write_card(tmp_path, f"---\nconfigs: {configs}\n---\n")
+            assert card_config_names(build) == [], configs
+
+    def test_configs_that_is_not_a_list_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "---\nconfigs: {a: 1}\n---\n")
+        assert card_config_names(build) == []
