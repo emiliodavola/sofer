@@ -36,6 +36,15 @@ def normalize_header(col_name: str) -> str:
     return col_name.strip()
 
 
+_MORE_INFO: str = "[More Information Needed]"
+"""Sentinel for a card section with no configured content.
+
+A module constant used at every such site (issue #291) so the sentinel the card
+emits and the value the tests assert cannot drift, and so a future change to
+"omit the section instead" is one edit rather than four.
+"""
+
+
 # Map our internal dtype strings to HF Dataset Feature types (CSV fallback path)
 _HF_FEATURE_MAP: dict[str, str] = {
     "numeric": "float64",
@@ -1688,7 +1697,11 @@ def build_dataset_card(
 
     lines.append("### Dataset Sources")
     lines.append("")
-    lines.append("- **Repository:** " + _ns)
+    # Issue #291: the card knows the repository/source split, and `source` is
+    # conventionally an institution name, so a declared `repository` wins and an
+    # undeclared one falls back to the source rather than to a bare sentinel.
+    repository = cfg.repository.strip() or cfg.source.strip() or _ns
+    lines.append("- **Repository:** " + repository)
     lines.append("")
 
     # ── Uses ───────────────────────────────────────────────────────────────
@@ -1696,11 +1709,11 @@ def build_dataset_card(
     lines.append("")
     lines.append("### Direct Use")
     lines.append("")
-    lines.append("[More Information Needed]")
+    lines.append(cfg.direct_use.strip() or _MORE_INFO)
     lines.append("")
     lines.append("### Out-of-Scope Use")
     lines.append("")
-    lines.append("[More Information Needed]")
+    lines.append(cfg.out_of_scope_use.strip() or _MORE_INFO)
     lines.append("")
 
     # ── Dataset Structure ──────────────────────────────────────────────────
@@ -1823,7 +1836,7 @@ def build_dataset_card(
         lines.append(study_design_content.strip())
         lines.append("")
     else:
-        lines.append("[More Information Needed]")
+        lines.append(_MORE_INFO)
         lines.append("")
 
     if collection:
@@ -1850,7 +1863,7 @@ def build_dataset_card(
     # ── Bias, Risks, and Limitations ───────────────────────────────────────
     lines.append("## Bias, Risks, and Limitations")
     lines.append("")
-    lines.append("[More Information Needed]")
+    lines.append(cfg.bias_risks_limitations.strip() or _MORE_INFO)
     lines.append("")
 
     # ── Citation ───────────────────────────────────────────────────────────
@@ -1889,7 +1902,7 @@ def build_dataset_card(
     # ── Contact ────────────────────────────────────────────────────────────
     lines.append("## Dataset Card Contact")
     lines.append("")
-    lines.append(_ns)
+    lines.append(cfg.contact.strip() or _ns)
     lines.append("")
 
     return header + "\n".join(lines)

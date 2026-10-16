@@ -1,5 +1,6 @@
 """Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
+import inspect
 import re
 from pathlib import Path, PurePosixPath
 
@@ -10,6 +11,7 @@ import sofer.config as config
 from sofer.model import DatasetConfig, FileEntry
 from sofer.publish import publish
 from sofer.repo_compliance import (
+    _MORE_INFO,
     _SIZE_CATEGORIES,
     ColumnSchema,
     _classify_parquet_read_failure,
@@ -3938,3 +3940,166 @@ class TestCardConfigNames:
     def test_configs_that_is_not_a_list_returns_empty(self, tmp_path) -> None:
         build = self._write_card(tmp_path, "---\nconfigs: {a: 1}\n---\n")
         assert card_config_names(build) == []
+
+
+class TestCardSectionKeys:
+    """#291: the five sentinel sections become fillable [meta] keys.
+
+    A config with every ROTW field filled still shipped a card full of
+    `[More Information Needed]` / `[Not specified]`, because those sections had
+    no key at all and no tool argument that could reach them.
+    """
+
+    @staticmethod
+    def _filled() -> DatasetConfig:
+        """A config with every ROTW field the card reads set to a real value.
+
+        `language` and `collection_method` are not among the sections #291 names
+        (they already had keys); they are set here because the issue's premise is
+        "a config with every ROTW field filled", and a fixture that leaves one
+        unset would prove the wrong thing.
+        """
+        return DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            description="Household census",
+            license="MIT",
+            source="Example Org",
+            tags=["census"],
+            language=["en"],
+            collection_method="Online survey",
+            citation="@misc{census2025, title={Census}}",
+            repository="https://github.com/example/census",
+            direct_use="Tabular benchmarking.",
+            out_of_scope_use="Not for individual-level inference.",
+            bias_risks_limitations="Rural districts are under-sampled.",
+            contact="data@example.org",
+        )
+
+    def test_a_fully_filled_config_emits_no_sentinel(self) -> None:
+        """The issue's acceptance: nothing left `[More Information Needed]`.
+
+        Curation Rationale is filled through `[meta] study_design` (a file whose
+        content the caller resolves and passes), which is the issue's "promoted
+        from the documented-but-obscure path to the obvious one" — it has no
+        free-text key of its own.
+        """
+        card = build_dataset_card(
+            self._filled(), schema=[], study_design_content="Curation rationale text."
+        )
+        assert _MORE_INFO not in card
+        assert "[Not specified]" not in card
+        assert "Curation rationale text." in card
+
+    def test_curation_rationale_needs_study_design(self) -> None:
+        """Without it, that one section keeps its sentinel — and only that one."""
+        card = build_dataset_card(self._filled(), schema=[])
+        assert card.count(_MORE_INFO) == 1
+        assert "### Curation Rationale\n\n" + _MORE_INFO in card
+        assert "[Not specified]" not in card
+
+    def test_each_key_fills_its_own_section(self) -> None:
+        card = build_dataset_card(self._filled(), schema=[])
+        assert "https://github.com/example/census" in card
+        assert "Tabular benchmarking." in card
+        assert "Not for individual-level inference." in card
+        assert "Rural districts are under-sampled." in card
+        assert "data@example.org" in card
+
+    def test_repository_falls_back_to_the_source(self) -> None:
+        """Option 3 of the issue: the source is already the best available value."""
+        cfg = DatasetConfig(name="census", repo_id="user/census", source="Example Org — Data Team")
+        card = build_dataset_card(cfg, schema=[])
+        assert "- **Repository:** Example Org — Data Team" in card
+
+    def test_a_declared_repository_beats_the_source(self) -> None:
+        card = build_dataset_card(self._filled(), schema=[])
+        assert "- **Repository:** https://github.com/example/census" in card
+        assert "- **Repository:** Example Org" not in card
+
+    def test_unset_keys_keep_their_sentinel(self) -> None:
+        """The spec's placeholder rule is unchanged for an unfilled section."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("a.csv"), remote="a.parquet")],
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert card.count(_MORE_INFO) == 4
+        assert "[Not specified]" in card
+
+    def test_multiline_values_render_verbatim(self) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            direct_use="Line one.\n\nLine two with a - dash and a # hash.",
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert "Line one.\n\nLine two with a - dash and a # hash." in card
+
+    def test_whitespace_only_values_keep_their_sentinel(self) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            direct_use="   \n  ",
+            contact=" ",
+            bias_risks_limitations="\t",
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert _MORE_INFO in card
+        assert "[Not specified]" in card
+
+    def test_the_sentinel_is_the_single_shared_constant(self) -> None:
+        """Four sites, one constant (AGENTS.md rule 4)."""
+        source = inspect.getsource(build_dataset_card)
+        assert source.count('"[More Information Needed]"') == 0
+        assert source.count("_MORE_INFO") == 4
+
+
+class TestCardSectionKeysFromToml:
+    """The keys are read from `[meta]`, so a TOML can carry them."""
+
+    def test_meta_keys_are_parsed(self, tmp_path: Path) -> None:
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            "[dataset]\n"
+            'name = "census"\n'
+            'repo_id = "user/census"\n'
+            "\n"
+            "[meta]\n"
+            'repository = "https://github.com/example/census"\n'
+            'direct_use = """\nMulti\nline.\n"""\n'
+            'out_of_scope_use = "None."\n'
+            'bias_risks_limitations = "Sampling bias."\n'
+            'contact = "data@example.org"\n'
+            "\n"
+            "[[file]]\n"
+            'local = "a.csv"\n'
+            'remote = "a.parquet"\n',
+            encoding="utf-8",
+        )
+        cfg = DatasetConfig.from_toml(toml)
+        assert cfg.repository == "https://github.com/example/census"
+        assert cfg.direct_use.strip() == "Multi\nline."
+        assert cfg.out_of_scope_use == "None."
+        assert cfg.bias_risks_limitations == "Sampling bias."
+        assert cfg.contact == "data@example.org"
+
+    def test_absent_meta_keys_default_to_empty(self, tmp_path: Path) -> None:
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            "[dataset]\n"
+            'name = "census"\n'
+            'repo_id = "user/census"\n'
+            "\n"
+            "[[file]]\n"
+            'local = "a.csv"\n'
+            'remote = "a.parquet"\n',
+            encoding="utf-8",
+        )
+        cfg = DatasetConfig.from_toml(toml)
+        assert cfg.repository == ""
+        assert cfg.direct_use == ""
+        assert cfg.out_of_scope_use == ""
+        assert cfg.bias_risks_limitations == ""
+        assert cfg.contact == ""
