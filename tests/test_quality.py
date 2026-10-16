@@ -1,6 +1,7 @@
 """Tests for sofer._csv_reader and sofer.quality."""
 
 import csv
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -1329,6 +1330,87 @@ class TestAccumulatorCaps:
             )
 
         assert _sizes(100) == _sizes(3000)
+
+
+class TestEncodingProbePeak:
+    """Issue #326/S3: the 8 KB probe must not materialize the whole file.
+
+    The probe is the one read the quality pass makes whose size is not capped by
+    ``max_sample``: it exists to answer "does the first ``probe_chunk_bytes``
+    decode?", so materializing the file to slice it makes the pass's peak follow
+    the corpus size — the property the `data-quality` spec forbids (S4).
+    """
+
+    # Slack allowed between the two peaks. The corpora below differ by ~100x on
+    # disk (~34 KiB vs ~3.4 MiB), so anything that makes the peak follow the
+    # input shows up as a difference two orders of magnitude above this bound.
+    PEAK_FLATNESS_SLACK_BYTES = 1 << 20
+
+    SMALL_ROWS = 2_000
+    LARGE_ROWS = 200_000
+
+    @staticmethod
+    def _write_corpus(path: Path, rows: int) -> Path:
+        """Write *rows* three-column data rows to *path* and return it."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh, delimiter=";")
+            writer.writerow(["a", "b", "c"])
+            for i in range(rows):
+                writer.writerow([f"value-{i}", "x", "y"])
+        return path
+
+    @classmethod
+    def _peak_bytes(cls, tmp_path: Path, rows: int) -> int:
+        """Return the ``tracemalloc`` peak of one quality pass over *rows* rows.
+
+        The scan is sampled (``full_scan = "never"``) with a tiny ``max_sample``
+        so every *capped* accumulator saturates after a couple of hundred rows:
+        what is left to grow with the corpus is exactly the uncapped read.
+        """
+        path = cls._write_corpus(tmp_path / f"rows-{rows}.csv", rows)
+        cfg = DatasetConfig(
+            name="peak",
+            repo_id="u/peak",
+            files=[FileEntry(local=path, remote=path.name)],
+            quality=QualityConfig(max_sample=200, full_scan="never"),
+        )
+        tracemalloc.start()
+        try:
+            QualityValidator(cfg).run()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return peak
+
+    def test_peak_does_not_track_the_corpus_size(self, tmp_path):
+        """Two corpora 100x apart in size must peak within a flatness slack."""
+        small_peak = self._peak_bytes(tmp_path, self.SMALL_ROWS)
+        large_peak = self._peak_bytes(tmp_path, self.LARGE_ROWS)
+        assert large_peak - small_peak < self.PEAK_FLATNESS_SLACK_BYTES
+
+    def test_only_the_probe_window_is_judged(self, tmp_path):
+        """Invalid bytes *after* the probe window keep the previous verdict.
+
+        The probe judges the first ``probe_chunk_bytes`` only — the accepted
+        limitation §4.9 records — and bounding the read must not quietly widen
+        that window to the whole file.
+        """
+        path = tmp_path / "late-invalid.csv"
+        window = config.PROBE_CHUNK_BYTES
+        with open(path, "wb") as fh:
+            fh.write(b"a;b\n")
+            fh.write(b"1;2\n" * (window // 4))  # valid UTF-8, longer than one window
+            fh.write(b"\xff\xfe\x00\x00")  # invalid UTF-8, past the window
+        cfg = DatasetConfig(
+            name="window",
+            repo_id="u/window",
+            files=[FileEntry(local=path, remote=path.name)],
+            quality=QualityConfig(max_sample=50, full_scan="never"),
+        )
+        report = QualityValidator(cfg).run()
+        assert "encoding_validation" in report.ran_checks
+        assert [r for r in report.quality_results if r.check == "encoding_validation"] == []
 
 
 class TestFullScanPolicy:
