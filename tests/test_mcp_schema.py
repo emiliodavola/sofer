@@ -82,11 +82,13 @@ def _schema_description(schema: Any) -> str:
 
 
 class TestToolCount:
-    def test_fifteen_tools(self, tmp_path: Path):
+    def test_seventeen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 15, sorted(tools.keys())
+        assert len(tools) == 17, sorted(tools.keys())
         expected = {
             "sofer_validate",
+            "sofer_meta_check",
+            "sofer_meta_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -248,7 +250,9 @@ class TestAnnotations:
         val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
         assert val is True
 
-    _READ_ONLY_TOOLS = frozenset({"sofer_validate", "sofer_scan_dry_run", "sofer_auth_status"})
+    _READ_ONLY_TOOLS = frozenset(
+        {"sofer_validate", "sofer_scan_dry_run", "sofer_auth_status", "sofer_meta_check"}
+    )
     _WRITING_TOOLS = frozenset(
         {
             "sofer_prepare",
@@ -262,6 +266,7 @@ class TestAnnotations:
             "sofer_render_all",
             "sofer_scan_apply",
             "sofer_init",
+            "sofer_meta_set",
             "sofer_report_failure",
         }
     )
@@ -270,9 +275,9 @@ class TestAnnotations:
         """readOnlyHint is True ONLY for genuinely read-only tools.
 
         Every tool that writes files (codebooks, metadata profiles, README
-        renders, scan_apply registration, init scaffolding, prepare, publish)
-        must report readOnlyHint False so agents treat it as side-effecting.
-        The roster partition covers all 15 tools.
+        renders, scan_apply registration, init scaffolding, prepare, publish,
+        meta_set) must report readOnlyHint False so agents treat it as
+        side-effecting. The roster partition covers all 17 tools.
         """
         tools = _tools_dict(tmp_path)
         assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS

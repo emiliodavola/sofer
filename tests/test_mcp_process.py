@@ -106,7 +106,7 @@ class TestStdioFraming:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 15
+                    assert len(tools.tools) == 17
                     result = await session.call_tool("sofer_validate", {"config": "dataset.toml"})
                     assert not result.isError
                     envelope = json.loads(result.content[0].text)

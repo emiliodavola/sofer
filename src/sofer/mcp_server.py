@@ -88,12 +88,17 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
-from . import _toml, failure_report, workflow
+from . import _toml, failure_report, meta_edit, workflow
 from . import config as sofer_config
 from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
-from .checks import DatasetValidator, ValidationReport
+from .checks import (
+    DatasetValidator,
+    ValidationReport,
+    meta_placeholder_warnings,
+    meta_placeholder_warnings_for,
+)
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
@@ -189,12 +194,14 @@ _PHASED_INSTRUCTIONS: str = (
     "Operate sofer's deterministic dataset pipeline.\n"
     "Phased canonical chain (tools/list alone teaches the order):\n"
     "  Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]\n"
-    "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply\n"
-    "    Metadata step (manual, between bootstrap and Phase 1): fill [meta] description, "
-    "license, source and tags in the dataset TOML. sofer_init writes placeholders; "
-    "sofer_validate warns while any remains, and prepare bakes whatever is there into "
-    "the Dataset Card and LICENSE. On an MCP-driven run the agent completes them; the "
-    "human supplies only what the data cannot determine (license, source).\n"
+    "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply -> sofer_meta_set\n"
+    "    Metadata step (between bootstrap and Phase 1, tool-driven): read the state "
+    "with sofer_meta_check and write [meta] description, license, source and tags "
+    "with sofer_meta_set, which also writes any other Dataset Card [meta] key. "
+    "sofer_init writes placeholders; sofer_validate warns while any remains, and "
+    "prepare bakes whatever is there into the Dataset Card and LICENSE. On an "
+    "MCP-driven run the agent completes them; the human supplies only what the "
+    "data cannot determine (license, source).\n"
     "  Phase 1 Build: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all\n"
     "  Phase 2 Publish: sofer_publish(dry_run=True) -> STOP (human approval) -> sofer_publish_confirm\n"
     "Each tool lists Requires: and Next: so tools/list is self-sufficient.\n"
@@ -1195,7 +1202,7 @@ def _refusal(
 
 
 # ---------------------------------------------------------------------------
-#  Tool callables — 15 callables
+#  Tool callables — 17 callables
 # ---------------------------------------------------------------------------
 
 
@@ -1246,6 +1253,187 @@ def sofer_validate(
             "confidential": cfg.confidential,
             "config_errors": config_errors,
             "next": _workflow_next("sofer_validate", config),
+        }
+
+
+def sofer_meta_check(
+    config: Annotated[
+        str,
+        Field(
+            description="Path to the dataset TOML file, relative to the server root or absolute inside it (e.g. 'dataset.toml')"
+        ),
+    ],
+) -> dict[str, Any]:
+    """Report the [meta] fields that still carry a sofer init placeholder, read-only.
+
+    Side effects: none - no file is written, no check reads the data files; only the TOML is parsed. Network usage: none.
+
+    When to use: to read the metadata state the canonical chain requires before Phase 1 without running the full validator; it reports exactly the warning sofer_validate prints.
+    Example: sofer_meta_check(config="dataset.toml")
+    Requires: dataset TOML exists under server root. Next: sofer_meta_set for each reported placeholder, then sofer_prepare.
+
+    Args:
+        config: Path to the dataset TOML, contained under the server root.
+
+    Returns:
+        The standard envelope plus ``placeholders`` (the count) and
+        ``warnings`` (one message per offending field). Informational by
+        contract (AGENTS.md-consistent decision D6 of #323): ``ok`` is True and
+        the exit code is 0 whatever it reports, because a query stricter than
+        the validator it queries would be a new contract. Only an unreadable or
+        uncontained config is a refusal.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        try:
+            toml_path = _contained_path(
+                config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        except PathOutsideRootError:
+            raise
+        try:
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_meta_check",
+                config_path=config,
+            )
+        warnings = meta_placeholder_warnings(cfg)
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": _captured_text(out, err),
+            "placeholders": len(warnings),
+            "warnings": warnings,
+            "config_errors": [],
+            "next": _workflow_next("sofer_meta_check", config),
+        }
+
+
+def sofer_meta_set(
+    config: Annotated[
+        str,
+        Field(
+            description="Path to the dataset TOML file, relative to the server root or absolute inside it (e.g. 'dataset.toml')"
+        ),
+    ],
+    values: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description='[meta] keys to write, e.g. {"description": "What it is", "license": "MIT", "source": "Some org", "tags": ["a", "b"]}. Text keys take a string, list keys an array of strings, and confidential a boolean; an unknown key is refused with the settable list. Omit it to write nothing and get back the placeholders that still need a value.'
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        Field(
+            description="When True, compute and verify the edit and report what it would write; the dataset TOML is left untouched."
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Write the given [meta] keys into the dataset TOML, preserving everything else.
+
+    Side effects: rewrites the dataset TOML's [meta] table only (atomic tmp+os.replace; other keys, comments and tables byte-preserved) unless dry_run. Network usage: none.
+
+    When to use: after sofer_init or sofer_meta_check, to fill [meta] description/license/source/tags and any other card key before sofer_prepare bakes them into the Dataset Card and LICENSE; it is the only way to write them over MCP.
+    Example: sofer_meta_set(config="dataset.toml", values={"description": "Census 2020", "license": "MIT"})
+    Requires: dataset TOML exists under server root; unknown keys or values of the wrong kind are refused with nothing written. Next: sofer_validate, then sofer_prepare (a build tree that predates this write is named in build_stale).
+
+    Args:
+        config: Path to the dataset TOML, contained under the server root.
+        values: ``{key: value}`` to write. The settable surface is one entry per
+            ``[meta]`` key ``DatasetConfig`` reads; a key outside it is refused
+            naming the accepted set. When omitted (or empty) nothing is written:
+            the envelope reports the placeholders that still need a value and
+            returns a continuation asking for them, which is what makes this
+            tool callable as a bare registry continuation with only a config.
+        dry_run: When ``True``, nothing is written.
+
+    Returns:
+        The standard envelope plus ``dry_run``, ``changed``, ``written``,
+        ``unchanged``, ``build_stale`` and the post-edit state in
+        ``placeholders`` / ``warnings`` (computed from the resulting table, so a
+        dry run reports the state it would leave behind). Re-running with the
+        values the file already holds changes nothing, so the call is
+        idempotent.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        try:
+            toml_path = _contained_path(
+                config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        except PathOutsideRootError:
+            raise
+        try:
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_meta_set",
+                config_path=config,
+            )
+        if not values:
+            # The write half of the metadata step, with nothing to write: report
+            # what still needs a value and ask for it. A caller that reached this
+            # tool through the registry (only a config is bound there) gets an
+            # executable answer instead of a validation error, and the point where
+            # human content enters the chain is named explicitly.
+            warnings = meta_placeholder_warnings(cfg)
+            print(
+                f"  !  {toml_path.name}: nothing to write; {len(warnings)} [meta] "
+                "placeholder(s) need a value",
+                file=sys.stderr,
+            )
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "output": _captured_text(out, err),
+                "dry_run": dry_run,
+                "changed": False,
+                "written": [],
+                "unchanged": [],
+                "build_stale": meta_edit.build_predates_write(cfg, toml_path) is not None,
+                "placeholders": len(warnings),
+                "warnings": warnings,
+                "config_errors": [],
+                "next": workflow.WorkflowCall(
+                    "sofer_meta_set",
+                    {"config": config},
+                    reason=(
+                        "Call sofer_meta_set again with the [meta] values to write "
+                        "(description/license/source/tags at minimum)."
+                    ),
+                    input_required=("values",),
+                ).to_dict(),
+            }
+        try:
+            result = meta_edit.set_meta(toml_path, values, dry_run=dry_run)
+        except meta_edit.MetaEditError as exc:
+            print(f"  X  {exc}", file=sys.stderr)
+            return _refusal([str(exc)], tool_name="sofer_meta_set", config_path=config)
+        note = meta_edit.build_predates_write(cfg, toml_path)
+        warnings = meta_placeholder_warnings_for(result.meta)
+        written = ", ".join(result.written)
+        if dry_run:
+            print(f"  DRY RUN  {toml_path.name}: would write {written or 'nothing'}")
+        elif result.changed:
+            print(f"  OK  {toml_path.name}: wrote {written}")
+        else:
+            print(f"  OK  {toml_path.name}: already up to date")
+        if note is not None:
+            print(note, file=sys.stderr)
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": _captured_text(out, err),
+            "dry_run": result.dry_run,
+            "changed": result.changed,
+            "written": list(result.written),
+            "unchanged": list(result.unchanged),
+            "build_stale": note is not None,
+            "placeholders": len(warnings),
+            "warnings": warnings,
+            "config_errors": [],
+            "next": _workflow_next("sofer_meta_set", config),
         }
 
 
@@ -2630,7 +2818,7 @@ def sofer_init(
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
     Example: sofer_init(name="my-dataset", user="myuser")
-    Requires: server root writable. Next: fill [meta] description/license/source/tags in the generated TOML, then sofer_scan_apply to register files.
+    Requires: server root writable. Next: fill [meta] description/license/source/tags with sofer_meta_set (or edit the TOML by hand), then sofer_scan_apply to register files.
 
     Args:
         name: Dataset name used for ``<name>.toml`` — a safe single path component.
@@ -2903,7 +3091,7 @@ def sofer_report_failure(
 
 
 def _register_tools(server: _FastMCP) -> None:
-    """Register the 15 tool callables on *server*."""
+    """Register the 17 tool callables on *server*."""
     server.tool(
         sofer_validate,
         description=_workflow_description(sofer_validate),
@@ -2926,6 +3114,57 @@ def _register_tools(server: _FastMCP) -> None:
                 "quality_warnings": {"type": "array"},
                 "ran_checks": {"type": "array"},
                 "confidential": {"type": "boolean"},
+                "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_meta_check,
+        description=_workflow_description(sofer_meta_check),
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "placeholders": {"type": "integer"},
+                "warnings": {"type": "array"},
+                "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_meta_set,
+        description=_workflow_description(sofer_meta_set),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "dry_run": {"type": "boolean"},
+                "changed": {"type": "boolean"},
+                "written": {"type": "array"},
+                "unchanged": {"type": "array"},
+                "build_stale": {"type": "boolean"},
+                "placeholders": {"type": "integer"},
+                "warnings": {"type": "array"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },

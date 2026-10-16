@@ -317,7 +317,7 @@ _WORKFLOW_METADATA = {
         PHASE_BOOTSTRAP,
         ("successful scan dry-run",),
         "greenfield",
-        WorkflowTemplate("sofer_validate", {"config": "<config_path>"}),
+        WorkflowTemplate("sofer_meta_set", {"config": "<config_path>"}),
     ),
     "sofer_validate": WorkflowMetadata(
         "sofer_validate",
@@ -325,6 +325,25 @@ _WORKFLOW_METADATA = {
         ("canonical config_path", "[meta] placeholders replaced"),
         "existing_config",
         WorkflowTemplate("sofer_prepare", {"config": "<config_path>"}),
+    ),
+    # The metadata step, now carried by tools instead of prose (issue #323,
+    # decision D8). `sofer_scan_apply` leads into `sofer_meta_set` so the step
+    # the instructions advertise is reachable from `tools/list` alone, and
+    # `sofer_meta_check` leads into the setter, so a reported placeholder has an
+    # executable fix.
+    "sofer_meta_check": WorkflowMetadata(
+        "sofer_meta_check",
+        PHASE_BUILD,
+        ("canonical config_path",),
+        "existing_config",
+        WorkflowTemplate("sofer_meta_set", {"config": "<config_path>"}),
+    ),
+    "sofer_meta_set": WorkflowMetadata(
+        "sofer_meta_set",
+        PHASE_BUILD,
+        ("canonical config_path",),
+        "existing_config",
+        WorkflowTemplate("sofer_validate", {"config": "<config_path>"}),
     ),
     "sofer_codebook": WorkflowMetadata(
         "sofer_codebook", PHASE_TRIAGE, ("explicit data path",), "triage"
@@ -406,6 +425,7 @@ WORKFLOW_BRANCHES: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "sofer_init",
             "sofer_scan_dry_run",
             "sofer_scan_apply",
+            "sofer_meta_set",
             "sofer_validate",
         ),
         "existing_config": (

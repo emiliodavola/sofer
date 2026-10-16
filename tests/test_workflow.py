@@ -29,6 +29,8 @@ CANONICAL_TOOLS = (
     "sofer_init",
     "sofer_scan_dry_run",
     "sofer_scan_apply",
+    "sofer_meta_check",
+    "sofer_meta_set",
     "sofer_validate",
     "sofer_prepare",
     "sofer_codebook_all",
@@ -77,11 +79,18 @@ def test_greenfield_branch_chain():
         "sofer_init",
         "sofer_scan_dry_run",
         "sofer_scan_apply",
+        "sofer_meta_set",
         "sofer_validate",
     )
     assert metadata_for("sofer_init").next.tool == "sofer_scan_dry_run"  # type: ignore[union-attr]
     assert metadata_for("sofer_scan_dry_run").next.tool == "sofer_scan_apply"  # type: ignore[union-attr]
-    assert metadata_for("sofer_scan_apply").next.tool == "sofer_validate"  # type: ignore[union-attr]
+    # #323 D8: the metadata step the instructions advertise is reachable from
+    # tools/list alone — bootstrap leads into the setter, and the setter into
+    # Phase 1. `sofer_meta_check` leads into the setter, so a reported
+    # placeholder has an executable fix.
+    assert metadata_for("sofer_scan_apply").next.tool == "sofer_meta_set"  # type: ignore[union-attr]
+    assert metadata_for("sofer_meta_set").next.tool == "sofer_validate"  # type: ignore[union-attr]
+    assert metadata_for("sofer_meta_check").next.tool == "sofer_meta_set"  # type: ignore[union-attr]
 
 
 def test_existing_config_branch_routes_render_all_to_auth_status():
