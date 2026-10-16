@@ -139,8 +139,12 @@ surfaces cannot accept different keys or disagree on a value's kind.
 
 _META_TABLE = "meta"
 _META_HEADER = f"[{_META_TABLE}]"
-_META_HEADER_RE = re.compile(rf"^\[{re.escape(_META_TABLE)}\](?:\s*#.*)?$")
-"""The ``[meta]`` table header, with an optional trailing comment."""
+_META_HEADER_RE = re.compile(r"^\[(?:meta|\"meta\"|'meta')\](?:\s*#.*)?$")
+"""The ``[meta]`` table header, with an optional trailing comment.
+
+Quoted spellings count: ``["meta"]`` is the same table, and refusing it would
+mean appending a second one (which TOML rejects) for a document that is valid.
+"""
 
 _TABLE_LINE_RE = re.compile(r"^\s*\[")
 """A candidate table header line (validated by re-parsing, not by the regex)."""
@@ -156,8 +160,22 @@ parser rejects.
 
 
 def _assignment_re(key: str) -> re.Pattern[str]:
-    """Return the pattern matching a top-level assignment of *key*."""
-    return re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=")
+    """Return the pattern matching a top-level assignment of *key*.
+
+    The quoted spellings (``"description" = ...``) are accepted too: they are
+    valid TOML a human may have written, and not recognizing one would append a
+    second assignment of the same key — which TOML rejects — for a document that
+    parses. A recognized quoted key is replaced by the canonical unquoted form,
+    so the edit also normalizes what it rewrote.
+
+    Args:
+        key: The registry key to locate.
+
+    Returns:
+        A pattern matching the assignment line.
+    """
+    escaped = re.escape(key)
+    return re.compile(rf"^[ \t]*(?:{escaped}|\"{escaped}\"|'{escaped}')[ \t]*=")
 
 
 def _parses(text: str) -> bool:
@@ -332,6 +350,48 @@ def parse_meta_value(key: str, raw: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _eol_of(line: str) -> str:
+    """Return *line*'s terminator as written (``""`` when it has none).
+
+    Lines are kept **with** their terminators (:meth:`str.splitlines` with
+    ``keepends=True``) so putting the document back together is a plain join
+    and every byte outside an edited key survives, whatever mix of ``\\n`` and
+    ``\\r\\n`` the file uses. This is what makes the byte-for-byte promise real
+    rather than a promise about the native platform's newline.
+
+    Args:
+        line: One line, terminator included.
+
+    Returns:
+        ``"\\r\\n"``, ``"\\n"``, ``"\\r"`` or ``""``.
+    """
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith(("\n", "\r")):
+        return line[-1]
+    return ""
+
+
+def _document_eol(lines: list[str]) -> str:
+    """Return the terminator a newly inserted line should carry.
+
+    The first terminator the document uses, so a CRLF file stays CRLF and an
+    LF file stays LF on the platform that does not use it natively. Defaults to
+    ``"\\n"`` for a document with no terminator at all (a single bare line).
+
+    Args:
+        lines: The document split into lines, terminators kept.
+
+    Returns:
+        The terminator to append to an inserted line.
+    """
+    for line in lines:
+        eol = _eol_of(line)
+        if eol:
+            return eol
+    return "\n"
+
+
 def _find_meta_header(lines: list[str]) -> int | None:
     """Return the index of the real ``[meta]`` header, or ``None``.
 
@@ -340,7 +400,7 @@ def _find_meta_header(lines: list[str]) -> int | None:
     an earlier table's multi-line string.
 
     Args:
-        lines: The document split into lines (newlines stripped).
+        lines: The document split into lines, terminators kept.
 
     Returns:
         The header's index, or ``None`` when the document has no ``[meta]``
@@ -349,7 +409,7 @@ def _find_meta_header(lines: list[str]) -> int | None:
     for index, line in enumerate(lines):
         if not _META_HEADER_RE.match(line.strip()):
             continue
-        if index == 0 or _parses("\n".join(lines[:index])):
+        if index == 0 or _parses("".join(lines[:index])):
             return index
     return None
 
@@ -362,7 +422,7 @@ def _meta_body_end(lines: list[str], header: int) -> int:
     :func:`_find_meta_header`.
 
     Args:
-        lines: The document split into lines.
+        lines: The document split into lines, terminators kept.
         header: Index of the ``[meta]`` header.
 
     Returns:
@@ -371,7 +431,7 @@ def _meta_body_end(lines: list[str], header: int) -> int:
     for index in range(header + 1, len(lines)):
         if not _TABLE_LINE_RE.match(lines[index]):
             continue
-        if _parses("\n".join(lines[:index])):
+        if _parses("".join(lines[:index])):
             return index
     return len(lines)
 
@@ -380,7 +440,7 @@ def _find_assignment(lines: list[str], header: int, end: int, key: str) -> int |
     """Return the index of *key*'s real assignment line inside ``[meta]``.
 
     Args:
-        lines: The document split into lines.
+        lines: The document split into lines, terminators kept.
         header: Index of the ``[meta]`` header.
         end: Exclusive end index of the table body.
         key: The registry key to locate.
@@ -393,7 +453,7 @@ def _find_assignment(lines: list[str], header: int, end: int, key: str) -> int |
     for index in range(header + 1, end):
         if not pattern.match(lines[index]):
             continue
-        if index == header + 1 or _parses("\n".join(lines[:index])):
+        if index == header + 1 or _parses("".join(lines[:index])):
             return index
     return None
 
@@ -406,7 +466,7 @@ def _value_end(lines: list[str], start: int, end: int, key: str) -> int:
     This is what replaces a multi-line array or string over its whole extent.
 
     Args:
-        lines: The document split into lines.
+        lines: The document split into lines, terminators kept.
         start: Index of the assignment line.
         end: Exclusive end index of the table body.
         key: The key being replaced.
@@ -420,7 +480,7 @@ def _value_end(lines: list[str], start: int, end: int, key: str) -> int:
             caller must inspect by hand.
     """
     for stop in range(start + 1, end + 1):
-        candidate = "\n".join(lines[:stop])
+        candidate = "".join(lines[:stop])
         if not _parses(candidate):
             continue
         if key in _meta_table(tomllib.loads(candidate)):
@@ -461,7 +521,7 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
         return text
     document = _parse(text)
     _meta_table(document)
-    lines = text.splitlines()
+    lines = text.splitlines(keepends=True)
     header = _find_meta_header(lines)
     if header is None:
         return _append_meta_table(text, rendered)
@@ -471,11 +531,13 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
     for key, literal in rendered.items():
         end = _meta_body_end(lines, header)
         start = _find_assignment(lines, header, end, key)
-        new_line = f"{key} = {literal}"
         if start is None:
-            insertions.append(new_line)
+            insertions.append(f"{key} = {literal}")
             continue
         stop = _value_end(lines, start, end, key)
+        # The replacement carries the terminator the assignment already had, so
+        # rewriting a value can never change the document's line endings.
+        new_line = f"{key} = {literal}{_eol_of(lines[start])}"
         if stop - start == 1 and lines[start] == new_line:
             continue
         lines = [*lines[:start], new_line, *lines[stop:]]
@@ -489,7 +551,14 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
             not lines[at - 1].strip() or lines[at - 1].lstrip().startswith("#")
         ):
             at -= 1
-        lines = lines[:at] + insertions + lines[at:]
+        # ``at >= header + 1 >= 1``: a header exists, so there is always a line
+        # before the insertion point. An unterminated one ended the file and
+        # must be terminated first, or the new key would land inside its value.
+        eol = _eol_of(lines[at - 1])
+        if not eol:
+            eol = _document_eol(lines)
+            lines[at - 1] = lines[at - 1] + eol
+        lines = [*lines[:at], *(f"{line}{eol}" for line in insertions), *lines[at:]]
         touched = True
 
     # A no-op edit returns the input VERBATIM: re-running with the values the
@@ -497,7 +566,7 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
     # or the idempotency the callers promise (no write, no ``.bak``) breaks.
     if not touched:
         return text
-    result = _join(lines)
+    result = "".join(lines)
     _verify_edit(result, rendered)
     return result
 
@@ -506,8 +575,11 @@ def _append_meta_table(text: str, rendered: Mapping[str, str]) -> str:
     """Return *text* with a new ``[meta]`` table appended at the end.
 
     Appending is always a valid position for a new top-level table, so a
-    document without ``[meta]`` needs no header scan. The result is verified by
-    the caller exactly like an in-place edit.
+    document without ``[meta]`` needs no header scan. The existing text is
+    carried over byte for byte; the only bytes added are the one that puts the
+    new table on its own line (when the file did not end with one), one blank
+    line so the document reads like the hand-written file it is, and the table
+    itself. The result is verified by the caller exactly like an in-place edit.
 
     Args:
         text: The current TOML document.
@@ -516,29 +588,17 @@ def _append_meta_table(text: str, rendered: Mapping[str, str]) -> str:
     Returns:
         The edited document.
     """
-    body = "\n".join(f"{key} = {literal}" for key, literal in rendered.items())
-    separator = ""
-    if text:
-        separator = "\n" if text.endswith("\n") else "\n\n"
-        if not text.rstrip("\n").strip():
-            separator = ""
-    result = f"{text}{separator}{_META_HEADER}\n{body}\n"
+    lines = text.splitlines(keepends=True)
+    eol = _document_eol(lines)
+    prefix = text
+    if prefix and not _eol_of(lines[-1]):
+        prefix += eol
+    if prefix.strip():
+        prefix += eol
+    body = "".join(f"{key} = {literal}{eol}" for key, literal in rendered.items())
+    result = f"{prefix}{_META_HEADER}{eol}{body}"
     _verify_edit(result, rendered)
     return result
-
-
-def _join(lines: list[str]) -> str:
-    """Return *lines* as text with a single trailing newline.
-
-    Args:
-        lines: The document split into lines.
-
-    Returns:
-        The document text. A blank document stays blank.
-    """
-    if not lines:
-        return ""
-    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 def _verify_edit(text: str, rendered: Mapping[str, str]) -> None:
@@ -613,19 +673,31 @@ def read_meta(path: str | Path) -> dict[str, Any]:
 
 
 def _read_text(path: str | Path) -> str:
-    """Return the dataset TOML's text.
+    """Return the dataset TOML's text, byte-faithfully.
+
+    ``newline=""`` on purpose: Python's universal-newline mode translates
+    ``\\r\\n`` to ``\\n`` while reading (and back while writing), which would
+    rewrite every line of the file — not just the ``[meta]`` table — with the
+    platform's native ending. The verifier caught exactly that on Windows with
+    an LF document, which is why the promise is "byte for byte" and the I/O
+    layer has to earn it.
+
+    ``open`` is used rather than ``Path.read_text`` because the ``newline``
+    argument only exists there from Python 3.13, and this package supports 3.10.
 
     Args:
         path: The dataset TOML path.
 
     Returns:
-        The file's text, decoded with the configured output encoding.
+        The file's text, decoded with the configured output encoding and with
+        line endings exactly as stored.
 
     Raises:
         MetaEditError: The file cannot be read.
     """
     try:
-        return Path(path).read_text(encoding=config.OUTPUT_ENCODING)
+        with open(path, encoding=config.OUTPUT_ENCODING, newline="") as handle:
+            return handle.read()
     except OSError as exc:
         raise MetaEditError(f"cannot read {path}: {exc}") from exc
 
@@ -690,7 +762,10 @@ def _atomic_replace(path: Path, text: str) -> None:
     """
     tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(text, encoding=config.OUTPUT_ENCODING)
+        # ``newline=""`` mirrors _read_text: no translation on write either, so
+        # the bytes outside the edited table are the bytes that were read.
+        with open(tmp, "w", encoding=config.OUTPUT_ENCODING, newline="") as handle:
+            handle.write(text)
         os.replace(tmp, path)
     except OSError as exc:
         tmp.unlink(missing_ok=True)

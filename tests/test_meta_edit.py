@@ -323,3 +323,90 @@ class TestBuildPredatesWrite:
         assert note is not None
         assert "predates this write" in note
         assert "sofer_prepare" in note
+
+
+class TestBytePreservation:
+    """A real write touches the ``[meta]`` value and nothing else.
+
+    Both cases here are the independent verifier's findings, and neither was
+    covered before: the editor's own tests compared bytes only on the no-op and
+    ``--dry-run`` paths, where no write happens at all. The first draft read and
+    wrote through the universal-newline default, so on Windows an LF document
+    came back all-CRLF (and on POSIX a CRLF document came back all-LF), and the
+    trailing blank lines collapsed. Bytes are asserted with ``read_bytes`` so the
+    test cannot be fooled by the same translation it is checking for.
+    """
+
+    @staticmethod
+    def _write(path: Path, content: bytes) -> None:
+        path.write_bytes(content)
+
+    def test_a_real_write_preserves_crlf_and_every_other_byte(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = (
+            b'# a comment\r\n[dataset]\r\nname = "d"\r\nrepo_id = "u/d"\r\n\r\n'
+            b'[meta]\r\ndescription = "old"\r\ntags = ["a"]\r\n'
+        )
+        self._write(path, before)
+        result = meta_edit.set_meta(path, {"description": "New"})
+        assert result.changed is True
+        assert path.read_bytes() == before.replace(b'"old"', b'"New"')
+
+    def test_a_real_write_preserves_lf_on_any_platform(self, tmp_path: Path) -> None:
+        """The Windows host is the one that would rewrite this file."""
+        path = tmp_path / "dataset.toml"
+        before = b'# c\n[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = "old"\n'
+        self._write(path, before)
+        meta_edit.set_meta(path, {"description": "New"})
+        after = path.read_bytes()
+        assert after == before.replace(b'"old"', b'"New"')
+        assert b"\r\n" not in after
+
+    def test_trailing_blank_lines_survive(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = "old"\n\n\n'
+        self._write(path, before)
+        meta_edit.set_meta(path, {"description": "New"})
+        assert path.read_bytes() == before.replace(b'"old"', b'"New"')
+
+    def test_a_missing_trailing_newline_stays_missing(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = "old"'
+        self._write(path, before)
+        meta_edit.set_meta(path, {"description": "New"})
+        assert path.read_bytes() == before.replace(b'"old"', b'"New"')
+
+    def test_an_inserted_key_uses_the_document_line_ending(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = (
+            b'[dataset]\r\nname = "d"\r\nrepo_id = "u/d"\r\n\r\n[meta]\r\ndescription = "old"\r\n'
+        )
+        self._write(path, before)
+        meta_edit.set_meta(path, {"license": "MIT"})
+        after = path.read_bytes()
+        assert after.startswith(before)
+        assert after.endswith(b'license = "MIT"\r\n')
+        # Every LF is part of a CRLF, so the inserted line did not mix endings.
+        assert after.count(b"\r\n") == after.count(b"\n")
+
+    def test_an_inserted_key_terminates_an_unterminated_last_line(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\ndescription = "old"'
+        self._write(path, before)
+        meta_edit.set_meta(path, {"license": "MIT"})
+        after = path.read_bytes()
+        assert after == before + b'\nlicense = "MIT"\n'
+
+    def test_a_quoted_key_is_replaced_in_its_canonical_form(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\n"description" = "old"\n'
+        self._write(path, before)
+        meta_edit.set_meta(path, {"description": "New"})
+        assert path.read_bytes() == before.replace(b'"description" = "old"', b'description = "New"')
+
+    def test_a_quoted_table_header_is_the_same_table(self, tmp_path: Path) -> None:
+        path = tmp_path / "dataset.toml"
+        before = b'[dataset]\nname = "d"\nrepo_id = "u/d"\n\n["meta"]\ndescription = "old"\n'
+        self._write(path, before)
+        meta_edit.set_meta(path, {"description": "New"})
+        assert path.read_bytes() == before.replace(b'"old"', b'"New"')
