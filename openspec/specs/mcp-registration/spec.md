@@ -388,7 +388,7 @@ forward env NAMES faithfully. Opencode and Pi MUST remain file-edit only
 - WHEN native delegation is invoked
 - THEN the native CLI SHALL be called and a zero exit SHALL short-circuit the file edit
 
-### Requirement: Host timeouts in the registered entry (MCP-REG-05)
+### Requirement: Host timeouts in the registered entry (MCP-REG-05) — Modified 2026-10-16, opencode-timeout
 
 `sofer mcp add` MUST write the host's per-request (tool call) and connect/startup deadlines into the
 `sofer` entry, using the key name and unit the adapter declares for that agent, so that neither the
@@ -399,6 +399,15 @@ tool call measured in minutes fails against a host default and reports as a brok
 (AGENTS.md rule 1) — MUST be overridable per invocation with `--timeout` / `--connect-timeout`, MUST
 be omitted entirely by `--no-timeout`, and MUST be rejected with exit 2 when non-positive.
 
+Per agent, the declared key, unit and budget decide the emitted shape, and the ADAPTER says which
+budget a key carries — never the caller and never a magnitude guess. **opencode** declares its single
+scalar `timeout` in **milliseconds** as its *connect* key, because that is the budget its schema and its
+docs give that key (fetching the server's tools, i.e. the cold start above), so `add` writes
+`timeout = <connect_seconds × 1000>` and SHALL NOT write the nested object other releases document for
+that key — a wrong shape there risks failing validation of the whole `mcp` block, and the sub-key name
+disagrees between those releases (issue #320). The emitted shape MUST be pinned by a test asserting the
+value, its type and its unit, not merely that a key is present.
+
 The timeout keys SHALL be namespaced under the `sofer` server name only. Writing them MUST NOT change
 any other server in the file, MUST keep the existing contracts (preserve unrelated keys, one `.bak`
 before the first mutation, atomic write, no write on `--dry-run`), and MUST still be idempotent:
@@ -407,7 +416,11 @@ re-running with the same values MUST NOT write and MUST NOT create a `.bak`, whi
 
 An agent whose entry schema accepts no timeout key SHALL keep an entry without one, and `add` SHALL
 name that on stderr rather than reporting a clean success — the same informational contract as the
-OpenCode env-drop warning (MCP-REG-03).
+OpenCode env-drop warning (MCP-REG-03). The guard SHALL be "declares NEITHER key": an agent that
+declares a connect key but no per-request key SHALL NOT be named as carrying no timeout, and `add`
+SHALL NOT print that note beside a key it just wrote. No registered agent is in that state today —
+opencode was, until issue #320 gave it the key its schema accepts — and the clause keeps its force for
+any future host whose schema accepts none.
 
 Because neither `codex mcp add` nor `gemini mcp add` accepts a timeout flag, a registration carrying
 timeouts MUST decline native delegation with the reason `timeout` and fall back to the file edit
