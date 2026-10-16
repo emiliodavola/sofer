@@ -43,16 +43,18 @@ added: `scripts/check_test_mapping.py` exits 0 and reports `mcp-server: 128 scen
 |------|---------|--------|
 | Focused selection | `uv run pytest tests/test_mcp_schema.py -q -k BatchOutputDirDescription` | **2 failed, 22 deselected** (RED) → packed into the GREEN run below |
 | MCP modules | `uv run pytest tests/test_mcp_schema.py tests/test_mcp_server.py -q` | **280 passed, 3 skipped** |
-| Full suite | `uv run pytest tests/ -q` | **2154 passed, 9 skipped, 6 warnings** in 71.02s |
+| Full suite | `uv run pytest tests/ -q` | **2152 passed, 9 skipped, 6 warnings** in 105.28s |
 | Lint | `uv run ruff check src/ tests/ scripts/` | All checks passed |
 | Format | `uv run ruff format --check src/ tests/` | 75 files already formatted |
 | Types | `uv run mypy src/ scripts/` | Success: no issues found in 37 source files |
 | Types (2nd) | `uv run pyright` | 0 errors, 1 warning (pre-existing `tomli` stub warning in `_toml.py:27`) |
-| Spec↔test mapping | `uv run python scripts/check_test_mapping.py` | OK — `mcp-server: 128 scenario(s), unmapped` (was 127) |
+| Spec↔test mapping | `uv run python scripts/check_test_mapping.py` | OK — `mcp-server: 126 scenario(s), unmapped` (was 125) |
 
-The suite was re-measured after `ruff format` joined the `Field(...)` call onto one line: the first run
-passed the suite but reported that file as unformatted, so these numbers belong to the committed bytes.
-Test-count delta from the diff: one parametrized guard covering two tools (two cases).
+The numbers above were measured on this change's content. An earlier run read `2154 passed` and 128
+scenarios because the branch was momentarily cut from the `#295` branch and carried its two new tests;
+`#295` has since merged (`#309`), and the re-measurement on this change's own bytes reads
+`2152 passed, 9 skipped` with `mcp-server: 126 scenario(s)`. Test-count delta from the diff: one
+parametrized guard covering two tools (two cases).
 
 ## Notes for the reviewer
 

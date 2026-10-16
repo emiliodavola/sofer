@@ -43,7 +43,8 @@ E  assert 'cache/renders' in 'Override directory for batch renders (default: ren
 2 failed, 22 deselected
 ```
 
-GREEN: the two MCP test modules together — **280 passed, 3 skipped**.
+GREEN: the two MCP test modules together, on this change's content — **278 passed, 3 skipped** (the
+`280` of an earlier run included two tests that belong to `#295`, merged separately as `#309`).
 
 ## 3. The edits
 
