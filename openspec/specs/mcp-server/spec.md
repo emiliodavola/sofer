@@ -90,11 +90,11 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ---
 
-### Requirement: Tool roster and schema contract (MSP-R03)
+### Requirement: Tool roster and schema contract (MSP-R03) — Modified 2026-10-15, fix-profile-render-default-paths
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`).
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics.
 
-Server SHALL expose 15 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1); `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
+Server SHALL expose 15 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -1130,6 +1130,14 @@ the explicit delimiter SHALL apply to `.csv`.
 - WHEN the input schemas are inspected
 - THEN `delimiter` and `encoding` SHALL each carry a description stating the fallback
 - AND neither SHALL be in the `required` list
+
+#### Scenario: batch output_dir descriptions name the resolved default
+
+- GIVEN `tools/list` for `sofer_profile_all` and `sofer_render_all`
+- WHEN the `output_dir` descriptions are inspected
+- THEN each SHALL name `<output_dir>/<sub-directory>` and the resolved default composed from the
+  configured cache root and the configured sub-directory
+- AND neither SHALL present the bare `profiles` / `renders` as the whole default
 
 #### Scenario: scan tools gain no inert parameter
 
