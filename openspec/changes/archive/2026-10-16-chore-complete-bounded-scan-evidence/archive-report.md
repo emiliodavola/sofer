@@ -14,7 +14,7 @@
 | --- | --- |
 | `scripts/measure_quality_scan_rss.py` | `_child_pids` (per-platform child enumeration) and `_rss_bytes_of_tree` (bounded subtree sum); both reader sites — `_peak_rss_of` and `_subprocess_run` — sample the subtree; a third case (`BOUND_DUP_CAP` = 100 000, default policy); `DEFAULT_DUP_CAP` replaces an in-body `1_000_000` literal |
 | `openspec/specs/data-quality/spec.md` §1 | the sampler paragraph corrected, the evidence table extended, the "bounded, non-growing memory" sentence replaced by what the measurement actually shows, and the 20 M boundary stated |
-| `openspec/changes/2026-10-16-chore-complete-bounded-scan-evidence/` | proposal, design, tasks, this report, and the `data-quality` delta |
+| `openspec/changes/archive/2026-10-16-chore-complete-bounded-scan-evidence/` | proposal, design, tasks, this report, and the `data-quality` delta (archived inside the delivering PR, AGENTS.md rule 15) |
 
 No `src/sofer/` change. The script is a development recipe: not imported, not packaged, read by no test and
 no CI job.

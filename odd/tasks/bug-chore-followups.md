@@ -350,11 +350,15 @@ T12), and this host's absolute wall times are ~2.5× the recorded ones, so the t
 ratio and not the seconds.
 
 L6 (evidence, the batch commits): `ec7d083` tracking · `4c68cef` #316 · `e1bc04f` #319 · `14d9131` #318 ·
-`2e77c51` #317 items 1 and 2. All five are on `fix/316-321-bug-chore-followups`, branched from
-`dev@eaf56f5`. Nothing is pushed and no PR is open: both remain the maintainer's decisions, as does the
-archive move of `openspec/changes/2026-10-16-chore-complete-bounded-scan-evidence/` into
-`openspec/changes/archive/`, which AGENTS.md rule 15 puts inside the delivering PR.
+`2e77c51` #317 items 1 and 2 · `b461164` their record. All six are on
+`fix/316-321-bug-chore-followups`, branched from `dev@eaf56f5` and pushed to `origin`. The change folder
+was moved to `openspec/changes/archive/2026-10-16-chore-complete-bounded-scan-evidence/` in its own
+commit, because AGENTS.md rule 15 puts the archive inside the PR that delivers the change.
 
-L7 (open): T7 (#321) is **blocked on D5**, a maintainer decision, and the two new findings this batch
-surfaced (codex's `$CODEX_HOME` resolution, and the ~1× input peak in `QualityValidator.run()`) are
-**proposed, not filed** — filing an issue is a publishing action.
+L7 (published): the correction comment on #317 (the wrong diagnosis), the one on #319 (the stale probe),
+and the two new issues this batch surfaced — **#325** (codex resolves `~/.codex` while its own adapter
+notes say codex's native commands act on `$CODEX_HOME`; reproduced) and **#326** (`QualityValidator.run()`
+transiently allocates ~1× the corpus, so the validate peak is not independent of the dataset size).
+
+L8 (open): T7 (#321) is **blocked on D5**, the maintainer's decision between delegating-then-patching and
+keeping the decline. **#325 is its prerequisite.** Nothing else is pending on this branch.
