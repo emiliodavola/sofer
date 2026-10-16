@@ -765,7 +765,10 @@ Per-agent locations and shapes:
   documents (fetching the server's tools, i.e. the cold start that bites). It is never written as the
   nested object some releases document, which would risk failing validation of the whole `mcp` block
   for a sub-key name that differs between those releases. A host whose entry accepts no timeout key at
-  all is still named on stderr rather than given an invented one.
+  all is still named on stderr rather than given an invented one. One thing this does **not** fix, and
+  naming it matters more than the key it fixes: a v2 opencode resolves its servers from
+  `mcp.servers.<name>`, while this command still writes the entry at `mcp.<name>` — a larger defect in
+  the layout, tracked separately.
 - **Long calls reset their own deadline.** Every long tool (`sofer_prepare`, `sofer_codebook_all`,
   `sofer_profile_all`, `sofer_render_all`, `sofer_publish_confirm`) re-announces progress while it
   runs, which is what resets a host's per-request timeout — so a long tool also survives a host whose
