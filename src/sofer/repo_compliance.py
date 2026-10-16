@@ -1906,3 +1906,61 @@ def build_dataset_card(
     lines.append("")
 
     return header + "\n".join(lines)
+
+
+_CARD_FRONTMATTER_FENCE: str = "---"
+"""Delimiter framing a Dataset Card's YAML frontmatter (see the ``header``
+:func:`build_dataset_card` renders, and :func:`card_config_names`). A module
+constant so the reader and the writer cannot drift.
+"""
+
+
+def card_config_names(build_dir: Path) -> list[str]:
+    """Return the ``configs[].config_name`` values a built Dataset Card emitted.
+
+    The dry-run warning tells the user to load a multi-table corpus one table at
+    a time with ``load_dataset(repo, name='<config>')``, but could not name the
+    configs (issue #303): they are computed inside :func:`build_dataset_card`,
+    which returns only the card text, so the caller that prints the warning never
+    sees them. They are known exactly once the card exists, so this reads them
+    back from the artifact — the names that shipped, not a second derivation that
+    could disagree with it. Required by ``repo-compliance`` RC-Universal-Card,
+    "Actionable warning" (S4).
+
+    Args:
+        build_dir: Package directory holding the generated ``README.md``.
+
+    Returns:
+        The emitted config names, in card order. ``[]`` when the card is absent,
+        unreadable, unfenced, has no ``configs`` block (an ungroupable corpus
+        emits none — RC-Universal-Card S2/D1), or does not name every entry with
+        a non-empty string. Each of those falls back to the placeholder form of
+        the warning rather than naming a guess.
+    """
+    try:
+        text = (Path(build_dir) / "README.md").read_text(encoding=config.OUTPUT_ENCODING)
+    except OSError:
+        return []
+    # maxsplit=2 keeps a fenced block inside the YAML (a multi-line citation,
+    # say) from being read as the closing fence.
+    parts = text.split(_CARD_FRONTMATTER_FENCE, 2)
+    if len(parts) < 3 or parts[0].strip():
+        return []
+    try:
+        frontmatter = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return []
+    if not isinstance(frontmatter, dict):
+        return []
+    configs = frontmatter.get("configs")
+    if not isinstance(configs, list):
+        return []
+    names: list[str] = []
+    for entry in configs:
+        if not isinstance(entry, dict):
+            return []
+        name = entry.get("config_name")
+        if not isinstance(name, str) or not name:
+            return []
+        names.append(name)
+    return names

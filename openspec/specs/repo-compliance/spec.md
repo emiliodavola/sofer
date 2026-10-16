@@ -1523,12 +1523,29 @@ schema-grouping plan, never from a single unconditional merged config:
 - **Ungroupable guard (S2/D1).** When the schema report carries no column for
   any planned remote and more than one remote is planned, the card SHALL emit
   neither `configs` nor `dataset_info`.
-- **Actionable warning (S4).** `validate_split_mapping(remotes)` SHALL warn, for
-  a multi-file corpus with no split keywords, that the card groups those files by
-  column schema — every file into one `train` split for a single-config card,
-  and one table at a time via `load_dataset(repo, name=...)` for a multi-config
-  card. The clause SHALL NOT claim a single merged split in general, because the
-  card no longer emits one.
+- **Actionable warning (S4).** `validate_split_mapping(remotes, config_names=None,
+  warn_limit=None)` SHALL warn, for a multi-file corpus with no split keywords, that the card groups
+  those files by column schema — every file into one `train` split for a single-config card, and one
+  table at a time for a multi-config card. The clause SHALL NOT claim a single merged split in
+  general, because the card no longer emits one. When `config_names` is supplied, the warning SHALL
+  name those configs (`name='<first>'`, `name='<second>'`, …) instead of the unresolvable placeholder
+  `name='<config>'`: the names are computed inside `build_dataset_card`, which returns only the card
+  text, so the caller that prints the warning has no other way to name them, and an MCP caller
+  receives the warning in the tool result without the card at all. The named list SHALL be capped at
+  `card_config_group_warn_limit` (`[tool.sofer]`, default 5) with an `... and N more` suffix;
+  `config_names=None` or `[]` SHALL keep the placeholder form.
+
+  > Amended by `2026-10-16-fix-card-config-group-warning` (issue #303). The previous clause named no
+  > config, so `load_dataset(repo, name='<config>')` was not actionable without opening the card's
+  > frontmatter — and an MCP caller never receives the card.
+
+- **Card config names (S4).** `repo_compliance.card_config_names(build_dir)` SHALL return the
+  `configs[].config_name` values read back from the built card's YAML frontmatter — the names that
+  shipped, never a second derivation that could disagree with the artifact — and SHALL return `[]` for
+  a card that is absent, unreadable, unfenced, malformed, has no `configs` block, or does not name
+  every entry with a non-empty string.
+
+  > Added by `2026-10-16-fix-card-config-group-warning` (issue #303).
 
 #### Scenario: Mixed-schema corpus is never one merged config — issue #292
 
