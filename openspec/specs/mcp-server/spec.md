@@ -614,9 +614,11 @@ NEVER-LEAK (extended to the four posture fields): the phrase, any phrase-derived
 
 ---
 
-### Requirement: Approval-phrase configuration diagnostics (APX-01)
+### Requirement: Approval-phrase configuration diagnostics (APX-01) — Modified 2026-10-15, fix-approval-phrase-agent-coverage
 
-> Added by change `2026-09-11-fix-auth-status-hints` (archived 2026-09-11).
+> Added by change `2026-09-11-fix-auth-status-hints` (archived 2026-09-11). Modified by
+> `2026-10-15-fix-approval-phrase-agent-coverage` (issue #295): per-agent guidance covers the whole
+> registry and is derived from its `env` capability.
 
 System MUST make the unconfigured-approval-phrase state actionable on the two surfaces that report it, instead of today's dead-end `{"action": "configure_approval_phrase"}`-only hint.
 
@@ -626,7 +628,7 @@ When `sofer_auth_status` reports `approval_configured:false`, its flat `hints` o
 - **process-start semantics** — the phrase is read exactly once, when the MCP server process starts (`build_server`), from the `approval_phrase` argument or `SOFER_MCP_APPROVAL_PHRASE`; the running server MUST NOT be presented as re-reading the environment;
 - the required location — the variable MUST be present in the environment of the process that **launches** `sofer-mcp`; a variable set in a separate shell or terminal MUST NOT be presented as sufficient;
 - the restart requirement — the change takes effect only after a full restart of the agent/server host process, signalled both as prose and as a machine-readable flat boolean key `approval_phrase_restart_required: true`; the guidance MUST NOT suggest that re-calling the tool resolves the state without a restart (no runtime re-read);
-- per-agent setup guidance whose named keys MUST be the shapes `mcp_registration.py` actually writes: `sofer mcp add --agent opencode` writes only the `mcp.sofer` entry keys `type`, `command`, `cwd` and forwards **NO** environment (so the guidance MUST NOT claim env forwarding for opencode), `codex` persists an `env_vars` allow-list of environment-variable NAMES, and `gemini` persists an `env` mapping of NAME → `$NAME` references; secret VALUES are never written to disk;
+- per-agent setup guidance that MUST cover **every** member of `mcp_registration.AGENT_NAMES` and MUST be derived from that registry's own `env` capability, never from a parallel hand-kept table: `sofer mcp add --agent <agent>` writes only the `mcp.sofer` entry keys `type`, `command`, `cwd` and forwards **NO** environment when the capability is `none` (so the guidance MUST NOT claim env forwarding for it), persists an `env_vars` allow-list of environment-variable NAMES when it is `allow_list`, and persists an `env` mapping of NAME → `$NAME` references when it is `refs` or NAME → `${NAME}` references when it is `refs_braced`; each fact MUST name the field and the reference form that agent's registration entry actually carries, and secret VALUES are never written to disk;
 - the verification step — after the restart, `sofer_auth_status` reports `approval_configured:true`.
 
 All guidance keys MUST be namespaced with the `approval_phrase_*` prefix (so the bare `approval_phrase` key of the configured branch stays absent when unconfigured) and MUST be **flat scalars** — no nested object or array value anywhere in `hints` (MSP-R13 flatness invariant).
@@ -644,6 +646,21 @@ NEVER-LEAK: guidance and message MUST NOT contain the phrase, any phrase-derived
 - AND `hints["approval_phrase_restart_required"]` SHALL be `True` and every `hints` value SHALL be a scalar (flat payload, no nested dict/list)
 - AND the guidance SHALL name the verification step (`approval_configured:true` after the restart)
 - AND the configured branch SHALL be unaffected: with a configured phrase `hints` SHALL NOT contain any `approval_phrase_*` guidance key
+
+#### Scenario: Per-agent guidance covers every registered agent
+
+- GIVEN a server with no configured approval phrase and the registered agent set `mcp_registration.AGENT_NAMES`
+- WHEN `sofer_auth_status(config)` is called
+- THEN `hints` SHALL carry exactly one `approval_phrase_setup_<agent>` key per registered agent
+- AND each fact SHALL name the entry field and the reference form `build_entry(agent, ...)` really
+  writes for that agent's `env` capability
+- AND an agent added to `ADAPTERS` SHALL appear in the guidance with no edit outside the registry
+
+#### Scenario: A registration capability without a fact fails the guard
+
+- GIVEN an `ADAPTERS` entry whose `env` capability has no guidance template
+- WHEN the single-source guard runs
+- THEN it SHALL fail, so no agent ships with missing or invented guidance
 
 #### Scenario: Publish refusal message carries the same process-start semantics
 
