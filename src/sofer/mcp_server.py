@@ -57,6 +57,7 @@ any phrase-derived value, and the configured env value never appear in them.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import hmac
 import io
@@ -75,6 +76,8 @@ from pydantic import Field
 try:
     from fastmcp import FastMCP as _FastMCP
     from fastmcp.resources import ResourceSecurity as _ResourceSecurity
+    from fastmcp.server.dependencies import get_context as _get_context
+    from fastmcp.server.middleware import Middleware as _Middleware
 except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monkeypatch
     raise ImportError(
         "sofer's MCP server requires 'fastmcp' — install with: "
@@ -957,11 +960,47 @@ def _workflow_doc_line(tool_name: str) -> str:
     )
 
 
+_LONG_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "sofer_prepare",
+        "sofer_codebook_all",
+        "sofer_profile_all",
+        "sofer_render_all",
+        "sofer_publish_confirm",
+    }
+)
+"""Tools whose body routinely runs for minutes on a real dataset (issue #296).
+
+Named in the issue's own list. A module constant, not a literal inside the
+prose helper, so the set that gets the deadline note is one edit and cannot
+drift from the tools it describes.
+"""
+
+_LONG_TOOL_NOTE: str = (
+    "Runs for minutes on a large dataset (measured ~680 s for sofer_prepare on a "
+    "3.2 GB / 66.2 M-row corpus, ~100 s for sofer_codebook_all): the host's "
+    "per-request timeout must accommodate it. `sofer mcp add` writes one into the "
+    "registration entry, and a long tool re-announces progress while it runs, "
+    "which resets a host deadline the entry could not raise."
+)
+"""Deadline expectation appended to a long tool's description (issue #296 §2)."""
+
+
 def _workflow_description(fn: Callable[..., Any]) -> str:
-    """Tool description = docstring plus the registry workflow line (MSP-R13)."""
+    """Tool description = docstring plus the registry workflow line (MSP-R13).
+
+    A tool whose body routinely runs for minutes on a real dataset also carries
+    :data:`_LONG_TOOL_NOTE`, so the caller learns the deadline expectation from
+    ``tools/list`` alone (issue #296 §2) instead of from a dropped response.
+    """
     doc = (fn.__doc__ or fn.__name__).rstrip()
+    parts = [doc]
     line = _workflow_doc_line(fn.__name__)
-    return f"{doc}\n\n{line}" if line else doc
+    if line:
+        parts.append(line)
+    if fn.__name__ in _LONG_TOOL_NAMES:
+        parts.append(_LONG_TOOL_NOTE)
+    return "\n\n".join(parts)
 
 
 def _batch_output_dir_description(kind: str, configured_dir: str) -> str:
@@ -3484,6 +3523,47 @@ def _register_prompts(server: _FastMCP) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _ProgressHeartbeatMiddleware(_Middleware):
+    """Re-announce progress while a tool call is running.
+
+    A host resets its per-request deadline on a progress notification, which is
+    the only lever a caller has on a host whose timeout is not configurable
+    (issue #296, its proposed solution §3). sofer's tool bodies are synchronous
+    and print their own progress to captured stdout, so threading a callback
+    through ``prepare``/``codebook``/``profile``/``render``/``publish`` would
+    touch five domain modules for a signal the host needs only as a deadline
+    reset. This middleware sits at the single dispatch point instead: every tool
+    is covered, including ones added later, and no domain function changes.
+
+    The heartbeat runs on the event loop while the tool body runs in fastmcp's
+    worker thread, so it keeps firing whatever the body is doing. A client that
+    sent no progress token is unaffected — ``Context.report_progress`` returns
+    without sending when there is no token to answer.
+    """
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        """Run the tool call, re-announcing progress until it finishes."""
+        try:
+            ctx = _get_context()
+        except RuntimeError:  # pragma: no cover - no request context to report to
+            return await call_next(context)
+        interval = float(sofer_config.MCP_PROGRESS_HEARTBEAT_SECONDS)
+        task = asyncio.ensure_future(call_next(context))
+        elapsed = 0.0
+        try:
+            while not task.done():
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    break
+                elapsed += interval
+                name = getattr(context.message, "name", "tool")
+                await ctx.report_progress(elapsed, None, f"{name} still running")
+            return await task
+        except BaseException:
+            task.cancel()
+            raise
+
+
 def build_server(root: Path | None = None, approval_phrase: str | None = None) -> _FastMCP:
     """Build and return the sofer MCP server.
 
@@ -3540,6 +3620,7 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     _register_tools(server)
     _register_resources(server)
     _register_prompts(server)
+    server.add_middleware(_ProgressHeartbeatMiddleware())
     return server
 
 
