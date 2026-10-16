@@ -369,11 +369,11 @@ canalización.
 | `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`; para `codebook`, `-o`/`--output` es la ruta del archivo de salida, por defecto stdout). `publish --clean` respeta `--output` solo para `build`; `cache/` siempre en `cfg._base_dir/cache`. |
 | `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all> [--scope user\|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
 | `--cwd PATH` | `mcp add` | `cwd` absoluto para el servidor; debe ser un directorio existente (si no, sale con 1 indicando la ruta resuelta). Un árbol fuera del home y del cwd del proceso se acepta con un warning que lo nombra. |
-| `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
+| `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`, codex: `CODEX_HOME`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
 | `--timeout SECONDS` | `mcp add` | Deadline por request (llamada a tool) escrita en la entrada, en segundos. Default: `[tool.sofer] mcp_request_timeout_seconds`. Un valor no positivo sale con código 2. |
 | `--connect-timeout SECONDS` | `mcp add` | Deadline de conexión inicial / arranque en frío escrita en la entrada, en segundos. Default: `[tool.sofer] mcp_connect_timeout_seconds`. |
-| `--no-timeout` | `mcp add` | Omite las claves de timeout, restaurando la forma de entrada previa a #287/#296 (y con ella la delegación nativa de codex/gemini). |
+| `--no-timeout` | `mcp add` | Omite las claves de timeout, restaurando la forma de entrada previa a #287/#296 y con ella la delegación nativa de codex/gemini — el único camino en el que sofer no reescribe el archivo de config, porque una edición TOML o JSON reescribe el documento entero (una edición TOML puede borrar comentarios). |
 
 ### Solución de problemas de subida a HF
 
@@ -753,7 +753,7 @@ Ubicaciones y formas por agente:
 | ------- | ------- | ------ | ------- |
 | opencode | `--scope project` | `./opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
 | opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
-| codex | `--scope user` | `~/.codex/config.toml` | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
+| codex | `--scope user` | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
 | codex | `--scope project` | `./.codex/config.toml` | same |
 | gemini | `--scope user` | `~/.config/gemini/settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"$HF_TOKEN",…}}` |
 | gemini | `--scope project` | `./.gemini/settings.json` | same |
@@ -785,7 +785,12 @@ Ubicaciones y formas por agente:
   `mcp_connect_timeout_seconds` (120); se overridean por invocación con `--timeout` / `--connect-timeout`,
   o se omiten ambas claves con `--no-timeout`. Escribir un timeout es además la razón por la que la
   delegación nativa de codex/gemini ahora declina con la razón `timeout` — ningún `<agente> mcp add`
-  acepta un flag de timeout — y `--no-timeout` es lo que restaura ese camino. Un agente cuya entrada no
+  acepta un flag de timeout — y `--no-timeout` es lo que restaura ese camino. La declinación nombra ese
+  flag en stderr, pero solo cuando `timeout` es la razón *única*: con una clave de env presente las razones
+  son `env forwarding, timeout` y el flag limpia solo la segunda, así que nombrarlo ahí mandaría al usuario
+  a un flag que no cambia nada. El intercambio no se evita haciendo las dos cosas — escribir los timeouts
+  después de una escritura nativa pasaría igual por el writer de sofer, y para codex eso es una reescritura
+  `tomli_w` del documento entero, que es justo lo que `--no-timeout` evita. Un agente cuya entrada no
   acepta timeout se nombra en stderr: **opencode** declara `timeout` distinto entre releases (un entero
   en su schema zod, un objeto `{startup, catalog, execution}` en milisegundos en su doc actual), así
   que escribir la forma equivocada podría invalidar el bloque `mcp` entero; configurá su `timeout` a mano.

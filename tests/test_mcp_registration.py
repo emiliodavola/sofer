@@ -457,6 +457,48 @@ class TestUserConfigResolution:
         monkeypatch.setenv("PI_CODING_AGENT_DIR", str(env_dir))
         assert mcp_registration.resolve_config_path("pi", "user") == env_dir / "mcp.json"
 
+    def test_codex_env_dir_wins_over_home(self, tmp_path, monkeypatch):
+        """#325: codex's native commands act on ``$CODEX_HOME``, so sofer must too.
+
+        The adapter contract states it (``mcp_registration.py:127``) while the
+        adapter declares no override, so the two disagree and sofer writes a
+        file codex never reads whenever the variable is set to anything else.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        env_dir = tmp_path / "codex-env"
+        env_dir.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(env_dir))
+        assert mcp_registration.resolve_config_path("codex", "user") == env_dir / "config.toml"
+
+    def test_codex_default_survives_the_override_being_declared(self, tmp_path, monkeypatch):
+        """#325: declaring the override must not move the no-variable default.
+
+        ``resolve_config_path`` joins only ``user_parts[-1]`` onto the override,
+        so ``user_parts`` stays the home-relative fallback: dropping its leading
+        ``.codex`` component would have moved the default to ``~/config.toml``.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        assert mcp_registration.resolve_config_path("codex", "user") == (
+            home / ".codex" / "config.toml"
+        )
+
+    def test_codex_project_scope_ignores_the_env_override(self, tmp_path, monkeypatch):
+        """The override is a user-scope concept, as ``--user-config`` is (#274)."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-env"))
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        assert mcp_registration.resolve_config_path("codex", "project", proj) == (
+            proj.resolve() / ".codex" / "config.toml"
+        )
+
     def test_home_is_still_the_default(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()

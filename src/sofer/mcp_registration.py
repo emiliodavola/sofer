@@ -216,7 +216,13 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "timeout_key": "tool_timeout_sec",
         "connect_timeout_key": "startup_timeout_sec",
         "timeout_unit": "seconds",
-        "user_env_dir": None,
+        # `native_scope` above is False precisely because these native commands
+        # act on the global `$CODEX_HOME` config (issue #325). Declaring the
+        # variable here is what makes the file edit land on the same file the
+        # native CLI would write; `user_parts` stays the home-relative fallback
+        # for when it is unset, because `resolve_config_path` joins only its
+        # last component onto the override.
+        "user_env_dir": "CODEX_HOME",
         "project_scope": True,
     },
     "gemini": {
