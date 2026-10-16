@@ -100,6 +100,30 @@ class TestFormatting:
         assert meta_edit.format_meta_value("text", "ñandú") == '"ñandú"'
 
 
+class TestParseMetaValue:
+    """The inverse reading for the one textual surface (CLI ``--set``)."""
+
+    def test_text_is_verbatim_including_commas_and_equals(self) -> None:
+        assert meta_edit.parse_meta_value("description", "a, b = c") == "a, b = c"
+
+    def test_lists_split_on_commas_and_drop_empty_items(self) -> None:
+        assert meta_edit.parse_meta_value("tags", "a, b") == ["a", "b"]
+        assert meta_edit.parse_meta_value("tags", "") == []
+        assert meta_edit.parse_meta_value("tags", "a,, b") == ["a", "b"]
+
+    def test_flags_accept_the_two_spellings_case_insensitively(self) -> None:
+        assert meta_edit.parse_meta_value("confidential", "TRUE") is True
+        assert meta_edit.parse_meta_value("confidential", " false ") is False
+
+    def test_a_bad_boolean_names_the_accepted_spellings(self) -> None:
+        with pytest.raises(MetaEditError, match="expected 'true' or 'false', got 'yes'"):
+            meta_edit.parse_meta_value("confidential", "yes")
+
+    def test_an_unknown_key_is_refused(self) -> None:
+        with pytest.raises(MetaEditError, match=r"unknown \[meta\] key 'nope'"):
+            meta_edit.parse_meta_value("nope", "x")
+
+
 class TestApplyMetaEdit:
     """The pure edit: only ``[meta]`` moves, and the result always parses."""
 

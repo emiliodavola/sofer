@@ -145,6 +145,15 @@ _META_HEADER_RE = re.compile(rf"^\[{re.escape(_META_TABLE)}\](?:\s*#.*)?$")
 _TABLE_LINE_RE = re.compile(r"^\s*\[")
 """A candidate table header line (validated by re-parsing, not by the regex)."""
 
+_TRUE_WORDS: tuple[str, ...] = ("true",)
+_FALSE_WORDS: tuple[str, ...] = ("false",)
+"""The boolean spellings :func:`parse_meta_value` accepts for a ``flag`` key.
+
+Module constants rather than literals inside the parser (AGENTS.md rule 1), so
+the accepted set has one home and the error message cannot list a spelling the
+parser rejects.
+"""
+
 
 def _assignment_re(key: str) -> re.Pattern[str]:
     """Return the pattern matching a top-level assignment of *key*."""
@@ -270,6 +279,52 @@ def _validate_keys(values: Mapping[str, Any]) -> dict[str, str]:
         except MetaEditError as exc:
             raise MetaEditError(f"[meta] {key}: {exc}") from exc
     return rendered
+
+
+def parse_meta_value(key: str, raw: str) -> Any:
+    """Return the typed value of a CLI ``--set KEY=VALUE`` assignment.
+
+    The inverse of :func:`format_meta_value` for the one surface that receives
+    its values as text (maintainer decision D9: one uniform ``--set`` flag
+    instead of a flag per key, so all of :data:`META_KEYS` is reachable from
+    the CLI). The registry kind decides the reading:
+
+    - ``text``: the raw string, verbatim (commas and ``=`` included);
+    - ``list``: comma-separated items, surrounding whitespace stripped, empty
+      items dropped, so ``--set tags=`` writes ``[]``;
+    - ``flag``: ``true`` or ``false``, case-insensitive, and nothing else.
+
+    Keeping this here rather than in ``cli.py`` keeps the kind-to-text mapping
+    in one module: the registry, its formatting and its parsing cannot drift.
+
+    Args:
+        key: The ``[meta]`` key being assigned.
+        raw: The text after the first ``=`` on one ``--set`` argument.
+
+    Returns:
+        The typed value for :func:`apply_meta_edit`.
+
+    Raises:
+        MetaEditError: *key* is not registered, or *raw* cannot be read as its
+            kind (a bad boolean spelling).
+    """
+    kind = META_KEYS.get(key)
+    if kind is None:
+        known = ", ".join(sorted(META_KEYS))
+        raise MetaEditError(f"unknown [meta] key '{key}'; settable keys are: {known}")
+    if kind == "text":
+        return raw
+    if kind == "list":
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    word = raw.strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    raise MetaEditError(
+        f"[meta] {key}: expected 'true' or 'false', got {raw!r} "
+        f"(accepted: {', '.join(_TRUE_WORDS + _FALSE_WORDS)})"
+    )
 
 
 # ---------------------------------------------------------------------------

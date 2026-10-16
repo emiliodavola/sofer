@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import shutil
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
-from . import _toml, config, failure_report, mcp_doctor, mcp_registration
+from . import _toml, config, failure_report, mcp_doctor, mcp_registration, meta_edit
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
-from .checks import DatasetValidator, ValidationReport
+from .checks import DatasetValidator, ValidationReport, meta_placeholder_warnings
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
 from .execution_context import resolve_dataset_root, validate_identity
@@ -1178,6 +1179,150 @@ def _cmd_mcp_doctor(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _cmd_meta_check(args: argparse.Namespace) -> int:
+    """Report the ``[meta]`` fields that still carry an ``init`` placeholder.
+
+    Orchestration:
+
+        1. Load the dataset TOML with :meth:`DatasetConfig.from_toml`, the same
+           dataset-directory anchor every other dataset command uses.
+        2. Reuse :func:`sofer.checks.meta_placeholder_warnings` — the very
+           implementation ``sofer_validate`` calls — so the query and the
+           validator cannot disagree about what a placeholder is.
+        3. Print one line per warning, or a single ``OK`` line when there are
+           none. Informational by contract (maintainer decision D6): the exit
+           code is 0 either way, exactly like the warning it reports, because a
+           non-zero exit here would make this query stricter than the run it
+           queries. Only "the config could not be read" exits 1.
+
+    Args:
+        args: Parsed arguments carrying ``config`` and ``--json``.
+
+    Returns:
+        0 when the config was read (whatever it reports), else 1.
+    """
+    path: str = args.config
+    try:
+        cfg = DatasetConfig.from_toml(path)
+    except Exception as exc:
+        print(f"  X  cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    warnings = meta_placeholder_warnings(cfg)
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "message": f"{len(warnings)} [meta] placeholder warning(s)",
+                    "placeholders": len(warnings),
+                    "warnings": warnings,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if warnings:
+        for warning in warnings:
+            print(f"  !  {warning}")
+    else:
+        print(f"  OK  {path}: no [meta] placeholders")
+    return 0
+
+
+def _cmd_meta_set(args: argparse.Namespace) -> int:
+    """Write the given ``[meta]`` keys into the dataset TOML.
+
+    Orchestration:
+
+        1. Read every ``--set KEY=VALUE`` into a typed mapping with
+           :func:`sofer.meta_edit.parse_meta_value` — the registry kind decides
+           how the text is read (maintainer decision D9). An argument without
+           ``=``, a blank key, an unknown key and an unreadable boolean are all
+           refused before anything is touched (argparse guarantees at least one
+           ``--set``).
+        2. Load the dataset TOML (dataset-directory anchor) so an unreadable or
+           invalid config fails before the write, and so the build-tree note
+           below can use the resolved ``build_dir``.
+        3. Apply the edit with :func:`sofer.meta_edit.set_meta`: it touches only
+           the ``[meta]`` table, preserves every other byte, commits with an
+           atomic replace, and refuses rather than writing a document it cannot
+           parse back. ``--dry-run`` computes and verifies the edit and writes
+           nothing.
+        4. Report the keys written and the keys already holding the requested
+           value; a build tree that predates the write is named on stderr and
+           never changes the exit code (maintainer decision D7). A refusal exits
+           1 with nothing written.
+
+    Args:
+        args: Parsed arguments carrying ``config``, ``assignments``,
+            ``--dry-run`` and ``--json``.
+
+    Returns:
+        0 on success (including a no-op), else 1.
+    """
+    values: dict[str, Any] = {}
+    for entry in list(getattr(args, "assignments", [])):
+        key, separator, raw = entry.partition("=")
+        if not separator or not key.strip():
+            print(f"  X  --set expects KEY=VALUE, got {entry!r}", file=sys.stderr)
+            return 1
+        try:
+            values[key.strip()] = meta_edit.parse_meta_value(key.strip(), raw)
+        except meta_edit.MetaEditError as exc:
+            print(f"  X  {exc}", file=sys.stderr)
+            return 1
+
+    path: str = args.config
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        cfg = DatasetConfig.from_toml(path)
+    except Exception as exc:
+        print(f"  X  cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = meta_edit.set_meta(path, values, dry_run=dry_run)
+    except meta_edit.MetaEditError as exc:
+        print(f"  X  {exc}", file=sys.stderr)
+        return 1
+
+    written = ", ".join(result.written)
+    if bool(getattr(args, "json", False)):
+        # CLI-R10: the machine-readable line is the ONLY stdout the command
+        # writes, so a consumer can parse it without stripping human prose.
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "message": (
+                        (f"would write: {written}" if dry_run else f"wrote: {written}")
+                        if result.changed
+                        else "already up to date"
+                    ),
+                    "dry_run": result.dry_run,
+                    "changed": result.changed,
+                    "written": list(result.written),
+                    "unchanged": list(result.unchanged),
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        if dry_run:
+            print(f"  DRY RUN  {path}: would write {written or 'nothing'}")
+        elif result.changed:
+            print(f"  OK  {path}: wrote {written}")
+        else:
+            print(f"  OK  {path}: already up to date")
+        if not dry_run and result.unchanged:
+            print(f"  i  unchanged: {', '.join(result.unchanged)}")
+    note = meta_edit.build_predates_write(cfg, path)
+    if note is not None:
+        print(note, file=sys.stderr)
+    return 0
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     """Write a ready-to-edit TOML template and scaffold ``raw/``.
 
@@ -2002,6 +2147,102 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit the machine-readable status line as stable JSON (CLI-R10).",
     )
     mcp_doctor_parser.set_defaults(func=_cmd_mcp_doctor)
+
+    # ── meta ──────────────────────────────────────────────────────
+    meta = sub.add_parser(
+        "meta",
+        help="Read and fill the dataset [meta] block (init placeholders, card values).",
+        description=(
+            "Read and write the dataset TOML's ``[meta]`` table. ``check`` "
+            "reports which fields still carry a ``sofer init`` placeholder, the "
+            "same warning ``sofer validate`` prints, queryable on demand. "
+            "``set`` writes the keys it is given into ``[meta]``, preserving "
+            "every other key, every comment and the rest of the document. "
+            "The dataset TOML is the only file touched, and both surfaces mirror "
+            "the ``sofer_meta_check`` / ``sofer_meta_set`` MCP tools."
+        ),
+    )
+    meta_sub = meta.add_subparsers(dest="meta_command", required=True)
+
+    meta_check = meta_sub.add_parser(
+        "check",
+        help="Report the [meta] fields still carrying an init placeholder (read-only).",
+        description=(
+            "Print one line per ``[meta]`` field that is empty or still starts "
+            "with a ``meta_placeholder_prefixes`` value (``[tool.sofer]``, "
+            "case-insensitive), plus one for placeholder ``tags``. Read-only: "
+            "no file is written. Informational: the exit code is 0 whatever it "
+            "reports, exactly like the warning ``sofer validate`` prints "
+            "(issue #288's decision); only an unreadable config exits 1."
+        ),
+    )
+    meta_check.add_argument(
+        "config",
+        help="Path to the dataset .toml configuration file to inspect.",
+    )
+    meta_check.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the machine-readable status line as stable JSON (CLI-R10): "
+            "ok, exit_code, message, placeholders, warnings."
+        ),
+    )
+    meta_check.set_defaults(func=_cmd_meta_check)
+
+    meta_set = meta_sub.add_parser(
+        "set",
+        help="Write [meta] keys into the dataset TOML, preserving everything else.",
+        description=(
+            "Write the given ``[meta]`` keys into the dataset TOML. Only the "
+            "``[meta]`` table changes: other keys, comments, blank lines and "
+            "every unrelated table survive byte for byte. The write is atomic "
+            "(tmp + os.replace) and the edited document is parsed back before "
+            "it replaces the file, so a refusal - an unknown key, a value of "
+            "the wrong kind, a document that would not parse - writes nothing. "
+            "``--set KEY=VALUE`` reads VALUE per the key's kind: text verbatim, "
+            "a list as comma-separated items (``--set tags=a,b``, empty for "
+            "``[]``), and a flag as ``true``/``false``. Re-running with the "
+            "values the file already holds writes nothing. A ``build/`` tree "
+            "that predates the write is named on stderr - the Dataset Card and "
+            "LICENSE there still carry the old values until ``sofer prepare`` "
+            "runs again."
+        ),
+    )
+    meta_set.add_argument(
+        "config",
+        help="Path to the dataset .toml configuration file to edit.",
+    )
+    meta_set.add_argument(
+        "--set",
+        dest="assignments",
+        action="append",
+        required=True,
+        metavar="KEY=VALUE",
+        help=(
+            "A [meta] key to write (repeatable), e.g. --set description='What it "
+            "is' --set license=MIT --set source='Some org' --set tags=a,b. The "
+            "value is read per the key's kind: text verbatim, a list as "
+            "comma-separated items, a flag as true/false."
+        ),
+    )
+    meta_set.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Compute and verify the edit, report the keys it would write, and "
+            "leave the file untouched."
+        ),
+    )
+    meta_set.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the machine-readable status line as stable JSON (CLI-R10): "
+            "ok, exit_code, message, dry_run, changed, written, unchanged."
+        ),
+    )
+    meta_set.set_defaults(func=_cmd_meta_set)
 
     # ── report-failure ────────────────────────────────────────────
     rf = sub.add_parser(
