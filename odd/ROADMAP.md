@@ -187,7 +187,7 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | Order | Issue | Size | Change folder | Feature doc | State |
 | --- | --- | --- | --- | --- | --- |
 | 1 | #324 Curation Rationale needs a file | **S** | `2026-10-16-feat-curation-rationale-key` | [`tasks/curation-rationale-key.md`](tasks/curation-rationale-key.md) | **delivered** on `feat/324-curation-rationale-key` |
-| 2 | #322 `sofer mcp doctor` measures the cold start | **M** | — | — | pending |
+| 2 | #322 `sofer mcp doctor` measures the cold start | **M** | `2026-10-16-feat-mcp-doctor` | [`tasks/mcp-doctor.md`](tasks/mcp-doctor.md) | **delivered** on `feat/322-mcp-doctor` (PR pending) |
 | 3 | #323a `sofer_meta_check` (read-only half) | **S/M** | — | — | pending |
 | 4 | #320 opencode receives no timeout key | **M/L** | — | — | pending, **research-gated** |
 | 5 | #323b `sofer_meta_set` (+ the CLI counterpart) | **L** | — | — | pending, **blocked on a design decision** |
@@ -225,6 +225,19 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | #323a | tool description contract (MSP-R04), `readOnlyHint`, typed `output_schema`, `_PHASED_INSTRUCTIONS`, `test_fifteen_tools`, a new `AREAS` entry in `test_parity.py` |
 | #320 | the external shape/unit verification, then nested-shape support in `_timeout_keys()`, `_timeout_keys_equal()`, the note, MCP-REG-05 and the README |
 | #323b | the TOML-writer decision, containment, atomic write, the "may it run while a build exists?" question, parity, and the CLI counterpart |
+
+### Finding raised by Batch B (not in any issue)
+
+`sofer mcp doctor` measured this machine's cold start at **1874 ms and 1718 ms** (two runs, warm page
+cache) while `README.md` and `mcp-registration` MCP-REG-05 state the **16-32 s** figure as *measured
+fact* — the figure #287/#296 wrote the deadlines against, and the premise #322 itself rests on. Two runs
+on one machine cannot falsify a figure that may have been taken cold or on slower hardware, so #322
+**does not edit it**: revising a stated measurement needs its own measurement (cold cache, and ideally a
+second machine). It is recorded here because it bears on this batch's value — if ~2 s is representative,
+the configured 120 s connect deadline carries roughly 60x headroom and the doctor's verdict will nearly
+always read "fine". The command stays worth having, because it measures *other* machines (which is
+exactly #322's case), but it now sits **below** the cheaper and more serious item: checking whether the
+recorded figure is true at all.
 
 One coupling worth honouring: **#320 and #322 amend the same spec clause (MCP-REG-05)**. They should
 share one change folder with two PRs rather than amend that clause twice — but not one PR, because #320

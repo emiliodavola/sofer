@@ -414,6 +414,11 @@ timeouts MUST decline native delegation with the reason `timeout` and fall back 
 (MCP-REG-04), and `--no-timeout` MUST restore the delegation path by restoring the pre-change entry
 shape.
 
+The value written SHALL be checkable against the machine that carries it: `sofer mcp doctor` (CLI-R15)
+MUST report this machine's own `initialize` round trip beside the key and the value `add` writes, and
+MUST name the flags that raise them. Like the two notes above it is informational and MUST NOT change
+the exit code (issue #322).
+
 #### Scenario: The entry carries each host's keys and unit
 
 - GIVEN an existing directory passed as `--cwd`
@@ -472,3 +477,13 @@ shape.
 - AND with `--no-timeout` the delegation SHALL proceed as before
 
 **Evidence:** `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_native_delegation_declines_with_the_timeout_reason`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_decline_reason_order_is_env_scope_timeout`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_timeouts_decline_native_delegation_naming_the_reason`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_no_timeout_restores_native_delegation`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_no_timeouts_leaves_delegation_available`
+
+#### Scenario: The written deadline can be checked against this machine — issue #322
+
+- GIVEN `sofer mcp doctor --agent <agent>` on a host whose entry carries a timeout key
+- WHEN it reports
+- THEN it SHALL name the same key and value `sofer mcp add` writes for that agent
+- AND an agent whose entry accepts no timeout key SHALL be named by the same note
+- AND the exit code SHALL be unchanged whatever the measurement
+
+**Evidence:** `test: tests/test_mcp_doctor.py::TestAgentRows::test_the_row_value_matches_what_mcp_add_would_write`, `test: tests/test_mcp_doctor.py::TestAgentRows::test_opencode_carries_the_note_instead_of_a_value`, `test: tests/test_mcp_doctor.py::TestCommandHandler::test_a_measurement_over_budget_still_exits_zero`
