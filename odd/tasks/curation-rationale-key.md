@@ -47,12 +47,13 @@ S7 (the clause as amended, verbatim): "`### Curation Rationale` SHALL be filled 
 | ID | Task | Spec | Route | State | Commit |
 | --- | --- | --- | --- | --- | --- |
 | T1 | Branch `feat/324-curation-rationale-key` off `dev@5249be6` | — | git | done | — |
-| T2 | RED: 7 tests for the key, the precedence, the whitespace edges and the TOML round trip | S1 S2 S3 | inline, test-first | done | see the archive report |
-| T3 | `model.py`: the `curation_rationale` field + its `from_toml` read | S1 | inline | done | see the archive report |
-| T4 | `repo_compliance.py`: the three-arm chain; `_MORE_INFO` stays at four sites | S1 S2 S7 | inline | done | see the archive report |
-| T5 | Canonical §2.1.1/§2.1.2 + this change's delta, removing the clause sentence that asserted the opposite | S6 S7 | inline | done | see the archive report |
-| T6 | Gates: full suite, collection delta, ruff/format/mypy/pyright, test-mapping checker | — | inline | done | see the archive report |
-| T7 | Archive inside the delivery branch (rule 15) | — | inline | done | this folder |
+| T2 | RED: 7 tests for the key, the precedence, the whitespace edges and the TOML round trip | S1 S2 S3 | inline, test-first | done | `3b90af3` |
+| T3 | `model.py`: the `curation_rationale` field + its `from_toml` read | S1 | inline | done | `3b90af3` |
+| T4 | `repo_compliance.py`: the three-arm chain; `_MORE_INFO` stays at four sites | S1 S2 S7 | inline | done | `3b90af3` |
+| T5 | Canonical §2.1.1/§2.1.2 + this change's delta, removing the clause sentence that asserted the opposite | S6 S7 | inline | done | `3b90af3` |
+| T6 | Gates: full suite, collection delta, ruff/format/mypy/pyright, test-mapping checker | — | inline | done | `3b90af3` |
+| T7 | Archive inside the delivery branch (rule 15) | — | inline | done | `3b90af3`, this folder |
+| T8 | Push the branch; assign the issue; leave the PR to the maintainer's authorization | — | git/gh | done | `origin/feat/324-curation-rationale-key` == `3b90af3`; #324 assigned to `emiliodavola` |
 
 ## Close-out
 
@@ -83,3 +84,5 @@ L6 (evidence, RED→GREEN): with the tests written and the source untouched, `py
 L7 (decision): S6 could not be extended in place — it asserted the opposite of the new behaviour. The #291 paragraph now keeps its five keys and delegates Curation Rationale to a new clause owning both fill paths. Leaving both sentences would have put a false statement in the spec of record.
 
 L8 (finding, pre-existing, out of scope): `uv run ruff format --check .` fails on `README.md:166` and `README_ES.md:174` — comment alignment in the MCP example block — on `dev` before and after this change. CI's gate is scoped to `src/ tests/`, which is why it is green.
+
+L9 (evidence, delivery): committed as **`3b90af3`** — `11 files changed, 652 insertions(+), 12 deletions(-)` — with all four pre-commit hooks `Passed` (`ruff`, `ruff-format`, `mypy`, `pyright`). Pushed to `origin/feat/324-curation-rationale-key` (remote SHA verified equal to local). Issue #324 assigned to `emiliodavola`. **The pull request was deliberately not opened**: publishing is the maintainer's call, and it stays pending.`

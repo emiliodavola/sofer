@@ -25,7 +25,8 @@ paragraphs of rationale types them into `[meta] curation_rationale`; a user who 
 
 ## 2. Task state
 
-Every task in `tasks.md` is `done` (T1–T7). No `pending` row remains.
+Every task in `tasks.md` is `done` (T1–T8). No `pending` row remains. The single work-unit commit is
+`3b90af3` on `feat/324-curation-rationale-key`, pushed to `origin` with the SHAs verified equal.
 
 ## 3. Measured evidence
 
@@ -39,6 +40,9 @@ Every task in `tasks.md` is `done` (T1–T7). No `pending` row remains.
 | Types | `uv run --python 3.13 mypy src/ scripts/`, `uv run pyright` | 0 errors / 0 errors (1 pre-existing `tomli` warning in `_toml.py`) |
 | Test-mapping contract | `uv run python scripts/check_test_mapping.py` | `OK` |
 | rule-14 per-file 100.00% gates | `scripts/check_core_coverage.sh` | **not run.** No edit touches `cli.py`, `scanner.py`, `prepare.py` or `publish.py`, and no test in this change executes a line of them. Stated as not-run rather than reported as passed |
+| Pre-commit hooks | `git commit` | `ruff`, `ruff-format`, `mypy`, `pyright` — all **Passed** |
+| Delivery | `git show --stat 3b90af3` | 11 files changed, 652 insertions(+), 12 deletions(-); pushed, remote SHA equal to local |
+| Pull request | — | **not opened.** Publishing is a maintainer decision; the branch is pushed and the issue is assigned |
 
 The collection baseline was measured by stashing `src/` and `tests/`, collecting, and restoring — so
 the +7 is a counted delta, not a reconciled-by-hand number.
