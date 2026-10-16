@@ -177,9 +177,19 @@ real Windows evidence) → T5 → T6 → T7 (blocked on a maintainer decision).
 
 ### Batch B — the four features (#320, #322, #323, #324) — **in progress**
 
-The four `type:feature` issues Batch A explicitly left out of its bug/chore scope. Each is its own SDD
-change on its own branch, archived inside its own delivery PR (AGENTS.md rule 15), with its own feature
-document under `odd/tasks/`. Every premise was re-checked against the code on 2026-10-16 and **none**
+The four `type:feature` issues Batch A explicitly left out of its bug/chore scope. Each is its own
+change on its own branch, with its own feature document under `odd/tasks/`.
+
+**Flow deviation, recorded because it changes what a reader finds here:** the first two (#324, #322) are
+SDD changes archived inside their own delivery PR (AGENTS.md rule 15). For #323 and #320 the maintainer
+instructed **ODD only, no SDD** — verbatim: *"quiero que utilices exclusivamente el flujo ODD, no SDD,
+y crees una rama por issue para versionar ahí el código que crees o modifiques"*. Those two therefore have
+**no `openspec/changes/` folder**: the specs of record (`mcp-server`, `cli`, `mcp-registration`) are
+amended **in place**, in the same commit as the code that makes them true, and the durable plan is the
+feature document plus this file. The rule 15 rationale still holds — the spec text travels with the
+delivery — only the delta folder is absent.
+
+Every premise was re-checked against the code on 2026-10-16 and **none**
 was already implemented: no `doctor` subcommand (`cli.py` has `mcp add` and `mcp remove` only), neither
 `sofer_meta_set` nor `sofer_meta_check` in the 15-tool roster, no `curation_rationale` token anywhere
 under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registration.py:195`).
@@ -188,9 +198,8 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | --- | --- | --- | --- | --- | --- |
 | 1 | #324 Curation Rationale needs a file | **S** | `2026-10-16-feat-curation-rationale-key` | [`tasks/curation-rationale-key.md`](tasks/curation-rationale-key.md) | **delivered** on `feat/324-curation-rationale-key` |
 | 2 | #322 `sofer mcp doctor` measures the cold start | **M** | `2026-10-16-feat-mcp-doctor` | [`tasks/mcp-doctor.md`](tasks/mcp-doctor.md) | **delivered** on `feat/322-mcp-doctor` (PR pending) |
-| 3 | #323a `sofer_meta_check` (read-only half) | **S/M** | — | — | pending |
-| 4 | #320 opencode receives no timeout key | **M/L** | — | — | pending, **research-gated** |
-| 5 | #323b `sofer_meta_set` (+ the CLI counterpart) | **L** | — | — | pending, **blocked on a design decision** |
+| 3 | #323 the metadata step's tool surface — check + set + CLI | **L** | none (ODD-only, see the flow note above) | [`tasks/meta-tools.md`](tasks/meta-tools.md) | 4 work-unit commits on `feat/323-meta-tools`; rule-14 gates and an independent verifier in flight |
+| 4 | #320 opencode receives no timeout key | **M** | none (ODD-only) | — | **research gate discharged** (see below); next on the branch |
 
 **Order of execution, and why it is not the issue order:**
 
@@ -199,21 +208,35 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 - **#322 second** — the highest value per cost, and it is the *input* #320 needs: #320's own body says the
   doctor's output "would be the most useful input". It also answers, with a number from this machine,
   whether opencode's 30 s startup default actually bites against the measured 16–32 s cold start.
-- **#323a third** — read-only, reuses `meta_placeholder_warnings()` verbatim, and closes the "the agent
-  cannot see the state" half of #323 without touching the tool-inventory write surface.
-- **#320 fourth** — **research-gated, and its three options are not equivalent.** Option 3 (a
-  startup-only capability) *requires* the nested `{startup,catalog,execution}` shape, so it re-imports
-  exactly the risk decision D5 avoided when it wrote no key at all. Option 1 (detect the shape from the
-  existing file) only helps a user who already has a nested timeout — not the case that bites. Option 2
-  (pin a version, write that version's shape, make an upgrade visible) is the only one that resolves the
-  contradiction, and it depends on a premise **not verifiable from this repository**: whether the pinned
-  opencode zod schema still declares `timeout` as a positive integer, and in which unit. First task is
-  that verification, not an implementation.
-- **#323b last** — the largest, and blocked on a decision the issue does **not** name: there is no
-  format-preserving TOML writer in this repository. `_toml.py` only reads, `tomli-w` serialises the whole
-  document, and the surgical splice exists only for YAML (`_yaml.py`). Writing `[meta]` keys with
-  `tomli-w` therefore destroys the comments in a hand-written dataset TOML. Choosing between a
-  `tomlkit` dependency, a new surgical `_toml_editor.py`, and accepting the rewrite is the gate.
+- **#323 third** — split into two phases because they are two different risks: #323a was read-only,
+  reused `meta_placeholder_warnings()` verbatim, and closed the "the agent cannot see the state" half
+  without touching the tool-inventory write surface; #323b was the larger one, blocked on the
+  format-preserving TOML writer this repository does not have. **Both landed as one branch and one
+  feature document** (`odd/tasks/meta-tools.md`), which is the maintainer's decision (questionnaire:
+  "Completo: check + set + CLI"): the read half is largely push-based already — `sofer_validate`
+  reports it in every envelope — so shipping the check without the writer would have left the dead end
+  the issue is about standing. The writer decision (D3/D4 there) was a **new surgical editor**
+  (`src/sofer/meta_edit.py`) with `tomllib` as the authority for the three questions a regex cannot
+  answer, and a parse-and-read-back gate before the atomic replace; `tomli-w` whole-document rewrite and
+  a `tomlkit` dependency were both rejected, with the reason recorded.
+- **#320 next** — **the research gate is discharged, and its three options are not the answer.**
+  Verified against opencode's own sources: the stable `packages/opencode/src/config/mcp.ts` zod schema
+  declares `timeout: z.number().int().positive()` (scalar, milliseconds) and the stable docs document
+  the local-server option as a **Number, default 5000 ms**, while `packages/core/src/config/mcp.ts`
+  declares a `Timeout` class (`startup` + `request`) and the v2 docs a `{startup,catalog,execution}`
+  object — and v2 also moves server names from `mcp.<name>` to **`mcp.servers.<name>`**. So the
+  disagreement is **version-shaped, not file-shaped**: option 1's detector only fires for an
+  inconsistent file that is valid in neither release, and it is useless in the common fresh-install
+  case; option 2 needs an `opencode --version` spawn that the adapter deliberately does not have
+  (`delegates: False`); option 3 needs a sub-key name that disagrees across the two sources. The
+  correction that none of the three names: the scalar `timeout` the stable schema accepts governs the
+  **connect/fetch-tools budget**, not the per-request one, so it belongs in the adapter's
+  `connect_timeout_key` with unit `milliseconds` — the generic writer then emits it with no new flag
+  (maintainer decision: "Escalar en ms con el presupuesto de connect"). The **layout** half (v2 reads
+  `mcp.servers`) is a separate, larger defect and is **not** part of #320.
+- **#323b** — closed by #323 (see above): not "last", not still blocked. The gate it recorded was real
+  and the answer was the third option it did not name, a new surgical editor rather than a dependency
+  or an accepted rewrite.
 
 **Cost, as measured against this repository's own obligations** (rule 14's 100.00% per-file gates on
 `cli.py`, rule 6's test mapping, rules 7/13's README pair, rule 15's in-PR archive):
@@ -222,9 +245,8 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | --- | --- |
 | #324 | one field, one branch, 7 tests — small |
 | #322 | a new `cli.py` handler under the rule-14 100.00% mandate, including the no-binary-on-`PATH` fallback and the child-kill path; Windows process handling in CI |
-| #323a | tool description contract (MSP-R04), `readOnlyHint`, typed `output_schema`, `_PHASED_INSTRUCTIONS`, `test_fifteen_tools`, a new `AREAS` entry in `test_parity.py` |
-| #320 | the external shape/unit verification, then nested-shape support in `_timeout_keys()`, `_timeout_keys_equal()`, the note, MCP-REG-05 and the README |
-| #323b | the TOML-writer decision, containment, atomic write, the "may it run while a build exists?" question, parity, and the CLI counterpart |
+| #323 | one new module, one new CLI command pair under the rule-14 100.00% mandate, **two** new MCP tools (roster 15 → 17: `WORKFLOW_METADATA`, `_PHASED_INSTRUCTIONS`, two `AREAS` entries, the schema/roster/workflow/mapping guards, both READMEs), and the writer itself — the largest item in the batch |
+| #320 | small once the research landed: one adapter entry, one guard in `dropped_timeout_note`, the shape assertions the issue asks for, MCP-REG-05 and the READMEs |
 
 ### Finding raised by Batch B (not in any issue)
 
@@ -239,6 +261,15 @@ always read "fine". The command stays worth having, because it measures *other* 
 exactly #322's case), but it now sits **below** the cheaper and more serious item: checking whether the
 recorded figure is true at all.
 
-One coupling worth honouring: **#320 and #322 amend the same spec clause (MCP-REG-05)**. They should
-share one change folder with two PRs rather than amend that clause twice — but not one PR, because #320
-is gated and #322 is not.
+One coupling worth honouring: **#320 and #322 amend the same spec clause (MCP-REG-05)**. #322 landed it
+in its own delivery; #320 amends the same clause again on its own branch, which is what actually
+happened — not one shared change folder. The clause's "an agent whose entry schema accepts no timeout key"
+sentence stays: it keeps its force for any future host, even though opencode stops being its example.
+
+### Finding raised by #323 (not in the issue)
+
+`_PHASED_INSTRUCTIONS` is a tool-visible contract, not documentation: `tests/test_mcp_server.py` asserts on
+its substrings, so "the metadata step" cannot exist in prose alone without also existing in the registry
+(`WORKFLOW_METADATA`), in the parity declarations, and in the roster count the spec pins. #323's own
+closing paragraph named the parity tests and the instructions; the registry and the pinned roster count
+were the two it did not. A future issue that adds a tool should budget all four.
