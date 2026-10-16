@@ -113,10 +113,13 @@ The 2 000 000-row case falls from 63.41 to 37.07 MiB, and what is left is the ca
 - Gates: `uv run ruff check src/ tests/ scripts/` (pass), `uv run ruff format --check src/ tests/`
   (75 files formatted), `uv run mypy src/ scripts/` (no issues, 38 files), `uv run pyright` (0 errors,
   1 pre-existing `_toml.py` `tomli` warning), `uv run python scripts/check_test_mapping.py` (contract
-  holds), `uv run pytest tests/ -q` (2240 passed, 9 skipped), coverage gates (TOTAL `fail_under = 90` +
-  `scripts/check_core_coverage.sh`).
-- Work-unit commit: `b7e8a74` — `fix(quality): bound the encoding probe so the pass's peak stops tracking the corpus`.
-- Delivery PR: this PR → `dev`.
+  holds), `uv run pytest tests/ -q` (2240 passed, 9 skipped), coverage gates (`uv run coverage run -m
+  pytest` → 2240 passed in 141.5 s; `uv run coverage report -m` → TOTAL 94% against the config-owned
+  floor of 90; `bash scripts/check_core_coverage.sh` → 100% in each of cli, scanner, prepare, publish).
+- Work-unit commits: `b7e8a74` (`fix(quality): bound the encoding probe so the pass's peak stops
+  tracking the corpus`) and `4645770` (`docs(quality): record the #326 allocation and correct the
+  data-quality evidence`).
+- Delivery PR: https://github.com/emiliodavola/sofer/pull/330 → `dev`.
 
 ## Log
 
