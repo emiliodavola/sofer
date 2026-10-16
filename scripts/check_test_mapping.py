@@ -25,6 +25,12 @@ declared evidence so the size of the escape hatch is visible. Owner: the
 repository maintainer. Review trigger: any change to a ``verify:`` row or to a
 spec's evidence class, and each release review.
 
+That count is scoped, and the report says so. It counts the rows this checker
+*accepted*, which are the rows in **mapped** specs; a spec with no
+``## Test Mapping`` section is a permanent declared backlog entry with no
+accepted row, so the printed number is not the whole tree's. The line names both
+sides of that boundary so a reader cannot take it for one (issue #319).
+
 Exit code 0 on a clean tree, non-zero with the full offender list otherwise.
 The checker is deterministic, runs offline, and modifies no repository file
 (MC-06).
@@ -616,6 +622,10 @@ def _count_verify_rows(records: list[SpecRecord]) -> int:
 def _report(records: list[SpecRecord], failures: list[str]) -> int:
     """Print the re-derived scenario inventory and the failure list.
 
+    The ``verify:`` line states the scope of its own count: the rows reported
+    are the ones the checker accepted, and the specs it excluded are counted
+    too, so the number is not mistaken for the whole tree's (issue #319).
+
     Args:
         records: Every spec record under ``openspec/specs``.
         failures: All accumulated failure messages.
@@ -628,10 +638,14 @@ def _report(records: list[SpecRecord], failures: list[str]) -> int:
         state = "mapped" if record.mapped else "unmapped"
         print(f"{INFO_MARKER}: {record.name}: {count} scenario(s), {state}")
     verify_rows = _count_verify_rows(records)
+    backlogged = sum(1 for record in records if not record.mapped)
     print(
         f"{INFO_MARKER}: verify: {verify_rows} declared evidence row(s) — declared, "
         f"non-verifiable escape hatch; owner: {VERIFY_ESCAPE_HATCH_OWNER}; "
-        f"review: {VERIFY_ESCAPE_HATCH_REVIEW_TRIGGER}"
+        f"review: {VERIFY_ESCAPE_HATCH_REVIEW_TRIGGER}; counted over the "
+        f"{len(records) - backlogged} mapped spec(s) only — the {backlogged} spec(s) "
+        f"recorded as a permanent declared backlog have no {TEST_MAPPING_HEADING} "
+        f"section and contribute no row to this count"
     )
     if not failures:
         print("OK: test-mapping contract holds")

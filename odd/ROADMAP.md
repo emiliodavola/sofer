@@ -1,4 +1,6 @@
-# Roadmap — v0.6.0, agent surface & card completeness
+# Roadmap
+
+## v0.6.0 — agent surface & card completeness
 
 **Milestone:** [v0.6.0 — agent surface & card completeness](https://github.com/emiliodavola/sofer/milestone/1)
 **Issues:** #287, #288, #291, #296, #303, #306
@@ -8,7 +10,7 @@ This file is the plan of record for the milestone. Each phase is its own SDD cha
 branch, archived inside its own delivery PR (AGENTS.md rule 15). The per-phase feature documents
 live under `odd/tasks/` and carry the task list, the decisions and the commit evidence.
 
-## Verification of the reported defects
+### Verification of the reported defects
 
 Every claim in the six issues was checked against the code, not against the issue text.
 
@@ -28,7 +30,7 @@ fix**: `openspec/specs/repo-compliance/spec.md:82` requires the placeholder (`"[
 and the *Minimal config* scenario at `:199` requires it again. Choosing omission means the change
 also carries a spec delta and rewrites the tests that today assert the sentinel.
 
-## Coupling map
+### Coupling map
 
 ```
 287 ─┬─ same file, same defect class ─┐
@@ -42,7 +44,7 @@ also carries a spec delta and rewrites the tests that today assert the sentinel.
 Nothing else overlaps. `mcp_registration.py` is the bottleneck for 287+296; `repo_compliance.py`
 serves 291 and 303, which share `build_dataset_card()` but no concern.
 
-## Phases
+### Phases
 
 ### Fase 1 — `fix/mcp-registration-timeouts` (#287 + #296) — size M
 
@@ -95,13 +97,13 @@ default quality settings, peak RSS and wall time recorded, then the same run wit
 `full_scan = "never"` and a lowered `max_dup_tracking`. Output: a `verify:` row in
 `specs/data-quality` plus corrections to any sentence the measurement falsifies.
 
-## Order of execution
+### Order of execution
 
 By user impact, not by issue number: Fase 1 (a lost MCP envelope is the only failure that makes an
 agent reason on a lie) → Fase 2 (cheap, closes a declared R2) → Fase 1b → Fase 5 (cheap, no code
 risk, parallelizable) → Fase 3 → Fase 4.
 
-## Decisions required from the maintainer
+### Decisions required from the maintainer
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
@@ -109,3 +111,57 @@ risk, parallelizable) → Fase 3 → Fase 4.
 | D2 | #296: write the timeout and document it now, or also emit progress notifications? | Timeout + docs in Fase 1; notifications as its own change (Fase 1b). |
 | D3 | #288: should the placeholder gate `warn` or `fail`? | `warn`. A `fail` breaks every existing config that still carries a placeholder, which is a contract change, not a fix. |
 | D4 | #306: is 20 M rows honest enough, and on which machine does the run happen? | 20 M rows plus one repetition with the knobs lowered, on the 65 GB host named in #290. |
+
+All six phases above are delivered and archived. The nine issues filed on 2026-10-16, the day this
+milestone closed, are the next batch.
+
+## v0.7.0 — follow-up defects from the v0.6.0 batch
+
+**Issues:** #316, #317, #318, #319, #320, #321, #322, #323, #324
+**Verified against:** `dev@eaf56f5`, working tree clean, no open PRs and no open `openspec/changes/`.
+**Feature document:** [`odd/tasks/bug-chore-followups.md`](tasks/bug-chore-followups.md) — task list,
+decisions and commit evidence.
+
+Every claim in the nine issues was checked against the code. One body carried a wrong diagnosis
+(#317.2: the Windows RSS branch is correct, the sampled **pid** is a uv trampoline), one carried a stale
+measurement (#319: `data-quality` gained a `verify:` row in PR #315, so the probe that returned 0 now
+returns 1), and one uncovered a prerequisite its own proposal did not know about (#321: codex's native CLI
+acts on `$CODEX_HOME` while the adapter resolves `~/.codex`, so "delegate then patch" would patch a
+different file than the native writer — the #274 defect class, still live for codex). The four remaining
+`type:feature` issues (#320, #322, #323, #324) were checked too and every premise still holds.
+
+### Batch A — bug/chore (this branch, `fix/316-321-bug-chore-followups`)
+
+| ID | Issue | Size | Route |
+| --- | --- | --- | --- |
+| T1 | #316 split-mapping warning prints one message per file | S | ad-hoc fix, test-first; the summary clause `RC-Universal-Card` S4 is unchanged |
+| T2 | #319 the `verify:` hatch size excludes the backlogged specs | S | inline; PB-15 pins what is reported, so option 2 of the issue, widened |
+| T3 | #318 README lists 3 of 26 `[meta]` keys | S | docs pointer, README + README_ES (AGENTS.md rule 13) |
+| T4 | #317.2 the RSS sampler reads a trampoline | S | ad-hoc fix, test-first |
+| T5 | #317.1 the corpus never reaches the dup cap | S | recipe change + re-run, no `src/` change |
+| T6 | #317.3 the 20 M row run | — | recorded as not performed; no host available |
+| T7 | #321 native codex/gemini delegation declines by default | M | **decision required** — see below |
+
+### Finding raised by this batch (not in any issue)
+
+The end-to-end measurement T5 produced answers #317 item 1 in a way that also **falsifies a sentence the
+merged `data-quality` spec currently carries**. The peak does not move across a 100× range of
+`quality_max_dup_tracking`, and the cap really is reached — but the peak is ≈1× the corpus size
+(44.0 / 63.4 / 160.1 MiB for 31.2 / 63.4 / 160.0 MiB of CSV), so `sofer validate`'s memory is **not**
+independent of the dataset size. #290's fix removed the 16.1 GB climb; it did not bound memory to a
+constant. Instrumenting the two phases separately places the whole size-proportional spike in
+`QualityValidator.run()` (44.0 MiB on a 31.2 MiB corpus) and none of it in `DatasetValidator.run_all()`
+(0.0 MiB), and a post-pass snapshot retains almost nothing — so the spike is transient. This is reported,
+its spec sentence is corrected in this batch, and the fix is proposed as its own issue — a `src/sofer/`
+change with data-path consequences does not ride along on a chore.
+
+### Order of execution
+
+T1 (a live defect a user reads three times) → T2 and T3 (one-line-of-substance chores) → T4 (unblocks
+real Windows evidence) → T5 → T6 → T7 (blocked on a maintainer decision).
+
+### Decision required from the maintainer
+
+| # | Decision | Recommendation |
+| --- | --- | --- |
+| D5 | #321: delegate natively and then patch the timeout keys into the same file (the issue's option 1), or keep the decline and make `--no-timeout` louder (option 3)? | Option 1 **after** the #321 prerequisite lands: give the codex adapter `user_env_dir = "CODEX_HOME"` so sofer's resolution matches the native CLI's. Option 1 alone would reintroduce the #274 defect class, and it reverses an MCP-REG-05 clause the maintainer decided two days earlier, so it is not an implementation step to take unilaterally. |

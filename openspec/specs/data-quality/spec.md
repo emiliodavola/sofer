@@ -45,7 +45,7 @@ upload()                → HF push
 - `test: tests/test_quality.py::TestDuplicateTrackingCap::test_tracking_dict_never_exceeds_the_cap` —
   the hash table stops at `quality_max_dup_tracking`.
 - `verify: end-to-end memory measurement, scripts/measure_quality_scan_rss.py --rows 5000000`
-  (issue #306). Measured on a synthetic corpus of 5 000 000 rows x 6 columns (160.0 MiB) plus a
+  (issues #306, #317). Measured on a synthetic corpus of 5 000 000 rows x 6 columns (160.0 MiB) plus a
   50 000-row second schema, with a duplicate value every 17 rows:
 
   | Case | `quality_full_scan` / `quality_max_dup_tracking` | peak `tracemalloc` | wall time |
@@ -53,18 +53,51 @@ upload()                → HF push
   | defaults (a `fail` check forces the full scan) | `auto` / 1 000 000 | 160.1 MiB | 159.7 s |
   | bounded knobs | `never` / 10 000 | 160.1 MiB | 8.3 s |
 
-  Both runs exited 0. **The policy knob moves wall time by ~19x and does not move peak allocation at
-  this corpus shape**, and that is stated rather than smoothed over: the peak is dominated by a
-  component other than the capped hash table here, so this measurement does **not** by itself
-  demonstrate that the cap moves the number. What it does show is the issue's acceptance —
-  `sofer validate` completes on a multi-million-row corpus with bounded, non-growing memory instead of
-  the 16.1 GB climb reported in #290.
+  Issue #317 re-ran the script with a third case and a working Windows RSS path (it sampled a uv venv's
+  launcher instead of the interpreter it spawns, so it had never published a figure):
 
-  **No peak RSS is published.** The sampler self-calibrates against a child holding a known 200 MiB
-  before printing anything, and on the Windows host this was run on it reported 5.2 MiB for that child
-  — a silent constant, confirmed independently with `tasklist`. Publishing that number would have
-  reproduced the defect #306 exists to name, so the script prints `n/a` instead. On Linux the `/proc`
-  path is calibrated the same way and yields a real figure.
+  | Case | `quality_full_scan` / `quality_max_dup_tracking` | peak `tracemalloc` | wall time | peak RSS |
+  | --- | --- | --- | --- | --- |
+  | defaults | `auto` / 1 000 000 | 160.1 MiB | 404.9 s | 230.7 MiB |
+  | default policy, cap reached | `auto` / 100 000 | 160.1 MiB | 409.0 s | 230.7 MiB |
+  | bounded knobs | `never` / 10 000 | 160.1 MiB | 20.4 s | 230.4 MiB |
+
+  All runs exited 0. The third case is the one that reaches the cap: at `quality_max_dup_tracking` =
+  100 000 the `duplicates` finding reports `partial — tracking capped at 100000 distinct rows`, while at
+  1 000 000 it does not, so the ≈294 000 distinct row hashes the generator produces exceed the cap only in
+  that case. **The cap does not move the peak**, across a 100× range of cap: 160.1 MiB in every
+  configuration. The policy knob moves wall time by ~19x (404.9 / 20.4 = 19.8). Absolute seconds are
+  host-specific — this host is ~2.5× slower than the one behind the first table, so the ratio is the
+  transferable claim and the seconds are not.
+
+  **The peak is not set by the capped hash table, and it is not independent of the corpus size.** The
+  same script measured the peak on smaller corpora of the same shape:
+
+  | Corpus | CSV size | peak `tracemalloc` |
+  | --- | --- | --- |
+  | 1 000 000 rows | 31.2 MiB | 44.0 MiB |
+  | 2 000 000 rows | 63.4 MiB | 63.4 MiB |
+  | 5 000 000 rows | 160.0 MiB | 160.1 MiB |
+
+  Above ~60 MiB the peak is ≈1× the CSV. Instrumenting the two phases separately places all of it in the
+  quality pass: on a 1 000 000-row / 31.2 MiB corpus, `DatasetValidator.run_all()` peaks at 0.0 MiB and
+  `QualityValidator.run()` at 44.0 MiB, and a `tracemalloc` snapshot taken after the pass retains almost
+  nothing — the spike is **transient**, not accumulating state. What the #290 fix demonstrates is therefore
+  that the pre-fix unbounded climb (16.1 GB reported in #290) is gone — **not** that memory is independent
+  of the dataset size, and not that a multi-GB corpus runs in a fixed budget. Until the allocator is
+  identified, a corpus of N bytes should be assumed to need on the order of N bytes of RAM, and the root
+  cause is filed separately. The row is written as 5 000 000; the 20 000 000-row scale #306 suggested was
+  **not** run, and nothing here is evidence about it.
+
+  **Peak RSS is published now.** The sampler self-calibrates against a child holding a known 200 MiB and
+  refuses a figure it cannot confirm. That guard had always failed on Windows — not because the platform
+  code was wrong (the `OpenProcess` handle is small, so no `restype` truncation; `sizeof` of
+  `PROCESS_MEMORY_COUNTERS` is 72, a correct layout; the counters were never stale) but because
+  `sys.executable` in a uv venv is a launcher that spawns the interpreter as its **child**, so the sampler
+  read an idle 5.2 MiB trampoline while the memory was one hop below it. `tasklist` reporting the same
+  5,320 KB was therefore **not** independent confirmation: it was asked about the same process. The
+  sampler now sums the process subtree at both reader sites, and the calibration passes on Windows for the
+  first time.
 
 ---
 

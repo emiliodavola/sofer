@@ -435,10 +435,12 @@ def test_scenario_regex_matches_only_four_hash_headings(tmp_path: Path) -> None:
 
 
 def test_verify_rows_reported_as_declared_escape_hatch(tmp_path: Path) -> None:
-    """PB-15 / issue #234: accepted ``verify:`` rows are reported as declared, non-verifiable.
+    """PB-15 / issues #234, #319: accepted ``verify:`` rows are reported as declared.
 
-    The checker must name the count, label the rows non-verifiable, and state the
-    owner and review trigger — without resolving the reference.
+    The checker must name the count, label the rows non-verifiable, state the
+    owner and review trigger, and state the scope of the count — the rows it
+    accepted come from mapped specs only, so the number is not the whole tree's.
+    It must do all of that without resolving the reference.
     """
     _write(
         tmp_path,
@@ -457,3 +459,7 @@ def test_verify_rows_reported_as_declared_escape_hatch(tmp_path: Path) -> None:
     assert "non-verifiable escape hatch" in output
     assert "the repository maintainer" in output
     assert "each release review" in output
+    # issue #319: the count is scoped to the specs it accepted rows from, and
+    # says so — one mapped spec here, with the one backlogged spec excluded.
+    assert "counted over the 1 mapped spec(s) only" in output
+    assert "1 spec(s) recorded as a permanent declared backlog" in output

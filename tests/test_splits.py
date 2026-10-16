@@ -306,15 +306,59 @@ class TestSplitReportDataclass:
 
 class TestValidateSplitMapping:
     def test_single_file_no_warning(self):
-        """A single file without a keyword should not produce multiple-file warning."""
+        """A one-file split cannot be inconsistent, so it warns about nothing (#316).
+
+        The per-file message this suppresses claimed a *consistency* defect ("it
+        does not contain a detectable split keyword" while its siblings in the
+        split do). With one file in the split the claim is vacuous, and the
+        summary path needs more than one file, so nothing is left to say.
+        """
         warnings = validate_split_mapping(["data.csv"])
-        # Single file fallback is acceptable — no multi-file warning
-        assert not any("Multiple files" in w for w in warnings)
+        assert warnings == []
 
     def test_multiple_files_no_keywords(self):
-        """Multiple files without split keywords should warn."""
+        """One summary warning, with no per-file restatement of it (#316)."""
         warnings = validate_split_mapping(["a.csv", "b.csv", "c.csv"])
-        assert any("Multiple files" in w or "Default-load warning" in w for w in warnings)
+        assert len(warnings) == 1, warnings
+        assert "Default-load warning" in warnings[0]
+        assert "File '" not in warnings[0]
+
+    def test_warning_does_not_scale_with_the_file_count(self) -> None:
+        """A 65-table corpus reports one problem once, not 66 times (#316).
+
+        The per-file message used to be emitted for every file of a corpus that
+        carries no split keyword anywhere, so the warning count equalled the
+        file count plus one — 66 lines for a single problem.
+        """
+        remotes = [f"data/table{i:02d}.parquet" for i in range(65)]
+        warnings = validate_split_mapping(remotes)
+        assert len(warnings) == 1, warnings
+        assert "Default-load warning" in warnings[0]
+        assert "65 data files" in warnings[0]
+
+    def test_mixed_split_still_names_the_keyword_less_file(self, monkeypatch) -> None:
+        """The guard kept: a keyword-less file inside a keyword-carrying split.
+
+        ``detect_splits`` attributes a file *by* its keyword, so no real input
+        produces this shape — 560 two- and three-file combinations drawn from
+        the keyword pool were checked and none produced a split holding both a
+        keyword-carrying and a keyword-less file. The guard is pinned through a
+        synthetic report so a future change in attribution cannot silently drop
+        the warning for a genuinely inconsistent split.
+        """
+        import sofer.splits as _splits
+
+        monkeypatch.setattr(
+            _splits,
+            "detect_splits",
+            lambda remotes: SplitReport(
+                splits=[SplitInfo(name="train", files=["train/a.csv", "data/b.csv"])],
+            ),
+        )
+        warnings = validate_split_mapping(["train/a.csv", "data/b.csv"])
+        assert len(warnings) == 1, warnings
+        assert "File 'data/b.csv'" in warnings[0]
+        assert "'train'" in warnings[0]
 
     def test_multiple_files_with_keywords_no_warning(self):
         """Files with proper split keywords should not produce warnings."""
