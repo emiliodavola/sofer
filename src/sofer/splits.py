@@ -300,7 +300,42 @@ def validate_layout(files: list[str]) -> list[str]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def validate_split_mapping(remotes: list[str]) -> list[str]:
+def _config_name_hint(config_names: list[str] | None, warn_limit: int | None = None) -> str:
+    """Return the ``load_dataset`` recommendation the warning prints.
+
+    Names the configs the card actually emitted when they are known: the
+    instruction ``name='<config>'`` is not actionable without opening the card's
+    frontmatter, and for an agent driving the MCP surface the tool result carries
+    the warning but not the card (issue #303). Falls back to the placeholder form
+    when they are not known, which is the only case the caller cannot name them
+    (no built card on disk).
+
+    Args:
+        config_names: Emitted ``config_name`` values, or ``None``/empty when the
+            caller does not have them.
+        warn_limit: How many names to list before eliding; defaults to the
+            ``[tool.sofer]`` cap so a corpus with dozens of groups still yields a
+            readable line.
+
+    Returns:
+        A bare ``name='...'`` list (the caller supplies the surrounding prose).
+    """
+    if not config_names:
+        return "name='<config>'"
+    limit = config.CARD_CONFIG_GROUP_WARN_LIMIT if warn_limit is None else warn_limit
+    shown = [f"name='{name}'" for name in config_names[:limit]]
+    remaining = len(config_names) - len(shown)
+    listed = ", ".join(shown)
+    if remaining > 0:
+        listed += f", ... and {remaining} more"
+    return listed
+
+
+def validate_split_mapping(
+    remotes: list[str],
+    config_names: list[str] | None = None,
+    warn_limit: int | None = None,
+) -> list[str]:
     """Validate that remote file paths map correctly to HF split detection rules.
 
     Checks:
@@ -313,10 +348,18 @@ def validate_split_mapping(remotes: list[str]) -> list[str]:
           (no split keyword detected in any file), emit a warning about the
           ``load_dataset()`` behaviour.  The generated card groups those files
           by column schema, so the warning states what a single-config card and
-          a multi-config card each do (issue #292).
+          a multi-config card each do, and — when *config_names* is supplied —
+          names the emitted configs instead of leaving a placeholder the reader
+          cannot resolve without opening the card (issue #303, RC-Universal-Card
+          "Actionable warning" S4).
 
     Args:
         remotes: Remote file paths (existing or planned).
+        config_names: ``configs[].config_name`` values read back from the built
+            card, or ``None`` when the card is absent (the placeholder form is
+            used instead).
+        warn_limit: How many names to list before eliding; ``None`` reads the
+            ``[tool.sofer]`` cap.
 
     Returns:
         A list of warning strings (empty = layout follows HF conventions).
@@ -333,18 +376,15 @@ def validate_split_mapping(remotes: list[str]) -> list[str]:
     if len(data_files) > 1:
         has_fallback = any("No splits detected" in w for w in report.warnings)
         if has_fallback:
-            # The card groups these files by column schema, so the historical
-            # unconditional claim ("ALL files land in one 'train' split") only
-            # holds for a single-config card; a multi-config card is loaded one
-            # table at a time. State both outcomes (issue #292, S4).
             warnings.append(
                 f"Default-load warning: {len(data_files)} data files have no "
                 f"split keywords. The generated card groups them by column "
                 f"schema: a single-config card loads every file into one 'train' "
                 f"split when load_dataset() is called without a config name "
                 f"(which may be slow for large repos), while a multi-config card "
-                f"is loaded one table at a time with load_dataset(repo, "
-                f"name='<config>'). Consider adding split keywords to filenames "
+                f"is loaded one table at a time, one call per emitted config "
+                f"({_config_name_hint(config_names, warn_limit)}). Consider "
+                f"adding split keywords to filenames "
                 f"(e.g. 'train.csv', 'test.csv') or using directory-based splits "
                 f"(e.g. 'train/data.csv') to split a table across splits."
             )

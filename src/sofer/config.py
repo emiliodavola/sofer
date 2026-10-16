@@ -126,6 +126,11 @@ _DEFAULTS: dict[str, Any] = {
     "card_config_slug_separator": "-",
     "card_config_slug_max_length": 96,
     "card_config_slug_fallback": "default",
+    # Group-aware default-load warning (issue #303): how many emitted config
+    # names the warning lists before eliding the rest. A corpus with dozens of
+    # column-signature groups would otherwise print an unreadable wall of names
+    # in the one message that tells the user how to load the repo.
+    "card_config_group_warn_limit": 5,
     # Assisted failure reporting (issue #244). ``failure_report_dir`` is the
     # subdirectory under sofer's state home that holds one JSON file per
     # unsent failure; ``failure_report_repo`` is the ``owner/repo`` issues are
@@ -137,6 +142,20 @@ _DEFAULTS: dict[str, Any] = {
     "failure_report_gh_timeout_seconds": 30,
     "failure_report_duplicate_limit": 5,
     "failure_report_duplicate_query_tokens": 8,
+    # ── MCP registration timeouts (issues #287, #296) ──
+    # Host-side deadlines ``sofer mcp add`` writes into the ``sofer`` entry.
+    # Both deadlines failed against hosts' defaults and both surfaced as
+    # ``Connection failed`` / ``request timed out`` — indistinguishable from a
+    # broken registration. ``mcp_connect_timeout_seconds`` is ~4x the measured
+    # 16-32 s cold start of ``sofer-mcp`` (heavy imports before ``initialize``
+    # can be answered); ``mcp_request_timeout_seconds`` covers the measured
+    # ~680 s ``prepare`` on a 3.2 GB / 66.2 M-row corpus with margin.
+    # ``mcp_progress_heartbeat_seconds`` is how often a long tool re-announces
+    # progress, which is what resets a host deadline that the registered value
+    # could not raise (issue #296 §3).
+    "mcp_request_timeout_seconds": 900,
+    "mcp_connect_timeout_seconds": 120,
+    "mcp_progress_heartbeat_seconds": 20,
     # ── HF upload diagnostics (issue #289) ──
     # Number of ADDITIONAL ``upload_folder`` attempts after the first failure.
     # ``1`` is the maintainer-settled bound (decision D2): exactly one retry,
@@ -326,6 +345,27 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
     if not isinstance(_dup_cap, int) or isinstance(_dup_cap, bool) or _dup_cap < 1:
         raise ValueError("'quality_max_dup_tracking' in [tool.sofer] must be a positive integer")
 
+    # MCP registration timeouts (issues #287, #296): all three must be positive
+    # integers. A non-positive host deadline would make the registered server
+    # unusable — exactly the failure these keys exist to prevent — and a
+    # non-positive heartbeat would spin.
+    for _key in (
+        "mcp_request_timeout_seconds",
+        "mcp_connect_timeout_seconds",
+        "mcp_progress_heartbeat_seconds",
+    ):
+        _val = merged.get(_key)
+        if not isinstance(_val, int) or isinstance(_val, bool) or _val < 1:
+            raise ValueError(f"'{_key}' in [tool.sofer] must be a positive integer")
+
+    # The group-aware warning cap must be a positive integer: 0 would name no
+    # config at all, which is the defect the cap exists inside of (issue #303).
+    _warn_limit = merged.get("card_config_group_warn_limit")
+    if not isinstance(_warn_limit, int) or isinstance(_warn_limit, bool) or _warn_limit < 1:
+        raise ValueError(
+            "'card_config_group_warn_limit' in [tool.sofer] must be a positive integer"
+        )
+
     # The placeholder prefixes are string patterns, never values: an empty entry or
     # a non-string would make the agent-facing gate match everything or nothing
     # (issue #288).
@@ -513,6 +553,9 @@ CARD_CONFIG_SLUG_SEPARATOR: str = _DEFAULTS["card_config_slug_separator"]
 CARD_CONFIG_SLUG_MAX_LENGTH: int = _DEFAULTS["card_config_slug_max_length"]
 CARD_CONFIG_SLUG_FALLBACK: str = _DEFAULTS["card_config_slug_fallback"]
 
+# Group-aware default-load warning cap (issue #303) — see the _DEFAULTS comment.
+CARD_CONFIG_GROUP_WARN_LIMIT: int = _DEFAULTS["card_config_group_warn_limit"]
+
 # Assisted failure reporting (issue #244): state subdirectory, target repo,
 # traceback cap, and gh timeout — read live through attribute access.
 FAILURE_REPORT_DIR: str = _DEFAULTS["failure_report_dir"]
@@ -522,6 +565,13 @@ FAILURE_REPORT_MANUAL_URL_MAX_CHARS: int = _DEFAULTS["failure_report_manual_url_
 FAILURE_REPORT_GH_TIMEOUT_SECONDS: int = _DEFAULTS["failure_report_gh_timeout_seconds"]
 FAILURE_REPORT_DUPLICATE_LIMIT: int = _DEFAULTS["failure_report_duplicate_limit"]
 FAILURE_REPORT_DUPLICATE_QUERY_TOKENS: int = _DEFAULTS["failure_report_duplicate_query_tokens"]
+
+# MCP registration timeouts (issues #287, #296): the deadlines ``sofer mcp add``
+# writes into the ``sofer`` entry, plus the heartbeat that keeps a long tool's
+# host deadline reset. Read live through attribute access.
+MCP_REQUEST_TIMEOUT_SECONDS: int = _DEFAULTS["mcp_request_timeout_seconds"]
+MCP_CONNECT_TIMEOUT_SECONDS: int = _DEFAULTS["mcp_connect_timeout_seconds"]
+MCP_PROGRESS_HEARTBEAT_SECONDS: int = _DEFAULTS["mcp_progress_heartbeat_seconds"]
 
 # HF upload diagnostics (issue #289): bounded retry count, the env-var NAMES
 # probed for the active transfer backend, and the exception-message cap.
