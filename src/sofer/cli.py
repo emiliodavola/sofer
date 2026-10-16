@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from . import _toml, config, failure_report, mcp_registration
+from . import _toml, config, failure_report, mcp_doctor, mcp_registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport
@@ -1125,6 +1125,59 @@ min_total_size_mb = 0.0
 """
 
 
+def _cmd_mcp_doctor(args: argparse.Namespace) -> int:
+    """Measure the real ``sofer-mcp`` cold start and report it against the written deadline.
+
+    Orchestration:
+
+        1. Resolve the entry point: the ``sofer-mcp`` console script when it is on
+           ``PATH``, else the module entry point (issue #322).
+        2. Measure the stdio ``initialize`` round trip, using the configured
+           ``[tool.sofer] mcp_connect_timeout_seconds`` as the budget - the same
+           value ``mcp add`` writes, never a literal here (AGENTS.md rule 1).
+        3. Collate the per-agent rows from ``timeout_entry_keys``, so the report
+           cannot disagree with what registration writes, and repeat
+           ``dropped_timeout_note`` for an agent whose schema accepts no key.
+        4. Print the report and return 0 even when the measurement exceeds the
+           budget - the same informational contract as the timeout and env-drop
+           notes. Only "nothing could be measured" returns 1. This command never
+           reads a config file and never writes one.
+
+    Args:
+        args: Parsed arguments carrying ``--agent`` and ``--json``.
+
+    Returns:
+        0 when a launch was measured (whatever it measured), else 1.
+    """
+    raw_agent: str | None = getattr(args, "agent", None)
+    agents: list[str] = (
+        list(mcp_registration.AGENT_NAMES) if raw_agent in (None, "all") else [raw_agent]
+    )
+    as_json = bool(getattr(args, "json", False))
+    timeouts = mcp_registration.Timeouts(
+        request_seconds=config.MCP_REQUEST_TIMEOUT_SECONDS,
+        connect_seconds=config.MCP_CONNECT_TIMEOUT_SECONDS,
+    )
+    measurement = mcp_doctor.measure(
+        mcp_doctor.resolve_entry_point(),
+        timeout_seconds=float(config.MCP_CONNECT_TIMEOUT_SECONDS),
+    )
+    report = mcp_doctor.build_report(
+        agents,
+        measurement=measurement,
+        timeouts=timeouts,
+        budget_seconds=config.MCP_CONNECT_TIMEOUT_SECONDS,
+    )
+    exit_code = 0 if measurement.ok else 1
+    if as_json:
+        print(mcp_doctor.render_json(report, exit_code=exit_code))
+    elif measurement.ok:
+        print(mcp_doctor.render_human(report))
+    else:
+        print(mcp_doctor.render_human(report), file=sys.stderr)
+    return exit_code
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     """Write a ready-to-edit TOML template and scaffold ``raw/``.
 
@@ -1921,6 +1974,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Preview without writing — no file or .bak is created.",
     )
     mcp_remove.set_defaults(func=_cmd_mcp_remove)
+
+    mcp_doctor_parser = mcp_sub.add_parser(
+        "doctor",
+        help="Measure the real sofer-mcp cold start and print the deadline to configure.",
+        description=(
+            "Measure the real launch: spawn ``sofer-mcp`` (or the module entry "
+            "point when the console script is not on PATH) and time the stdio "
+            "``initialize`` round trip, which is what a host's connect/startup "
+            "deadline covers - import timing measures the wrong thing. Prints the "
+            "measured milliseconds beside the per-agent entry key and the value "
+            "``sofer mcp add`` would write, so the two can be compared. The budget "
+            "is ``[tool.sofer] mcp_connect_timeout_seconds``. Informational: "
+            "exceeding the budget never changes the exit code, because a slow "
+            "machine is not a broken registration. Reads and writes nothing."
+        ),
+    )
+    mcp_doctor_parser.add_argument(
+        "--agent",
+        choices=[*mcp_registration.AGENT_NAMES, "all"],
+        default=None,
+        help="Report one agent's entry key instead of every registered agent.",
+    )
+    mcp_doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable status line as stable JSON (CLI-R10).",
+    )
+    mcp_doctor_parser.set_defaults(func=_cmd_mcp_doctor)
 
     # ── report-failure ────────────────────────────────────────────
     rf = sub.add_parser(
