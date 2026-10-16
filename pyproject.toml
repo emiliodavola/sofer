@@ -232,6 +232,12 @@ quality_full_scan = "auto"
 # deliberately absent.
 quality_row_requiring_checks = ["corrupt_records"]
 
+# ── Group-aware default-load warning (issue #303) ──
+# How many emitted config names the dry-run default-load warning lists before
+# eliding the rest, so a corpus with dozens of column-signature groups still
+# gets a readable instruction instead of a wall of names.
+card_config_group_warn_limit = 5
+
 # ── Report truncation limits (issue #189) ──
 # Unclassified filenames listed by splits.validate_layout (slice + guard).
 splits_max_unclassified_names = 5
