@@ -236,6 +236,13 @@ quality_row_requiring_checks = ["corrupt_records"]
 # Unclassified filenames listed by splits.validate_layout (slice + guard).
 splits_max_unclassified_names = 5
 
+# ── Agent-facing metadata gate (issue #288) ──
+# A [meta] value that is empty or begins with one of these prefixes
+# (case-insensitive) is reported as a template placeholder by `sofer validate`,
+# the pre-prepare run and the MCP `sofer_validate` tool. A warning, never a
+# failure: a `fail` would break every existing config that already carries one.
+meta_placeholder_prefixes = ["TODO", "YOUR_", "example"]
+
 # ── Metadata core (profile / render) ──
 # All keys optional — these mirror the code defaults in src/sofer/config.py.
 # Prior probability per semantic detector name (email prior 0.98: the @ + TLD

@@ -757,6 +757,13 @@ Ubicaciones y formas por agente:
 | hermes | `--scope user` | `$HERMES_HOME/config.yaml` (por defecto `~/.hermes/config.yaml`) | `mcp_servers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
 | hermes | `--scope project` | el mismo archivo de scope user — hermes no tiene config de proyecto, y la sustitución se nombra en stderr | same |
 
+- **Quién completa `[meta]` (issue #288).** `sofer init` escribe un bloque `[meta]` con valores
+  placeholder. Completarlos es un **paso obligatorio entre el bootstrap y la Phase 1**, y es el único
+  paso que comparten un humano y un agente: en una corrida vía MCP el **agente** completa lo que los
+  datos pueden determinar (description, tags), y el **humano** aporta lo que no (license, source).
+  `sofer_validate` avisa mientras algún valor de `[meta]` siga vacío o empiece con `TODO`, `YOUR_` o
+  `example`, así el paso llega al agente por el envelope en lugar de aparecer recién en la card
+  generada. El aviso nunca cambia el código de salida.
 - **Resolución del scope user:** las rutas de abajo son la resolución **por defecto** de sofer bajo
   `Path.home()`. Agentes como opencode leen su config del home de **cuenta** del sistema, así que cuando
   los dos difieren la entrada puede terminar en un archivo que el agente nunca lee. Pasá

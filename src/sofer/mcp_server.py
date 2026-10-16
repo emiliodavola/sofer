@@ -187,6 +187,11 @@ _PHASED_INSTRUCTIONS: str = (
     "Phased canonical chain (tools/list alone teaches the order):\n"
     "  Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]\n"
     "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply\n"
+    "    Metadata step (manual, between bootstrap and Phase 1): fill [meta] description, "
+    "license, source and tags in the dataset TOML. sofer_init writes placeholders; "
+    "sofer_validate warns while any remains, and prepare bakes whatever is there into "
+    "the Dataset Card and LICENSE. On an MCP-driven run the agent completes them; the "
+    "human supplies only what the data cannot determine (license, source).\n"
     "  Phase 1 Build: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all\n"
     "  Phase 2 Publish: sofer_publish(dry_run=True) -> STOP (human approval) -> sofer_publish_confirm\n"
     "Each tool lists Requires: and Next: so tools/list is self-sufficient.\n"
@@ -1169,7 +1174,7 @@ def sofer_validate(
 
     When to use: as Phase 1 step 1 of the canonical chain; standalone for quick checks before prepare.
     Example: sofer_validate(config="dataset.toml")
-    Requires: dataset TOML exists under server root. Next: sofer_prepare on success.
+    Requires: dataset TOML exists under server root, with [meta] description/license/source/tags filled (no placeholders). Next: sofer_prepare on success.
     """
     with _tool_execution(), _capture_output() as (out, err):
         try:
@@ -1238,7 +1243,7 @@ def sofer_prepare(
 
     When to use: Phase 1 step 2 after sofer_validate. Standalone when you need a local package without batch docs.
     Example: sofer_prepare(config="dataset.toml", output_dir=None, run_checks=True)
-    Requires: sofer_validate passed. Next: sofer_codebook_all, then sofer_profile_all.
+    Requires: sofer_validate passed with no [meta] placeholder warnings. Next: sofer_codebook_all, then sofer_profile_all.
     """
     with _tool_execution(), _capture_output() as (out, err):
         cfg, _report, config_errors = _load_dataset(config, run_checks=run_checks)
@@ -2586,7 +2591,7 @@ def sofer_init(
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
     Example: sofer_init(name="my-dataset", user="myuser")
-    Requires: server root writable. Next: sofer_scan_apply to register files.
+    Requires: server root writable. Next: fill [meta] description/license/source/tags in the generated TOML, then sofer_scan_apply to register files.
 
     Args:
         name: Dataset name used for ``<name>.toml`` — a safe single path component.

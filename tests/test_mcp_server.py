@@ -5518,3 +5518,40 @@ class TestExplicitCsvDialectOverrideMcp:
         data = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert data["file"]["delimiter"] == ","
         assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+
+class TestMetadataStepInTheAdvertisedChain:
+    """#288: the metadata step is in the surface the agent reads.
+
+    An MCP consumer has no other source of truth than the descriptions and
+    envelopes it receives, so a required step that is absent from them cannot be
+    inferred — and the rest of the pipeline signals success either way.
+    """
+
+    def test_validate_requires_filled_meta(self) -> None:
+        description = ms._workflow_description(ms.sofer_validate)
+        assert "[meta] description/license/source/tags filled (no placeholders)" in description
+
+    def test_prepare_requires_validate_without_placeholder_warnings(self) -> None:
+        description = ms._workflow_description(ms.sofer_prepare)
+        assert "no [meta] placeholder warnings" in description
+
+    def test_init_next_points_at_the_metadata_step(self) -> None:
+        description = ms._workflow_description(ms.sofer_init)
+        assert "fill [meta] description/license/source/tags" in description
+
+    def test_server_instructions_name_the_metadata_step(self) -> None:
+        instructions = ms._PHASED_INSTRUCTIONS
+        assert "Metadata step" in instructions
+        assert "[meta] description, license, source and tags" in instructions
+        # It sits between bootstrap and Phase 1, which is where the agent looks.
+        assert instructions.index("Metadata step") < instructions.index("Phase 1 Build")
+
+    def test_the_workflow_registry_carries_the_requirement(self) -> None:
+        entry = ms.workflow.metadata_for("sofer_validate")
+        assert "[meta] placeholders replaced" in entry.requires
+
+    def test_the_server_instructions_still_describe_the_full_chain(self) -> None:
+        """The metadata step must not have replaced a phase."""
+        for phase in ("Phase 0 Bootstrap", "Phase 1 Build", "Phase 2 Publish"):
+            assert phase in ms._PHASED_INSTRUCTIONS

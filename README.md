@@ -721,6 +721,13 @@ Per-agent locations and shapes:
 | hermes | `--scope user` | `$HERMES_HOME/config.yaml` (default `~/.hermes/config.yaml`) | `mcp_servers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
 | hermes | `--scope project` | the same user-scope file — Hermes has no project-scope config, and the substitution is named on stderr | same |
 
+- **Who fills `[meta]` (issue #288).** `sofer init` writes a `[meta]` block whose values are
+  placeholders. Filling them is a **required step between bootstrap and Phase 1**, and it is the one
+  step a human and an agent share: on an MCP-driven run the **agent** completes what the data can
+  determine (description, tags), and the **human** supplies what it cannot (license, source).
+  `sofer_validate` warns while any `[meta]` value is still empty or still starts with `TODO`, `YOUR_`
+  or `example`, so the step reaches the agent through the envelope instead of appearing only in the
+  generated card. The warning never changes the exit code.
 - **User-scope resolution:** the paths below are sofer's **default** resolution under `Path.home()`.
   Agents such as opencode read their config from the system **account** home instead, so when the two
   differ the entry can land in a file the agent never reads. Pass `--user-config PATH` to state the
