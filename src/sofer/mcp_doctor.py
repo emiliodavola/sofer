@@ -109,7 +109,8 @@ class AgentRow:
         agent: Registry agent name.
         key: The entry key carrying the cold-start deadline -
             ``connect_timeout_key or timeout_key`` - or ``None`` when the agent's
-            schema accepts no timeout at all (opencode today).
+            schema accepts no timeout at all (no registered agent today: opencode
+            was the example until issue #320 gave it the scalar its schema takes).
         value: The value written to :attr:`key`, in :attr:`unit`, or ``None``.
         unit: The adapter's unit for that key, or ``None`` when there is no key.
         note: MCP-REG-05's ``dropped_timeout_note`` when the agent has no key.
