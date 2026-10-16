@@ -1832,12 +1832,19 @@ def build_dataset_card(
     lines.append("### Curation Rationale")
     lines.append("")
 
-    if study_design_content is not None:
-        lines.append(study_design_content.strip())
-        lines.append("")
+    # Issue #324: this section's only fill path was `[meta] study_design`, a
+    # *path* to a markdown file, while every neighbouring section takes a plain
+    # multi-line string. A declared `curation_rationale` wins, the resolved
+    # file's content is the fallback, and the sentinel is last. When the key is
+    # absent the branch taken is the pre-#324 one, byte for byte.
+    if cfg.curation_rationale.strip():
+        rationale = cfg.curation_rationale.strip()
+    elif study_design_content is not None:
+        rationale = study_design_content.strip()
     else:
-        lines.append(_MORE_INFO)
-        lines.append("")
+        rationale = _MORE_INFO
+    lines.append(rationale)
+    lines.append("")
 
     if collection:
         lines.append("### Source Data")

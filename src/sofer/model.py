@@ -363,6 +363,11 @@ class DatasetConfig:
     out_of_scope_use: str = ""
     bias_risks_limitations: str = ""
     contact: str = ""
+    # The one card section whose only fill path was a *file* (`[meta]
+    # study_design`) while every neighbouring section takes inline text, so a
+    # user with three paragraphs of rationale and nothing else to say had to
+    # create one (issue #324). `study_design` keeps working.
+    curation_rationale: str = ""
 
     # -- internal ----------------------------------------------------------
     _base_dir: Path = Path()  # directory of the TOML file (set by from_toml)
@@ -599,6 +604,7 @@ class DatasetConfig:
             out_of_scope_use=meta.get("out_of_scope_use", ""),
             bias_risks_limitations=meta.get("bias_risks_limitations", ""),
             contact=meta.get("contact", ""),
+            curation_rationale=meta.get("curation_rationale", ""),
             _base_dir=base_dir,
             _config_path=path.resolve(),
         )
