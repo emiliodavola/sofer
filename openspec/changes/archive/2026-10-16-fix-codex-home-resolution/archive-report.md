@@ -14,7 +14,7 @@
 | `src/sofer/mcp_registration.py` | `ADAPTERS["codex"]["user_env_dir"] = "CODEX_HOME"`. `user_parts` is deliberately unchanged (D1), and the field carries a comment tying it to `native_scope: False`, which is `False` *because* those native commands act on the same global config. |
 | `tests/test_mcp_registration.py` | three tests in `TestUserConfigResolution`: the override wins, the no-variable default survives, project scope ignores it. |
 | `README.md`, `README_ES.md` | the per-agent table's codex user-scope row reads `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`), the shape the Pi and Hermes rows already use; the `--user-config` row now names both env-override agents instead of only Pi. |
-| `openspec/changes/2026-10-16-fix-codex-home-resolution/` | proposal, design, tasks, this report. **No `specs/` delta** — see §4. |
+| `openspec/changes/archive/2026-10-16-fix-codex-home-resolution/` | proposal, design, tasks, this report. **No `specs/` delta** — see §4. Archived late; see §8. |
 
 ## 2. The defect, measured
 
@@ -83,3 +83,29 @@ contradicted the contract its own field documents, so no clause changes; nine ar
 | `uv run ruff check` / `ruff format` | clean (pre-commit hooks on the commit) |
 | `uv run mypy src/ scripts/` | clean (pre-commit hook) |
 | `uv run pyright` | 0 errors (the 1 warning is the pre-existing `_tomli.py` one) |
+
+## 8. Late archive, and what it corrects
+
+#328 delivered this change and merged **without** the archive move AGENTS.md rule 15 requires, so the
+folder sat at `openspec/changes/2026-10-16-fix-codex-home-resolution/` on `dev`. That is the rule's first
+bullet broken, and two more defects travelled with it: this folder's `tasks.md` still carried `CH-6` and
+`CH-7` as `pending` after both were done, and the delivering PR body called a non-archive path
+"Archived at…".
+
+This commit closes all three: the folder moved to `openspec/changes/archive/`, the two rows now record the
+work that had in fact been done, and this note exists so the correction is legible instead of silent.
+
+The rule names this exact case, which is why it is worth the paragraph:
+
+> Never open a second PR whose only purpose is to archive a change that already merged. By then the change
+> is delivered, the archive is orphaned from its own diff, and the reviewer can no longer read the change
+> and its record together — which is exactly what happened to the changes delivered by #276 and #279 and
+> only archived later in #281.
+
+The remedy taken here is the narrower reading of that prohibition: the archive travels with a commit whose
+**declared purpose is closing the v0.7.0 durable record** — the archive move, the corrected task rows and
+`odd/` — and the PR body says so rather than presenting it as an ordinary archive.
+
+The cause is worth naming because it is the kind of mistake that repeats: I conflated *the change folder is
+in the PR's diff* with *the change folder is in `archive/`*. A future reader of this folder is exactly who
+would otherwise repeat it.

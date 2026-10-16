@@ -14,7 +14,7 @@
 | `src/sofer/cli.py` | the native-delegation decline names `--no-timeout`, **only when `timeout` is the sole reason**; the flag's `--help` states the trade-off instead of just the entry shape. |
 | `tests/test_cli.py` | two tests: the hint appears when it is true, and is **absent** when it would be false. The second is a guard, passing before and after by construction. |
 | `README.md`, `README_ES.md` | the `--no-timeout` row and the timeout paragraph state what the user is actually choosing between, and why doing both is not an option. |
-| `openspec/changes/2026-10-16-chore-321-name-the-timeout-tradeoff/` | proposal, design, tasks, this report. **No `specs/` delta** — §4. |
+| `openspec/changes/archive/2026-10-16-chore-321-name-the-timeout-tradeoff/` | proposal, design, tasks, this report. **No `specs/` delta** — §4. Archived late; see §7. |
 | `#321` | the framing correction comment (`6221654849`). |
 
 ## 2. The decision this records
@@ -73,3 +73,29 @@ the reason name, not the message wording, and nine archived changes carry no `sp
 | `uv run ruff check` / `ruff format` | clean (pre-commit hooks on the commit) |
 | `uv run mypy src/ scripts/` | clean (pre-commit hook) |
 | `uv run pyright` | 0 errors (the 1 warning is the pre-existing `_tomli.py` one) |
+
+## 7. Late archive, and what it corrects
+
+#328 delivered this change and merged **without** the archive move AGENTS.md rule 15 requires, so the
+folder sat at `openspec/changes/2026-10-16-chore-321-name-the-timeout-tradeoff/` on `dev`. That is the
+rule's first bullet broken, and two more defects travelled with it: this folder's `tasks.md` still carried
+`TT-8`, `TT-9` and `TT-10` as `pending` after all three were done, and the delivering PR body called a
+non-archive path "Archived at…".
+
+This commit closes all three: the folder moved to `openspec/changes/archive/`, the three rows now record
+the work that had in fact been done, and this note exists so the correction is legible instead of silent.
+
+The rule names this exact case, which is why it is worth the paragraph:
+
+> Never open a second PR whose only purpose is to archive a change that already merged. By then the change
+> is delivered, the archive is orphaned from its own diff, and the reviewer can no longer read the change
+> and its record together — which is exactly what happened to the changes delivered by #276 and #279 and
+> only archived later in #281.
+
+The remedy taken here is the narrower reading of that prohibition: the archive travels with a commit whose
+**declared purpose is closing the v0.7.0 durable record** — the archive move, the corrected task rows and
+`odd/` — and the PR body says so rather than presenting it as an ordinary archive.
+
+The cause is worth naming because it is the kind of mistake that repeats: I conflated *the change folder is
+in the PR's diff* with *the change folder is in `archive/`*. A future reader of this folder is exactly who
+would otherwise repeat it.
