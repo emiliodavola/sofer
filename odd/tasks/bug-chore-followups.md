@@ -125,6 +125,86 @@ comment at `mcp_registration.py:127` states that codex's native commands "always
 - The 20 M row run of S6: no host with the space and patience is available in this session. Recorded as
   not performed, never as done.
 
+## #317 — the sampler and the cap, measured (T4 / T5)
+
+### The sampler: a correct reading of the wrong process
+
+`.venv\Scripts\python.exe` in a uv-managed venv on Windows is a **trampoline launcher** that spawns the
+real interpreter as a child, so `_peak_rss_of` and `_subprocess_run` were both sampling the launcher.
+Three competing diagnoses were disproved before this one was accepted: the `OpenProcess` handle is small
+(`0x1b0`, so no `restype` truncation), `sizeof(PROCESS_MEMORY_COUNTERS)` is 72 (a correct layout), and the
+counters were never stale — they were a true reading of an idle trampoline. `tasklist` agreeing with
+`ctypes` at 5,320 KB is therefore **not** independent confirmation, which is what the spec currently
+assumes: it is two readings of the same process.
+
+Both reader sites now sum the process subtree (bounded by `RSS_TREE_MAX_DEPTH`, children enumerated
+through `/proc` or a Toolhelp32 snapshot). Measured:
+
+| Probe | Before | After |
+| --- | --- | --- |
+| `_sampler_is_trustworthy()` on Windows 11 / CPython 3.13.12 | `(False, 5.2 MiB, 200.0 MiB)` | `(True, 216.6 MiB, 200.0 MiB)` |
+| 20 000-row smoke run, table column | `peak RSS 5.2 MiB` in all three cases | 87.0 / 87.5 / 87.2 MiB |
+
+**The lesson worth keeping:** fixing `_peak_rss_of` alone satisfied the issue's reproduction — the
+calibration flipped to `trustworthy` — while `_subprocess_run`, the path that actually publishes the
+figure, kept sampling the root pid and kept printing 5.2 MiB. Only the 20 000-row smoke run caught it. A
+fix that satisfies the reproduction is not a fix that satisfies the defect, and that distinction cost a
+review cycle here.
+
+### The cap: reached, and still not the binding constraint
+
+The recorded #306 run measured `auto`/1 000 000 against `never`/10 000 and got an identical 160.1 MiB
+peak. That could not distinguish "the cap does not matter" from "the cap was never reached": the
+generator writes one distinct row per bucket of 17, so 5 000 000 rows carry ≈294 000 distinct row
+hashes, well under the shipped 1 000 000 cap — and in the `never` case the pass is sampled, so the table
+never sees them either.
+
+T5 added a third case — the **default** `auto` policy with `BOUND_DUP_CAP` = 100 000, under the ≈294 000
+distinct hashes — so the cap is reached where the policy a user actually runs is in force. The 5 M run:
+
+| Case | `quality_full_scan` / `quality_max_dup_tracking` | tracemalloc peak | wall time | peak RSS |
+| --- | --- | --- | --- | --- |
+| defaults | `auto` / 1 000 000 | 160.1 MiB | 404.9 s | 230.7 MiB |
+| **default policy, cap reached** | `auto` / 100 000 | **160.1 MiB** | 409.0 s | 230.7 MiB |
+| bounded knobs | `never` / 10 000 | 160.1 MiB | 20.4 s | 230.4 MiB |
+
+**The cap does not move the peak**, across a 100× range of cap. And the cap really is reached in the third
+case, so the observation is not an artifact of a table that never filled: at `quality_max_dup_tracking` =
+100 000 the `duplicates` finding reads `partial — tracking capped at 100000 distinct rows`, while at
+1 000 000 it does not. The ≈294 000 distinct row hashes exceed the low cap and fit under the shipped one,
+which is exactly the contrast the recorded run could not produce.
+
+**But the peak is 160.1 MiB and the corpus is 160.0 MiB, and that is not a coincidence.** The same script
+measured the same shape at smaller sizes:
+
+| Corpus | CSV size | peak `tracemalloc` | peak / CSV | bytes per row |
+| --- | --- | --- | --- | --- |
+| 1 000 000 rows | 31.2 MiB | 44.0 MiB | 1.41 | 46.1 B |
+| 2 000 000 rows | 63.4 MiB | 63.4 MiB | 1.00 | 33.2 B |
+| 5 000 000 rows | 160.0 MiB | 160.1 MiB | 1.00 | 33.6 B |
+
+Above ~60 MiB the peak is ≈1× the CSV, and the phase is now known rather than guessed: instrumenting the
+two separately on a 1 M-row / 31.2 MiB corpus gives `DatasetValidator.run_all()` = **0.0 MiB** and
+`QualityValidator.run()` = **44.0 MiB**, i.e. the whole size-proportional peak is in the quality pass. A
+`tracemalloc` snapshot taken when the pass returns retains almost nothing, so the spike is **transient**,
+not accumulating state — the fix's job is to find what inside that pass briefly allocates ~1× the input.
+Two consequences this batch must not blur:
+
+- The caps are not what sets the peak, and they are not what protects memory here. The residual ~1× input
+  is what a multi-GB corpus would need.
+- **#290's promise is not demonstrated by this measurement.** The fix removed the pre-fix unbounded climb
+  (16.1 GB reported in #290); it did not make memory independent of the dataset size. This is a **new
+  finding**, not part of #317: it is proposed as its own issue below and deliberately not fixed in this
+  batch.
+
+That last point is also why the merged spec's "bounded, non-growing memory" sentence cannot stand, and the
+delta corrects it.
+
+One more caveat the table forces: absolute wall times are **host-specific**. This host is ~2.5× slower
+than the one behind the recorded numbers (404.9 s vs 159.7 s for the same case and corpus), while the ~19×
+policy-knob ratio reproduces (404.9 / 20.4 = 19.8). The ratio is the transferable claim; the seconds are
+not.
+
 ## #320 / #321 — the overlap, resolved (T8)
 
 The two issues are **not duplicates**, and neither closes the other. Both are about a `timeout` key in the
@@ -174,16 +254,68 @@ Two bodies carry an inaccuracy that a correction comment should record (not post
 maintainer's action): #317.2's "the Windows branch is effectively dead" is a wrong diagnosis, and #319's
 "`data-quality` has none" was overtaken by PR #315.
 
+### Corrections ready to post (drafted, unpublished)
+
+**On #317, item 2** — the diagnosis, not just the outcome:
+
+> Item 2's premise is wrong and the branch is not dead, so this is being fixed rather than dropped.
+> `.venv\Scripts\python.exe` in a uv-managed venv on Windows is a trampoline launcher that spawns the real
+> interpreter as a child, and the sampler read `child.pid` — the launcher. The platform code was right: the
+> `OpenProcess` handle is small (`0x1b0`, no `restype` truncation), `sizeof(PROCESS_MEMORY_COUNTERS)` is 72
+> (a correct layout), and the counters were not stale — they were a true reading of an idle 5.2 MiB
+> process. `tasklist` agreeing with `ctypes` was therefore not independent confirmation; it was asked
+> about the same process. After summing the process subtree the calibration passes on Windows for the
+> first time (`(False, 5.2 MiB)` → `(True, 216.6 MiB)` against the same 200 MiB target).
+>
+> One correction to the issue's own scope: the defect is in **two** sampler sites, not one.
+> `_peak_rss_of` (the calibration, which is what the reproduction exercises) and `_subprocess_run` (which
+> publishes the figure) each sampled a pid. Fixing only the first flipped the calibration to
+> `trustworthy` while the table still printed 5.2 MiB; only a smoke run caught it.
+
+**On #319, the probe** — one number moved after the issue was filed:
+
+> The issue records `grep -c "verify:" openspec/specs/data-quality/spec.md` → `0`. It is `1` today:
+> PR #315 added the end-to-end measurement line at `spec.md:47`, so `data-quality` is now a backlogged
+> spec that *does* carry a declared row outside the gate — which sharpens the point rather than weakening
+> it. The `verify:` count stays at 65 because the row is invisible to a counter that only walks
+> `## Test Mapping` tables; the fix states the scope of the count on the line instead of adding a second
+> counter, since the whole backlog holds exactly one such line and no row syntax.
+
+### Proposed new issue (not filed — needs your go-ahead)
+
+**bug(mcp): codex's native `mcp add` acts on `$CODEX_HOME`, but sofer resolves `~/.codex`** —
+`mcp_registration.py:127` states that codex's native commands "always act on the global `$CODEX_HOME`
+config", yet the adapter declares `user_env_dir: None` and `resolve_config_path` returns
+`Path.home()/".codex"/config.toml`. With `$CODEX_HOME` set to anything else, `sofer mcp add --agent codex`
+writes an entry the agent never reads — the #274 defect class, still live for codex. It is also the
+prerequisite for #321's option 1, which would otherwise delegate to the native CLI and then patch a
+different file than the native writer did.
+
+**bug(quality): the validate peak is ≈1× the corpus size, so memory is not independent of the dataset** —
+`openspec/specs/data-quality/spec.md` §1 claimed `sofer validate` completes "with bounded, non-growing
+memory". Measured on the script's own corpus shape: 1 M rows / 31.2 MiB CSV → 44.0 MiB peak, 2 M / 63.4 →
+63.4, 5 M / 160.0 → 160.1. Above ~60 MiB the peak is ≈1× the CSV, so the fixed code holds roughly one copy
+of the input and a 10 GB corpus should be assumed to need ~10 GB of RAM. The #290 fix is real (the pre-fix
+climb was 16.1 GB) but it did not make memory size-independent. Which phase allocates it is open:
+`checks.DatasetValidator.run_all()` (whose `_check_csv_columns` reads only the header) and
+`quality.QualityValidator.run()` peaks at 44.0 MiB on a 31.2 MiB corpus while `DatasetValidator.run_all()`
+peaks at 0.0 MiB, so the whole size-proportional spike is in the quality pass, and a snapshot taken after it
+retains almost nothing, so the spike is transient rather than retained state. The next step is finding what
+inside that pass briefly allocates ~1× the input — `tracemalloc.take_snapshot()` at the peak rather than at
+the end is the first instrument. This is a `src/sofer/` fix with data-path consequences, so it gets its own
+issue and its own change.
+
 ## Tasks
 
 | ID | Issue | Route | Spec | State |
 | --- | --- | --- | --- | --- |
 | T1 | #316 | inline, test-first | S3 | delivered |
 | T2 | #319 | inline | S8, S9 | delivered |
-| T3 | #318 | inline | S7 | pending |
-| T4 | #317 | inline, test-first | S5 | pending || T5 | #317 | inline, recipe + re-run | S4 | pending |
-| T6 | #317 | record only | S6 | pending |
-| T7 | #321 | decision | S10, S11, S12 | pending |
+| T3 | #318 | inline | S7 | delivered |
+| T4 | #317 | inline, test-first | S5 | delivered |
+| T5 | #317 | inline, recipe + re-run | S4 | delivered |
+| T6 | #317 | record only | S6 | delivered |
+| T7 | #321 | decision | S10, S11, S12 | blocked — maintainer decision (D5) |
 | T8 | #320/#321 | analysis | S2 | delivered (see the section above) |
 | T9 | — | issue hygiene | S2 | delivered — nothing merits closing (see the section above) |
 
@@ -209,3 +341,10 @@ spec change, not an ad-hoc fix: publishing a real Windows number falsifies that 
 sentence's *diagnosis* is wrong in the same way the issue body was — `tasklist` agreeing with ctypes is
 not independent confirmation, it is two readings of the same 5.2 MiB trampoline; the interpreter holding
 the memory is its child. The spec delta must correct the claim, not just the outcome.
+
+L5 (evidence, from the 5 M run): the measurement publishes a real Windows figure for the first time (peak
+RSS 230.7 MiB), and the third case settles the cap question the recorded evidence left open — the cap is
+reached and the peak does not move. It also exposes two things the recorded table could not show: the peak
+is 160.1 MiB against a 160.0 MiB corpus, so its dominant component is *not* the capped table (tracked as
+T12), and this host's absolute wall times are ~2.5× the recorded ones, so the transferable claim is the
+ratio and not the seconds.

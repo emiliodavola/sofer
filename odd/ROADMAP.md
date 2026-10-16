@@ -142,6 +142,19 @@ different file than the native writer — the #274 defect class, still live for 
 | T6 | #317.3 the 20 M row run | — | recorded as not performed; no host available |
 | T7 | #321 native codex/gemini delegation declines by default | M | **decision required** — see below |
 
+### Finding raised by this batch (not in any issue)
+
+The end-to-end measurement T5 produced answers #317 item 1 in a way that also **falsifies a sentence the
+merged `data-quality` spec currently carries**. The peak does not move across a 100× range of
+`quality_max_dup_tracking`, and the cap really is reached — but the peak is ≈1× the corpus size
+(44.0 / 63.4 / 160.1 MiB for 31.2 / 63.4 / 160.0 MiB of CSV), so `sofer validate`'s memory is **not**
+independent of the dataset size. #290's fix removed the 16.1 GB climb; it did not bound memory to a
+constant. Instrumenting the two phases separately places the whole size-proportional spike in
+`QualityValidator.run()` (44.0 MiB on a 31.2 MiB corpus) and none of it in `DatasetValidator.run_all()`
+(0.0 MiB), and a post-pass snapshot retains almost nothing — so the spike is transient. This is reported,
+its spec sentence is corrected in this batch, and the fix is proposed as its own issue — a `src/sofer/`
+change with data-path consequences does not ride along on a chore.
+
 ### Order of execution
 
 T1 (a live defect a user reads three times) → T2 and T3 (one-line-of-substance chores) → T4 (unblocks

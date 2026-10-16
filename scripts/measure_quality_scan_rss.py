@@ -12,17 +12,19 @@ temporary directory and measures the same run twice:
 
 1. **In process, under ``tracemalloc``** — the peak Python allocation of the
    whole validation pass, plus wall time. Always available (stdlib).
-2. **As a subprocess, sampling its resident set** — peak RSS plus wall time,
-   reported **only when the sampler passes a self-calibration** (below).
+2. **As a subprocess, sampling its process subtree** — peak RSS plus wall time,
+   reported **only when the sampler passes a self-calibration** (below). The
+   subtree matters because ``sys.executable`` need not be the process that does
+   the work (see :func:`_rss_bytes_of_tree`).
 
 The self-calibration matters and is not ceremony: on the Windows host this was
-first developed on, ``GetProcessMemoryInfo`` reported 5.2 MiB for every child,
-including one that had touched a 300 MiB allocation, while the same child
-reading its own counters reported 0 — a silent constant. Publishing that number
-would have reproduced exactly the defect #306 exists to name: evidence that looks
-like a measurement and is not one. The sampler is therefore calibrated against a
-child whose footprint is known before any RSS number is printed, and the script
-falls back to ``tracemalloc`` alone when the calibration fails.
+first developed on, the sampler reported 5.2 MiB for every child, including one
+that had touched a 300 MiB allocation. The platform code was not at fault, and
+the constant was not a stale counter: ``sys.executable`` in a uv-managed venv is
+a launcher that spawns the real interpreter as its child, so the sampler was
+reading an idle trampoline while the memory sat one hop below it. The sampler
+therefore measures the whole process subtree before comparing anything, and it
+still refuses to publish a number its calibration has not accepted.
 
 Both quality configurations of the issue's step 3 are measured, so the output
 shows the knobs move the number rather than only that one number exists.
@@ -81,6 +83,26 @@ SECOND_ROWS: int = 50_000
 
 # Sampling interval for the child's resident set.
 RSS_SAMPLE_SECONDS: float = 0.05
+
+# How many process hops the subtree reading follows. One hop is what a uv venv's
+# launcher needs; the bound exists so an unforeseen process tree cannot turn a
+# 20 Hz sampler into an unbounded one.
+RSS_TREE_MAX_DEPTH: int = 4
+
+# Toolhelp32 snapshot flag for the process list (winbase.h).
+TH32CS_SNAPPROCESS: int = 0x00000002
+
+# The `[tool.sofer]` ``quality_max_dup_tracking`` default that the "defaults"
+# case measures, restated as a constant so the case does not silently follow a
+# developer's own pyproject.
+DEFAULT_DUP_CAP: int = 1_000_000
+
+# A cap below the corpus's distinct-row-hash count (~294 000 at 5 M rows), paired
+# with the *default* full-scan policy. The first and third cases cannot show
+# whether the cap bounds the peak — the shipped 1 000 000 cap is never reached on
+# this corpus shape, so both of them measure an uncapped hash table (issue #317,
+# item 1). This case is what makes the two default-policy peaks comparable.
+BOUND_DUP_CAP: int = 100_000
 
 # The lowered cap used by the bounded case. Small enough that the `duplicates`
 # finding is marked partial and the hash table stays tiny.
@@ -198,22 +220,142 @@ def _rss_bytes(pid: int) -> int | None:
     return int(out) * 1024
 
 
+def _windows_child_pids(pid: int) -> list[int]:
+    """Return *pid*'s direct children through a Toolhelp32 process snapshot.
+
+    Args:
+        pid: Parent process id.
+
+    Returns:
+        The children's process ids, or ``[]`` on a host without the Windows API
+        or when the snapshot cannot be taken.
+    """
+    windll = getattr(__import__("ctypes"), "windll", None)
+    if windll is None:  # pragma: no cover - non-Windows host
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class _ProcessEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    kernel32 = windll.kernel32
+    # HANDLE is pointer-sized: without these two lines ctypes truncates it to a
+    # 32-bit int, which happens to work for small handle values and is therefore
+    # a trap rather than a visible defect.
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot in (0, None, ctypes.c_void_p(-1).value):  # pragma: no cover - API failure
+        return []
+    entry = _ProcessEntry32()
+    entry.dwSize = ctypes.sizeof(_ProcessEntry32)
+    children: list[int] = []
+    try:
+        present = kernel32.Process32First(snapshot, ctypes.byref(entry))
+        while present:
+            if entry.th32ParentProcessID == pid:
+                children.append(int(entry.th32ProcessID))
+            present = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    except (OSError, AttributeError):  # pragma: no cover - API failure
+        return []
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return children
+
+
+def _child_pids(pid: int) -> list[int]:
+    """Return the direct children of *pid*, using this host's cheapest reader.
+
+    Child enumeration is the one part of the subtree measurement with no portable
+    stdlib answer, and the script adds no dependency, so each host gets the
+    smallest interface that answers it: ``/proc`` on Linux and WSL, a Toolhelp32
+    snapshot on Windows (see :func:`_windows_child_pids`), and nothing
+    elsewhere. ``[]`` means "no known descendants" — which is exactly what the
+    sampler assumed before it walked subtrees at all.
+
+    Args:
+        pid: Process id whose children to list.
+
+    Returns:
+        The direct children's process ids, possibly empty.
+    """
+    proc_children = Path(f"/proc/{pid}/task/{pid}/children")
+    try:
+        if proc_children.is_file():
+            return [int(token) for token in proc_children.read_text(encoding="ascii").split()]
+    except (OSError, ValueError):
+        return []
+    return _windows_child_pids(pid)
+
+
+def _rss_bytes_of_tree(pid: int) -> int | None:
+    """Return the resident set of *pid* plus its descendants, in bytes.
+
+    The process a measurement spawns is not always the process that does the
+    work: a ``sys.executable`` inside a uv-managed venv is a launcher whose child
+    is the real interpreter. Summing the subtree makes the reading independent of
+    whether that hop exists, instead of encoding one platform's launcher shape
+    into the measurement.
+
+    The walk is bounded by :data:`RSS_TREE_MAX_DEPTH` and stops as soon as a
+    level reports no children.
+
+    Args:
+        pid: Root process id of the subtree.
+
+    Returns:
+        Total resident bytes, or ``None`` when the root itself cannot be read.
+        A descendant that cannot be read is skipped rather than failing the
+        whole measurement.
+    """
+    root = _rss_bytes(pid)
+    if root is None:
+        return None
+    total = root
+    frontier = [pid]
+    for _ in range(RSS_TREE_MAX_DEPTH):
+        descendants: list[int] = []
+        for parent in frontier:
+            descendants.extend(_child_pids(parent))
+        if not descendants:
+            break
+        for descendant in descendants:
+            reading = _rss_bytes(descendant)
+            if reading is not None:
+                total += reading
+        frontier = descendants
+    return total
+
+
 def _peak_rss_of(code: str, seconds: float) -> int | None:
-    """Run *code* in a child and return the highest RSS sampled from it.
+    """Run *code* in a child and return the highest RSS sampled from its tree.
 
     Args:
         code: Python source for the child.
         seconds: How long to keep sampling.
 
     Returns:
-        Peak resident bytes, or ``None`` when the sampler could not read it.
+        Peak resident bytes of the child and its descendants, or ``None`` when
+        the sampler could not read it.
     """
     child = subprocess.Popen([sys.executable, "-c", code])
     peak = 0
     deadline = time.perf_counter() + seconds
     try:
         while child.poll() is None and time.perf_counter() < deadline:
-            current = _rss_bytes(child.pid)
+            current = _rss_bytes_of_tree(child.pid)
             if current is None:
                 return None
             peak = max(peak, current)
@@ -355,7 +497,11 @@ def _in_process_run(
 def _subprocess_run(
     config_path: Path, corpus: Path, *, full_scan: str, dup_cap: int
 ) -> dict[str, Any]:
-    """Run ``sofer validate`` as a subprocess, sampling its RSS.
+    """Run ``sofer validate`` as a subprocess, sampling its tree's RSS.
+
+    The reading covers the spawned process and its descendants, because
+    ``sys.executable`` need not be the interpreter that does the work (see
+    :func:`_rss_bytes_of_tree`).
 
     Args:
         config_path: Dataset TOML path.
@@ -379,7 +525,7 @@ def _subprocess_run(
     )
     peak = 0
     while proc.poll() is None:
-        current = _rss_bytes(proc.pid)
+        current = _rss_bytes_of_tree(proc.pid)
         if current is None:
             proc.kill()
             proc.communicate()
@@ -464,7 +610,8 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
         cases: list[tuple[str, str, int]] = [
-            ("defaults (fail check forces the full scan)", "auto", 1_000_000),
+            ("defaults (fail check forces the full scan)", "auto", DEFAULT_DUP_CAP),
+            ("default policy, cap reached", "auto", BOUND_DUP_CAP),
             ("bounded knobs", "never", LOWERED_DUP_CAP),
         ]
         rows: list[dict[str, Any]] = []
