@@ -38,6 +38,34 @@ upload()                → HF push
   (`quality_full_scan`), forced only by the config-declared row-requiring checks; a fixed-size probe
   (`encoding_validation`, 8 KB) never triggers it.
 
+**Evidence (declared, outside this spec's gate):**
+
+- `test: tests/test_quality.py::TestColNonemptyBoolean::test_memory_is_o_columns_not_o_rows` — the
+  `empty_columns` state does not grow with the row count.
+- `test: tests/test_quality.py::TestDuplicateTrackingCap::test_tracking_dict_never_exceeds_the_cap` —
+  the hash table stops at `quality_max_dup_tracking`.
+- `verify: end-to-end memory measurement, scripts/measure_quality_scan_rss.py --rows 5000000`
+  (issue #306). Measured on a synthetic corpus of 5 000 000 rows x 6 columns (160.0 MiB) plus a
+  50 000-row second schema, with a duplicate value every 17 rows:
+
+  | Case | `quality_full_scan` / `quality_max_dup_tracking` | peak `tracemalloc` | wall time |
+  | --- | --- | --- | --- |
+  | defaults (a `fail` check forces the full scan) | `auto` / 1 000 000 | 160.1 MiB | 159.7 s |
+  | bounded knobs | `never` / 10 000 | 160.1 MiB | 8.3 s |
+
+  Both runs exited 0. **The policy knob moves wall time by ~19x and does not move peak allocation at
+  this corpus shape**, and that is stated rather than smoothed over: the peak is dominated by a
+  component other than the capped hash table here, so this measurement does **not** by itself
+  demonstrate that the cap moves the number. What it does show is the issue's acceptance —
+  `sofer validate` completes on a multi-million-row corpus with bounded, non-growing memory instead of
+  the 16.1 GB climb reported in #290.
+
+  **No peak RSS is published.** The sampler self-calibrates against a child holding a known 200 MiB
+  before printing anything, and on the Windows host this was run on it reported 5.2 MiB for that child
+  — a silent constant, confirmed independently with `tasklist`. Publishing that number would have
+  reproduced the defect #306 exists to name, so the script prints `n/a` instead. On Linux the `/proc`
+  path is calibrated the same way and yields a real figure.
+
 ---
 
 ## 2. Data Model — `model.py`
