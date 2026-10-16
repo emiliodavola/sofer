@@ -5518,3 +5518,70 @@ class TestExplicitCsvDialectOverrideMcp:
         data = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert data["file"]["delimiter"] == ","
         assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+
+class TestProgressHeartbeat:
+    """#296 §3: a long tool re-announces progress, which resets a host deadline.
+
+    The middleware sits at the single dispatch point, so this exercises it
+    against a purpose-built slow tool rather than waiting on a real multi-minute
+    one — the contract under test is the heartbeat, not any single tool body.
+    """
+
+    @staticmethod
+    def _run(interval: float, sleep_for: float) -> list[float]:
+        """Call a slow tool on a probe server, returning the progress values."""
+        import fastmcp
+
+        seen: list[float] = []
+
+        async def _handler(progress: float, total: float | None, message: str | None) -> None:
+            seen.append(progress)
+
+        def _build() -> fastmcp.FastMCP:
+            server = fastmcp.FastMCP("probe")
+
+            @server.tool
+            async def slow_tool() -> str:
+                await asyncio.sleep(sleep_for)
+                return "done"
+
+            server.add_middleware(ms._ProgressHeartbeatMiddleware())
+            return server
+
+        async def _call() -> None:
+            async with Client(_build(), progress_handler=_handler) as client:
+                await client.call_tool("slow_tool", {})
+
+        original = config.MCP_PROGRESS_HEARTBEAT_SECONDS
+        object.__setattr__(config, "MCP_PROGRESS_HEARTBEAT_SECONDS", interval)
+        try:
+            asyncio.run(_call())
+        finally:
+            object.__setattr__(config, "MCP_PROGRESS_HEARTBEAT_SECONDS", original)
+        return seen
+
+    def test_a_long_tool_reannounces_progress(self) -> None:
+        seen = self._run(interval=0.05, sleep_for=0.35)
+        assert seen, "expected at least one heartbeat notification"
+        assert seen == sorted(seen), "progress must be monotonic"
+
+    def test_a_fast_tool_sends_no_heartbeat(self) -> None:
+        assert self._run(interval=0.5, sleep_for=0.01) == []
+
+    def test_long_tool_descriptions_carry_the_deadline_note(self) -> None:
+        """#296 §2: the agent learns the expectation from ``tools/list``."""
+        server = ms.build_server(root=Path.cwd())
+        import anyio
+
+        async def _descriptions() -> dict[str, str]:
+            async with Client(server) as client:
+                tools = await client.list_tools()
+                return {t.name: (t.description or "") for t in tools}
+
+        described = anyio.run(_descriptions)
+        for name in sorted(ms._LONG_TOOL_NAMES):
+            assert name in described, name
+            assert "Runs for minutes on a large dataset" in described[name], name
+        # A short tool must not carry it, or the note stops meaning anything.
+        assert "Runs for minutes" not in described["sofer_validate"]

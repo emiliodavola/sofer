@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from sofer import cli, mcp_registration
+from sofer import cli, config, mcp_registration
 
 # ── helpers ───────────────────────────────────────────────────────────
 
@@ -190,6 +190,12 @@ class TestMerge:
                             "sofer": {
                                 "command": ["sofer-mcp"],
                                 "cwd": str(proj.resolve()),
+                                # The timeout keys `sofer mcp add` writes by
+                                # default (issues #287, #296); included here so
+                                # the assertion below isolates the command
+                                # string/array normalization it is about.
+                                "tool_timeout_sec": config.MCP_REQUEST_TIMEOUT_SECONDS,
+                                "startup_timeout_sec": config.MCP_CONNECT_TIMEOUT_SECONDS,
                                 "env_vars": [],
                             }
                         }
@@ -1420,6 +1426,10 @@ class TestSingleSourceRegistry:
             "delegates",
             "native_env",
             "native_scope",
+            "native_timeout",
+            "timeout_key",
+            "connect_timeout_key",
+            "timeout_unit",
             "user_env_dir",
             "project_scope",
         }
@@ -1429,6 +1439,14 @@ class TestSingleSourceRegistry:
             assert spec["fmt"] in {"json", "toml", "yaml"}
             assert spec["command"] in {"array", "string"}
             assert spec["env"] in {"none", "allow_list", "refs", "refs_braced"}
+            assert spec["timeout_unit"] in {"seconds", "milliseconds"}
+            assert spec["timeout_key"] is None or isinstance(spec["timeout_key"], str)
+            assert spec["connect_timeout_key"] is None or isinstance(
+                spec["connect_timeout_key"], str
+            )
+            # No native CLI takes a timeout flag today, so no adapter may claim
+            # it can forward one (issues #287, #296).
+            assert spec["native_timeout"] is False
 
     def test_resolve_config_path_matches_registry_for_every_agent(
         self, tmp_path, monkeypatch
@@ -1475,6 +1493,10 @@ class TestSingleSourceRegistry:
             "delegates": False,
             "native_env": False,
             "native_scope": False,
+            "native_timeout": False,
+            "timeout_key": None,
+            "connect_timeout_key": None,
+            "timeout_unit": "seconds",
             "user_env_dir": None,
             "project_scope": True,
         }
@@ -1558,6 +1580,14 @@ class TestPiAdapter:
             "delegates": False,
             "native_env": False,
             "native_scope": False,
+            "native_timeout": False,
+            # Pi `docs/mcp.md` documents a per-server `timeout` in seconds
+            # (default 60, reset by progress notifications) and connects
+            # enabled servers in the background, so there is no entry-level
+            # cold-start deadline (issues #287, #296).
+            "timeout_key": "timeout",
+            "connect_timeout_key": None,
+            "timeout_unit": "seconds",
             "user_env_dir": "PI_CODING_AGENT_DIR",
             "project_scope": True,
         }
@@ -1575,6 +1605,7 @@ class TestPiAdapter:
         assert "args" not in entry
         assert "type" not in entry
         assert "enabled" not in entry
+        assert "timeout" not in entry, "no Timeouts passed must write no timeout key"
         assert "hf123" not in str(entry)
 
     def test_pi_env_braced_refs_and_omits_absent_keys(self, tmp_path) -> None:
@@ -1658,6 +1689,7 @@ class TestPiCli:
         assert data["mcpServers"]["sofer"] == {
             "command": "sofer-mcp",
             "cwd": str(tmp_path.resolve()),
+            "timeout": config.MCP_REQUEST_TIMEOUT_SECONDS,
             "env": {"HF_TOKEN": "${HF_TOKEN}"},
         }
         assert "hf123" not in path.read_text(encoding="utf-8")
@@ -1746,6 +1778,12 @@ class TestHermesAdapter:
             "delegates": False,
             "native_env": False,
             "native_scope": False,
+            "native_timeout": False,
+            # Hermes "MCP Config Reference": `timeout` (tool call, default 300 s)
+            # and `connect_timeout` (initial connection, default 60 s), seconds.
+            "timeout_key": "timeout",
+            "connect_timeout_key": "connect_timeout",
+            "timeout_unit": "seconds",
             "user_env_dir": "HERMES_HOME",
             "project_scope": False,
         }
@@ -2130,3 +2168,124 @@ class TestYamlFormat:
         assert b"  sofer:\r\n    command: sofer-mcp\r\n" in raw
         assert b"\n" not in raw.replace(b"\r\n", b"")
         assert yaml.safe_load(raw.decode("utf-8")) == doc
+
+
+# ── host timeouts (issues #287, #296) ─────────────────────────────────
+
+
+class TestRegistrationTimeouts:
+    """The entry carries the host deadlines that failed against host defaults.
+
+    #287: ``sofer-mcp`` cold start (16-32 s measured) against a host's
+    connect/startup deadline. #296: a long tool call (~680 s ``prepare``) against
+    its per-request deadline. Both surfaced as ``Connection failed`` /
+    ``request timed out`` — indistinguishable from a broken registration.
+    """
+
+    def test_entry_carries_each_host_timeout_key_and_unit(self, tmp_path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        timeouts = mcp_registration.Timeouts(request_seconds=900, connect_seconds=120)
+
+        codex = mcp_registration.build_entry("codex", cwd, {}, timeouts)
+        assert codex["tool_timeout_sec"] == 900
+        assert codex["startup_timeout_sec"] == 120
+
+        # gemini-cli compares against MCP_DEFAULT_TIMEOUT_MSEC, so the unit is
+        # milliseconds and its single key covers discovery and calls alike.
+        gemini = mcp_registration.build_entry("gemini", cwd, {}, timeouts)
+        assert gemini["timeout"] == 900_000
+        assert "connect_timeout" not in gemini
+
+        pi = mcp_registration.build_entry("pi", cwd, {}, timeouts)
+        assert pi["timeout"] == 900
+
+        hermes = mcp_registration.build_entry("hermes", cwd, {}, timeouts)
+        assert hermes["timeout"] == 900
+        assert hermes["connect_timeout"] == 120
+
+    def test_entry_without_timeouts_keeps_the_pre_change_shape(self, tmp_path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        for agent in ("opencode", "codex", "gemini", "pi", "hermes"):
+            entry = mcp_registration.build_entry(agent, cwd, {})
+            spec = mcp_registration.ADAPTERS[agent]
+            for key in (spec["timeout_key"], spec["connect_timeout_key"]):
+                if key is not None:
+                    assert key not in entry, (agent, key)
+
+    def test_opencode_declares_no_timeout_key(self) -> None:
+        """Its entry shape drifted between releases, so sofer writes none."""
+        spec = mcp_registration.ADAPTERS["opencode"]
+        assert spec["timeout_key"] is None
+        assert spec["connect_timeout_key"] is None
+        assert (
+            mcp_registration.timeout_entry_keys("opencode", mcp_registration.Timeouts(900, 120))
+            == {}
+        )
+
+    def test_changed_timeout_is_not_swallowed_by_the_idempotency_guard(self, tmp_path) -> None:
+        """A changed ``--timeout`` must rewrite, or the host keeps the old one."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        existing = mcp_registration.build_entry(
+            "hermes", cwd, {}, mcp_registration.Timeouts(900, 120)
+        )
+        doc = {"mcp_servers": {"sofer": existing}}
+        desired = mcp_registration.build_entry(
+            "hermes", cwd, {}, mcp_registration.Timeouts(1800, 120)
+        )
+        _, changed = mcp_registration.merge("hermes", doc, desired)
+        assert changed is True
+
+    def test_same_timeout_is_idempotent(self, tmp_path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        timeouts = mcp_registration.Timeouts(900, 120)
+        entry = mcp_registration.build_entry("pi", cwd, {}, timeouts)
+        doc = {"mcpServers": {"sofer": entry}}
+        desired = mcp_registration.build_entry("pi", cwd, {}, timeouts)
+        _, changed = mcp_registration.merge("pi", doc, desired)
+        assert changed is False
+
+    def test_codex_same_timeouts_different_command_form_is_idempotent(self, tmp_path) -> None:
+        """The timeout comparison must not defeat command normalization."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("codex", cwd, {}, mcp_registration.Timeouts(900, 120))
+        doc = {"mcp_servers": {"sofer": {**entry, "command": ["sofer-mcp"]}}}
+        desired = mcp_registration.build_entry(
+            "codex", cwd, {}, mcp_registration.Timeouts(900, 120)
+        )
+        _, changed = mcp_registration.merge("codex", doc, desired)
+        assert changed is False
+
+    def test_native_delegation_declines_with_the_timeout_reason(self) -> None:
+        """No native ``mcp add`` takes a timeout flag (issue #287 §2, #296 §1)."""
+        timeouts = mcp_registration.Timeouts(900, 120)
+        assert mcp_registration.native_delegation_decline_reasons(
+            "codex", [], "user", timeouts
+        ) == ["timeout"]
+        assert mcp_registration.native_delegation_decline_reasons(
+            "gemini", [], "user", timeouts
+        ) == ["timeout"]
+
+    def test_decline_reason_order_is_env_scope_timeout(self) -> None:
+        timeouts = mcp_registration.Timeouts(900, 120)
+        assert mcp_registration.native_delegation_decline_reasons(
+            "codex", ["HF_TOKEN"], "project", timeouts
+        ) == ["env forwarding", "project scope", "timeout"]
+
+    def test_no_timeouts_leaves_delegation_available(self) -> None:
+        assert mcp_registration.native_delegation_decline_reasons("gemini", [], "user", None) == []
+
+    def test_dropped_timeout_note_only_for_a_host_without_the_key(self) -> None:
+        timeouts = mcp_registration.Timeouts(900, 120)
+        note = mcp_registration.dropped_timeout_note("opencode", timeouts)
+        assert note is not None
+        assert "opencode" in note
+        assert "timeout" in note
+        assert mcp_registration.dropped_timeout_note("pi", timeouts) is None
+        # No timeouts requested → nothing to drop, nothing to say.
+        assert mcp_registration.dropped_timeout_note("opencode", None) is None
+        assert mcp_registration.dropped_timeout_note("unregistered", timeouts) is None
