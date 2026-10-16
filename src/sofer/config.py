@@ -92,6 +92,15 @@ _DEFAULTS: dict[str, Any] = {
     "confirm_threshold": 0.8,
     "min_threshold": 0.5,
     "detect_threshold": 0.5,
+    # Agent-facing metadata gate (issue #288). `sofer init` writes a [meta] block
+    # of placeholders and nothing said they had to be replaced, so they travelled
+    # through validate -> prepare -> codebook_all -> profile_all -> render_all with
+    # every envelope reporting ok: true, surfacing only in the generated card.
+    # A value that is empty or begins with one of these prefixes (case-insensitive)
+    # is reported as a template placeholder. A WARNING, never a failure: a `fail`
+    # would break every existing config that still carries one, which is a contract
+    # change rather than a fix (maintainer decision D3).
+    "meta_placeholder_prefixes": ["TODO", "YOUR_", "example"],
     "profile_max_sample": 100_000,
     "confidence_round_digits": 4,
     # Size guard for MCP agent resource reads (sofer://dataset, sofer://codebook,
@@ -357,6 +366,20 @@ def _read_tool_section(toml_path: Path | None) -> dict[str, Any]:
             "'card_config_group_warn_limit' in [tool.sofer] must be a positive integer"
         )
 
+    # The placeholder prefixes are string patterns, never values: an empty entry or
+    # a non-string would make the agent-facing gate match everything or nothing
+    # (issue #288).
+    _prefixes = merged.get("meta_placeholder_prefixes")
+    if (
+        not isinstance(_prefixes, list)
+        or not _prefixes
+        or not all(isinstance(p, str) and p.strip() for p in _prefixes)
+    ):
+        raise ValueError(
+            "'meta_placeholder_prefixes' in [tool.sofer] must be a non-empty list of "
+            "non-empty strings"
+        )
+
     return merged
 
 
@@ -512,6 +535,9 @@ MIN_THRESHOLD: float = _DEFAULTS["min_threshold"]
 DETECT_THRESHOLD: float = _DEFAULTS["detect_threshold"]
 PROFILE_MAX_SAMPLE: int = _DEFAULTS["profile_max_sample"]
 CONFIDENCE_ROUND_DIGITS: int = _DEFAULTS["confidence_round_digits"]
+
+# Agent-facing metadata gate (issue #288) — see the _DEFAULTS comment.
+META_PLACEHOLDER_PREFIXES: list[str] = _DEFAULTS["meta_placeholder_prefixes"]
 
 # MCP agent resource size guard (see ``_DEFAULTS["agent_resource_max_bytes"]``).
 AGENT_RESOURCE_MAX_BYTES: int = _DEFAULTS["agent_resource_max_bytes"]

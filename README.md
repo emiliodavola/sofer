@@ -755,6 +755,13 @@ Per-agent locations and shapes:
   runs, which is what resets a host's per-request timeout — so a long tool also survives a host whose
   timeout cannot be configured. Their `tools/list` descriptions say so, and name the expected
   duration.
+- **Who fills `[meta]` (issue #288).** `sofer init` writes a `[meta]` block whose values are
+  placeholders. Filling them is a **required step between bootstrap and Phase 1**, and it is the one
+  step a human and an agent share: on an MCP-driven run the **agent** completes what the data can
+  determine (description, tags), and the **human** supplies what it cannot (license, source).
+  `sofer_validate` warns while any `[meta]` value is still empty or still starts with `TODO`, `YOUR_`
+  or `example`, so the step reaches the agent through the envelope instead of appearing only in the
+  generated card. The warning never changes the exit code.
 - **User-scope resolution:** the paths below are sofer's **default** resolution under `Path.home()`.
   Agents such as opencode read their config from the system **account** home instead, so when the two
   differ the entry can land in a file the agent never reads. Pass `--user-config PATH` to state the

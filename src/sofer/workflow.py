@@ -322,7 +322,7 @@ _WORKFLOW_METADATA = {
     "sofer_validate": WorkflowMetadata(
         "sofer_validate",
         PHASE_BUILD,
-        ("canonical config_path",),
+        ("canonical config_path", "[meta] placeholders replaced"),
         "existing_config",
         WorkflowTemplate("sofer_prepare", {"config": "<config_path>"}),
     ),
