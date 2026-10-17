@@ -1306,3 +1306,54 @@ continuation SHALL be `sofer_meta_set`, `sofer_meta_set`’s SHALL be `sofer_val
 - THEN it SHALL use the configured values, not a literal
 
 **Evidence:** `test: tests/test_checks.py::TestMetaPlaceholderGate::test_prefixes_are_config_owned`
+
+---
+
+### Requirement: Visibility control with an explicit gate (MSP-R20) — Added 2026-10-17, feat-visibility-enforcement
+
+`sofer_repo_settings` SHALL report the target repository's current visibility together with the
+configured posture, and SHALL change it only when the call carries the approval phrase and the exact
+target state (`private: bool`). A read SHALL NOT require an authorization, SHALL change nothing, and
+SHALL report an unreachable or unreadable remote as an explicit `unknown: <reason>` value rather than
+raising — an unknown state is never reported as agreement. Without a token the read SHALL say
+`unknown: no token` and SHALL NOT call the Hub.
+
+A write SHALL be refused when no approval phrase is configured on the server
+(`REPO_SETTINGS_APPROVAL_NOT_CONFIGURED`), when the supplied phrase does not match
+(`REPO_SETTINGS_APPROVAL_REQUIRED`), when there is no token (`REPO_SETTINGS_TOKEN_REQUIRED`), and when
+the installed `huggingface-hub` has no `HfApi.update_repo_settings` (`REPO_SETTINGS_UNSUPPORTED`,
+naming the method). A failed write SHALL surface as `REPO_SETTINGS_WRITE_FAILED` with its cause. After a
+successful write the tool SHALL re-read and report `changed` plus `diverges_from_config`.
+
+#### Scenario: A read needs no authorization
+
+- GIVEN a dataset TOML and a token
+- WHEN `sofer_repo_settings` runs with only `config`
+- THEN the envelope SHALL carry the configured posture and `remote_visibility`
+- AND nothing SHALL be changed on the Hub
+
+#### Scenario: A write without the phrase is refused
+
+- GIVEN `private=false` and a server with an approval phrase configured
+- WHEN `sofer_repo_settings` runs without `approval_phrase`
+- THEN it SHALL refuse with `REPO_SETTINGS_APPROVAL_REQUIRED` and SHALL NOT call the Hub
+
+#### Scenario: A dry run predicts without writing
+
+- GIVEN a repository whose visibility differs from the requested one
+- WHEN `sofer_repo_settings` runs with `private` and `dry_run=true`
+- THEN it SHALL report `would_change: true` with `changed: false` and SHALL NOT call the Hub
+
+#### Scenario: An SDK without the settings method fails closed
+
+- GIVEN an installed `huggingface-hub` whose `HfApi` has no `update_repo_settings`
+- WHEN a write is attempted with a valid phrase
+- THEN it SHALL refuse with `REPO_SETTINGS_UNSUPPORTED` naming the method
+
+#### Scenario: A write that disagrees with the config is reported
+
+- GIVEN `[dataset] private = true` and a write that makes the repository public
+- WHEN the write succeeds
+- THEN the envelope SHALL report `diverges_from_config: true`
+- AND the next `sofer_publish_confirm` SHALL refuse that divergence (PUB-13)
+
