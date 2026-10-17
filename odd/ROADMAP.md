@@ -198,8 +198,8 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | --- | --- | --- | --- | --- | --- |
 | 1 | #324 Curation Rationale needs a file | **S** | `2026-10-16-feat-curation-rationale-key` | [`tasks/curation-rationale-key.md`](tasks/curation-rationale-key.md) | **delivered** on `feat/324-curation-rationale-key` |
 | 2 | #322 `sofer mcp doctor` measures the cold start | **M** | `2026-10-16-feat-mcp-doctor` | [`tasks/mcp-doctor.md`](tasks/mcp-doctor.md) | **delivered** on `feat/322-mcp-doctor` (PR pending) |
-| 3 | #323 the metadata step's tool surface — check + set + CLI | **L** | none (ODD-only, see the flow note above) | [`tasks/meta-tools.md`](tasks/meta-tools.md) | **delivered** on `feat/323-meta-tools` — 9 commits, head `073275a`, three independent verification rounds (the first falsified two byte-preservation defects), rule-14 gates 100.00%, suite 2376 passed / 9 skipped; PR pending the maintainer |
-| 4 | #320 opencode receives no timeout key | **M** | none (ODD-only) | — | **research gate discharged** (see below); next on the branch |
+| 3 | #323 the metadata step's tool surface — check + set + CLI | **L** | none (ODD-only, see the flow note above) | [`tasks/meta-tools.md`](tasks/meta-tools.md) | **delivered** on `feat/323-meta-tools` — three independent verification rounds (the first falsified two byte-preservation defects) and a parser fix CI caught on 3.10; rule-14 gates 100.00%, suite green; PR **#333** open |
+| 4 | #320 opencode receives no timeout key | **S** | none (ODD-only) | [`tasks/opencode-timeout.md`](tasks/opencode-timeout.md) | **delivered, merged as PR #335** — adapter + guard + tests, READMEs and the spec clause; one verification round confirmed the five behavioural claims and refuted the durable-text one, fixed in `60c01c0` |
 
 **Order of execution, and why it is not the issue order:**
 

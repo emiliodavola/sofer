@@ -3313,18 +3313,28 @@ class TestMcpRegistrationTimeoutsCli:
         assert seen == ["gemini"]
         assert not (tmp_path / ".gemini" / "settings.json").exists()
 
-    def test_opencode_names_the_missing_timeout_key_on_stderr(
+    def test_opencode_receives_the_timeout_key_its_schema_accepts(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
+        """#320: the emitted SHAPE is what is asserted, not that a key exists.
+
+        opencode's stable schema takes `timeout` as a positive integer in
+        milliseconds, and the value written is its connect/startup budget — the
+        documented budget for fetching the server's tools, which is the cold start
+        that bites. The stderr note that used to name the missing key must be gone:
+        it printed "carries no timeout key" beside a key that is now written.
+        """
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
         rc = cli._cmd_mcp_add(
             Namespace(agent="opencode", scope="project", cwd=str(tmp_path), dry_run=False)
         )
         assert rc == 0
-        assert "opencode registration carries no timeout key" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "carries no timeout key" not in err
         data = json.loads((tmp_path / "opencode.json").read_text("utf-8"))
-        assert "timeout" not in data["mcp"]["sofer"]
+        assert data["mcp"]["sofer"]["timeout"] == config.MCP_CONNECT_TIMEOUT_SECONDS * 1000
+        assert isinstance(data["mcp"]["sofer"]["timeout"], int)
 
     def test_dry_run_with_timeouts_writes_nothing(self, tmp_path, monkeypatch) -> None:
         hermes_home = tmp_path / "hermes-home"

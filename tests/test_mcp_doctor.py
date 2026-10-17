@@ -157,13 +157,13 @@ class TestAgentRows:
         assert rows[0].value == config.MCP_REQUEST_TIMEOUT_SECONDS * 1000
         assert rows[0].unit == "milliseconds"
 
-    def test_opencode_carries_the_note_instead_of_a_value(self) -> None:
-        """MCP-REG-05: an agent with no key is named, never given an invented one."""
+    def test_opencode_reports_its_scalar_connect_budget(self) -> None:
+        """#320: opencode stops being MCP-REG-05's example, so its row carries a value."""
         rows = mcp_doctor.agent_rows(("opencode",), _timeouts())
-        assert rows[0].key is None
-        assert rows[0].value is None
-        assert rows[0].unit is None
-        assert rows[0].note == mcp_registration.dropped_timeout_note("opencode", _timeouts())
+        assert rows[0].key == "timeout"
+        assert rows[0].value == _timeouts().connect_seconds * 1000
+        assert rows[0].unit == "milliseconds"
+        assert rows[0].note is None
 
     def test_every_registered_agent_gets_a_row(self) -> None:
         rows = mcp_doctor.agent_rows(mcp_registration.AGENT_NAMES, _timeouts())
@@ -221,7 +221,13 @@ class TestJsonPayload:
         assert payload["entry_point"] == "sofer-mcp"
         assert payload["connect_timeout_seconds"] == config.MCP_CONNECT_TIMEOUT_SECONDS
         assert [row["agent"] for row in payload["agents"]] == ["pi", "opencode"]
-        assert payload["agents"][1]["note"] is not None
+        # Issue #320: opencode used to be the row carrying a note instead of a
+        # value. It now carries its own scalar, in the adapter's unit.
+        opencode_row = payload["agents"][1]
+        assert opencode_row["note"] is None
+        assert opencode_row["key"] == "timeout"
+        assert opencode_row["value"] == config.MCP_CONNECT_TIMEOUT_SECONDS * 1000
+        assert opencode_row["unit"] == "milliseconds"
 
     def test_the_serialized_payload_is_json_not_a_repr(self) -> None:
         text = mcp_doctor.render_json(_report(("pi",)), exit_code=0)

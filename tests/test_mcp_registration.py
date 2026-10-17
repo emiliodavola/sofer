@@ -870,13 +870,16 @@ class TestEnvForwarding:
         assert "See README" in err
         assert "HF_TOKEN" in err
         assert "SOFER_MCP_APPROVAL_PHRASE" in err
-        # entry stays exactly {type, command, cwd} with no env key
+        # entry stays exactly {type, command, cwd, timeout} with no env key
         path = proj / "opencode.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["mcp"]["sofer"] == {
             "type": "local",
             "command": ["sofer-mcp"],
             "cwd": str(proj.resolve()),
+            # Issue #320: opencode receives its connect budget in the scalar shape
+            # its schema accepts, in milliseconds, from the live [tool.sofer] key.
+            "timeout": config.MCP_CONNECT_TIMEOUT_SECONDS * 1000,
         }
         assert "env" not in data["mcp"]["sofer"]
 
@@ -2246,6 +2249,12 @@ class TestRegistrationTimeouts:
         assert hermes["timeout"] == 900
         assert hermes["connect_timeout"] == 120
 
+        # opencode's single scalar is its connect/startup budget, in milliseconds
+        # (issue #320): the stable schema declares a positive integer there, and
+        # its docs give that key the "fetching tools" budget.
+        opencode = mcp_registration.build_entry("opencode", cwd, {}, timeouts)
+        assert opencode["timeout"] == 120_000
+
     def test_entry_without_timeouts_keeps_the_pre_change_shape(self, tmp_path) -> None:
         cwd = tmp_path / "proj"
         cwd.mkdir()
@@ -2256,15 +2265,64 @@ class TestRegistrationTimeouts:
                 if key is not None:
                     assert key not in entry, (agent, key)
 
-    def test_opencode_declares_no_timeout_key(self) -> None:
-        """Its entry shape drifted between releases, so sofer writes none."""
+    def test_opencode_writes_the_scalar_its_schema_accepts(self) -> None:
+        """#320 S5: the SHAPE is pinned, not merely the presence of a key.
+
+        opencode's stable zod schema declares `timeout` as a positive integer in
+        milliseconds, so the emitted value is an int — never the nested object the
+        next-major tree describes, which would risk failing validation of the whole
+        `mcp` block. The value is the CONNECT budget: that scalar's documented
+        meaning is the budget for fetching the server's tools, which is the cold
+        start #287 is about, not the per-call deadline.
+        """
         spec = mcp_registration.ADAPTERS["opencode"]
         assert spec["timeout_key"] is None
-        assert spec["connect_timeout_key"] is None
-        assert (
-            mcp_registration.timeout_entry_keys("opencode", mcp_registration.Timeouts(900, 120))
-            == {}
+        assert spec["connect_timeout_key"] == "timeout"
+        assert spec["timeout_unit"] == "milliseconds"
+        keys = mcp_registration.timeout_entry_keys("opencode", mcp_registration.Timeouts(900, 120))
+        assert keys == {"timeout": 120_000}
+        assert isinstance(keys["timeout"], int)
+        # The request budget must not leak into it: 900_000 would be the wrong
+        # mapping, and a magnitude error is invisible in a passing "key exists".
+        assert keys["timeout"] != 900_000
+
+    def test_opencode_keeps_the_pre_change_shape_without_timeouts(self, tmp_path) -> None:
+        """``--no-timeout`` must still write the entry opencode had before #320."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        entry = mcp_registration.build_entry("opencode", cwd, {}, None)
+        assert "timeout" not in entry
+
+    def test_a_host_with_no_timeout_key_is_still_named(self, monkeypatch) -> None:
+        """MCP-REG-05's clause keeps its force for a future host (S8).
+
+        The guard has to be "declares NEITHER key": checking only ``timeout_key``
+        printed "carries no timeout key" beside the key opencode now receives.
+        """
+        fake = dict(mcp_registration.ADAPTERS["opencode"])
+        fake["timeout_key"] = None
+        fake["connect_timeout_key"] = None
+        monkeypatch.setitem(mcp_registration.ADAPTERS, "hypothetical", fake)
+        note = mcp_registration.dropped_timeout_note(
+            "hypothetical", mcp_registration.Timeouts(900, 120)
         )
+        assert note is not None
+        assert "carries no timeout key" in note
+
+    def test_a_changed_opencode_timeout_is_not_swallowed(self, tmp_path) -> None:
+        """A changed `--connect-timeout` must rewrite, or opencode keeps the old one."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        existing = mcp_registration.build_entry(
+            "opencode", cwd, {}, mcp_registration.Timeouts(900, 120)
+        )
+        doc = {"mcp": {"sofer": existing}}
+        desired = mcp_registration.build_entry(
+            "opencode", cwd, {}, mcp_registration.Timeouts(900, 300)
+        )
+        _, changed = mcp_registration.merge("opencode", doc, desired)
+        assert changed is True
+        assert desired["timeout"] == 300_000
 
     def test_changed_timeout_is_not_swallowed_by_the_idempotency_guard(self, tmp_path) -> None:
         """A changed ``--timeout`` must rewrite, or the host keeps the old one."""
@@ -2321,13 +2379,16 @@ class TestRegistrationTimeouts:
     def test_no_timeouts_leaves_delegation_available(self) -> None:
         assert mcp_registration.native_delegation_decline_reasons("gemini", [], "user", None) == []
 
-    def test_dropped_timeout_note_only_for_a_host_without_the_key(self) -> None:
+    def test_dropped_timeout_note_needs_a_host_without_any_key(self) -> None:
+        """#320: no registered agent is in that state any more (MCP-REG-05).
+
+        The clause keeps its force for a future host; what changes is that
+        opencode stops being its example. The guard also has to be "declares
+        NEITHER key", or the note would print beside the key opencode now gets.
+        """
         timeouts = mcp_registration.Timeouts(900, 120)
-        note = mcp_registration.dropped_timeout_note("opencode", timeouts)
-        assert note is not None
-        assert "opencode" in note
-        assert "timeout" in note
-        assert mcp_registration.dropped_timeout_note("pi", timeouts) is None
+        for agent in mcp_registration.AGENT_NAMES:
+            assert mcp_registration.dropped_timeout_note(agent, timeouts) is None, agent
         # No timeouts requested → nothing to drop, nothing to say.
-        assert mcp_registration.dropped_timeout_note("opencode", None) is None
+        assert mcp_registration.dropped_timeout_note("pi", None) is None
         assert mcp_registration.dropped_timeout_note("unregistered", timeouts) is None

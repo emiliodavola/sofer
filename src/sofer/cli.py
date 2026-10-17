@@ -2014,8 +2014,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "take tens of seconds while its imports warm up, and a tool call on a "
             "large dataset can run for minutes, so the entry carries the host's "
             "per-request and connect/startup deadlines (--timeout / "
-            "--connect-timeout, or --no-timeout to omit them). The key name and "
-            "unit are per agent; opencode accepts none and is named on stderr."
+            "--connect-timeout, or --no-timeout to omit them). The key name, the "
+            "unit and which budget a key carries are per agent: opencode's single "
+            "scalar `timeout` is its connect budget in milliseconds. An agent "
+            "whose schema accepts no timeout key is named on stderr."
         ),
     )
     mcp_add.add_argument(
