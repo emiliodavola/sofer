@@ -3488,11 +3488,21 @@ class TestMetaCommand:
     def test_set_reads_each_kind_from_text(self, tmp_path: Path) -> None:
         path = self._dataset(tmp_path)
         rc = cli._cmd_meta_set(
-            self._set(path, ["confidential=false", "language=en,es", "curation_rationale=x"])
+            self._set(
+                path,
+                [
+                    # #338: an explicit opt-out carries its reason in the same write.
+                    "confidential=false",
+                    "confidentiality_reason=test: nothing sensitive",
+                    "language=en,es",
+                    "curation_rationale=x",
+                ],
+            )
         )
         assert rc == 0
         meta = _toml.loads(path.read_text(encoding="utf-8"))["meta"]
         assert meta["confidential"] is False
+        assert meta["confidentiality_reason"] == "test: nothing sensitive"
         assert meta["language"] == ["en", "es"]
         assert meta["curation_rationale"] == "x"
 

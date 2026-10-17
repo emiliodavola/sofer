@@ -491,3 +491,49 @@ class TestValueEqualityDecides:
         after = path.read_bytes()
         assert after.startswith(before)
         assert after.endswith(b'[meta]\ndescription = "New"\n')
+
+
+# ── Posture authorization through the writer (#338) ───────────────────────────
+
+
+class TestPostureAuthorizationOnWrite:
+    """An explicit confidentiality opt-out must carry its reason, in one state."""
+
+    def _toml(self, tmp_path: Path, meta_extra: str = "") -> Path:
+        p = tmp_path / "ds.toml"
+        p.write_text(
+            '[dataset]\nname = "ds"\nrepo_id = "u/ds"\n\n[meta]\ndescription = "d"\n' + meta_extra,
+            encoding="utf-8",
+        )
+        return p
+
+    def test_confidential_false_alone_is_refused(self, tmp_path: Path) -> None:
+        path = self._toml(tmp_path)
+        with pytest.raises(MetaEditError, match="confidentiality_reason"):
+            meta_edit.set_meta(path, {"confidential": False})
+        assert "confidential" not in path.read_text(encoding="utf-8")
+
+    def test_both_keys_in_one_call_are_accepted(self, tmp_path: Path) -> None:
+        path = self._toml(tmp_path)
+        meta_edit.set_meta(
+            path, {"confidential": False, "confidentiality_reason": "public statistics"}
+        )
+        text = path.read_text(encoding="utf-8")
+        assert "confidential = false" in text
+        assert 'confidentiality_reason = "public statistics"' in text
+
+    def test_an_existing_reason_satisfies_the_write(self, tmp_path: Path) -> None:
+        path = self._toml(tmp_path, 'confidentiality_reason = "public statistics"\n')
+        meta_edit.set_meta(path, {"confidential": False})
+        assert "confidential = false" in path.read_text(encoding="utf-8")
+
+    def test_clearing_the_reason_while_false_is_refused(self, tmp_path: Path) -> None:
+        path = self._toml(tmp_path, 'confidential = false\nconfidentiality_reason = "x"\n')
+        with pytest.raises(MetaEditError, match="confidentiality_reason"):
+            meta_edit.set_meta(path, {"confidentiality_reason": ""})
+        assert 'confidentiality_reason = "x"' in path.read_text(encoding="utf-8")
+
+    def test_keeping_confidential_true_needs_no_reason(self, tmp_path: Path) -> None:
+        path = self._toml(tmp_path)
+        meta_edit.set_meta(path, {"confidential": True})
+        assert "confidential = true" in path.read_text(encoding="utf-8")

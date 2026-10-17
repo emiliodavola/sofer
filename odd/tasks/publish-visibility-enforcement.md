@@ -71,6 +71,7 @@ report/manifest so it is auditable after the fact."
 | T11 | GREEN: posture recorded in the publish report and the manifest | S6 | pending | — |
 | T12 | Specs `publish` + `mcp-server` + `metadata`; README + README_ES (rules 7/13); new tool documented in both READMEs | S1-S6 | pending | — |
 | T13 | Gates: pytest, ruff, mypy, pyright, coverage (rule 14: `publish.py` + `cli.py` at 100.00%), commit slices, push, PR assigned to `@emiliodavola` | — | pending | — |
+| T14 | The writer cannot produce an unauthorized opt-out: `sofer_meta_set` refuses `confidential = false` without a reason in the same written state | S2 | **done** | RED then GREEN: `TestPostureAuthorizationOnWrite` (5). The guard lives in `apply_meta_edit`, before the atomic replace, so the CLI and the MCP tool share it; one CLI test that opted out now states its reason |
 
 ## Decisions
 
@@ -113,6 +114,12 @@ report/manifest so it is auditable after the fact."
 
   necesito una rama por issue y luego un push y PR (asignado a mi) por implementación"
 - **L2** (user, verbatim): "usá ODD obligatoriamente"
+- **L3** — verification (2026-10-17): every claim checked against `dev@ec511e7`; #133 and #148 are
+  already closed, so this is the remaining fail-closed gap. Two corrections applied to the issue:
+  (a) the Hub settings route **does** exist (`update_repo_settings` → `PUT .../settings`, present at the
+  declared floor) — the observed 404 came from `/api/datasets/<repo_id>` without `/settings`;
+  (b) `private` defaults `true`, so the posture is not "both bits default open" — only `confidential`
+  defaults permissive. Evidence appended to the issue body.
 - **L4** — first slice delivered (commit `1385f12`, rebased onto the reworded `dev@903237e`): the
   authorization surface. Two things it settled against this plan: **(a) D2 revised** — the
   confidentiality default changes in the template, not in the dataclass, because flipping the dataclass
@@ -120,10 +127,10 @@ report/manifest so it is auditable after the fact."
   "explicit opt-outs" does not ask for; the roadmap carries the same correction (`8d33082`). **(b)** the
   fallout was entirely test-side: 46 failures, all from TOMLs declaring `confidential = false` with no
   reason, so the shared `conftest` helper and two test-local TOMLs now state why. Gates at the commit:
-  2439 passed / 9 skipped, TOTAL coverage 94%, the four rule-14 files at 100.00%, ruff/myPy/pyright clean.
-- **L3** — verification (2026-10-17): every claim checked against `dev@ec511e7`; #133 and #148 are
-  already closed, so this is the remaining fail-closed gap. Two corrections applied to the issue:
-  (a) the Hub settings route **does** exist (`update_repo_settings` → `PUT .../settings`, present at the
-  declared floor) — the observed 404 came from `/api/datasets/<repo_id>` without `/settings`;
-  (b) `private` defaults `true`, so the posture is not "both bits default open" — only `confidential`
-  defaults permissive. Evidence appended to the issue body.
+  2439 passed / 9 skipped, TOTAL coverage 94%, the four rule-14 files at 100.00%, ruff/mypy/pyright clean.
+- **L5** — second slice: the writer guard. `sofer_meta_set` could write `confidential = false` on its
+  own and leave a config `validate()` must reject, so `apply_meta_edit` now refuses (before the atomic
+  replace) unless the same written state carries a non-empty `confidentiality_reason`. It is a
+  consequence of this change rather than a line in the issue, hence its own task row (T14): the tool
+  must not be able to produce the state the validator refuses. RED captured first (`2 failed, 3
+  passed`), then the guard; one CLI test that opted out had to state its reason.
