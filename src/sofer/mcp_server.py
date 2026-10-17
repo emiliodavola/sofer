@@ -124,8 +124,10 @@ from .scanner import (
     collect_init_moves,
     copy_files,
     discover_files,
+    format_stale_cache_warning,
     merge_entries,
     move_to_raw,
+    stale_cache_registrations,
     write_toml,
 )
 
@@ -195,6 +197,9 @@ _PHASED_INSTRUCTIONS: str = (
     "Phased canonical chain (tools/list alone teaches the order):\n"
     "  Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]\n"
     "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply -> sofer_meta_set\n"
+    "    The scan step MOVEs loose sources into raw/ unconditionally (mandatory in both "
+    "scan tools; never an opt-in flag) before copying raw/ -> cache/, so the registered "
+    "sources always live under raw/ and never only in the disposable cache/.\n"
     "    Metadata step (between bootstrap and Phase 1, tool-driven): read the state "
     "with sofer_meta_check and write [meta] description, license, source and tags "
     "with sofer_meta_set, which also writes any other Dataset Card [meta] key. "
@@ -2506,22 +2511,14 @@ def sofer_scan_dry_run(
             )
         ),
     ] = None,
-    move_loose: Annotated[
-        bool,
-        Field(
-            description=(
-                "Preview the Phase-1 move of loose files (outside raw//cache/) "
-                "into raw/ preserving the relative tree. Read-only: nothing is "
-                "moved in dry-run. When False, loose files are reported with a "
-                "move_loose=True hint instead of a preview."
-            )
-        ),
-    ] = False,
 ) -> dict[str, Any]:
     """Discover unregistered data files in a dataset tree (read-only).
 
     Side effects: none — nothing is copied and the TOML is not written.
     Network usage: none.
+
+    The Phase-1 move of loose files into ``raw/`` is mandatory in both scan
+    tools (#339): this preview always computes it and never mutates.
 
     When to use: Phase 0 preview before sofer_scan_apply; conditional on greenfield (no TOML or empty [[file]]).
     Example: sofer_scan_dry_run(config="dataset.toml")
@@ -2541,11 +2538,11 @@ def sofer_scan_dry_run(
         data_dir = base_dir / sofer_config.OUTPUT_DIR
         lines: list[str] = []
 
-        # Phase 1 - loose files to raw/ (preview only, never mutating).
+        # Phase 1 - loose files to raw/ (mandatory, #339; preview only here).
         exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
         loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
-        if move_loose:
-            raw_dir = base_dir / sofer_config.RAW_DIR
+        raw_dir = base_dir / sofer_config.RAW_DIR
+        if loose:
             try:
                 check_raw_collisions(loose, raw_dir, base_dir)
             except ValueError as exc:
@@ -2561,18 +2558,12 @@ def sofer_scan_dry_run(
                     "next": {},
                 }
             plan = move_to_raw(loose, base_dir, raw_dir, dry_run=True)
-            if plan:
-                lines.append("Phase 1 - would MOVE to raw/ (move_loose):")
-                for _src, dest in plan:
-                    rel = dest.relative_to(base_dir).relative_to(sofer_config.RAW_DIR)
-                    lines.append(f"  -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
-            else:
-                lines.append("Phase 1 - no loose files to move (move_loose).")
-        elif loose:
-            lines.append(
-                f"Phase 1 - {len(loose)} loose file(s) outside raw//cache/ would be "
-                "moved into raw/ on apply with move_loose=True."
-            )
+            lines.append(f"Phase 1 - would MOVE {len(plan)} loose file(s) to raw/ (mandatory):")
+            for _src, dest in plan:
+                rel = dest.relative_to(raw_dir)
+                lines.append(f"  -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
+        else:
+            lines.append("Phase 1 - no loose files outside raw//cache/ to move.")
 
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
         discovered = discover_files(base_dir, ext_set, exclude_dirs=exclude)
@@ -2613,6 +2604,12 @@ def sofer_scan_dry_run(
 
         if not lines:
             lines.append(f"Discovered {len(discovered)} supported file(s).")
+        # Stale-registration report (#339/D5), mirrored from sofer_scan_apply.
+        for line in format_stale_cache_warning(
+            stale_cache_registrations(merged.get("file", []), base_dir),
+            sofer_config.REPORT_MAX_ITEMS,
+        ):
+            lines.append(line)
         if registered:
             lines.append(f"Registered {registered} new [[file]] entry(s).")
         else:
@@ -2657,22 +2654,10 @@ def sofer_scan_apply(
             )
         ),
     ] = None,
-    move_loose: Annotated[
-        bool,
-        Field(
-            description=(
-                "Explicit opt-in (never silent): MOVE loose files (outside raw//"
-                "cache/) into raw/ preserving the relative tree BEFORE the "
-                "cache/ copy, matching the CLI scan Phase 1. Collisions in raw/ "
-                "abort before any move. False = current behavior (only the "
-                "cache/ copy)."
-            )
-        ),
-    ] = False,
 ) -> dict[str, Any]:
     """Register discovered data files and copy them into the artifact cache.
 
-    Side effects: copies discovered files into cache/ and updates the dataset TOML with new [[file]] entries.
+    Side effects: MOVEs loose files into ``raw/`` (mandatory, #339), copies discovered files into cache/ and updates the dataset TOML with new [[file]] entries.
     Network usage: none.
 
     Ordering (SCN-08): files are copied first and the TOML is written LAST
@@ -2698,30 +2683,28 @@ def sofer_scan_apply(
             return _refusal([str(exc)], tool_name="sofer_scan_apply", config_path=config)
         data_dir = base_dir / sofer_config.OUTPUT_DIR
 
-        # Phase 1 - loose files to raw/ (explicit move_loose opt-in only).
-        moved: list[tuple[Path, Path]] = []
-        if move_loose:
-            exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
-            loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
-            raw_dir = base_dir / sofer_config.RAW_DIR
-            try:
-                check_raw_collisions(loose, raw_dir, base_dir)
-            except ValueError as exc:
-                return {
-                    "ok": False,
-                    "exit_code": 1,
-                    "output": _captured_text(out, err),
-                    "discovered": len(loose),
-                    "registered": 0,
-                    "config_errors": [str(exc)],
-                    "error_code": "CONFIG_ERROR",
-                    "message": str(exc),
-                    "next": {},
-                }
-            moved = move_to_raw(loose, base_dir, raw_dir, dry_run=False)
-            for src, dest in moved:
-                rel = dest.relative_to(base_dir).relative_to(sofer_config.RAW_DIR)
-                print(f"     {src.name} -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
+        # Phase 1 - loose files to raw/ (mandatory, #339: never optional).
+        exclude_move = EXCLUSIONS | frozenset({sofer_config.RAW_DIR, sofer_config.OUTPUT_DIR})
+        loose = discover_files(base_dir, ext_set, exclude_dirs=exclude_move)
+        raw_dir = base_dir / sofer_config.RAW_DIR
+        try:
+            check_raw_collisions(loose, raw_dir, base_dir)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "exit_code": 1,
+                "output": _captured_text(out, err),
+                "discovered": len(loose),
+                "registered": 0,
+                "config_errors": [str(exc)],
+                "error_code": "CONFIG_ERROR",
+                "message": str(exc),
+                "next": {},
+            }
+        moved = move_to_raw(loose, base_dir, raw_dir, dry_run=False)
+        for src, dest in moved:
+            rel = dest.relative_to(raw_dir)
+            print(f"     {src.name} -> {sofer_config.RAW_DIR}/{rel.as_posix()}")
 
         exclude = EXCLUSIONS | frozenset({sofer_config.OUTPUT_DIR})
         discovered = discover_files(base_dir, ext_set, exclude_dirs=exclude)
@@ -2742,6 +2725,13 @@ def sofer_scan_apply(
         before = len(raw_toml.get("file", []))
         merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
         registered = len(merged.get("file", [])) - before
+        # Stale-registration report (#339/D5): name cache/-only entries whose
+        # raw/ source is missing, without rewriting them.
+        for line in format_stale_cache_warning(
+            stale_cache_registrations(merged.get("file", []), base_dir),
+            sofer_config.REPORT_MAX_ITEMS,
+        ):
+            print(line)
         try:
             copied = copy_files(discovered, base_dir, data_dir, dry_run=False, force=force)
         except FileExistsError as exc:

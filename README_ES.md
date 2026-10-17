@@ -148,7 +148,7 @@ reciente que el Parquet más nuevo).
 | ------ | ----------- | ------------------ |
 | **CWD en CLI** | Ejecuta siempre `sofer init` desde el directorio del dataset (p. ej. `C:\Users\...\test`). La CLI usa `Path.cwd()` en vivo — `test.toml` y `raw/` se crean exactamente donde la ejecutes. | Ejecutarlo desde el padre crea `test.toml`/`raw/` en el lugar equivocado. Haz `cd` al directorio del dataset primero. |
 | **Parámetro `cwd` en MCP** | La raíz del servidor se elige al arrancar con `--root PATH` o la variable de entorno `SOFER_MCP_ROOT` (el argumento gana; con ninguno, el cwd del proceso, resuelto). `sofer_init` tiene un `cwd` opcional. Cuando `cwd` es `None` usa el `Path.cwd()` en vivo solo si es un **descendiente estricto** de la raíz del servidor; en caso contrario la llamada es RECHAZADA (fails closed) indicando el argumento requerido `cwd="<directorio del dataset>"` — **no** vuelve a la raíz del servidor. Un `cwd="C:/Users/.../Desktop/test"` explícito sigue soportado como `effective_root` por llamada vía `_contained_path` y nunca muta la raíz global. | Rechaza con `PathOutsideRootError` para `cwd` explícito fuera de la raíz (sin `../` por encima, sin `C:/evil`, sin escape por symlink). El caso auto con `cwd=None` está contenido por una verificación de descendiente estricto `is_relative_to` — nunca escapa ni muta `_SERVER_ROOT`, y rechaza (indicando `cwd`) en vez de volver a la raíz cuando el `cwd` en vivo no es un descendiente estricto. |
-| **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `flatten_first_level`. |
+| **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `registration_path` (clave relativa a `raw/`). |
 | **Separadores de ruta** | Escribe siempre `raw/` y `cache/` con barras `/` en el TOML (`raw/example.csv`, `cache/file.csv`). CLI y MCP normalizan internamente a POSIX. | Funciona en Windows y POSIX; `ntpath.splitdrive` trataría `C:/...` como absoluto, pero `raw/...` permanece relativo y contenido. |
 | **Codificación de consola** | Nada que hacer: la CLI nunca aborta por un carácter que la codificación activa de la consola no puede representar — el carácter se sustituye en el texto emitido y el comando conserva su código de salida documentado (CLI-R11). Las terminales con Unicode (Windows Terminal, VS Code, macOS, Linux) no se ven afectadas y mantienen los marcadores `⚠`/`✓`/`✗`/`→` de sofer. | Afecta a los flujos que no son una consola con Unicode: salida redirigida a un archivo o tubería, captura de IDE/CI, o una página de códigos antigua forzada con `PYTHONIOENCODING=cp1252`. El carácter no representable se escribe como marcador de posición (o secuencia de escape) en lugar de lanzar `UnicodeEncodeError`. Para conservar todos los marcadores, define `PYTHONIOENCODING=utf-8`. |
 
@@ -236,7 +236,7 @@ expected = ["column_a", "column_b"]
 
 ```
 raw/            raíz de fuentes versionada — archivos sueltos CSV/XLSX/JSONL se MUEVEN a raw/<relative> luego scan copia a cache/ (p. ej. raw/DPTO.csv -> cache/DPTO.csv)
-cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan (Phase 2 copy via flatten_first_level); codebook --all-files escribe en build/codebooks/ + build/codebook.md
+cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan (Phase 2 copy con clave relativa a raw/); codebook --all-files escribe en build/codebooks/ + build/codebook.md
 build/          salida de prepare + entrada de publish (por dataset [dataset] build_dir, por defecto "build")
 ```
 
@@ -252,7 +252,9 @@ archivos soportados de profundidad 1 a `raw/` (opt-in, `--dry-run` previsualiza,
 `sofer scan` MUEVE archivos soportados sueltos fuera de `raw/`/`cache/`/`EXCLUSIONS` a
 `raw/<relative_to(base_dir)>` preservando árbol (`mkdir -p` parents, `check_raw_collisions`
 antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego
-copia `raw/` → `cache/` (aplanando primer nivel).
+copia `raw/` → `cache/` con la clave relativa a `raw/`. El movimiento no es opcional en
+ninguna de las dos superficies de scan: `sofer_scan_apply` lo ejecuta incondicionalmente,
+igual que la CLI, así que las fuentes registradas nunca viven solo en el `cache/` descartable.
 
 ## Perfilado y renderizado
 
@@ -684,7 +686,7 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | Paso | Herramienta | Args clave | Cuándo usar |
 | ------ | ------------- | ------------ | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Bootstrap greenfield; crea TOML + `raw/` (Windows: `cwd` debe permanecer bajo la raíz vía `_contained_path`; `raw/example.csv` es NTFS-safe). |
-| 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Fase 0 preview/apply tras `init`. |
+| 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force`, `extensions` | Fase 0 preview/apply tras `init`. Ambos MUEVEN archivos sueltos a `raw/` de forma incondicional — la fase es obligatoria, sin flag de opt-in; `sofer_scan_dry_run` la previsualiza sin mutar nada. |
 | M | `sofer_meta_check` | `config` | Lee el estado de metadata sin correr el validador; `readOnlyHint:true`. Reporta el mismo warning que imprime `sofer_validate`. |
 | M | `sofer_meta_set` | `config`, `values`, `dry_run` | Escribe `[meta]` antes de la Fase 1 (la única vía por MCP): description/license/source/tags, más cualquier otra clave del card. Preserva cada otra clave y comentario; `build_stale` nombra un árbol `build/` anterior a la escritura. Llamada sin `values` no escribe nada y devuelve una continuación pidiéndolos. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
