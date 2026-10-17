@@ -367,6 +367,26 @@ PR is assigned to `@emiliodavola` and carries `Closes #N`.
 | 2 | #337 | `fix/337-parquet-dtype-control` | `2026-10-17-fix-parquet-dtype-control` | [`tasks/parquet-dtype-control.md`](tasks/parquet-dtype-control.md) |
 | 3 | #338 | `feat/338-visibility-enforcement` | `2026-10-17-feat-visibility-enforcement` | [`tasks/publish-visibility-enforcement.md`](tasks/publish-visibility-enforcement.md) |
 
+#### Delivery record
+
+| Order | Issue | Delivered in | Evidence |
+| --- | --- | --- | --- |
+| 1 | #339 | PR [#340](https://github.com/emiliodavola/sofer/pull/340) — merged as `a7f631e` | The move into `raw/` is unconditional in both scan tools and every file is keyed relative to the root that owns it; `validate`/`prepare` refuse a `cache/`-only registration with no `raw/` source. Suite `2380 → 2399`, TOTAL coverage 94%, the four rule-14 files at 100.00% |
+| 2 | #337 | PR [#341](https://github.com/emiliodavola/sofer/pull/341) — merged as `e960ee4` | Declared `column_types`, automatic protection of zero-padded codes, and a fail-closed value check that stops `prepare` from shipping an altered value. Suite `2399 → 2426`, TOTAL coverage 94%, the four rule-14 files at 100.00%; CI green 13/13 after two corrections |
+| 3 | #338 | — | in progress |
+
+Two corrections landed on #341 between its first push and the merge, both found outside the local gate
+set: the README footnote named a concrete file and column instead of stating the mechanism generally
+(fixed in both READMEs), and `test_zero_padded_codes_survive_prepare` asserted the un-normalized
+artifact name — `prepare` delivers `dpto.parquet` for `remote = "DPTO.csv"`, and a case-insensitive
+Windows filesystem resolved the wrong name to the right file, so only CI could see it.
+
+**Auto-close gap, recorded because it will repeat:** both delivering PR bodies carried `Closes #N`
+inside code spans, and GitHub does not read a closing keyword inside one. The PRs target the default
+branch (`dev`), so that was the whole reason #340 and #341 merged without closing #339 and #337; both
+were closed by hand at delivery. Every later PR in this batch must put the keyword outside the
+backticks.
+
 ### Decisions taken in this batch
 
 Recorded in each feature document and reversible at review, not raised as blocking questions — the
