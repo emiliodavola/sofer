@@ -2,7 +2,7 @@
 
 **Branch:** `fix/339-scan-move-raw-mandatory` from `dev@ec511e7`
 **Issue:** `emiliodavola/sofer#339` — *bug(scan): moving sources into raw/ is opt-in, so the default MCP flow leaves them in the disposable cache/*
-**Delivery PR:** pending — assigned to `@emiliodavola`
+**Delivery PR:** [#340](https://github.com/emiliodavola/sofer/pull/340) — `fix/339-scan-move-raw-mandatory` → `dev`, assigned to `@emiliodavola`
 **SDD change:** `openspec/changes/2026-10-17-fix-scan-move-raw-mandatory/`
 **Phase:** 1 of the v0.8.0 batch (first, because it is the only one of the three with a data-loss path)
 
@@ -68,7 +68,7 @@ TOTAL entries for 2 files    = 3     remotes = ['A.csv', 'B.csv', 'Labels/B.csv'
 | T7 | GREEN: report duplicates/stale `cache/` entries on scan without rewriting unrelated config; name the repair in the envelope | S3 | **done** | `scanner.stale_cache_registrations` + `format_stale_cache_warning` (bounded by `report_max_items`, rule 1) printed by the CLI `scan` and both MCP scan tools; `TestStaleCacheRegistrations` 6 passed plus `test_scan_reports_stale_cache_registration` in `tests/test_scanner.py` and `tests/test_mcp_server.py`; the TOML is asserted unchanged |
 | T8 | `workflow.py` + MCP `next` hints + tool descriptions name the mandatory move | S6 | **done** | both tool docstrings/descriptions state the move is mandatory and never an opt-in; `_PHASED_INSTRUCTIONS` names it in the Phase 0 chain |
 | T9 | `scan` spec: SCN-01/SCN-02 key rule and SCN-07 move + tracked-source contract amended in place, plus 4 new scenarios; README + README_ES (rule 13), rule 7 help text, SDD change folder | S1-S6 | **done** | `openspec/specs/scan/spec.md` — SCN-01, SCN-02, SCN-07 and the scenarios `MCP scan moves without an opt-in flag`, `Nested tree keys identically loose and under raw`, `MCP dry-run previews the mandatory move`, `Cache-only registration with no raw source is refused`; delta recorded in `openspec/changes/2026-10-17-fix-scan-move-raw-mandatory/` (proposal, design, tasks, `specs/scan/spec.md`); README pair and argparse help updated; `uv run python scripts/check_test_mapping.py` → `OK: test-mapping contract holds` (`scan` stays a permanent declared-backlog spec, registry untouched) |
-| T10 | Gates: pytest, ruff, mypy, pyright, coverage (rule 14: `scanner.py` + `cli.py` at 100.00%), commit slices, push, PR assigned to `@emiliodavola` | — | **partial** | `uv run pytest tests/ -q` → **2399 passed, 9 skipped** (baseline `2380 passed, 9 skipped`); `coverage run -m pytest` → same, TOTAL **94%** (floor 90); rule-14 rows `cli.py` **100%**, `scanner.py` **100%**, `prepare.py` and `publish.py` **100%**; `ruff check` + `ruff format --check` clean; `mypy src/ scripts/` clean; `pyright` 0 errors (1 pre-existing `tomli` module-source warning). Push and PR remain |
+| T10 | Gates: pytest, ruff, mypy, pyright, coverage (rule 14: `scanner.py` + `cli.py` at 100.00%), commit slices, push, PR assigned to `@emiliodavola` | — | **done** | `uv run pytest tests/ -q` → **2399 passed, 9 skipped** (baseline `2380 passed, 9 skipped`); `coverage run -m pytest` → same, TOTAL **94%** (floor 90); rule-14 rows `cli.py`, `scanner.py`, `prepare.py`, `publish.py` all **100%**; `ruff check` + `ruff format --check` clean; `mypy src/ scripts/` clean; `pyright` 0 errors (1 pre-existing `tomli` warning); `scripts/check_test_mapping.py` → `OK: test-mapping contract holds`. Three commits, pushed, PR **#340** open against `dev`, assigned to `@emiliodavola`, change folder archived inside it |
 
 ## Decisions
 
