@@ -133,15 +133,15 @@ class Adapter(TypedDict):
         timeout_key: Entry key holding the per-request (tool call) deadline,
             or ``None`` when the host's schema does not accept one. ``timeout``
             for Pi/Hermes/Gemini, ``tool_timeout_sec`` for Codex, ``None`` for
-            opencode (its published shape drifted between releases: the zod
-            schema declares a positive integer while the current docs declare a
-            nested object, and writing the wrong one risks failing validation
-            of the whole ``mcp`` block).
+            opencode, whose one ``timeout`` scalar carries the connect budget
+            instead (issue #320; see ``connect_timeout_key``).
         connect_timeout_key: Entry key holding the initial-connection /
             cold-start deadline, or ``None`` when the host has no separate key
             (Pi connects in the background; Gemini's single ``timeout`` covers
             tool discovery). ``connect_timeout`` for Hermes,
-            ``startup_timeout_sec`` for Codex.
+            ``startup_timeout_sec`` for Codex, and ``timeout`` for opencode —
+            whose single scalar is the documented budget for fetching the
+            server's tools, which is the cold start, not the tool call.
         timeout_unit: Unit the host expresses those keys in. ``"milliseconds"``
             for Gemini only (its CLI compares against ``MCP_DEFAULT_TIMEOUT_MSEC``);
             every other host is ``"seconds"``.
@@ -186,15 +186,24 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "native_env": False,
         "native_scope": False,
         "native_timeout": False,
-        # opencode declares no timeout key: the published shape drifted between
-        # releases (zod `ConfigMCP.Local` declares `timeout` as a positive
-        # integer, the current docs declare a nested {startup,catalog,execution}
-        # object in milliseconds), and writing the wrong shape risks failing
-        # validation of the whole `mcp` block. Its own execution default (12 h)
-        # is also not the deadline that breaks. README names the manual key.
+        # opencode accepts `timeout` as a single scalar in MILLISECONDS (issue
+        # #320). Verified against opencode's own sources: the stable zod
+        # `ConfigMCP.Local` declares `z.number().int().positive()` and the stable
+        # docs document the local-server option as a Number in ms for fetching
+        # tools; the next-major tree declares a `{startup, request}` class (its
+        # docs a `{startup, catalog, execution}` object) AND moves servers to
+        # `mcp.servers.<name>`, a layout this adapter does not write. The scalar
+        # is therefore the shape belonging to the layout we DO write, and no
+        # sub-key name has to be guessed.
+        #
+        # That scalar governs establishing the server and listing its tools — the
+        # cold start #287 is about — not the per-request deadline (opencode's own
+        # execution default is 12 h). It is declared as the CONNECT key, so
+        # `timeout_entry_keys` emits it from the connect budget with no new
+        # capability and no wrong-magnitude mapping.
         "timeout_key": None,
-        "connect_timeout_key": None,
-        "timeout_unit": "seconds",
+        "connect_timeout_key": "timeout",
+        "timeout_unit": "milliseconds",
         "user_env_dir": None,
         "project_scope": True,
     },
@@ -539,8 +548,11 @@ def timeout_entry_keys(agent: AgentName, timeouts: Timeouts) -> dict[str, Any]:
     single-sourced like env forwarding: ``timeout_key`` holds the per-request
     deadline, ``connect_timeout_key`` the cold-start one, and ``timeout_unit``
     converts seconds to milliseconds where the host expects them. An agent
-    declaring neither key (opencode) gets an empty mapping — nothing is written,
-    and the caller names the manual key instead.
+    declaring neither key gets an empty mapping — nothing is written, and the
+    caller names it on stderr instead of inventing a deadline. No registered
+    agent is in that state today (opencode was, until issue #320); the branch
+    keeps its force for any future host whose schema accepts no timeout key
+    (MCP-REG-05).
 
     Args:
         agent: Target agent.
@@ -1059,12 +1071,13 @@ def dropped_timeout_note(agent: AgentName, timeouts: Timeouts | None) -> str | N
     """Return the stderr note for an agent whose entry accepts no timeout key.
 
     Informational, and the same contract as the env-drop warning: it never
-    changes the exit code. Only opencode declares no timeout key today, because
-    its published schema drifted between releases (a positive integer in the
-    zod ``ConfigMCP.Local`` shape, a nested ``{startup,catalog,execution}``
-    object in milliseconds in the current docs) and writing the wrong shape
-    risks failing validation of the whole ``mcp`` block. The note names that,
-    so the user does not read a clean ``OK`` as "the deadline is configured".
+    changes the exit code. The guard is "declares NEITHER key", which is what
+    MCP-REG-05 actually says — checking only ``timeout_key`` would print "carries
+    no timeout key" beside the key opencode now receives (issue #320).
+
+    No registered agent declares neither key today (opencode was the example
+    until #320 gave it the scalar its schema accepts); the note keeps its force
+    for any future host whose entry schema accepts no timeout at all.
 
     Args:
         agent: Target agent.
@@ -1077,12 +1090,12 @@ def dropped_timeout_note(agent: AgentName, timeouts: Timeouts | None) -> str | N
     if timeouts is None:
         return None
     spec = ADAPTERS.get(agent)
-    if spec is None or spec["timeout_key"] is not None:
+    if spec is None or spec["timeout_key"] is not None or spec["connect_timeout_key"] is not None:
         return None
     return (
-        f"  !  {agent} registration carries no timeout key: its schema declares "
-        "`timeout` differently across releases, so writing it could fail validation "
-        "of the whole mcp block. Set it manually — see README."
+        f"  !  {agent} registration carries no timeout key: its schema accepts none, "
+        "so no deadline could be written. Configure one manually if the host "
+        "offers it — see README."
     )
 
 

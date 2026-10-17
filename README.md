@@ -748,7 +748,7 @@ Per-agent locations and shapes:
   | hermes | `timeout` | `connect_timeout` | seconds | 300 / 60 |
   | codex | `tool_timeout_sec` | `startup_timeout_sec` | seconds | 60 / 10 |
   | gemini | `timeout` | — (same key covers discovery) | **milliseconds** | 600 000 |
-  | opencode | — (none written) | — | — | 30 000 startup / 12 h execution |
+  | opencode | — | `timeout` | **milliseconds** | 5 000 for the tool fetch; 30 000 in code |
 
   Defaults come from `[tool.sofer] mcp_request_timeout_seconds` (900) and
   `mcp_connect_timeout_seconds` (120); override per invocation with `--timeout` / `--connect-timeout`,
@@ -759,10 +759,16 @@ Per-agent locations and shapes:
   the flag clears only the second, so naming it there would send the user to a flag that changes
   nothing. The trade-off itself is not avoidable by doing both — writing the timeouts after a native
   write would go through sofer's writer anyway, and for codex that is a whole-document `tomli_w`
-  rewrite, which is exactly what `--no-timeout` avoids. An agent whose entry accepts no timeout is named on
-  stderr: **opencode** declares `timeout` differently across its releases (an integer in its zod
-  schema, a `{startup, catalog, execution}` object in milliseconds in its current docs), so writing
-  the wrong shape could fail validation of the whole `mcp` block; set its `timeout` by hand.
+  rewrite, which is exactly what `--no-timeout` avoids. **opencode** used to be the exception, and is
+  not any more: it receives `timeout` as a single scalar in **milliseconds** carrying the *connect*
+  budget — the shape the schema for the layout this command writes accepts, and the budget that scalar
+  documents (fetching the server's tools, i.e. the cold start that bites). It is never written as the
+  nested object some releases document, which would risk failing validation of the whole `mcp` block
+  for a sub-key name that differs between those releases. A host whose entry accepts no timeout key at
+  all is still named on stderr rather than given an invented one. One thing this does **not** fix, and
+  naming it matters more than the key it fixes: a v2 opencode resolves its servers from
+  `mcp.servers.<name>`, while this command still writes the entry at `mcp.<name>` — a larger defect in
+  the layout, tracked separately.
 - **Long calls reset their own deadline.** Every long tool (`sofer_prepare`, `sofer_codebook_all`,
   `sofer_profile_all`, `sofer_render_all`, `sofer_publish_confirm`) re-announces progress while it
   runs, which is what resets a host's per-request timeout — so a long tool also survives a host whose

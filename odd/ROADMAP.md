@@ -189,7 +189,7 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | 1 | #324 Curation Rationale needs a file | **S** | `2026-10-16-feat-curation-rationale-key` | [`tasks/curation-rationale-key.md`](tasks/curation-rationale-key.md) | **delivered** on `feat/324-curation-rationale-key` |
 | 2 | #322 `sofer mcp doctor` measures the cold start | **M** | `2026-10-16-feat-mcp-doctor` | [`tasks/mcp-doctor.md`](tasks/mcp-doctor.md) | **delivered** on `feat/322-mcp-doctor` (PR pending) |
 | 3 | #323a `sofer_meta_check` (read-only half) | **S/M** | — | — | pending |
-| 4 | #320 opencode receives no timeout key | **M/L** | — | — | pending, **research-gated** |
+| 4 | #320 opencode receives no timeout key | **S** | none (ODD-only) | [`tasks/opencode-timeout.md`](tasks/opencode-timeout.md) | **delivered** on `feat/320-opencode-timeout` — adapter + guard + tests, READMEs and the spec clause; one verification round confirmed the five behavioural claims and refuted the durable-text one, fixed in `60c01c0` |
 | 5 | #323b `sofer_meta_set` (+ the CLI counterpart) | **L** | — | — | pending, **blocked on a design decision** |
 
 **Order of execution, and why it is not the issue order:**
