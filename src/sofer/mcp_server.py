@@ -114,6 +114,7 @@ from .model import DatasetConfig, QualityResult, resolve_doc_path
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
 from .profile import profile as run_profile
+from .publish import _repo_visibility
 from .publish import publish as run_publish
 from .quality import QualityValidator
 from .render import render as run_render
@@ -2322,11 +2323,22 @@ def sofer_auth_status(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file to check publish authorization for")
     ],
+    check_remote: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, also read the target repository's CURRENT visibility from the Hub "
+                "(one read-only call, needs the token). Default false: the preflight stays "
+                "offline and reports only the configured posture."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
-    """Check whether a dataset is ready to publish (token, confidential, approval phrase).
+    """Check whether a dataset is ready to publish (token, posture, approval phrase).
 
-    Side effects: none — read-only probe, no network.
-    Network usage: none.
+    Side effects: none — read-only probe.
+    Network usage: none by default; ``check_remote=true`` makes one read-only
+    Hub call to report the repository's current visibility (issue #338).
 
     ``ok`` reflects publish readiness — config validity AND auth state. A
     config that fails validation or containment checks reports ``ok:False``
@@ -2417,11 +2429,27 @@ def sofer_auth_status(
             and token is not None
             and (not requires_approval_phrase or approval_configured)
         )
+        remote_visibility = "not checked"
+        if check_remote:
+            if token is None:
+                remote_visibility = "unknown: no token"
+            else:
+                try:
+                    observed = _repo_visibility(cfg)
+                    remote_visibility = (
+                        "absent" if observed is None else ("private" if observed else "public")
+                    )
+                except Exception as exc:  # a preflight reports, it never raises
+                    remote_visibility = f"unknown: {exc}"
         return {
             "ok": ok,
             "exit_code": 0 if ok else 1,
             "output": "",
             "token": token_status,
+            "private": cfg.private,
+            "public_reason": cfg.public_reason,
+            "confidentiality_reason": cfg.confidentiality_reason,
+            "remote_visibility": remote_visibility,
             "confidential": cfg.confidential,
             "requires_ack_confidential": requires_ack_confidential,
             "approval_configured": approval_configured,
@@ -3454,6 +3482,19 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "token": {"type": "string"},
                 "confidential": {"type": "boolean"},
+                "private": {"type": "boolean"},
+                "public_reason": {
+                    "type": "string",
+                    "description": "The declared authorization for a public target; empty while the dataset is private.",
+                },
+                "confidentiality_reason": {
+                    "type": "string",
+                    "description": "The declared authorization for an explicit confidential = false; empty otherwise.",
+                },
+                "remote_visibility": {
+                    "type": "string",
+                    "description": '"not checked" by default; with check_remote=true: "private" | "public" | "absent" | "unknown: <reason>" (one read-only Hub call).',
+                },
                 "requires_ack_confidential": {"type": "boolean"},
                 "approval_configured": {"type": "boolean"},
                 "requires_approval_phrase": {"type": "boolean"},

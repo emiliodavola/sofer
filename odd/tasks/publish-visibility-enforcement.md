@@ -60,13 +60,13 @@ report/manifest so it is auditable after the fact."
 | --- | --- | --- | --- | --- |
 | T1 | RED: `private = false` without an authorization reason is refused, naming the missing key | S2 | **done** | RED against the pre-slice code: `AssertionError: []` (the refusal produced no error) and `AttributeError: 'DatasetConfig' object has no attribute 'public_reason'`. GREEN: `TestVisibilityAuthorization` (8 passed) |
 | T2 | RED: `confidential = false` without an authorization reason is refused; the init template writes `confidential = true` | S2, S5 | **done** | RED: `assert 'confidential = true' in …` on the old template, `AttributeError: … 'confidentiality_reason'`, `AssertionError: []` for the explicit-`false` case. GREEN: `TestVisibilityAuthorization` + `TestInitTemplatePosture` (2 passed) |
-| T3 | RED: the publish plan and `sofer_auth_status` print configured + observed visibility + confidential | S3 | pending | — |
-| T4 | RED: publish fails closed when configured and observed visibility diverge on an existing repo | S3 | pending | — |
+| T3 | RED: the publish plan and `sofer_auth_status` print configured + observed visibility + confidential | S3 | **done** | RED: `KeyError: 'private'` (the fields did not exist) and, once they did, the tool's declared `output_schema` **filtered them** until they were declared there too. GREEN: `TestPostureLines` (4) + `TestAuthStatusRemoteVisibility` (6) |
+| T4 | RED: publish fails closed when configured and observed visibility diverge on an existing repo | S3 | **done** | GREEN: `TestTargetPostureGate` (3) — divergence refuses with rc 1 and `upload_folder` is asserted never called; agreement proceeds rc 0; a public config against a private repository is refused too |
 | T5 | RED: `sofer_repo_settings` reads the posture without authorization, and refuses a write without the approval phrase + exact target state | S4 | pending | — |
 | T6 | RED: `sofer_repo_settings` writes via `update_repo_settings`, and fails closed with a named reason when the installed SDK has no such method | S4 | pending | — |
 | T7 | RED: a public target requires its own acknowledgement; `acknowledge_risk` alone no longer reads as public consent | S5 | pending | — |
 | T8 | GREEN: authorization keys (`[dataset].public_reason`, `[meta].confidentiality_reason`), fail-closed validation, template default (D2 revised: no dataclass flip) | S2, S5 | **done** | commit `1385f12`. `declared_dataset_keys` is the presence signal that tells an explicit `false` from a TOML that never mentions visibility; `confidentiality_reason` joined `META_KEYS` so `sofer_meta_set` can write it; the validator warns when no posture is stated. Fixture fallout cleared (46 failures → 0): the shared `conftest` helper and two test-local TOMLs now state the reason |
-| T9 | GREEN: observed visibility in the plan, `auth_status`, and the divergence gate | S3 | pending | — |
+| T9 | GREEN: observed visibility in the plan, `auth_status`, and the divergence gate | S3 | **done** | `_repo_visibility` (fail-closed probe: only not-found answers), `_posture_lines` (the plan block; the dry run says "not read", D8), the gate after the plan print and before staging, `sofer_auth_status(check_remote=...)` carrying `private`/`public_reason`/`confidentiality_reason`/`remote_visibility`. Eight fake-api sites now stub `repo_info` through the shared conftest `repo_info_private` |
 | T10 | GREEN: `sofer_repo_settings` tool + roster/workflow/schema guards + `_PHASED_INSTRUCTIONS` | S4 | pending | — |
 | T11 | GREEN: posture recorded in the publish report and the manifest | S6 | pending | — |
 | T12 | Specs `publish` + `mcp-server` + `metadata`; README + README_ES (rules 7/13); new tool documented in both READMEs | S1-S6 | pending | — |
@@ -106,6 +106,12 @@ report/manifest so it is auditable after the fact."
   overwrite of the target); a public target additionally requires `acknowledge_public`, and the
   confidential flag keeps `acknowledge_confidential`. Renaming the existing parameter would break every
   documented chain for no gain.
+- **D8 — the dry run stays network-free; the observed state lands where the network already is.**
+  `publish --dry-run` is documented and tested as token-free and offline, so it prints the configured
+  posture and says the remote was not read. The observed visibility appears in the **confirm** plan
+  (which inspects the repository anyway) and in `sofer_auth_status(check_remote=true)`, the opt-in
+  preflight a human runs before approving. Making the dry run reach the Hub would have traded a
+  documented property for a line of output.
 
 ## Log
 
@@ -134,3 +140,11 @@ report/manifest so it is auditable after the fact."
   consequence of this change rather than a line in the issue, hence its own task row (T14): the tool
   must not be able to produce the state the validator refuses. RED captured first (`2 failed, 3
   passed`), then the guard; one CLI test that opted out had to state its reason.
+- **L6** — third slice: the target-posture surface, and two findings worth keeping. **(a)** The tool's
+  declared `output_schema` **filters** envelope fields it does not declare: the four new keys were
+  silently dropped until they were added there, which is the same "registry + schema + docs move
+  together" class the #323 finding recorded. **(b)** The first version of the no-token test reached the
+  **real Hub** through a token stored on this machine and failed with a false "absent"; it now patches
+  `_get_hf_token` and asserts the probe is never called, so the branch is pinned without the network.
+  Added **D8**: the dry run stays network-free, so the observed state lives in the confirm plan and in
+  `sofer_auth_status(check_remote=true)`.

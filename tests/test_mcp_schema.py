@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import call_tool
+from conftest import call_tool, repo_info_private
 from fastmcp import Client
 
 from sofer import config as sofer_config
@@ -498,6 +498,7 @@ class TestHappyPath:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
 
         def _fake_hf_api(*_a, **_kw):

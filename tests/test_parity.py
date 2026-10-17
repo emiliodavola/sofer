@@ -219,7 +219,13 @@ AREAS: list[AreaParity] = [
     AreaParity(
         cli_command=None,
         mcp_tools=("sofer_auth_status",),
-        exempt_params={"config": "dataset config path (same shape as the other tools)"},
+        exempt_params={
+            "config": "dataset config path (same shape as the other tools)",
+            "check_remote": (
+                "MCP-only opt-in: the CLI preflight has no network switch; the agent asks "
+                "for the repository's current visibility explicitly (issue #338)"
+            ),
+        },
         note="sofer_auth_status has no CLI counterpart by design (agent preflight, actor design A)",
     ),
 ]

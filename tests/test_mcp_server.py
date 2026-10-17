@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import PROCESS_TIMEOUT_SECONDS, _make_dataset, call_tool, mcp_payload
+from conftest import (
+    PROCESS_TIMEOUT_SECONDS,
+    _make_dataset,
+    call_tool,
+    mcp_payload,
+    repo_info_private,
+)
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -69,6 +75,7 @@ def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
     """Stub every HF API method publish could reach (offline tests)."""
     monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
     monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: existing or [])
+    monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
     # publish now uses HfApi(token=token) when a token is resolved; keep the
@@ -2943,6 +2950,7 @@ class TestPublishTargetLadder:
             "list_repo_files",
             lambda *a, **kw: calls.append("list_repo_files"),
         )
+        monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(
             publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
         )
@@ -3388,6 +3396,9 @@ class TestHfTokenFallback:
                 def list_repo_files(self, *a, **kw):
                     return []
 
+                def repo_info(self, *a, **kw):
+                    return repo_info_private()
+
                 def upload_folder(self, *a, **kw):
                     return None
 
@@ -3479,6 +3490,7 @@ class TestHfTokenIntegration:
         monkeypatch.setattr(
             publish_mod._api, "list_repo_files", lambda *a, **kw: calls.append("list_repo_files")
         )
+        monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(
             publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
         )
@@ -5242,6 +5254,7 @@ class TestWorkflowRegistryConformance:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
 
         def _fake_hf_api(*_a, **_kw):
@@ -5344,6 +5357,7 @@ class TestPublishCleanup:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
 
         def _fake_hf_api(*_a, **_kw):
@@ -5927,3 +5941,117 @@ class TestMetadataStepInTheAdvertisedChain:
         """The metadata step must not have replaced a phase."""
         for phase in ("Phase 0 Bootstrap", "Phase 1 Build", "Phase 2 Publish"):
             assert phase in ms._PHASED_INSTRUCTIONS
+
+
+class TestAuthStatusRemoteVisibility:
+    """#338/S3: the preflight reports the configured posture, and the repository's
+    current visibility only when asked — the default stays offline."""
+
+    @staticmethod
+    def _raise_network(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("the default preflight must not read the remote")
+
+    def test_default_reports_the_configured_posture_and_reads_nothing(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setattr(ms, "_repo_visibility", self._raise_network)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+
+        assert envelope["private"] is True
+        assert envelope["public_reason"] == ""
+        assert envelope["confidential"] is False
+        assert envelope["confidentiality_reason"] == "test fixture: nothing sensitive"
+        assert envelope["remote_visibility"] == "not checked"
+
+    def test_check_remote_reports_a_public_repository(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: False)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "public"
+
+    def test_check_remote_reports_a_private_repository(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "private"
+
+    def test_check_remote_reports_an_absent_repository(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: None)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "absent"
+
+    def test_check_remote_without_a_token_says_unknown(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """No token is a stated reason, not a silent skip — and nothing is read."""
+        _make_dataset(tmp_path)
+        # Patch the token source, not just the env: a developer machine may hold a
+        # stored token, and this branch must not depend on that.
+        monkeypatch.setattr(ms, "_get_hf_token", lambda: None)
+        monkeypatch.setattr(ms, "_repo_visibility", self._raise_network)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "unknown: no token"
+
+    def test_check_remote_failure_is_reported_not_raised(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """A preflight reports; it never turns an unreachable Hub into a crash."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+        def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("hub down")
+
+        monkeypatch.setattr(ms, "_repo_visibility", _boom)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "unknown: hub down"

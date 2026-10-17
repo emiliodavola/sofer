@@ -14,12 +14,14 @@ import os
 import shutil as _shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import cast as _cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from conftest import repo_info_private
 
 from sofer import publish as publish_mod
 from sofer.model import DatasetConfig, FileEntry
@@ -61,6 +63,7 @@ def _mock_hf_api(monkeypatch) -> None:
     """Stub every HF API method publish could reach (offline tests)."""
     monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
     monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+    monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
 
@@ -2368,3 +2371,155 @@ class TestSplitMappingValidationNamesConfigsNext:
 
         _print_split_mapping_validation(["data/a.parquet", "data/b.parquet"])
         assert "name='<config>'" in capsys.readouterr().out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Issue #338 — target posture: configured vs observed, and the divergence gate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _raise_not_found_response() -> None:
+    """Raise ``RepositoryNotFoundError`` with the response object 2.x requires."""
+    import httpx2
+    from huggingface_hub.utils import RepositoryNotFoundError
+
+    request = httpx2.Request("GET", "https://huggingface.co/api/datasets/u/x")
+    response = httpx2.Response(404, request=request)
+    raise RepositoryNotFoundError("not found", response=response)
+
+
+class TestRepoVisibilityProbe:
+    """The read answers only when it knows; otherwise it raises (fail closed)."""
+
+    @staticmethod
+    def _cfg() -> DatasetConfig:
+        return DatasetConfig(name="ds", repo_id="u/ds", files=[])
+
+    def test_private_repository_reads_true(self) -> None:
+        class _Api:
+            def repo_info(self, **_kw: Any) -> Any:
+                return SimpleNamespace(private=True)
+
+        assert publish_mod._repo_visibility(self._cfg(), api=_cast(Any, _Api())) is True
+
+    def test_public_repository_reads_false(self) -> None:
+        class _Api:
+            def repo_info(self, **_kw: Any) -> Any:
+                return SimpleNamespace(private=False)
+
+        assert publish_mod._repo_visibility(self._cfg(), api=_cast(Any, _Api())) is False
+
+    def test_missing_repository_reads_none(self) -> None:
+        class _Api:
+            def repo_info(self, **_kw: Any) -> Any:
+                _raise_not_found_response()
+
+        assert publish_mod._repo_visibility(self._cfg(), api=_cast(Any, _Api())) is None
+
+    def test_unreadable_repository_raises(self) -> None:
+        """Unknown is never 'agrees with the config'."""
+
+        class _Api:
+            def repo_info(self, **_kw: Any) -> Any:
+                raise RuntimeError("hub down")
+
+        with pytest.raises(RuntimeError, match="hub down"):
+            publish_mod._repo_visibility(self._cfg(), api=_cast(Any, _Api()))
+
+    def test_info_without_visibility_raises(self) -> None:
+        class _Api:
+            def repo_info(self, **_kw: Any) -> Any:
+                return SimpleNamespace()
+
+        with pytest.raises(RuntimeError, match="carries no visibility"):
+            publish_mod._repo_visibility(self._cfg(), api=_cast(Any, _Api()))
+
+
+class TestPostureLines:
+    """The plan states the posture it is asking the human to approve."""
+
+    def test_unchecked_read_says_so_and_points_at_the_preflight(self) -> None:
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[])
+        lines = publish_mod._posture_lines(cfg)
+        assert any("configured:   private" in line for line in lines)
+        assert any("not read" in line and "check_remote=true" in line for line in lines)
+
+    def test_absent_repository_is_named(self) -> None:
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", files=[])
+        lines = publish_mod._posture_lines(cfg, observed_private=None, observed_checked=True)
+        assert any("does not exist yet" in line for line in lines)
+
+    def test_public_config_carries_its_reason_and_the_observed_state(self) -> None:
+        cfg = DatasetConfig(
+            name="ds", repo_id="u/ds", files=[], private=False, public_reason="open data mandate"
+        )
+        lines = publish_mod._posture_lines(cfg, observed_private=True, observed_checked=True)
+        assert any("configured:   PUBLIC" in line and "open data mandate" in line for line in lines)
+        assert any("observed:     private" in line for line in lines)
+
+    def test_confidential_opt_out_carries_its_reason(self) -> None:
+        cfg = DatasetConfig(
+            name="ds",
+            repo_id="u/ds",
+            files=[],
+            confidential=False,
+            confidentiality_reason="public statistics",
+        )
+        lines = publish_mod._posture_lines(cfg)
+        assert any("confidential: no" in line and "public statistics" in line for line in lines)
+
+
+class TestTargetPostureGate:
+    """Divergence between the config and the repository refuses the upload."""
+
+    @staticmethod
+    def _dataset(tmp_path: Path, **cfg_kw: Any) -> DatasetConfig:
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        return _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")], **cfg_kw)
+
+    def test_divergence_refuses_before_upload(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """A public repository under a private config is a refusal, not a warning."""
+        from sofer.checks import ValidationReport
+
+        cfg = self._dataset(tmp_path)
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            publish_mod._api, "repo_info", lambda *a, **kw: SimpleNamespace(private=False)
+        )
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "TARGET POSTURE MISMATCH" in out
+        assert "configured: private   observed: public" in out
+
+    def test_agreement_proceeds(self, tmp_path: Path, monkeypatch) -> None:
+        """Configured private + observed private passes the gate (rc 0)."""
+        from sofer.checks import ValidationReport
+
+        cfg = self._dataset(tmp_path)
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        assert rc == 0
+
+    def test_a_public_config_against_a_private_repository_is_refused(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        from sofer.checks import ValidationReport
+
+        cfg = self._dataset(tmp_path, private=False, public_reason="open data mandate")
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "configured: PUBLIC   observed: private" in out

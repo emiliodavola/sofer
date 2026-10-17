@@ -303,6 +303,81 @@ def _inspect_repo(cfg: DatasetConfig, api: HfApi | None = None) -> list[str]:
         return []
 
 
+def _repo_visibility(cfg: DatasetConfig, api: HfApi | None = None) -> bool | None:
+    """Return the repository's current visibility: ``True`` private, ``False`` public.
+
+    Fail-closed in the same shape as :func:`_inspect_repo`: only a
+    :class:`RepositoryNotFoundError` is an answer (``None`` — the repository does
+    not exist yet, so there is no posture to diverge from). Any other failure
+    RAISES, because "unknown" must never be treated as "agrees with the config".
+
+    Args:
+        cfg: Dataset configuration (``repo_id``, ``repo_type``).
+        api: Optional :class:`HfApi` instance (with token); defaults to module ``_api``.
+
+    Returns:
+        ``True`` for a private repository, ``False`` for a public one, ``None``
+        when it does not exist.
+
+    Raises:
+        Exception: Any inspection failure other than
+            :class:`RepositoryNotFoundError`, and a repository whose info carries
+            no visibility at all (fail closed rather than assume).
+    """
+    target_api = api if api is not None else _api
+    try:
+        info = target_api.repo_info(repo_id=cfg.repo_id, repo_type=cfg.repo_type)
+    except RepositoryNotFoundError:
+        return None
+    private = getattr(info, "private", None)
+    if private is None:
+        raise RuntimeError(
+            f"repository info for {cfg.repo_id} carries no visibility — refusing to assume one"
+        )
+    return bool(private)
+
+
+def _posture_lines(
+    cfg: DatasetConfig,
+    observed_private: bool | None = None,
+    observed_checked: bool = False,
+) -> list[str]:
+    """Render the configured and observed delivery posture (issue #338).
+
+    Args:
+        cfg: Dataset configuration carrying the posture and its authorizations.
+        observed_private: The repository's current visibility: ``True`` private,
+            ``False`` public, ``None`` when it does not exist yet.
+        observed_checked: Whether the remote was read at all. ``publish --dry-run``
+            is documented as token-free and network-free, so it reports the
+            configured posture and points at the opt-in preflight instead of
+            pretending the remote agrees.
+
+    Returns:
+        The lines appended to the publish plan.
+    """
+    configured = "private" if cfg.private else "PUBLIC"
+    if not cfg.private and cfg.public_reason:
+        configured += f' (public_reason: "{cfg.public_reason}")'
+    if not observed_checked:
+        observed = (
+            "(not read — the dry run is network-free; sofer_auth_status check_remote=true reads it)"
+        )
+    elif observed_private is None:
+        observed = "(the repository does not exist yet)"
+    else:
+        observed = "private" if observed_private else "public"
+    confidential = "yes" if cfg.confidential else "no"
+    if not cfg.confidential and cfg.confidentiality_reason:
+        confidential += f' (confidentiality_reason: "{cfg.confidentiality_reason}")'
+    return [
+        "  Target posture:",
+        f"    configured:   {configured}",
+        f"    observed:     {observed}",
+        f"    confidential: {confidential}",
+    ]
+
+
 def _repo_diff_summary(
     cfg: DatasetConfig,
     existing_files: list[str],
@@ -310,6 +385,8 @@ def _repo_diff_summary(
     codebook_remotes: list[str] | None = None,
     staging_dir: Path | None = None,
     manifest: PackageManifest | None = None,
+    observed_private: bool | None = None,
+    observed_checked: bool = False,
 ) -> str:
     """Build a human-readable diff of what will be added vs modified.
 
@@ -379,6 +456,12 @@ def _repo_diff_summary(
                     f"    ! MISSING {miss_entry.artifact_type}: {miss_entry.path} "
                     "(rebuild with `prepare --force --all-files`)"
                 )
+
+    # The posture travels with the plan (issue #338): the human approval is a
+    # decision about THIS target, so the target's visibility is never implicit.
+    lines.extend(
+        _posture_lines(cfg, observed_private=observed_private, observed_checked=observed_checked)
+    )
 
     return "\n".join(lines)
 
@@ -849,6 +932,7 @@ def publish(
     try:
         _ensure_repo(cfg, api=api)
         existing_files = _inspect_repo(cfg, api=api)
+        observed_private = _repo_visibility(cfg, api=api)
     except Exception as exc:
         print(f"\n  \u2717  Remote inspection failed: {exc}")
         print("  Publish aborted — remote state unknown, refusing to upload (fail closed).")
@@ -880,9 +964,40 @@ def publish(
             "     Run `sofer prepare --all-files` to generate per-file codebooks first."
         )
 
-    diff = _repo_diff_summary(cfg, existing_files, keep_csv, codebook_remotes, staging_dir=source)
+    diff = _repo_diff_summary(
+        cfg,
+        existing_files,
+        keep_csv,
+        codebook_remotes,
+        staging_dir=source,
+        observed_private=observed_private,
+        observed_checked=True,
+    )
     print(diff)
     print()
+
+    # ── Target posture gate (issue #338, D5): divergence is a refusal ──────
+    # `create_repo(exist_ok=True)` is a no-op on an existing repository, so a
+    # config and a remote can disagree invisibly and permanently. The upload is
+    # what must not happen, so the refusal lives here, before any staging.
+    if observed_private is not None and observed_private != cfg.private:
+        configured = "private" if cfg.private else "PUBLIC"
+        observed = "private" if observed_private else "public"
+        print(f"  \u2717  TARGET POSTURE MISMATCH — refusing to upload: {cfg.repo_id}")
+        print(f"     configured: {configured}   observed: {observed}")
+        if cfg.private:
+            print(
+                "     The repository is PUBLIC while the config declares it private.\n"
+                "     Fix: flip the repository to private on the Hub, or declare what it is\n"
+                "     (`private = false` plus a `public_reason`) before publishing."
+            )
+        else:
+            print(
+                "     The repository is private while the config declares it PUBLIC.\n"
+                "     Fix: make the repository public on the Hub, or keep `private = true`.\n"
+                "     A public target also needs `public_reason` and acknowledge_public=True."
+            )
+        return 1
 
     protected = _check_overwrite_protection(existing_files, force, planned_files=planned)
     if protected_out is not None:

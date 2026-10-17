@@ -27,6 +27,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -288,6 +289,17 @@ class McpStdioServer:
             args=list(self.args),
             cwd=str(self.cwd),
         )
+
+
+#: Minimal stand-in for ``HfApi.repo_info`` in offline tests: a private repository
+#: (issue #338 — the publish gate reads the target's current visibility, so every
+#: fake api must answer ``repo_info`` or the real client is reached).
+_REPO_INFO_PRIVATE = SimpleNamespace(private=True)
+
+
+def repo_info_private(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    """Stub for ``HfApi.repo_info``: a repository that is currently private."""
+    return _REPO_INFO_PRIVATE
 
 
 def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-ds") -> Path:
