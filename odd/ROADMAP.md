@@ -402,10 +402,12 @@ as examples:
   vocabulary (D2); leading-zero columns are auto-forced as a deliberate default change (D3); a residual
   alteration is fatal (D4); `validate` predicts and `prepare` confirms the same finding shape (D5).
 - **#338** — a required reason string per posture change (`public_reason` / `confidentiality_reason`)
-  rather than a boolean (D1); the model default for `confidential` flips to `True`, documented as
-  breaking (D2); the settings write uses `update_repo_settings` with feature detection (D3); reads need
-  no phrase and writes never happen without one (D4); divergence is a refusal (D5); `acknowledge_risk`
-  keeps its name and loses its claim about "public" (D6).
+  rather than a boolean (D1); the confidentiality default changes in the **template**, not in the
+  dataclass — an explicit `false` carries the reason and an absent key is surfaced as a warning (D2,
+  revised while implementing: flipping the dataclass default would re-mark every existing TOML and force
+  `acknowledge_confidential` on every publish); the settings write uses `update_repo_settings` with
+  feature detection (D3); reads need no phrase and writes never happen without one (D4); divergence is a
+  refusal (D5); `acknowledge_risk` keeps its name and loses its claim about "public" (D6).
 
 #### Cost, as measured against this repository's own obligations
 
