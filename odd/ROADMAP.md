@@ -304,3 +304,101 @@ made in prose ("preserving every other key and the file's formatting") had **no 
 compared bytes** — the tests compared bytes only on the no-op and `--dry-run` paths, where nothing is
 written. `tomllib`-level equality passed while the file was rewritten whole on Windows. Any future
 format-preservation claim needs `read_bytes` on a real write, on both chain endings, or it is untested.
+
+---
+
+## v0.8.0 — data fidelity, posture enforcement and scan parity
+
+**Issues:** #337, #338, #339
+**Verified against:** `dev@ec511e7`, working tree clean, no open PRs and no open `openspec/changes/`.
+**Milestone:** none created yet (the v0.6.0 milestone is closed; the v0.7.0 issues were never milestoned).
+**Feature documents:** [`tasks/scan-move-to-raw-mandatory.md`](tasks/scan-move-to-raw-mandatory.md),
+[`tasks/parquet-dtype-control.md`](tasks/parquet-dtype-control.md),
+[`tasks/publish-visibility-enforcement.md`](tasks/publish-visibility-enforcement.md).
+
+All three were filed on 2026-10-17 out of one real corpus run (65 files, 3.2 GB, 66.2 M rows). Every
+claim was checked against the code, not against the issue text, and two of the three were reproduced
+end-to-end before anything was planned. Corrections were applied to all three bodies in place, with the
+evidence appended as a `## Verification` section — the same discipline as the v0.6.0 table above.
+
+### Verification of the reported defects
+
+| Issue | Reproduces | Current-code evidence | Corrections applied |
+| --- | --- | --- | --- |
+| #337 | **yes**, end-to-end | `tmp/verify-337/`: `prepare` prints `[!] VALUE ALTERED: column 'IDDPTO' — e.g. '001' changed after type inference`, then `Errors: 0 / Warnings: 0 / OK All checks passed.` and exits 0; the Parquet reads back `IDDPTO: int64 = [1, 2, 5]`. Detection at `_converters.py:400-405`; the caller at `:513` discards the returned warnings. `grep` over `src/` finds no `column_types`/`ConvertOptions`/`force_string`/`as_string`. #12 is CLOSED with its checklist unchecked, and `openspec/specs/parquet-conversion/spec.md` §7.2 documents the gap as a limitation instead. | 2 refinements: the emission is at `:406-407` (not `:400-405`), and the grep scope is `src/`, not "the installed package". |
+| #339 | **yes**, at helper level | `tmp/verify-339/repro.py`: the default run leaves `raw/` empty and registers `['cache/A.csv', 'cache/B.csv']`; the run with the move registers `['cache/A.csv', 'cache/B.csv', 'cache/Labels/B.csv']` — 3 entries for 2 files, with the stale flattened entry never removed. `flatten_first_level` drops a fixed segment (`scanner.py:88-97`); `merge_entries` dedups on the resolved local path and the remote (`:321-338`). `grep -rn "raw_dir\|RAW_DIR" prepare.py checks.py publish.py` → 0 hits. | 1 correction: "both entry points are opt-in" is false — `sofer scan` runs Phase 1 unconditionally (`cli.py:550-593`); only the MCP adapter gates it, which is exactly the parity #152 asked for. 1 new finding: the stale entry is also never removed, so one source is registered under two remotes. |
+| #338 | **yes**, code-level | `private=ds.get("private", True)` (`model.py:561`) with only a bool type-check; no validator mentions it; `META_KEYS` has `confidential` and no `private`; `private` reaches only `create_repo(..., exist_ok=True)` (`publish.py:135`), a no-op on an existing repo; the plan, `auth_status` and the manifest never show visibility. | 2 corrections: (a) the Hub settings route **does** exist — `HfApi.update_repo_settings` → `PUT {endpoint}/api/{repo_type}s/{repo_id}/settings`, present at the declared floor `huggingface-hub>=0.26.0` (verified in a throwaway env) and installed as 2.2.0, so the observed `404 Cannot PATCH/PUT` came from `/api/datasets/<repo_id>` without the `/settings` suffix; (b) `private` defaults `true` in both the template and the model, so "both posture bits default open" is wrong — only `confidential` does. |
+
+### Coupling map
+
+```
+339 ── independent (scanner.py, cli.py scan, mcp_server.py scan tools, checks.py)
+337 ── independent (_converters.py, model.py FileEntry, quality.py, prepare.py, manifest.py)
+338 ── independent (model.py dataset keys, cli.py init template, publish.py, mcp_server.py roster,
+                    checks.py, manifest.py)
+```
+
+Nothing depends on anything else. The only textual overlap is `cli.py`, where 339 edits the `scan`
+handler and its help while 338 edits `_INIT_TEMPLATE` and the publish help — different regions, and the
+two are sequenced anyway because each delivery owns its own branch and its own rule-14 coverage row.
+
+### Order of execution
+
+1. **#339 `fix/339-scan-move-raw-mandatory`** — first because it is the only one of the three with a
+   data-loss path: `cache/` is the shared, deletion-prone staging directory reachable from
+   `publish(clean=True, clean_cache=True)`, and today the registered sources live there while the
+   documented source root stays empty. It also closes the parity gap #152 was accepted against.
+2. **#337 `fix/337-parquet-dtype-control`** — self-contained, and the fix is the unfixed half of a
+   contract accepted two months ago. Highest fidelity value per line changed.
+3. **#338 `feat/338-visibility-enforcement`** — last because it is the largest (a new MCP tool with the
+   roster/workflow/schema guards, a changed default, a config surface, a divergence gate and a report
+   field) and the only one that changes the posture of existing configurations.
+
+### Delivery contract for each issue
+
+One branch off `dev`, one SDD change folder under `openspec/changes/` archived inside its own delivery
+PR (rule 15), one feature document under `odd/tasks/`, work-unit commits, and a PR opened against `dev`
+from `.github/PULL_REQUEST_TEMPLATE.md` with its "SDD artifacts" section naming the archive path. Each
+PR is assigned to `@emiliodavola` and carries `Closes #N`.
+
+| Order | Issue | Branch | Change folder | Feature doc |
+| --- | --- | --- | --- | --- |
+| 1 | #339 | `fix/339-scan-move-raw-mandatory` | `2026-10-17-fix-scan-move-raw-mandatory` | [`tasks/scan-move-to-raw-mandatory.md`](tasks/scan-move-to-raw-mandatory.md) |
+| 2 | #337 | `fix/337-parquet-dtype-control` | `2026-10-17-fix-parquet-dtype-control` | [`tasks/parquet-dtype-control.md`](tasks/parquet-dtype-control.md) |
+| 3 | #338 | `feat/338-visibility-enforcement` | `2026-10-17-feat-visibility-enforcement` | [`tasks/publish-visibility-enforcement.md`](tasks/publish-visibility-enforcement.md) |
+
+### Decisions taken in this batch
+
+Recorded in each feature document and reversible at review, not raised as blocking questions — the
+issues themselves name the intended behaviour, and the open parts are surface details their text offers
+as examples:
+
+- **#339** — `move_loose` is removed rather than defaulted (D1); the move is previewable, never
+  promptable, on the MCP channel (D2); the registration key becomes `raw/`-relative instead of "drop the
+  first segment" (D3); the `cache/`-only check refuses and names the repair instead of rewriting the
+  TOML (D4); legacy duplicate entries are reported, not mutated (D5).
+- **#337** — `column_types` lives on `[[file]]` as an inline table (D1) with a `"string"`-only
+  vocabulary (D2); leading-zero columns are auto-forced as a deliberate default change (D3); a residual
+  alteration is fatal (D4); `validate` predicts and `prepare` confirms the same finding shape (D5).
+- **#338** — a required reason string per posture change (`public_reason` / `confidentiality_reason`)
+  rather than a boolean (D1); the model default for `confidential` flips to `True`, documented as
+  breaking (D2); the settings write uses `update_repo_settings` with feature detection (D3); reads need
+  no phrase and writes never happen without one (D4); divergence is a refusal (D5); `acknowledge_risk`
+  keeps its name and loses its claim about "public" (D6).
+
+### Cost, as measured against this repository's own obligations
+
+| Issue | Dominated by |
+| --- | --- |
+| #339 | `scanner.py` and `cli.py` are both rule-14 100.00% files; a new enforcement check that must not fire on the layout the CLI already produces; spec deltas in `scan`; the duplicate-report path |
+| #337 | the pyarrow `ConvertOptions` threading plus a leading-zero probe that must not re-read the corpus twice; a new finding that appears in `validate`, `prepare` and the manifest; `prepare.py` is a rule-14 file; a spec that currently *documents the gap* has to become a requirement |
+| #338 | the new `sofer_repo_settings` tool (roster count, `WORKFLOW_METADATA`, `_PHASED_INSTRUCTIONS`, schema/parity guards, both READMEs) plus a changed default; `publish.py` and `cli.py` are both rule-14 files |
+
+### Not in this batch
+
+- The corpus-side consequence of #337 (the `NOMPROV` cross-file type mismatch) is a *symptom* of the same
+  inference, not a second defect: the `cross_file_types` check already reports it, and it disappears once
+  the codes are forced to string. No separate issue.
+- A migration or repair command for configs already carrying duplicate `[[file]]` entries is **not** part
+  of #339 (D5): the fix stops creating them and reports them, and rewriting a generated config is a
+  separate change with its own risk.
