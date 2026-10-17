@@ -2,6 +2,7 @@
 
 import csv
 from pathlib import Path
+from typing import Any
 
 from sofer import config
 from sofer.checks import DatasetValidator, meta_placeholder_warnings
@@ -412,3 +413,49 @@ class TestCacheOnlyRegistrationGate:
         (tmp_path / "raw" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
         report = DatasetValidator(self._cfg(tmp_path, "raw/x.csv")).run_all()
         assert not any("disposable" in e for e in report.errors), report.errors
+
+
+# ── Column value parity warning (#337) ────────────────────────────────────────
+
+
+class TestColumnValueParityWarning:
+    """validate names a code column before prepare converts it."""
+
+    def _cfg(self, tmp_path: Path, remote: str, **entry_kw: Any) -> DatasetConfig:
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path(remote), remote=remote, **entry_kw)],
+        )
+        cfg._base_dir = tmp_path
+        return cfg
+
+    def test_zero_padded_code_column_is_reported(self, tmp_path: Path) -> None:
+        """A code column is named, with the declaration that makes it explicit."""
+        (tmp_path / "DPTO.csv").write_text(
+            "IDDPTO;NOMDPTO\n001;Amazonas\n02;Antioquia\n", encoding="utf-8"
+        )
+        report = DatasetValidator(self._cfg(tmp_path, "DPTO.csv")).run_all()
+        assert report.errors == [], report.errors
+        assert any(
+            "column 'IDDPTO'" in w and 'column_types = { IDDPTO = "string" }' in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_declared_column_is_not_reported(self, tmp_path: Path) -> None:
+        """The operator already said what they want."""
+        (tmp_path / "DPTO.csv").write_text("IDDPTO\n001\n", encoding="utf-8")
+        cfg = self._cfg(tmp_path, "DPTO.csv", column_types={"IDDPTO": "string"})
+        report = DatasetValidator(cfg).run_all()
+        assert not any("zero-padded" in w for w in report.warnings), report.warnings
+
+    def test_plain_numeric_column_is_not_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "plain.csv").write_text("a\n1\n2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "plain.csv")).run_all()
+        assert not any("zero-padded" in w for w in report.warnings), report.warnings
+
+    def test_missing_source_is_left_to_the_existence_check(self, tmp_path: Path) -> None:
+        """No duplicate complaint: a missing file is a single error."""
+        report = DatasetValidator(self._cfg(tmp_path, "gone.csv")).run_all()
+        assert any("Missing" in e for e in report.errors)
+        assert not any("zero-padded" in w for w in report.warnings), report.warnings

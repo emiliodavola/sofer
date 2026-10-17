@@ -250,6 +250,43 @@ class DatasetValidator:
                 f"{config.RAW_DIR}/ holds the source, or delete the stale [[file]] entry."
             )
 
+    def _check_column_value_parity(self) -> None:
+        """Warn about columns a Parquet conversion would change (issue #337).
+
+        A zero-padded code column (``"001"``, ``"02"``) is stored as an integer
+        by pyarrow's inference and the source form is lost. ``prepare`` protects
+        those columns automatically and fails when anything still changes; this
+        check reads only the delimited source (bounded by
+        :data:`sofer.config.LEADING_ZERO_PROBE_ROWS`) and names the exact
+        declaration, so the decision is visible *before* the conversion runs.
+
+        A column already covered by an explicit ``column_types`` entry is not
+        reported: the operator has said what they want.
+        """
+        from ._converters import DELIMITED_TEXT_SUFFIXES, _resolve_csv_dialect, leading_zero_columns
+
+        base = self.cfg._base_dir if self.cfg._base_dir else Path.cwd()
+        for entry in self.cfg.files:
+            if entry.recursive or not entry.convert_to_parquet:
+                continue
+            if Path(entry.remote).suffix.lower() not in DELIMITED_TEXT_SUFFIXES:
+                continue
+            resolved = entry.resolve(base)
+            if not resolved.exists():
+                continue  # _check_files_exist already reports a missing source
+            try:
+                delimiter, encoding = _resolve_csv_dialect(resolved, self.cfg)
+            except Exception:
+                continue  # unreadable file: the conversion path reports it
+            for column in leading_zero_columns(resolved, delimiter, encoding):
+                if column in entry.column_types:
+                    continue
+                self.report.warnings.append(
+                    f"{entry.remote}: column '{column}' carries zero-padded codes — a numeric "
+                    "conversion would drop them; prepare forces string dtype (declare "
+                    f'column_types = {{ {column} = "string" }} to be explicit).'
+                )
+
     def _check_min_files(self) -> None:
         """Fail if fewer file entries than configured."""
         if len(self.cfg.files) < self.cfg.min_files:
@@ -317,6 +354,7 @@ class DatasetValidator:
         # disposable cache/ with no raw/ source is one cleanup away from losing
         # its only copy, so it is an error, not a warning.
         self._check_cache_only_registrations()
+        self._check_column_value_parity()
         self._check_min_files()
         self._check_total_size()
         self._check_csv_columns()
