@@ -611,12 +611,13 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 17 tool callables (`sofer_validate`, `sofer_meta_check`,
+The server exposes 18 tool callables (`sofer_validate`, `sofer_meta_check`,
 `sofer_meta_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`, `sofer_report_failure`), 4 resources (`sofer://dataset/{config}`,
+`sofer_auth_status`, `sofer_repo_settings`,
+`sofer_report_failure`), 4 resources (`sofer://dataset/{config}`,
 `sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`, and the
 static `sofer://status`), and 3 prompts (`prepare_dataset`,
 `assess_dataset`, `finalize_and_publish`). No remote/streamable-http
@@ -645,7 +646,8 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 
 - **Phase 0** `init→scan` is REQUIRED for greenfield (no `.toml` or empty `[[file]]`), optional otherwise. Build assumes `[[file]]` entries exist.
 - Each tool lists `Requires:` and `Next:` so `tools/list` alone teaches the order; server `instructions` is the single source for the phased diagram and the UNTRUSTED disclaimer.
-- `sofer_auth_status` is the preflight: checks `token`/`confidential`/`approval_phrase` without network.
+- `sofer_auth_status` is the preflight: checks `token`/`confidential`/`approval_phrase` without network, and reports the configured visibility; `check_remote=true` adds the repository's *current* visibility (one read-only call).
+- `sofer_repo_settings` reads the same posture and can set the target visibility; a write needs the approval phrase **and** the exact state (`private=true|false`). A publish whose configured visibility differs from the repository's is refused.
 
 | Step | Tool | Key args | When to use |
 | ------ | ------ | ---------- | ------------- |
@@ -662,7 +664,8 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 | 5b | `sofer_render_all` | `config`, `output_dir` | Phase 1 step 5 batch (`cache/renders/`); requires `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
 | 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval. |
-| * | `sofer_auth_status` | `config` | Preflight without publish; `readOnlyHint:true`. |
+| * | `sofer_auth_status` | `config`, `check_remote` | Preflight without publish; reports the configured visibility, and the repository's current one with `check_remote=true`; `readOnlyHint:true`. |
+| * | `sofer_repo_settings` | `config`, `private`, `approval_phrase`, `dry_run` | Read the target repository's visibility and posture; `private` + `approval_phrase` sets the visibility (needs a token). `openWorldHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Single-file codebook. |
 | * | `sofer_report_failure` | `error`, `command`, `trace`, `confirm`, `force` | Prepare a confidential failure report and (only with `confirm=true`) file it via `gh`; searches open issues for duplicates first. `openWorldHint:true`. |
 

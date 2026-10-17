@@ -479,11 +479,12 @@ class TestToolRoster:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_repo_settings",
             "sofer_report_failure",
         }
     )
 
-    def test_exactly_seventeen_callables(self, server):
+    def test_exactly_eighteen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -714,7 +715,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 17, [t.name for t in tools]
+        assert len(tools) == 18, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -901,7 +902,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 17
+                    assert len(tools.tools) == 18
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -4883,9 +4884,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 17 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 18 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_seventeen(self, tmp_path):
+    def test_tool_roster_still_eighteen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4894,7 +4895,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 17
+        assert len(names) == 18
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):
@@ -6055,3 +6056,217 @@ class TestAuthStatusRemoteVisibility:
         ).data
 
         assert envelope["remote_visibility"] == "unknown: hub down"
+
+
+class TestRepoSettingsTool:
+    """#338/S4: reading the posture is free; writing it needs explicit authorization."""
+
+    @staticmethod
+    def _config(tmp_path: Path) -> str:
+        return str(tmp_path / "dataset.toml")
+
+    @staticmethod
+    def _recording_api(calls: list[dict[str, Any]], state: dict[str, bool]) -> type:
+        """A stand-in HfApi whose write records itself and flips *state*."""
+
+        class _Api:
+            def __init__(self, token: str | None = None) -> None:
+                self.token = token
+
+            def update_repo_settings(self, **kw: Any) -> None:
+                calls.append(kw)
+                state["private"] = bool(kw["private"])
+
+        return _Api
+
+    def test_read_reports_the_configured_and_the_remote_posture(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: False)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_repo_settings", {"config": self._config(tmp_path)}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["private"] is True
+        assert envelope["target_private"] is False
+        assert envelope["remote_visibility"] == "public"
+        assert envelope["changed"] is False
+        assert envelope["would_change"] is False
+
+    def test_read_without_a_token_says_unknown(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setattr(ms, "_get_hf_token", lambda: None)
+        monkeypatch.setattr(
+            ms,
+            "_repo_visibility",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not read")),
+        )
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_repo_settings", {"config": self._config(tmp_path)}).data
+
+        assert envelope["remote_visibility"] == "unknown: no token"
+        assert envelope["target_private"] is None
+
+    def test_dry_run_predicts_the_change_and_writes_nothing(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        import huggingface_hub
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", self._recording_api(calls, {"private": True}))
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "dry_run": True},
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["would_change"] is True
+        assert envelope["changed"] is False
+        assert calls == [], "a dry run must not write"
+
+    def test_write_without_the_phrase_is_refused(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        import huggingface_hub
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", self._recording_api(calls, {"private": True}))
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server, "sofer_repo_settings", {"config": self._config(tmp_path), "private": False}
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_APPROVAL_REQUIRED"
+        assert envelope["hints"] == {"approval_phrase": "<from human>"}
+        assert calls == [], "a refusal must not write"
+
+    def test_write_with_the_phrase_sets_the_visibility(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        import huggingface_hub
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        state = {"private": True}
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: state["private"])
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", self._recording_api(calls, state))
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert calls and calls[0]["private"] is False
+        assert calls[0]["repo_type"] == "dataset"
+        assert envelope["remote_visibility"] == "public"
+        assert envelope["changed"] is True
+        # The config still declares private, and the next publish refuses that.
+        assert envelope["diverges_from_config"] is True
+
+    def test_write_is_refused_when_the_sdk_lacks_the_method(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Fail closed naming the requirement, never an obscure AttributeError."""
+        import huggingface_hub
+
+        class _LegacyApi:
+            def __init__(self, token: str | None = None) -> None:
+                self.token = token
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        monkeypatch.setattr(huggingface_hub, "HfApi", _LegacyApi)
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_UNSUPPORTED"
+        assert "update_repo_settings" in envelope["message"]
+
+    def test_write_failure_is_reported(self, tmp_path, monkeypatch, restore_tool_config) -> None:
+        import huggingface_hub
+
+        class _BoomApi:
+            def __init__(self, token: str | None = None) -> None:
+                self.token = token
+
+            def update_repo_settings(self, **_kw: Any) -> None:
+                raise RuntimeError("hub refused")
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        monkeypatch.setattr(huggingface_hub, "HfApi", _BoomApi)
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_WRITE_FAILED"
+        assert "hub refused" in envelope["message"]
+
+    def test_write_without_a_token_is_refused(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setattr(ms, "_get_hf_token", lambda: None)
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_TOKEN_REQUIRED"
+
+    def test_write_is_refused_when_no_phrase_is_configured(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Without a server phrase there is no human gate, so the write is refused."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        server = build_server(root=tmp_path)  # no approval phrase configured
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "anything"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_APPROVAL_NOT_CONFIGURED"
+        assert envelope["hints"] == {"action": "configure_approval_phrase"}

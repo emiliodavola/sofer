@@ -82,9 +82,9 @@ def _schema_description(schema: Any) -> str:
 
 
 class TestToolCount:
-    def test_seventeen_tools(self, tmp_path: Path):
+    def test_eighteen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 17, sorted(tools.keys())
+        assert len(tools) == 18, sorted(tools.keys())
         expected = {
             "sofer_validate",
             "sofer_meta_check",
@@ -102,6 +102,7 @@ class TestToolCount:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_repo_settings",
             "sofer_report_failure",
         }
         assert set(tools.keys()) == expected
@@ -267,6 +268,7 @@ class TestAnnotations:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_meta_set",
+            "sofer_repo_settings",
             "sofer_report_failure",
         }
     )
@@ -276,8 +278,8 @@ class TestAnnotations:
 
         Every tool that writes files (codebooks, metadata profiles, README
         renders, scan_apply registration, init scaffolding, prepare, publish,
-        meta_set) must report readOnlyHint False so agents treat it as
-        side-effecting. The roster partition covers all 17 tools.
+        meta_set, repo_settings) must report readOnlyHint False so agents treat it as
+        side-effecting. The roster partition covers all 18 tools.
         """
         tools = _tools_dict(tmp_path)
         assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS

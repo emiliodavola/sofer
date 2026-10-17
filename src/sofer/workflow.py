@@ -410,6 +410,13 @@ _WORKFLOW_METADATA = {
     "sofer_publish_confirm": WorkflowMetadata(
         "sofer_publish_confirm", PHASE_PUBLISH, ("human approval",), "delivery"
     ),
+    "sofer_repo_settings": WorkflowMetadata(
+        "sofer_repo_settings",
+        PHASE_PUBLISH,
+        ("canonical config_path",),
+        "delivery",
+        WorkflowTemplate("sofer_auth_status", {"config": "<config_path>"}),
+    ),
     "sofer_report_failure": WorkflowMetadata(
         "sofer_report_failure",
         PHASE_TRIAGE,
@@ -438,6 +445,7 @@ WORKFLOW_BRANCHES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "triage": ("sofer_codebook", "sofer_profile", "sofer_render"),
         "delivery": (
             "sofer_auth_status",
+            "sofer_repo_settings",
             "sofer_publish(dry_run=true)",
             "STOP human approval",
             "sofer_publish_confirm",
