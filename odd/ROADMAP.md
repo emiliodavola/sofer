@@ -4,11 +4,13 @@
 
 **Milestone:** [v0.6.0 — agent surface & card completeness](https://github.com/emiliodavola/sofer/milestone/1)
 **Issues:** #287, #288, #291, #296, #303, #306
-**Verified against:** `dev@6786ba1`, working tree clean, no open PRs and no open `openspec/changes/`.
+**Verified against:** `dev@6786ba1` for the six issues of record; every follow-up batch below carries its own
+`Verified against` line.
 
-This file is the plan of record for the milestone. Each phase is its own SDD change on its own
-branch, archived inside its own delivery PR (AGENTS.md rule 15). The per-phase feature documents
-live under `odd/tasks/` and carry the task list, the decisions and the commit evidence.
+This file is the plan of record **and the delivery record** for the `v0.6.0` line — the six issues below
+plus every follow-up batch filed against that line, which stays where it is. Each phase or batch is its
+own SDD change on its own branch, archived inside its own delivery PR (AGENTS.md rule 15). The per-phase
+feature documents live under `odd/tasks/` and carry the task list, the decisions and the commit evidence.
 
 ### Verification of the reported defects
 
@@ -112,10 +114,10 @@ risk, parallelizable) → Fase 3 → Fase 4.
 | D3 | #288: should the placeholder gate `warn` or `fail`? | `warn`. A `fail` breaks every existing config that still carries a placeholder, which is a contract change, not a fix. |
 | D4 | #306: is 20 M rows honest enough, and on which machine does the run happen? | 20 M rows plus one repetition with the knobs lowered, on the 65 GB host named in #290. |
 
-All six phases above are delivered and archived. The nine issues filed on 2026-10-16, the day this
-milestone closed, are the next batch.
+All six phases above are delivered and archived. The follow-up batches below were filed against this same
+line and are recorded here as they land, each with its own `Verified against` and delivery PR(s).
 
-## v0.7.0 — follow-up defects from the v0.6.0 batch
+### Follow-up batch, 2026-10-16 — nine defects and chores
 
 **Issues:** #316, #317, #318, #319, #320, #321, #322, #323, #324
 **Verified against:** `dev@eaf56f5`, working tree clean, no open PRs and no open `openspec/changes/`.
@@ -130,7 +132,7 @@ acts on `$CODEX_HOME` while the adapter resolves `~/.codex`, so "delegate then p
 different file than the native writer — the #274 defect class, still live for codex). The four remaining
 `type:feature` issues (#320, #322, #323, #324) were checked too and every premise still holds.
 
-### Batch A — bug/chore — **delivered**
+#### Batch A — bug/chore — **delivered**
 
 | ID | Issue | Delivered in | Evidence |
 | --- | --- | --- | --- |
@@ -151,7 +153,7 @@ rows for work already done. `chore/sdd-close-v0.7.0-record` closes it; each arch
 "Late archive" section recording the miss, its cause and the remedy, because that record is the only thing
 a future reader has.
 
-### Finding raised by this batch (not in any issue)
+#### Finding raised by Batch A (not in any issue)
 
 The end-to-end measurement T5 produced answers #317 item 1 in a way that also **falsifies a sentence the
 merged `data-quality` spec currently carries**. The peak does not move across a 100× range of
@@ -164,18 +166,18 @@ constant. Instrumenting the two phases separately places the whole size-proporti
 its spec sentence is corrected in this batch, and the fix is proposed as its own issue — a `src/sofer/`
 change with data-path consequences does not ride along on a chore.
 
-### Order of execution
+#### Order of execution
 
 T1 (a live defect a user reads three times) → T2 and T3 (one-line-of-substance chores) → T4 (unblocks
 real Windows evidence) → T5 → T6 → T7 (blocked on a maintainer decision).
 
-### Decision required from the maintainer
+#### Decision recorded for the maintainer
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
 | D5 | #321: delegate natively and then patch the timeout keys into the same file (the issue's option 1), or keep the decline and make `--no-timeout` louder (option 3)? | **Decided: option 3, made honest** — keep the decline, and name the trade-off at the point a user meets it. Option 1 was rejected *after measuring*, not as a preference: `atomic_write` rewrites the whole document for TOML and JSON while only YAML splices, and `merge()` replaces the `sofer` entry wholesale, so "delegate then patch" produces the same document as the direct file edit — a `subprocess` and an extra `.bak` for nothing, with the claimed comment preservation undelivered. The prerequisite this row predicted was real and shipped anyway, as #325. |
 
-### Batch B — the four features (#320, #322, #323, #324) — **in progress**
+#### Batch B — the four features (#320, #322, #323, #324) — **delivered**
 
 The four `type:feature` issues Batch A explicitly left out of its bug/chore scope. Each is its own
 change on its own branch, with its own feature document under `odd/tasks/`.
@@ -249,7 +251,7 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | #320 | small once the research landed: one adapter entry, one guard in `dropped_timeout_note`, the shape assertions the issue asks for, MCP-REG-05 and the READMEs |
 | #334 | the cheapest delivery of the batch — a test, a spec clause and the README pair, with **no code change**. Its cost sat entirely in the research that made "no code change" an answer instead of a guess |
 
-### Follow-up raised by #320 and closed here — issue #334, size **S**
+#### Follow-up raised by #320 and closed here — issue #334, size **S**
 
 `odd/tasks/opencode-timeout.md` D6/L4 left the *layout* half out of #320 and filed it as
 [#334](https://github.com/emiliodavola/sofer/issues/334), whose first task was to **verify** it ("this is
@@ -273,7 +275,7 @@ reasoning from the tool's newest docs. #334's own table listed the v2 *schema* (
 is the one neither source pointed at. The same shape of mistake as the `verify:` rows rule 6 warns about:
 the cited evidence class was not the one that carries the claim.
 
-### Finding raised by Batch B (not in any issue)
+#### Finding raised by Batch B (not in any issue)
 
 `sofer mcp doctor` measured this machine's cold start at **1874 ms and 1718 ms** (two runs, warm page
 cache) while `README.md` and `mcp-registration` MCP-REG-05 state the **16-32 s** figure as *measured
@@ -291,7 +293,7 @@ in its own delivery; #320 amends the same clause again on its own branch, which 
 happened — not one shared change folder. The clause's "an agent whose entry schema accepts no timeout key"
 sentence stays: it keeps its force for any future host, even though opencode stops being its example.
 
-### Finding raised by #323 (not in the issue)
+#### Finding raised by #323 (not in the issue)
 
 `_PHASED_INSTRUCTIONS` is a tool-visible contract, not documentation: `tests/test_mcp_server.py` asserts on
 its substrings, so "the metadata step" cannot exist in prose alone without also existing in the registry
@@ -304,3 +306,122 @@ made in prose ("preserving every other key and the file's formatting") had **no 
 compared bytes** — the tests compared bytes only on the no-op and `--dry-run` paths, where nothing is
 written. `tomllib`-level equality passed while the file was rewritten whole on Windows. Any future
 format-preservation claim needs `read_bytes` on a real write, on both chain endings, or it is untested.
+
+---
+
+### Follow-up batch, 2026-10-17 — data fidelity, posture enforcement and scan parity
+
+**Issues:** #337, #338, #339
+**Verified against:** `dev@ec511e7`, working tree clean, no open PRs and no open `openspec/changes/`.
+**Feature documents:** [`tasks/scan-move-to-raw-mandatory.md`](tasks/scan-move-to-raw-mandatory.md),
+[`tasks/parquet-dtype-control.md`](tasks/parquet-dtype-control.md),
+[`tasks/publish-visibility-enforcement.md`](tasks/publish-visibility-enforcement.md).
+
+All three were filed on 2026-10-17 out of one real corpus run (65 files, 3.2 GB, 66.2 M rows). Every
+claim was checked against the code, not against the issue text, and two of the three were reproduced
+end-to-end before anything was planned. Corrections were applied to all three bodies in place, with the
+evidence appended as a `## Verification` section — the same discipline as the v0.6.0 table above.
+
+#### Verification of the reported defects
+
+| Issue | Reproduces | Current-code evidence | Corrections applied |
+| --- | --- | --- | --- |
+| #337 | **yes**, end-to-end | `tmp/verify-337/`: `prepare` prints `[!] VALUE ALTERED: column 'IDDPTO' — e.g. '001' changed after type inference`, then `Errors: 0 / Warnings: 0 / OK All checks passed.` and exits 0; the Parquet reads back `IDDPTO: int64 = [1, 2, 5]`. Detection at `_converters.py:400-405`; the caller at `:513` discards the returned warnings. `grep` over `src/` finds no `column_types`/`ConvertOptions`/`force_string`/`as_string`. #12 is CLOSED with its checklist unchecked, and `openspec/specs/parquet-conversion/spec.md` §7.2 documents the gap as a limitation instead. | 2 refinements: the emission is at `:406-407` (not `:400-405`), and the grep scope is `src/`, not "the installed package". |
+| #339 | **yes**, at helper level | `tmp/verify-339/repro.py`: the default run leaves `raw/` empty and registers `['cache/A.csv', 'cache/B.csv']`; the run with the move registers `['cache/A.csv', 'cache/B.csv', 'cache/Labels/B.csv']` — 3 entries for 2 files, with the stale flattened entry never removed. `flatten_first_level` drops a fixed segment (`scanner.py:88-97`); `merge_entries` dedups on the resolved local path and the remote (`:321-338`). `grep -rn "raw_dir\|RAW_DIR" prepare.py checks.py publish.py` → 0 hits. | 1 correction: "both entry points are opt-in" is false — `sofer scan` runs Phase 1 unconditionally (`cli.py:550-593`); only the MCP adapter gates it, which is exactly the parity #152 asked for. 1 new finding: the stale entry is also never removed, so one source is registered under two remotes. |
+| #338 | **yes**, code-level | `private=ds.get("private", True)` (`model.py:561`) with only a bool type-check; no validator mentions it; `META_KEYS` has `confidential` and no `private`; `private` reaches only `create_repo(..., exist_ok=True)` (`publish.py:135`), a no-op on an existing repo; the plan, `auth_status` and the manifest never show visibility. | 2 corrections: (a) the Hub settings route **does** exist — `HfApi.update_repo_settings` → `PUT {endpoint}/api/{repo_type}s/{repo_id}/settings`, present at the declared floor `huggingface-hub>=0.26.0` (verified in a throwaway env) and installed as 2.2.0, so the observed `404 Cannot PATCH/PUT` came from `/api/datasets/<repo_id>` without the `/settings` suffix; (b) `private` defaults `true` in both the template and the model, so "both posture bits default open" is wrong — only `confidential` does. |
+
+#### Coupling map
+
+```
+339 ── independent (scanner.py, cli.py scan, mcp_server.py scan tools, checks.py)
+337 ── independent (_converters.py, model.py FileEntry, quality.py, prepare.py, manifest.py)
+338 ── independent (model.py dataset keys, cli.py init template, publish.py, mcp_server.py roster,
+                    checks.py, manifest.py)
+```
+
+Nothing depends on anything else. The only textual overlap is `cli.py`, where 339 edits the `scan`
+handler and its help while 338 edits `_INIT_TEMPLATE` and the publish help — different regions, and the
+two are sequenced anyway because each delivery owns its own branch and its own rule-14 coverage row.
+
+#### Order of execution
+
+1. **#339 `fix/339-scan-move-raw-mandatory`** — first because it is the only one of the three with a
+   data-loss path: `cache/` is the shared, deletion-prone staging directory reachable from
+   `publish(clean=True, clean_cache=True)`, and today the registered sources live there while the
+   documented source root stays empty. It also closes the parity gap #152 was accepted against.
+2. **#337 `fix/337-parquet-dtype-control`** — self-contained, and the fix is the unfixed half of a
+   contract accepted two months ago. Highest fidelity value per line changed.
+3. **#338 `feat/338-visibility-enforcement`** — last because it is the largest (a new MCP tool with the
+   roster/workflow/schema guards, a changed default, a config surface, a divergence gate and a report
+   field) and the only one that changes the posture of existing configurations.
+
+#### Delivery contract for each issue
+
+One branch off `dev`, one SDD change folder under `openspec/changes/` archived inside its own delivery
+PR (rule 15), one feature document under `odd/tasks/`, work-unit commits, and a PR opened against `dev`
+from `.github/PULL_REQUEST_TEMPLATE.md` with its "SDD artifacts" section naming the archive path. Each
+PR is assigned to `@emiliodavola` and carries `Closes #N`.
+
+| Order | Issue | Branch | Change folder | Feature doc |
+| --- | --- | --- | --- | --- |
+| 1 | #339 | `fix/339-scan-move-raw-mandatory` | `2026-10-17-fix-scan-move-raw-mandatory` | [`tasks/scan-move-to-raw-mandatory.md`](tasks/scan-move-to-raw-mandatory.md) |
+| 2 | #337 | `fix/337-parquet-dtype-control` | `2026-10-17-fix-parquet-dtype-control` | [`tasks/parquet-dtype-control.md`](tasks/parquet-dtype-control.md) |
+| 3 | #338 | `feat/338-visibility-enforcement` | `2026-10-17-feat-visibility-enforcement` | [`tasks/publish-visibility-enforcement.md`](tasks/publish-visibility-enforcement.md) |
+
+#### Delivery record
+
+| Order | Issue | Delivered in | Evidence |
+| --- | --- | --- | --- |
+| 1 | #339 | PR [#340](https://github.com/emiliodavola/sofer/pull/340) — merged as `a7f631e` | The move into `raw/` is unconditional in both scan tools and every file is keyed relative to the root that owns it; `validate`/`prepare` refuse a `cache/`-only registration with no `raw/` source. Suite `2380 → 2399`, TOTAL coverage 94%, the four rule-14 files at 100.00% |
+| 2 | #337 | PR [#341](https://github.com/emiliodavola/sofer/pull/341) — merged as `e960ee4` | Declared `column_types`, automatic protection of zero-padded codes, and a fail-closed value check that stops `prepare` from shipping an altered value. Suite `2399 → 2426`, TOTAL coverage 94%, the four rule-14 files at 100.00%; CI green 13/13 after two corrections |
+| 3 | #338 | PR [#342](https://github.com/emiliodavola/sofer/pull/342) — open, awaiting review | Declared posture and its authorization keys, the writer guard, the target-posture gate in the publish plan, `sofer_repo_settings` (read free, write with the approval phrase plus the exact state), and a public target's own acknowledgement. Suite `2463 → 2476`, TOTAL coverage 94%, the four rule-14 files at 100.00%. Two corrections rode along: the **MSP-R15** clause that #339 left describing a removed opt-in, and the `acknowledge_risk` wording |
+
+Two corrections landed on #341 between its first push and the merge, both found outside the local gate
+set: the README footnote named a concrete file and column instead of stating the mechanism generally
+(fixed in both READMEs), and `test_zero_padded_codes_survive_prepare` asserted the un-normalized
+artifact name — `prepare` delivers `dpto.parquet` for `remote = "DPTO.csv"`, and a case-insensitive
+Windows filesystem resolved the wrong name to the right file, so only CI could see it.
+
+**Auto-close gap, recorded because it will repeat:** both delivering PR bodies carried `Closes #N`
+inside code spans, and GitHub does not read a closing keyword inside one. The PRs target the default
+branch (`dev`), so that was the whole reason #340 and #341 merged without closing #339 and #337; both
+were closed by hand at delivery. Every later PR in this batch must put the keyword outside the
+backticks.
+
+#### Decisions taken in this batch
+
+Recorded in each feature document and reversible at review, not raised as blocking questions — the
+issues themselves name the intended behaviour, and the open parts are surface details their text offers
+as examples:
+
+- **#339** — `move_loose` is removed rather than defaulted (D1); the move is previewable, never
+  promptable, on the MCP channel (D2); the registration key becomes `raw/`-relative instead of "drop the
+  first segment" (D3); the `cache/`-only check refuses and names the repair instead of rewriting the
+  TOML (D4); legacy duplicate entries are reported, not mutated (D5).
+- **#337** — `column_types` lives on `[[file]]` as an inline table (D1) with a `"string"`-only
+  vocabulary (D2); leading-zero columns are auto-forced as a deliberate default change (D3); a residual
+  alteration is fatal (D4); `validate` predicts and `prepare` confirms the same finding shape (D5).
+- **#338** — a required reason string per posture change (`public_reason` / `confidentiality_reason`)
+  rather than a boolean (D1); the confidentiality default changes in the **template**, not in the
+  dataclass — an explicit `false` carries the reason and an absent key is surfaced as a warning (D2,
+  revised while implementing: flipping the dataclass default would re-mark every existing TOML and force
+  `acknowledge_confidential` on every publish); the settings write uses `update_repo_settings` with
+  feature detection (D3); reads need no phrase and writes never happen without one (D4); divergence is a
+  refusal (D5); `acknowledge_risk` keeps its name and loses its claim about "public" (D6).
+
+#### Cost, as measured against this repository's own obligations
+
+| Issue | Dominated by |
+| --- | --- |
+| #339 | `scanner.py` and `cli.py` are both rule-14 100.00% files; a new enforcement check that must not fire on the layout the CLI already produces; spec deltas in `scan`; the duplicate-report path |
+| #337 | the pyarrow `ConvertOptions` threading plus a leading-zero probe that must not re-read the corpus twice; a new finding that appears in `validate`, `prepare` and the manifest; `prepare.py` is a rule-14 file; a spec that currently *documents the gap* has to become a requirement |
+| #338 | the new `sofer_repo_settings` tool (roster count, `WORKFLOW_METADATA`, `_PHASED_INSTRUCTIONS`, schema/parity guards, both READMEs) plus a changed default; `publish.py` and `cli.py` are both rule-14 files |
+
+#### Not in this batch
+
+- The corpus-side consequence of #337 (the `NOMPROV` cross-file type mismatch) is a *symptom* of the same
+  inference, not a second defect: the `cross_file_types` check already reports it, and it disappears once
+  the codes are forced to string. No separate issue.
+- A migration or repair command for configs already carrying duplicate `[[file]]` entries is **not** part
+  of #339 (D5): the fix stops creating them and reports them, and rewriting a generated config is a
+  separate change with its own risk.

@@ -666,3 +666,114 @@ class TestInferenceStatus:
             "INFERRED",
             "UNKNOWN",
         }
+
+
+# ── [[file]] column_types (issue #337) ────────────────────────────────────────
+
+
+class TestFileColumnTypes:
+    """The declared dtype control: parsed, and its vocabulary is closed."""
+
+    def _toml(self, tmp_path: Path, entry_extra: str) -> Path:
+        p = tmp_path / "ds.toml"
+        p.write_text(
+            '[dataset]\nname = "ds"\nrepo_id = "u/ds"\n\n'
+            f'[[file]]\nlocal = "raw/a.csv"\nremote = "a.csv"\n{entry_extra}',
+            encoding="utf-8",
+        )
+        return p
+
+    def test_declared_column_types_is_parsed(self, tmp_path: Path) -> None:
+        """A table of {column = "string"} reaches the FileEntry."""
+        p = self._toml(tmp_path, 'column_types = { ID = "string", CODE = "string" }\n')
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[0].column_types == {"ID": "string", "CODE": "string"}
+
+    def test_absent_column_types_defaults_to_empty(self, tmp_path: Path) -> None:
+        p = self._toml(tmp_path, "")
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[0].column_types == {}
+
+    def test_unknown_type_is_refused_naming_the_accepted_set(self, tmp_path: Path) -> None:
+        """A typo fails closed instead of silently doing nothing."""
+        p = self._toml(tmp_path, 'column_types = { ID = "int64" }\n')
+        cfg = DatasetConfig.from_toml(p)
+        errors = cfg.validate()
+        assert any("must be one of 'string'" in e and "ID" in e for e in errors), errors
+
+    def test_non_table_shape_is_ignored_with_a_warning(self, tmp_path: Path, capsys) -> None:
+        """A wrong shape never reaches the converter, and says so."""
+        p = self._toml(tmp_path, 'column_types = ["ID"]\n')
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[0].column_types == {}
+        assert "must be a table" in capsys.readouterr().out
+
+
+# ── Visibility and confidentiality authorization (issue #338) ─────────────────
+
+
+class TestVisibilityAuthorization:
+    """A posture change carries its own reason; the absent case is untouched."""
+
+    def _toml(self, tmp_path: Path, dataset_extra: str = "", meta_extra: str = "") -> Path:
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        p = tmp_path / "ds.toml"
+        p.write_text(
+            '[dataset]\nname = "ds"\nrepo_id = "u/ds"\n'
+            + dataset_extra
+            + '\n[meta]\ndescription = "d"\nlicense = "MIT"\nsource = "s"\ntags = ["t"]\n'
+            + meta_extra
+            + '\n[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
+            encoding="utf-8",
+        )
+        return p
+
+    def test_private_false_without_reason_is_refused(self, tmp_path: Path) -> None:
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path, "private = false\n"))
+        errors = cfg.validate()
+        assert any("public_reason" in e for e in errors), errors
+
+    def test_private_false_with_reason_is_accepted(self, tmp_path: Path) -> None:
+        cfg = DatasetConfig.from_toml(
+            self._toml(tmp_path, 'private = false\npublic_reason = "open data mandate"\n')
+        )
+        assert not any("public_reason" in e for e in cfg.validate()), cfg.validate()
+        assert cfg.private is False
+        assert cfg.public_reason == "open data mandate"
+
+    def test_absent_private_keeps_the_closed_default(self, tmp_path: Path) -> None:
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path))
+        assert cfg.private is True
+        assert "private" not in cfg.declared_dataset_keys
+        assert not any("public_reason" in e for e in cfg.validate()), cfg.validate()
+
+    def test_explicit_confidential_false_without_reason_is_refused(self, tmp_path: Path) -> None:
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path, meta_extra="confidential = false\n"))
+        errors = cfg.validate()
+        assert any("confidentiality_reason" in e for e in errors), errors
+
+    def test_explicit_confidential_false_with_reason_is_accepted(self, tmp_path: Path) -> None:
+        cfg = DatasetConfig.from_toml(
+            self._toml(
+                tmp_path,
+                meta_extra='confidential = false\nconfidentiality_reason = "public statistics"\n',
+            )
+        )
+        assert not any("confidentiality_reason" in e for e in cfg.validate()), cfg.validate()
+        assert cfg.confidential is False
+        assert cfg.confidentiality_reason == "public statistics"
+
+    def test_absent_confidential_is_not_an_error(self, tmp_path: Path) -> None:
+        """The absent case is surfaced as a validator warning, not a refusal."""
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path))
+        assert "confidential" not in cfg.declared_meta_keys
+        assert not any("confidentiality_reason" in e for e in cfg.validate()), cfg.validate()
+
+    def test_declared_confidential_true_needs_no_reason(self, tmp_path: Path) -> None:
+        cfg = DatasetConfig.from_toml(self._toml(tmp_path, meta_extra="confidential = true\n"))
+        assert cfg.confidential is True
+        assert not any("confidential" in e for e in cfg.validate()), cfg.validate()
+
+    def test_non_string_reason_is_refused(self) -> None:
+        cfg = DatasetConfig(name="ds", repo_id="u/ds", public_reason=5, files=[])
+        assert any("public_reason must be a string" in e for e in cfg.validate()), cfg.validate()

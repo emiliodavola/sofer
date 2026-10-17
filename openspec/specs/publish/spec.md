@@ -441,3 +441,59 @@ Missing **required** artifacts SHALL block confirm with a stable `error_code` an
 - WHEN `force=false`
 - THEN the delivery SHALL refuse to overwrite
 - AND with `force=true` it SHALL overwrite
+
+### Requirement: The target posture is declared, observed and enforced (PUB-13) — Added 2026-10-17, feat-visibility-enforcement
+
+Repositories are private and confidential by mandate: a configuration MAY open them, but only by saying
+so, and a delivery SHALL NOT proceed while the configuration and the repository disagree about
+visibility.
+
+- `[dataset] private = false` SHALL require a non-empty `public_reason`, and an explicit
+  `[meta] confidential = false` SHALL require a non-empty `confidentiality_reason`; an unauthorized
+  posture change SHALL be refused naming the missing key.
+- The publish plan SHALL print the configured visibility (with its reason when public), the observed
+  visibility and the confidential flag, so the human approval is a decision about a stated target.
+- `sofer_publish_confirm` SHALL refuse, and SHALL NOT upload, when the repository's current visibility
+  differs from the configured one. `create_repo(exist_ok=True)` is a no-op on an existing repository,
+  so this is the only check that can see that divergence.
+- Reading a repository's visibility SHALL NOT require an authorization; changing it SHALL require the
+  approval phrase plus the exact target state.
+- `publish --dry-run` SHALL stay network-free: the observed visibility SHALL be available from
+  `sofer_auth_status(check_remote=true)` and from `sofer_repo_settings` instead.
+
+#### Scenario: A public repository under a private config is refused
+
+- GIVEN `[dataset] private = true` and a repository the Hub reports as public
+- WHEN `sofer_publish_confirm` runs
+- THEN it SHALL refuse with exit code 1, name both states, and upload nothing
+
+#### Scenario: An unauthorized posture change is refused at validation
+
+- GIVEN `[dataset] private = false` with no `public_reason`
+- WHEN the configuration is validated
+- THEN it SHALL report an error naming `public_reason`, and `sofer_init`'s template SHALL NOT need it
+  because the template declares `private = true`
+
+#### Scenario: The plan states the posture it asks to approve
+
+- GIVEN a prepared package and an existing repository
+- WHEN the confirm plan is printed
+- THEN it SHALL carry the configured visibility, the observed one and the confidential flag
+
+#### Scenario: A public target requires its own acknowledgement
+
+- GIVEN `[dataset] private = false` with its `public_reason`, and a human who approved the upload
+- WHEN a publish is confirmed with `acknowledge_risk` but no `acknowledge_public`
+- THEN it SHALL refuse with `PUBLISH_PUBLIC_NOT_ACKD` naming the acknowledgement, and SHALL NOT upload
+
+#### Scenario: The delivery report records the posture
+
+- GIVEN a confirmed publish
+- WHEN the envelope is returned
+- THEN it SHALL carry `posture` with the configured visibility and its reason, the observed repository visibility, and the three acknowledgements (`risk`, `confidential`, `public`)
+
+#### Scenario: An unreadable remote is not an agreement
+
+- GIVEN a `repo_info` call that fails for a reason other than not-found
+- WHEN the publish reads the posture
+- THEN it SHALL abort rather than treat the unknown state as agreement with the config

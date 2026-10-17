@@ -2,6 +2,7 @@
 
 import csv
 from pathlib import Path
+from typing import Any
 
 from sofer import config
 from sofer.checks import DatasetValidator, meta_placeholder_warnings
@@ -359,3 +360,139 @@ class TestMetaPlaceholderGate:
         report = DatasetValidator(cfg).run_all()
         report.print_summary()
         assert "[meta] description" in capsys.readouterr().out
+
+
+# ── Tracked-source gate (#339) ────────────────────────────────────────────────
+
+
+class TestCacheOnlyRegistrationGate:
+    """#339/S4: a cache/-registered file must have a raw/ source behind it."""
+
+    def _cfg(self, tmp_path: Path, local: str, remote: str = "x.csv") -> DatasetConfig:
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path(local), remote=remote)],
+        )
+        cfg._base_dir = tmp_path
+        return cfg
+
+    def test_cache_registration_without_raw_source_is_refused(self, tmp_path: Path) -> None:
+        """local=cache/x.csv with no raw/x.csv is an error naming the repair."""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "cache/x.csv")).run_all()
+        assert report.passed is False
+        assert any(
+            "disposable" in e and "raw/x.csv" in e and "delete the stale" in e
+            for e in report.errors
+        ), report.errors
+
+    def test_cache_registration_with_raw_source_passes(self, tmp_path: Path) -> None:
+        """The layout the fixed scan produces is accepted."""
+        for rel in ("cache/x.csv", "raw/x.csv"):
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "cache/x.csv")).run_all()
+        assert report.errors == [], report.errors
+
+    def test_nested_registration_needs_its_own_raw_source(self, tmp_path: Path) -> None:
+        """cache/Labels/x.csv needs raw/Labels/x.csv, not a root-level raw/x.csv."""
+        (tmp_path / "cache" / "Labels").mkdir(parents=True)
+        (tmp_path / "cache" / "Labels" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "cache/Labels/x.csv")).run_all()
+        assert any("raw/Labels/x.csv" in e for e in report.errors), report.errors
+
+    def test_non_cache_local_keeps_its_own_source_rule(self, tmp_path: Path) -> None:
+        """An entry that does not point into cache/ is not gated by this check."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "raw/x.csv")).run_all()
+        assert not any("disposable" in e for e in report.errors), report.errors
+
+
+# ── Column value parity warning (#337) ────────────────────────────────────────
+
+
+class TestColumnValueParityWarning:
+    """validate names a code column before prepare converts it."""
+
+    def _cfg(self, tmp_path: Path, remote: str, **entry_kw: Any) -> DatasetConfig:
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path(remote), remote=remote, **entry_kw)],
+        )
+        cfg._base_dir = tmp_path
+        return cfg
+
+    def test_zero_padded_code_column_is_reported(self, tmp_path: Path) -> None:
+        """A code column is named, with the declaration that makes it explicit."""
+        (tmp_path / "DPTO.csv").write_text(
+            "IDDPTO;NOMDPTO\n001;Amazonas\n02;Antioquia\n", encoding="utf-8"
+        )
+        report = DatasetValidator(self._cfg(tmp_path, "DPTO.csv")).run_all()
+        assert report.errors == [], report.errors
+        assert any(
+            "column 'IDDPTO'" in w and 'column_types = { IDDPTO = "string" }' in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_declared_column_is_not_reported(self, tmp_path: Path) -> None:
+        """The operator already said what they want."""
+        (tmp_path / "DPTO.csv").write_text("IDDPTO\n001\n", encoding="utf-8")
+        cfg = self._cfg(tmp_path, "DPTO.csv", column_types={"IDDPTO": "string"})
+        report = DatasetValidator(cfg).run_all()
+        assert not any("zero-padded" in w for w in report.warnings), report.warnings
+
+    def test_plain_numeric_column_is_not_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "plain.csv").write_text("a\n1\n2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "plain.csv")).run_all()
+        assert not any("zero-padded" in w for w in report.warnings), report.warnings
+
+    def test_missing_source_is_left_to_the_existence_check(self, tmp_path: Path) -> None:
+        """No duplicate complaint: a missing file is a single error."""
+        report = DatasetValidator(self._cfg(tmp_path, "gone.csv")).run_all()
+        assert any("Missing" in e for e in report.errors)
+        assert not any("zero-padded" in w for w in report.warnings), report.warnings
+
+
+# ── Confidentiality posture warning (#338) ────────────────────────────────────
+
+
+class TestVisibilityPostureWarning:
+    """A TOML that states no confidentiality posture is told so, not blocked."""
+
+    def _cfg(
+        self, tmp_path: Path, declared: frozenset[str], confidential: bool = False
+    ) -> DatasetConfig:
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        return DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            confidential=confidential,
+            declared_meta_keys=declared,
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+    def test_absent_posture_is_reported(self, tmp_path: Path) -> None:
+        report = DatasetValidator(self._cfg(tmp_path, frozenset())).run_all()
+        assert any("no confidentiality posture" in w for w in report.warnings), report.warnings
+        assert report.errors == []
+
+    def test_declared_true_is_not_reported(self, tmp_path: Path) -> None:
+        report = DatasetValidator(
+            self._cfg(tmp_path, frozenset({"confidential"}), confidential=True)
+        ).run_all()
+        assert not any("no confidentiality posture" in w for w in report.warnings)
+
+    def test_declared_false_is_not_reported(self, tmp_path: Path) -> None:
+        report = DatasetValidator(
+            self._cfg(tmp_path, frozenset({"confidential", "confidentiality_reason"}))
+        ).run_all()
+        assert not any("no confidentiality posture" in w for w in report.warnings)

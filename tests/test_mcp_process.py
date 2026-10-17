@@ -42,6 +42,7 @@ from conftest import (
     McpStdioServer,
     _make_dataset,
     call_tool,
+    repo_info_private,
 )
 
 from sofer import mcp_server
@@ -106,7 +107,7 @@ class TestStdioFraming:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 17
+                    assert len(tools.tools) == 18
                     result = await session.call_tool("sofer_validate", {"config": "dataset.toml"})
                     assert not result.isError
                     envelope = json.loads(result.content[0].text)
@@ -735,6 +736,7 @@ class TestDeliveryHandoff:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         upload_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
         def _fake_upload(*a: Any, **kw: Any) -> None:

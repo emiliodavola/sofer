@@ -22,7 +22,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import PROCESS_TIMEOUT_SECONDS, _make_dataset, call_tool, mcp_payload
+from conftest import (
+    PROCESS_TIMEOUT_SECONDS,
+    _make_dataset,
+    call_tool,
+    mcp_payload,
+    repo_info_private,
+    repo_info_public,
+)
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -69,6 +76,7 @@ def _mock_hf_api(monkeypatch, *, existing: list[str] | None = None) -> None:
     """Stub every HF API method publish could reach (offline tests)."""
     monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
     monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: existing or [])
+    monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
     # publish now uses HfApi(token=token) when a token is resolved; keep the
@@ -472,11 +480,12 @@ class TestToolRoster:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_repo_settings",
             "sofer_report_failure",
         }
     )
 
-    def test_exactly_seventeen_callables(self, server):
+    def test_exactly_eighteen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -707,7 +716,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 17, [t.name for t in tools]
+        assert len(tools) == 18, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -894,7 +903,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 17
+                    assert len(tools.tools) == 18
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -2636,8 +2645,8 @@ class TestScanApplyTruthfulReport:
 
 
 # ---------------------------------------------------------------------------
-#  #152 + #154 — MCP scan parity: Phase-1 move-to-raw/ (move_loose) and the
-#  CLI --ext extension filter (extensions) on both scan tools.
+#  #152 + #339 — MCP scan parity: the Phase-1 move-to-raw/ is mandatory in
+#  both scan tools, and registration is keyed relative to raw/.
 # ---------------------------------------------------------------------------
 
 
@@ -2662,19 +2671,17 @@ def _scanned_dataset(root: Path) -> None:
     toml.write_text(text, encoding="utf-8")
 
 
-class TestScanMoveLoosePhase:
-    """#152: MCP scan offers the CLI's Phase-1 move-to-raw/ via explicit opt-in."""
+class TestScanMoveToRawPhase:
+    """#339: sofer_scan_apply runs the CLI's Phase-1 move-to-raw/ unconditionally."""
 
-    def test_scan_apply_move_loose_moves_to_raw(self, tmp_path, restore_tool_config):
-        """move_loose=True moves the loose file into raw/ AND copies it to cache/."""
+    def test_scan_apply_moves_loose_file_into_raw(self, tmp_path, restore_tool_config):
+        """The default call moves the loose file into raw/ AND copies it to cache/."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server,
-            "sofer_scan_apply",
-            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
         assert envelope.get("moved") == 1, envelope
@@ -2685,21 +2692,44 @@ class TestScanMoveLoosePhase:
             encoding="utf-8"
         )
 
-    def test_scan_apply_without_move_loose_leaves_files_loose(self, tmp_path, restore_tool_config):
-        """Opt-in default: nothing moves silently without move_loose=True."""
+    def test_scan_apply_registers_nested_file_under_its_raw_tree(
+        self, tmp_path, restore_tool_config
+    ):
+        """A nested loose file keeps its tree: cache/Labels/nested.csv, not cache/nested.csv."""
         _scanned_dataset(tmp_path)
-        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "Labels").mkdir()
+        (tmp_path / "Labels" / "nested.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
 
         envelope = _call(
             server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
-        assert envelope.get("moved", 0) == 0, envelope
-        assert (tmp_path / "loose.csv").is_file()
-        assert not (tmp_path / "raw").exists()
+        assert (tmp_path / "raw" / "Labels" / "nested.csv").is_file()
+        assert (tmp_path / "cache" / "Labels" / "nested.csv").is_file()
+        assert not (tmp_path / "cache" / "nested.csv").exists()
+        text = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        assert 'local = "cache/Labels/nested.csv"' in text, text
+        assert 'remote = "Labels/nested.csv"' in text, text
 
-    def test_scan_apply_move_loose_collision_aborts_atomically(self, tmp_path, restore_tool_config):
+    def test_scan_apply_twice_registers_nothing_new(self, tmp_path, restore_tool_config):
+        """scan -> move -> scan is idempotent, nested tree included."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "Labels").mkdir()
+        (tmp_path / "Labels" / "nested.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        first = _call(server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}).data
+        assert first["ok"] is True, first
+        after_first = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        assert after_first.count('local = "cache/') == 2, after_first
+
+        second = _call(server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}).data
+        assert second["ok"] is True, second
+        assert second.get("registered") == 0, second
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == after_first
+
+    def test_scan_apply_collision_aborts_atomically(self, tmp_path, restore_tool_config):
         """A raw/ collision fails BEFORE any move; TOML untouched."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
@@ -2710,9 +2740,7 @@ class TestScanMoveLoosePhase:
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server,
-            "sofer_scan_apply",
-            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is False, envelope
         assert envelope["exit_code"] == 1
@@ -2720,29 +2748,47 @@ class TestScanMoveLoosePhase:
         assert (tmp_path / "loose.csv").is_file(), "collision must abort before any move"
         assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
 
-    def test_scan_dry_run_move_loose_previews_without_mutation(self, tmp_path, restore_tool_config):
-        """move_loose dry-run previews the moves; no raw/, no cache/, no TOML write."""
+    def test_scan_dry_run_previews_move_without_mutation(self, tmp_path, restore_tool_config):
+        """dry-run previews the mandatory move; no raw/, no cache/, no TOML write."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server,
-            "sofer_scan_dry_run",
-            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
         assert "raw/loose.csv" in envelope["output"], envelope
+        assert "mandatory" in envelope["output"], envelope
         assert (tmp_path / "loose.csv").is_file(), "dry-run must not move files"
         assert not (tmp_path / "raw").exists(), "dry-run must not scaffold raw/"
         assert not (tmp_path / "cache" / "loose.csv").exists(), "dry-run must not copy files"
         assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
 
-    def test_scan_dry_run_hints_move_loose_when_loose_files_exist(
-        self, tmp_path, restore_tool_config
-    ):
-        """Without move_loose, dry-run reports the loose files and names the opt-in."""
+    def test_scan_reports_stale_cache_registration(self, tmp_path, restore_tool_config):
+        """#339/T7: a cache/-only entry with no raw/ source is named, never rewritten."""
+        _scanned_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert "no raw/ source" in envelope["output"], envelope
+        assert "cache/data.csv" in envelope["output"], envelope
+        assert "Repair:" in envelope["output"], envelope
+        assert 'local = "cache/data.csv"' in (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+
+        preview = _call(
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert preview["ok"] is True, preview
+        assert "no raw/ source" in preview["output"], preview
+        assert "cache/data.csv" in preview["output"], preview
+
+    def test_scan_dry_run_offers_no_opt_out(self, tmp_path, restore_tool_config):
+        """#339: the move is never advertised as an opt-in the caller can skip."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
@@ -2751,7 +2797,7 @@ class TestScanMoveLoosePhase:
             server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
-        assert "move_loose" in envelope["output"], envelope
+        assert "move_loose" not in envelope["output"], envelope
 
 
 class TestScanExtensionsFilter:
@@ -2805,9 +2851,7 @@ class TestScanExtensionsFilter:
         assert envelope["exit_code"] == 1
         assert "txt" in envelope["message"] or "txt" in envelope["output"]
 
-    def test_scan_move_loose_with_extensions_filters_both_phases(
-        self, tmp_path, restore_tool_config
-    ):
+    def test_scan_move_with_extensions_filters_both_phases(self, tmp_path, restore_tool_config):
         """extensions filters the Phase-1 move set AND the Phase-2 cache copy."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
@@ -2817,11 +2861,7 @@ class TestScanExtensionsFilter:
         envelope = _call(
             server,
             "sofer_scan_apply",
-            {
-                "config": str(tmp_path / "dataset.toml"),
-                "extensions": ["csv"],
-                "move_loose": True,
-            },
+            {"config": str(tmp_path / "dataset.toml"), "extensions": ["csv"]},
         ).data
         assert envelope["ok"] is True, envelope
         assert envelope.get("moved") == 1, envelope
@@ -2912,6 +2952,7 @@ class TestPublishTargetLadder:
             "list_repo_files",
             lambda *a, **kw: calls.append("list_repo_files"),
         )
+        monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(
             publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
         )
@@ -3357,6 +3398,9 @@ class TestHfTokenFallback:
                 def list_repo_files(self, *a, **kw):
                     return []
 
+                def repo_info(self, *a, **kw):
+                    return repo_info_private()
+
                 def upload_folder(self, *a, **kw):
                     return None
 
@@ -3448,6 +3492,7 @@ class TestHfTokenIntegration:
         monkeypatch.setattr(
             publish_mod._api, "list_repo_files", lambda *a, **kw: calls.append("list_repo_files")
         )
+        monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(
             publish_mod._api, "upload_folder", lambda *a, **kw: calls.append("upload_folder")
         )
@@ -4840,9 +4885,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 17 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 18 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_seventeen(self, tmp_path):
+    def test_tool_roster_still_eighteen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4851,7 +4896,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 17
+        assert len(names) == 18
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):
@@ -5018,7 +5063,9 @@ class TestDocPathContainment:
         """Overwrite *proj*/dataset.toml with an extra [meta] doc declaration."""
         (proj / "dataset.toml").write_text(
             "[dataset]\nname='x'\nrepo_id='u/x'\n\n"
-            f"[meta]\nconfidential = false\n{field} = {value!r}\n\n"
+            f"[meta]\nconfidential = false\n"
+            'confidentiality_reason = "fixture: nothing sensitive"\n'
+            f"{field} = {value!r}\n\n"
             '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
             encoding="utf-8",
         )
@@ -5209,6 +5256,7 @@ class TestWorkflowRegistryConformance:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
 
         def _fake_hf_api(*_a, **_kw):
@@ -5311,6 +5359,7 @@ class TestPublishCleanup:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
 
         def _fake_hf_api(*_a, **_kw):
@@ -5894,3 +5943,429 @@ class TestMetadataStepInTheAdvertisedChain:
         """The metadata step must not have replaced a phase."""
         for phase in ("Phase 0 Bootstrap", "Phase 1 Build", "Phase 2 Publish"):
             assert phase in ms._PHASED_INSTRUCTIONS
+
+
+class TestAuthStatusRemoteVisibility:
+    """#338/S3: the preflight reports the configured posture, and the repository's
+    current visibility only when asked — the default stays offline."""
+
+    @staticmethod
+    def _raise_network(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("the default preflight must not read the remote")
+
+    def test_default_reports_the_configured_posture_and_reads_nothing(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setattr(ms, "_repo_visibility", self._raise_network)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+
+        assert envelope["private"] is True
+        assert envelope["public_reason"] == ""
+        assert envelope["confidential"] is False
+        assert envelope["confidentiality_reason"] == "test fixture: nothing sensitive"
+        assert envelope["remote_visibility"] == "not checked"
+
+    def test_check_remote_reports_a_public_repository(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: False)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "public"
+
+    def test_check_remote_reports_a_private_repository(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "private"
+
+    def test_check_remote_reports_an_absent_repository(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: None)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "absent"
+
+    def test_check_remote_without_a_token_says_unknown(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """No token is a stated reason, not a silent skip — and nothing is read."""
+        _make_dataset(tmp_path)
+        # Patch the token source, not just the env: a developer machine may hold a
+        # stored token, and this branch must not depend on that.
+        monkeypatch.setattr(ms, "_get_hf_token", lambda: None)
+        monkeypatch.setattr(ms, "_repo_visibility", self._raise_network)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "unknown: no token"
+
+    def test_check_remote_failure_is_reported_not_raised(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """A preflight reports; it never turns an unreachable Hub into a crash."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+        def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("hub down")
+
+        monkeypatch.setattr(ms, "_repo_visibility", _boom)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server,
+            "sofer_auth_status",
+            {"config": str(tmp_path / "dataset.toml"), "check_remote": True},
+        ).data
+
+        assert envelope["remote_visibility"] == "unknown: hub down"
+
+
+class TestRepoSettingsTool:
+    """#338/S4: reading the posture is free; writing it needs explicit authorization."""
+
+    @staticmethod
+    def _config(tmp_path: Path) -> str:
+        return str(tmp_path / "dataset.toml")
+
+    @staticmethod
+    def _recording_api(calls: list[dict[str, Any]], state: dict[str, bool]) -> type:
+        """A stand-in HfApi whose write records itself and flips *state*."""
+
+        class _Api:
+            def __init__(self, token: str | None = None) -> None:
+                self.token = token
+
+            def update_repo_settings(self, **kw: Any) -> None:
+                calls.append(kw)
+                state["private"] = bool(kw["private"])
+
+        return _Api
+
+    def test_read_reports_the_configured_and_the_remote_posture(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: False)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_repo_settings", {"config": self._config(tmp_path)}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["private"] is True
+        assert envelope["target_private"] is False
+        assert envelope["remote_visibility"] == "public"
+        assert envelope["changed"] is False
+        assert envelope["would_change"] is False
+
+    def test_read_without_a_token_says_unknown(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setattr(ms, "_get_hf_token", lambda: None)
+        monkeypatch.setattr(
+            ms,
+            "_repo_visibility",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not read")),
+        )
+        server = build_server(root=tmp_path)
+
+        envelope = _call(server, "sofer_repo_settings", {"config": self._config(tmp_path)}).data
+
+        assert envelope["remote_visibility"] == "unknown: no token"
+        assert envelope["target_private"] is None
+
+    def test_dry_run_predicts_the_change_and_writes_nothing(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        import huggingface_hub
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", self._recording_api(calls, {"private": True}))
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "dry_run": True},
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["would_change"] is True
+        assert envelope["changed"] is False
+        assert calls == [], "a dry run must not write"
+
+    def test_write_without_the_phrase_is_refused(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        import huggingface_hub
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", self._recording_api(calls, {"private": True}))
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server, "sofer_repo_settings", {"config": self._config(tmp_path), "private": False}
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_APPROVAL_REQUIRED"
+        assert envelope["hints"] == {"approval_phrase": "<from human>"}
+        assert calls == [], "a refusal must not write"
+
+    def test_write_with_the_phrase_sets_the_visibility(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        import huggingface_hub
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        state = {"private": True}
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: state["private"])
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", self._recording_api(calls, state))
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert calls and calls[0]["private"] is False
+        assert calls[0]["repo_type"] == "dataset"
+        assert envelope["remote_visibility"] == "public"
+        assert envelope["changed"] is True
+        # The config still declares private, and the next publish refuses that.
+        assert envelope["diverges_from_config"] is True
+
+    def test_write_is_refused_when_the_sdk_lacks_the_method(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Fail closed naming the requirement, never an obscure AttributeError."""
+        import huggingface_hub
+
+        class _LegacyApi:
+            def __init__(self, token: str | None = None) -> None:
+                self.token = token
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        monkeypatch.setattr(huggingface_hub, "HfApi", _LegacyApi)
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_UNSUPPORTED"
+        assert "update_repo_settings" in envelope["message"]
+
+    def test_write_failure_is_reported(self, tmp_path, monkeypatch, restore_tool_config) -> None:
+        import huggingface_hub
+
+        class _BoomApi:
+            def __init__(self, token: str | None = None) -> None:
+                self.token = token
+
+            def update_repo_settings(self, **_kw: Any) -> None:
+                raise RuntimeError("hub refused")
+
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        monkeypatch.setattr(huggingface_hub, "HfApi", _BoomApi)
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_WRITE_FAILED"
+        assert "hub refused" in envelope["message"]
+
+    def test_write_without_a_token_is_refused(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        monkeypatch.setattr(ms, "_get_hf_token", lambda: None)
+        server = build_server(root=tmp_path, approval_phrase="let-me")
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "let-me"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_TOKEN_REQUIRED"
+
+    def test_write_is_refused_when_no_phrase_is_configured(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Without a server phrase there is no human gate, so the write is refused."""
+        _make_dataset(tmp_path)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setattr(ms, "_repo_visibility", lambda *_a, **_kw: True)
+        server = build_server(root=tmp_path)  # no approval phrase configured
+
+        envelope = _call(
+            server,
+            "sofer_repo_settings",
+            {"config": self._config(tmp_path), "private": False, "approval_phrase": "anything"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "REPO_SETTINGS_APPROVAL_NOT_CONFIGURED"
+        assert envelope["hints"] == {"action": "configure_approval_phrase"}
+
+
+class TestPublishPublicGate:
+    """#338/S5: acknowledging the upload is not consenting to a public target."""
+
+    @staticmethod
+    def _public_dataset(tmp_path: Path) -> str:
+        """A dataset that declares itself public, with the required reason."""
+        _make_dataset(tmp_path)
+        toml = tmp_path / "dataset.toml"
+        text = toml.read_text(encoding="utf-8").replace(
+            'repo_id = "user/test-ds"',
+            'repo_id = "user/test-ds"\nprivate = false\npublic_reason = "open data mandate"',
+        )
+        toml.write_text(text, encoding="utf-8")
+        _prepare_package(tmp_path)
+        return str(toml)
+
+    def test_a_public_target_needs_its_own_acknowledgement(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        config = self._public_dataset(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        uploaded: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api, "upload_folder", lambda *a, **kw: uploaded.append("upload")
+        )
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": config,
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "PUBLISH_PUBLIC_NOT_ACKD"
+        assert envelope["hints"] == {"acknowledge_public": True}
+        assert uploaded == [], "a refused publish must not upload"
+
+    def test_acknowledge_public_lets_it_through_and_is_recorded(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        config = self._public_dataset(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_public)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": config,
+                "acknowledge_risk": True,
+                "acknowledge_public": True,
+                "approval_phrase": "test-phrase",
+            },
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["posture"]["configured"] == "PUBLIC"
+        assert envelope["posture"]["public_reason"] == "open data mandate"
+        assert envelope["posture"]["observed"] == "public"
+        assert envelope["posture"]["acknowledged"]["public"] is True
+
+    def test_the_posture_is_recorded_for_a_private_target(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["posture"]["configured"] == "private"
+        assert envelope["posture"]["observed"] == "private"
+        assert envelope["posture"]["acknowledged"] == {
+            "risk": True,
+            "confidential": False,
+            "public": False,
+        }

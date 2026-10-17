@@ -50,6 +50,8 @@ _DEFAULTS: dict[str, Any] = {
     "codebook_mixed_threshold": 0.5,
     "output_encoding": "utf-8",
     "probe_chunk_bytes": 8192,
+    "column_types_supported": ["string"],
+    "leading_zero_probe_rows": 1000,
     "csv_delimiter": ";",
     "csv_encoding": "utf-8-sig",
     "sniff_delimiters": [";", ",", "\t"],
@@ -502,6 +504,15 @@ OUTPUT_ENCODING: str = _DEFAULTS["output_encoding"]
 # settable and drift the behaviour away from the CLI-R11 contract.
 CONSOLE_ERRORS: str = "replace"
 PROBE_CHUNK_BYTES: int = _DEFAULTS["probe_chunk_bytes"]
+#: ``[[file]]`` ``column_types`` vocabulary (issue #337). Only ``string`` is
+#: expressible today: the requirement is to force a code-like column *not* to be
+#: inferred as a number, and anything richer would be speculative config surface.
+#: An unknown value is refused naming this set, so a typo cannot silently do
+#: nothing.
+COLUMN_TYPES_SUPPORTED: list[str] = _DEFAULTS["column_types_supported"]
+#: Rows the leading-zero probe reads per file before the conversion read (#337).
+#: Bounds the detection cost so a 3 GB corpus is not read twice.
+LEADING_ZERO_PROBE_ROWS: int = _DEFAULTS["leading_zero_probe_rows"]
 CSV_DELIMITER: str = _DEFAULTS["csv_delimiter"]
 CSV_ENCODING: str = _DEFAULTS["csv_encoding"]
 

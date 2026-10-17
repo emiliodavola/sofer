@@ -148,7 +148,7 @@ reciente que el Parquet más nuevo).
 | ------ | ----------- | ------------------ |
 | **CWD en CLI** | Ejecuta siempre `sofer init` desde el directorio del dataset (p. ej. `C:\Users\...\test`). La CLI usa `Path.cwd()` en vivo — `test.toml` y `raw/` se crean exactamente donde la ejecutes. | Ejecutarlo desde el padre crea `test.toml`/`raw/` en el lugar equivocado. Haz `cd` al directorio del dataset primero. |
 | **Parámetro `cwd` en MCP** | La raíz del servidor se elige al arrancar con `--root PATH` o la variable de entorno `SOFER_MCP_ROOT` (el argumento gana; con ninguno, el cwd del proceso, resuelto). `sofer_init` tiene un `cwd` opcional. Cuando `cwd` es `None` usa el `Path.cwd()` en vivo solo si es un **descendiente estricto** de la raíz del servidor; en caso contrario la llamada es RECHAZADA (fails closed) indicando el argumento requerido `cwd="<directorio del dataset>"` — **no** vuelve a la raíz del servidor. Un `cwd="C:/Users/.../Desktop/test"` explícito sigue soportado como `effective_root` por llamada vía `_contained_path` y nunca muta la raíz global. | Rechaza con `PathOutsideRootError` para `cwd` explícito fuera de la raíz (sin `../` por encima, sin `C:/evil`, sin escape por symlink). El caso auto con `cwd=None` está contenido por una verificación de descendiente estricto `is_relative_to` — nunca escapa ni muta `_SERVER_ROOT`, y rechaza (indicando `cwd`) en vez de volver a la raíz cuando el `cwd` en vivo no es un descendiente estricto. |
-| **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `flatten_first_level`. |
+| **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `registration_path` (clave relativa a `raw/`). |
 | **Separadores de ruta** | Escribe siempre `raw/` y `cache/` con barras `/` en el TOML (`raw/example.csv`, `cache/file.csv`). CLI y MCP normalizan internamente a POSIX. | Funciona en Windows y POSIX; `ntpath.splitdrive` trataría `C:/...` como absoluto, pero `raw/...` permanece relativo y contenido. |
 | **Codificación de consola** | Nada que hacer: la CLI nunca aborta por un carácter que la codificación activa de la consola no puede representar — el carácter se sustituye en el texto emitido y el comando conserva su código de salida documentado (CLI-R11). Las terminales con Unicode (Windows Terminal, VS Code, macOS, Linux) no se ven afectadas y mantienen los marcadores `⚠`/`✓`/`✗`/`→` de sofer. | Afecta a los flujos que no son una consola con Unicode: salida redirigida a un archivo o tubería, captura de IDE/CI, o una página de códigos antigua forzada con `PYTHONIOENCODING=cp1252`. El carácter no representable se escribe como marcador de posición (o secuencia de escape) en lugar de lanzar `UnicodeEncodeError`. Para conservar todos los marcadores, define `PYTHONIOENCODING=utf-8`. |
 
@@ -236,7 +236,7 @@ expected = ["column_a", "column_b"]
 
 ```
 raw/            raíz de fuentes versionada — archivos sueltos CSV/XLSX/JSONL se MUEVEN a raw/<relative> luego scan copia a cache/ (p. ej. raw/DPTO.csv -> cache/DPTO.csv)
-cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan (Phase 2 copy via flatten_first_level); codebook --all-files escribe en build/codebooks/ + build/codebook.md
+cache/          caché de artefactos de sofer (OUTPUT_DIR, gitignored) — destino de scan (Phase 2 copy con clave relativa a raw/); codebook --all-files escribe en build/codebooks/ + build/codebook.md
 build/          salida de prepare + entrada de publish (por dataset [dataset] build_dir, por defecto "build")
 ```
 
@@ -252,7 +252,9 @@ archivos soportados de profundidad 1 a `raw/` (opt-in, `--dry-run` previsualiza,
 `sofer scan` MUEVE archivos soportados sueltos fuera de `raw/`/`cache/`/`EXCLUSIONS` a
 `raw/<relative_to(base_dir)>` preservando árbol (`mkdir -p` parents, `check_raw_collisions`
 antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego
-copia `raw/` → `cache/` (aplanando primer nivel).
+copia `raw/` → `cache/` con la clave relativa a `raw/`. El movimiento no es opcional en
+ninguna de las dos superficies de scan: `sofer_scan_apply` lo ejecuta incondicionalmente,
+igual que la CLI, así que las fuentes registradas nunca viven solo en el `cache/` descartable.
 
 ## Perfilado y renderizado
 
@@ -453,12 +455,16 @@ repositorio destino y los límites del reporte son claves de `[tool.sofer]`
 
 ¹ `prepare` convierte `csv/tsv/xlsx/jsonl` a Parquet normalizado por defecto (Excel → un Parquet por hoja como `stem__sheet.parquet`); usa `convert_to_parquet = false` por `[[file]]` para conservar el original. `upload_as_csv = true` es un alias obsoleto de `convert_to_parquet = false` solo para `.csv`. `publish` entrega el paquete preparado sin cambios (`--keep-csv` conserva el `.csv` original junto a su Parquet, solo para CSV).
 
+² **La conversión nunca cambia un valor.** Una columna cuyos valores son códigos con ceros a la izquierda (un `0` inicial seguido de dígitos, p. ej. `"001"`) no es un número, así que `prepare` la fuerza a `string` en lugar de dejar que la inferencia de pyarrow guarde un entero: sondea la fuente (como máximo `leading_zero_probe_rows` filas, por defecto 1000), imprime cada decisión y conserva el texto original. Para dejar esa intención en el config, agregá una tabla inline `column_types = { "<columna>" = "string" }` a la entrada `[[file]]`, nombrando las columnas que querés mantener como strings. `"string"` es el único tipo aceptado hoy; cualquier otro valor se rechaza nombrando el conjunto aceptado. Un valor que la protección no pueda cubrir no se entrega nunca: `prepare` **falla**, nombrando la columna, un valor de muestra y la declaración exacta que lo arregla, no entrega nada para ese archivo y sale con código distinto de cero. `sofer validate` reporta el mismo hallazgo como advertencia antes de que corras `prepare`.
+
 ### Limitaciones de conversión a Parquet
 
 `prepare` convierte CSV a Parquet con la inferencia automática de tipos de
 pyarrow — lo mejor posible, sin garantías. Estos patrones PUEDEN producir tipos
 de columna inesperados (o una conversión fallida, en cuyo caso `prepare` imprime
-una advertencia e incorpora el CSV original tal cual):
+una advertencia e incorpora el CSV original tal cual). Los códigos con ceros a la
+izquierda **no** son uno de esos casos: `prepare` los protege (nota ²) y se niega
+a entregar un valor que no pueda preservar:
 
 | Patrón de CSV | Qué puede fallar | Solución |
 | --- | --- | --- |
@@ -645,12 +651,13 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 17 callables de herramientas (`sofer_validate`,
+El servidor expone 18 callables de herramientas (`sofer_validate`,
 `sofer_meta_check`, `sofer_meta_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`, `sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
+`sofer_auth_status`, `sofer_repo_settings`,
+`sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
 `sofer://codebook/{data_file}`, `sofer://metadata/{data_file}` y el recurso
 estático `sofer://status`) y 3 prompts
 (`prepare_dataset`, `assess_dataset`, `finalize_and_publish`). No se expone
@@ -679,12 +686,13 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 
 - **Fase 0** `init→scan` es REQUERIDA para greenfield (sin `.toml` o `[[file]]` vacío), opcional en otro caso. Build asume `[[file]]` existentes.
 - Cada herramienta lista `Requires:` y `Next:` por lo que `tools/list` por sí sola enseña el orden; `instructions` del servidor es la única fuente del diagrama por fases y del aviso UNTRUSTED.
-- `sofer_auth_status` es el preflight: verifica `token`/`confidential`/`approval_phrase` sin red.
+- `sofer_auth_status` es el preflight: verifica `token`/`confidential`/`approval_phrase` sin red, y reporta la visibilidad configurada; `check_remote=true` agrega la visibilidad *actual* del repositorio (una llamada de sólo lectura).
+- `sofer_repo_settings` lee esa misma postura y puede fijar la visibilidad del destino; una escritura necesita la frase de aprobación **y** el estado exacto (`private=true|false`). Un publish cuya visibilidad configurada difiera de la del repositorio se rechaza.
 
 | Paso | Herramienta | Args clave | Cuándo usar |
 | ------ | ------------- | ------------ | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Bootstrap greenfield; crea TOML + `raw/` (Windows: `cwd` debe permanecer bajo la raíz vía `_contained_path`; `raw/example.csv` es NTFS-safe). |
-| 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Fase 0 preview/apply tras `init`. |
+| 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force`, `extensions` | Fase 0 preview/apply tras `init`. Ambos MUEVEN archivos sueltos a `raw/` de forma incondicional — la fase es obligatoria, sin flag de opt-in; `sofer_scan_dry_run` la previsualiza sin mutar nada. |
 | M | `sofer_meta_check` | `config` | Lee el estado de metadata sin correr el validador; `readOnlyHint:true`. Reporta el mismo warning que imprime `sofer_validate`. |
 | M | `sofer_meta_set` | `config`, `values`, `dry_run` | Escribe `[meta]` antes de la Fase 1 (la única vía por MCP): description/license/source/tags, más cualquier otra clave del card. Preserva cada otra clave y comentario; `build_stale` nombra un árbol `build/` anterior a la escritura. Llamada sin `values` no escribe nada y devuelve una continuación pidiéndolos. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
@@ -695,8 +703,9 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 5a | `sofer_render` | `package`, `output_dir`, `force` | Render de un archivo tras `sofer_profile`. |
 | 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`cache/renders/`); requiere `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` previsualiza; **STOP** antes de confirm. |
-| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Solo tras aprobación humana. |
-| * | `sofer_auth_status` | `config` | Preflight sin publicar; `readOnlyHint:true`. |
+| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `acknowledge_public`, `approval_phrase`, `force` | Solo tras aprobación humana. Un destino público (`[dataset] private = false`) necesita su propio `acknowledge_public`: `acknowledge_risk` cubre la subida irreversible, no la exposición. El envelope registra la postura (configurada, observada, reconocida). |
+| * | `sofer_auth_status` | `config`, `check_remote` | Preflight sin publicar; reporta la visibilidad configurada y, con `check_remote=true`, la actual del repositorio; `readOnlyHint:true`. |
+| * | `sofer_repo_settings` | `config`, `private`, `approval_phrase`, `dry_run` | Lee la visibilidad y la postura del repositorio destino; `private` + `approval_phrase` fija la visibilidad (requiere token). `openWorldHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Codebook de un archivo. |
 | * | `sofer_report_failure` | `error`, `command`, `trace`, `confirm`, `force` | Prepara un reporte de fallo confidencial y (solo con `confirm=true`) lo envía vía `gh`; antes busca issues abiertos duplicados. `openWorldHint:true`. |
 

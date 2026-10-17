@@ -3,7 +3,7 @@
 **Branch:** `fix/316-321-bug-chore-followups` from `dev@eaf56f5`, plus `fix/325-codex-home-and-321-delegation`
 for the `#321` follow-up. **Issues:** `emiliodavola/sofer#316`, `#317`, `#318`, `#319`, `#321`, `#325`.
 **Delivery PRs:** **#327 merged** (`2451763`) and **#328 merged** (`397e7e2`) → `dev`.
-**Milestone:** v0.7.0 — follow-up defects from the v0.6.0 batch. **Store:** hybrid
+**Line:** v0.6.0 follow-up defects from the 2026-10-16 batch. **Store:** hybrid
 (`odd/tasks/bug-chore-followups.md` + `openspec/changes/<date>-<type>-<name>/` per issue that carries a
 spec delta, archived inside the delivering PR per AGENTS.md rule 15).
 **Risk:** item 3 for #316 and #321 (both change a warning/registration surface that other code and tests

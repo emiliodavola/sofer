@@ -36,9 +36,11 @@ from .scanner import (
     collect_init_moves,
     copy_files,
     discover_files,
-    flatten_first_level,
+    format_stale_cache_warning,
     merge_entries,
     move_to_raw,
+    registration_path,
+    stale_cache_registrations,
     write_toml,
 )
 
@@ -517,12 +519,12 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             5. ``move_to_raw`` — ``mkdir -p`` parents, ``shutil.move``,
                no flatten.
 
-        Phase 2 — copy ``raw/`` → ``cache/`` (flatten first level):
+        Phase 2 — copy ``raw/`` → ``cache/`` (keyed relative to ``raw/``):
 
             6. Discover files excluding ``cache/``/``EXCLUSIONS``,
                ``check_flatten_collisions``, ``merge_entries``,
                ``copy_files`` (``raw/DPTO.csv`` → ``cache/DPTO.csv`` via
-               :func:`flatten_first_level` + ``shutil.copy2``), ``write_toml``.
+               :func:`registration_path` + ``shutil.copy2``), ``write_toml``.
 
     Atomicity: collision or ``N``/``--dry-run`` leaves TOML and moved files
     untouched — no partial moves. Phase 2 copies files first and writes the
@@ -620,6 +622,15 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     exclude_cache = EXCLUSIONS | frozenset({config.OUTPUT_DIR})
     discovered = discover_files(base_dir, extensions, exclude_dirs=exclude_cache)
 
+    # Stale-registration report (#339/D5): name cache/-only entries whose raw/
+    # source is missing, without rewriting them. Reported before the early
+    # return so a config whose only entries are stale still says so.
+    for line in format_stale_cache_warning(
+        stale_cache_registrations(raw_toml.get("file", []), base_dir),
+        config.REPORT_MAX_ITEMS,
+    ):
+        print(line)
+
     if not discovered:
         print("  OK  No supported files found.")
         return 0
@@ -645,7 +656,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if not candidates and not args.dry_run and not args.force:
         print(f"\n  The following files will be copied to {config.OUTPUT_DIR}/:")
         for f in discovered:
-            flat = flatten_first_level(f.relative_to(base_dir))
+            flat = registration_path(f, base_dir, raw_dir)
             print(f"     -> {config.OUTPUT_DIR}/{flat.as_posix()}")
         try:
             answer = input("\n  Continue? [y/N] ").strip().lower()
@@ -1062,13 +1073,21 @@ _INIT_TEMPLATE = """\
 name = "{name}"
 repo_id = "{user}/{name}"
 repo_type = "dataset"
+# Private by mandate. Publishing a public repository is an explicit decision and
+# carries its own authorization, so the intent is recorded instead of implied:
+#   private = false
+#   public_reason = "why this dataset is public"
 private = true
 build_dir = "build"
 
 [meta]
 description = "TODO: short description"
 license = "TODO: MIT / restricted / …"
-confidential = false
+# Confidential by mandate: a dataset of sensitive or legally protected data keeps
+# this true. Dropping the marking is an explicit decision with its own reason:
+#   confidential = false
+#   confidentiality_reason = "why this dataset is not confidential"
+confidential = true
 source = "TODO: organisation name"
 tags = ["TODO: tag1", "TODO: tag2"]
 
@@ -1566,6 +1585,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "convert_to_parquet=false per [[file]] to keep the original.  This "
             "command never contacts Hugging Face and needs no credentials.\n"
             "\n"
+            "Conversion never changes a value: a zero-padded code column "
+            '("001", "02") is forced to string instead of being inferred as '
+            'a number, and declaring column_types = { COL = "string" } on the '
+            "[[file]] entry makes that intent explicit.  If a value would still "
+            "be altered, the run reports the column and the declaration that "
+            "fixes it, delivers nothing for that file, and exits 1.\n"
+            "\n"
             "Artifacts are written to --output DIR (default: the dataset's "
             "[dataset] build_dir, usually build/).  Existing generated "
             "artifacts block the run unless --force is given."
@@ -1864,8 +1890,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "(not isatty) skips the [y/N] prompt, else prompt aborts on N.\n"
             "\n"
             "Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) "
-            "-> build/ (gitignored); scan flattens raw/DPTO.csv -> cache/DPTO.csv "
-            "via flatten_first_level."
+            "-> build/ (gitignored); scan keys raw/DPTO.csv -> cache/DPTO.csv "
+            "via registration_path."
         ),
     )
     i.add_argument("name", help="Short name for the dataset.")
@@ -1925,10 +1951,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "no partial moves or TOML write.\n"
             "\n"
             "Phase 2 — COPY raw/ -> cache/: recursively scan (excluding "
-            "cache/ and EXCLUSIONS), flatten the first path segment "
-            "(raw/DPTO.csv -> cache/DPTO.csv), register new files as "
+            "cache/ and EXCLUSIONS), key each file by its path relative to "
+            "raw/ (raw/DPTO.csv -> cache/DPTO.csv, raw/Labels/x.csv -> "
+            "cache/Labels/x.csv), register new files as "
             "[[file]] entries in the TOML, and copy them into the cache/ "
-            "directory via flatten_first_level + shutil.copy2.\n"
+            "directory via registration_path + shutil.copy2. Keying on raw/ "
+            "is what makes a re-scan idempotent whatever the layout."
             "\n"
             "Running scan twice is safe — already-registered files are "
             "skipped (idempotent TOML and cache/)."

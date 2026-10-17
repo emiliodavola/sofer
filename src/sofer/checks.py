@@ -19,6 +19,7 @@ from typing import Any
 from . import config
 from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityResult
 from .repo_compliance import normalize_header
+from .scanner import raw_source_for_local
 
 _META_PLACEHOLDER_FIELDS: tuple[str, ...] = ("description", "license", "source")
 """The ``[meta]`` scalar fields the agent-facing gate inspects (issue #288).
@@ -226,6 +227,83 @@ class DatasetValidator:
             if not resolved.exists():
                 self.report.errors.append(f"Missing: {resolved}")
 
+    def _check_cache_only_registrations(self) -> None:
+        """Fail when a ``cache/``-registered file has no source under ``raw/``.
+
+        ``cache/`` (``OUTPUT_DIR``) is the tool-wide, sibling-shared staging
+        directory that ``publish --clean --clean-cache`` deletes, so a
+        ``[[file]]`` entry that points there with no matching ``raw/`` source has
+        an untracked source: one authorized cleanup destroys the only copy
+        (issue #339). The error names the expected ``raw/`` path and the repair.
+        """
+        base = self.cfg._base_dir if self.cfg._base_dir else Path.cwd()
+        data_dir = base / config.OUTPUT_DIR
+        raw_dir = base / config.RAW_DIR
+        for entry in self.cfg.files:
+            source = raw_source_for_local(entry.local, base, raw_dir, data_dir)
+            if source is None or source.exists():
+                continue
+            self.report.errors.append(
+                f"{entry.local.as_posix()} is registered from {config.OUTPUT_DIR}/ "
+                f"(disposable) but its "
+                f"source {source.relative_to(base).as_posix()} does not exist — re-run scan so "
+                f"{config.RAW_DIR}/ holds the source, or delete the stale [[file]] entry."
+            )
+
+    def _check_column_value_parity(self) -> None:
+        """Warn about columns a Parquet conversion would change (issue #337).
+
+        A zero-padded code column (``"001"``, ``"02"``) is stored as an integer
+        by pyarrow's inference and the source form is lost. ``prepare`` protects
+        those columns automatically and fails when anything still changes; this
+        check reads only the delimited source (bounded by
+        :data:`sofer.config.LEADING_ZERO_PROBE_ROWS`) and names the exact
+        declaration, so the decision is visible *before* the conversion runs.
+
+        A column already covered by an explicit ``column_types`` entry is not
+        reported: the operator has said what they want.
+        """
+        from ._converters import DELIMITED_TEXT_SUFFIXES, _resolve_csv_dialect, leading_zero_columns
+
+        base = self.cfg._base_dir if self.cfg._base_dir else Path.cwd()
+        for entry in self.cfg.files:
+            if entry.recursive or not entry.convert_to_parquet:
+                continue
+            if Path(entry.remote).suffix.lower() not in DELIMITED_TEXT_SUFFIXES:
+                continue
+            resolved = entry.resolve(base)
+            if not resolved.exists():
+                continue  # _check_files_exist already reports a missing source
+            try:
+                delimiter, encoding = _resolve_csv_dialect(resolved, self.cfg)
+            except Exception:
+                continue  # unreadable file: the conversion path reports it
+            for column in leading_zero_columns(resolved, delimiter, encoding):
+                if column in entry.column_types:
+                    continue
+                self.report.warnings.append(
+                    f"{entry.remote}: column '{column}' carries zero-padded codes — a numeric "
+                    "conversion would drop them; prepare forces string dtype (declare "
+                    f'column_types = {{ {column} = "string" }} to be explicit).'
+                )
+
+    def _check_visibility_posture(self) -> None:
+        """Warn when a TOML states no confidentiality posture (issue #338).
+
+        Repositories are confidential by mandate and ``sofer init`` writes
+        ``confidential = true``, so a TOML that declares nothing is behind the
+        template rather than making a decision. The warning names both ways to
+        say it and never changes the exit code: the exposure gate is
+        ``[dataset] private``, which is fail-closed by default and refuses an
+        unauthorized ``false`` (``_validate_visibility_authorization``).
+        """
+        if "confidential" in self.cfg.declared_meta_keys:
+            return
+        self.report.warnings.append(
+            "[meta] states no confidentiality posture — add `confidential = true` (the init "
+            "template's default) or `confidential = false` plus a `confidentiality_reason`."
+        )
+
     def _check_min_files(self) -> None:
         """Fail if fewer file entries than configured."""
         if len(self.cfg.files) < self.cfg.min_files:
@@ -289,6 +367,12 @@ class DatasetValidator:
     def run_all(self) -> ValidationReport:
         """Execute every built-in check and return the report."""
         self._check_files_exist()
+        # Tracked-source gate (issue #339): a [[file]] entry registered from the
+        # disposable cache/ with no raw/ source is one cleanup away from losing
+        # its only copy, so it is an error, not a warning.
+        self._check_cache_only_registrations()
+        self._check_column_value_parity()
+        self._check_visibility_posture()
         self._check_min_files()
         self._check_total_size()
         self._check_csv_columns()

@@ -40,6 +40,7 @@ CANONICAL_TOOLS = (
     "sofer_profile",
     "sofer_render",
     "sofer_auth_status",
+    "sofer_repo_settings",
     "sofer_publish",
     "sofer_publish_confirm",
     "sofer_report_failure",

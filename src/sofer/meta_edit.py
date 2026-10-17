@@ -99,6 +99,7 @@ META_KEYS: Mapping[str, MetaKind] = MappingProxyType(
         "recipe": "text",
         # -- data-sharing / card fields -----------------------------------
         "confidential": "flag",
+        "confidentiality_reason": "text",
         "language": "list",
         "pretty_name": "text",
         "task_categories": "list",
@@ -607,6 +608,7 @@ def apply_meta_edit(text: str, values: Mapping[str, Any]) -> str:
         return text
     result = "".join(lines)
     _verify_edit(result, rendered)
+    _verify_posture_pair(result)
     return result
 
 
@@ -638,6 +640,34 @@ def _append_meta_table(text: str, rendered: Mapping[str, str]) -> str:
     result = f"{prefix}{_META_HEADER}{eol}{body}"
     _verify_edit(result, rendered)
     return result
+
+
+def _verify_posture_pair(text: str) -> None:
+    """Refuse a document whose confidentiality opt-out carries no reason (#338).
+
+    ``[meta] confidential = false`` is an explicit posture change and needs its
+    own authorization value. The editor writes one key per call, so the reason
+    may arrive in this call or already be in the file; either state satisfies this
+    check, and so does writing ``confidential = true``. Refusing **before** the
+    atomic replace is what keeps the writer from leaving behind a config that
+    ``DatasetConfig.validate()`` must reject.
+
+    Args:
+        text: The edited document, as it would be written.
+
+    Raises:
+        MetaEditError: When ``confidential`` is ``false`` and
+            ``confidentiality_reason`` is missing or blank.
+    """
+    table = _meta_table(_parse(text))
+    if table.get("confidential") is not False:
+        return
+    if str(table.get("confidentiality_reason") or "").strip():
+        return
+    raise MetaEditError(
+        "[meta] confidential = false requires a non-empty confidentiality_reason — pass "
+        'confidentiality_reason = "<why>" in the same write, or keep confidential = true.'
+    )
 
 
 def _verify_edit(text: str, rendered: Mapping[str, str]) -> None:
