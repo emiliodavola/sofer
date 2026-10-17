@@ -17,8 +17,10 @@ from sofer.scanner import (
     copy_files,
     discover_files,
     flatten_first_level,
+    format_stale_cache_warning,
     merge_entries,
     registration_path,
+    stale_cache_registrations,
     write_toml,
 )
 
@@ -473,6 +475,45 @@ class TestRegistrationPath:
     def test_loose_root_file_keeps_its_name(self, tmp_path: Path) -> None:
         src = _touch(tmp_path / "x.csv")
         assert registration_path(src, tmp_path, tmp_path / "raw") == Path("x.csv")
+
+
+class TestStaleCacheRegistrations:
+    """#339/T7: the scan report names cache/-only entries with no raw/ source."""
+
+    def test_cache_entry_without_raw_source_is_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "x.csv").write_text("a\n", encoding="utf-8")
+        assert stale_cache_registrations([{"local": "cache/x.csv"}], tmp_path) == ["cache/x.csv"]
+
+    def test_cache_entry_with_raw_source_is_not_reported(self, tmp_path: Path) -> None:
+        for rel in ("cache/x.csv", "raw/x.csv"):
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("a\n", encoding="utf-8")
+        assert stale_cache_registrations([{"local": "cache/x.csv"}], tmp_path) == []
+
+    def test_non_cache_local_is_not_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "x.csv").write_text("a\n", encoding="utf-8")
+        assert stale_cache_registrations([{"local": "raw/x.csv"}], tmp_path) == []
+
+    def test_missing_local_key_is_skipped(self, tmp_path: Path) -> None:
+        assert stale_cache_registrations([{"remote": "x.csv"}], tmp_path) == []
+
+    def test_warning_bounds_the_list_and_counts_every_entry(self, tmp_path: Path) -> None:
+        (tmp_path / "cache").mkdir()
+        entries = []
+        for i in range(5):
+            (tmp_path / "cache" / f"f{i}.csv").write_text("a\n", encoding="utf-8")
+            entries.append({"local": f"cache/f{i}.csv"})
+        lines = format_stale_cache_warning(stale_cache_registrations(entries, tmp_path), 2)
+        assert "5 registered file(s)" in lines[0]
+        assert lines[0].count(".csv") == 2
+        assert lines[1] == "        (+3 more)"
+        assert "Repair:" in lines[2]
+
+    def test_nothing_stale_prints_nothing(self, tmp_path: Path) -> None:
+        assert format_stale_cache_warning([], 3) == []
 
 
 class TestMergeEntries:
@@ -1045,6 +1086,34 @@ class TestIntegration:
         assert "a.csv" in captured
         # Should NOT show the raw/ prefix — the first segment was dropped.
         assert "cache/raw/" not in captured
+
+    def test_scan_reports_stale_cache_registration(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """#339/T7: the CLI names a cache/-only entry with no raw/ source (#339)."""
+        from sofer.cli import _cmd_scan
+
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        config = tmp_path / "dataset.toml"
+        config.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/t"\n\n'
+            '[[file]]\nlocal = "cache/x.csv"\nremote = "x.csv"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        from argparse import Namespace
+
+        args = Namespace(config=str(config), dry_run=False, force=True, ext=None)
+        assert _cmd_scan(args) == 0
+
+        captured = capsys.readouterr().out
+        assert "no raw/ source" in captured
+        assert "cache/x.csv" in captured
+        assert "Repair:" in captured
+        # Reported, never rewritten: the entry stays exactly as it was.
+        assert 'local = "cache/x.csv"' in config.read_text(encoding="utf-8")
 
     def test_scan_preview_shows_flattened_paths(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """Interactive preview before copy shows flattened paths."""

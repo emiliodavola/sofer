@@ -157,6 +157,104 @@ def registration_path(src: Path, base_dir: Path, raw_dir: Path) -> Path:
         return src.relative_to(base_dir)
 
 
+def raw_source_for_local(
+    local: str | Path,
+    base_dir: Path,
+    raw_dir: Path,
+    data_dir: Path,
+) -> Path | None:
+    """Return the ``raw/`` source that MUST back a ``cache/``-registered path.
+
+    ``local`` is the path a ``[[file]]`` entry declares. When it resolves under
+    *data_dir* (``cache/``, the disposable staging directory) the tracked source
+    for that entry is ``raw_dir / <path relative to cache/>``; when it resolves
+    anywhere else the entry carries its own source and ``None`` is returned.
+    Single home for the ``cache/`` → ``raw/`` mapping shared by the scan report
+    and the ``validate`` gate (issue #339, AGENTS.md rule 4).
+
+    Args:
+        local: The declared ``local`` value (absolute or base-relative).
+        base_dir: The dataset directory that owns the TOML.
+        raw_dir: Absolute path to the tracked source root (``raw/``).
+        data_dir: Absolute path to the artifact cache (``cache/``).
+
+    Returns:
+        The expected ``raw/`` source path, or ``None`` when *local* does not
+        point into the artifact cache.
+    """
+    resolved = Path(local)
+    if not resolved.is_absolute():
+        resolved = base_dir / resolved
+    try:
+        key = resolved.relative_to(data_dir)
+    except ValueError:
+        return None
+    return raw_dir / key
+
+
+def stale_cache_registrations(
+    entries: Iterable[dict[str, Any]],
+    base_dir: Path,
+) -> list[str]:
+    """Return every ``[[file]]`` ``local`` that points into ``cache/`` with no ``raw/`` source.
+
+    Those entries are the ones a pre-#339 scan could write (a loose
+    ``Labels/x.csv`` flattened to ``cache/x.csv``) or that a hand-written TOML
+    can declare: the registration names the disposable staging directory while
+    the tracked root holds no matching source, so one ``clean_cache`` destroys
+    the only copy. Reporting them is the scan half of the #339 contract; the
+    ``validate`` half refuses them (see :func:`sofer.checks.DatasetValidator`).
+
+    Args:
+        entries: The raw-TOML ``[[file]]`` mappings (each with a ``local`` key).
+        base_dir: The dataset directory that owns the TOML.
+
+    Returns:
+        The offending ``local`` values, in TOML order. Empty when none.
+    """
+    raw_dir = base_dir / config.RAW_DIR
+    data_dir = base_dir / config.OUTPUT_DIR
+    stale: list[str] = []
+    for entry in entries:
+        local = str(entry.get("local", ""))
+        if not local:
+            continue
+        source = raw_source_for_local(local, base_dir, raw_dir, data_dir)
+        if source is not None and not source.exists():
+            stale.append(local)
+    return stale
+
+
+def format_stale_cache_warning(locals_: list[str], limit: int) -> list[str]:
+    """Return the printed lines warning about stale ``cache/`` registrations.
+
+    The listed paths are bounded by *limit* (a ``[tool.sofer]`` value, rule 1)
+    so the scan output stays independent of the dataset size, and the count is
+    always exact. Single home for the message both adapters print (rule 4).
+
+    Args:
+        locals_: The stale ``local`` values, as returned by
+            :func:`stale_cache_registrations`.
+        limit: Maximum number of paths named in the warning.
+
+    Returns:
+        The lines to print, or an empty list when there is nothing stale.
+    """
+    if not locals_:
+        return []
+    lines = [
+        f"  WARN  {len(locals_)} registered file(s) point into {config.OUTPUT_DIR}/ "
+        f"with no {config.RAW_DIR}/ source: {', '.join(locals_[:limit])}"
+    ]
+    if len(locals_) > limit:
+        lines.append(f"        (+{len(locals_) - limit} more)")
+    lines.append(
+        f"        Repair: re-run scan so {config.RAW_DIR}/ holds the source, or delete the "
+        "stale [[file]] entries."
+    )
+    return lines
+
+
 def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
     """Raise :class:`ValueError` if two or more discovered files share a destination.
 

@@ -359,3 +359,56 @@ class TestMetaPlaceholderGate:
         report = DatasetValidator(cfg).run_all()
         report.print_summary()
         assert "[meta] description" in capsys.readouterr().out
+
+
+# ── Tracked-source gate (#339) ────────────────────────────────────────────────
+
+
+class TestCacheOnlyRegistrationGate:
+    """#339/S4: a cache/-registered file must have a raw/ source behind it."""
+
+    def _cfg(self, tmp_path: Path, local: str, remote: str = "x.csv") -> DatasetConfig:
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path(local), remote=remote)],
+        )
+        cfg._base_dir = tmp_path
+        return cfg
+
+    def test_cache_registration_without_raw_source_is_refused(self, tmp_path: Path) -> None:
+        """local=cache/x.csv with no raw/x.csv is an error naming the repair."""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "cache/x.csv")).run_all()
+        assert report.passed is False
+        assert any(
+            "disposable" in e and "raw/x.csv" in e and "delete the stale" in e
+            for e in report.errors
+        ), report.errors
+
+    def test_cache_registration_with_raw_source_passes(self, tmp_path: Path) -> None:
+        """The layout the fixed scan produces is accepted."""
+        for rel in ("cache/x.csv", "raw/x.csv"):
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "cache/x.csv")).run_all()
+        assert report.errors == [], report.errors
+
+    def test_nested_registration_needs_its_own_raw_source(self, tmp_path: Path) -> None:
+        """cache/Labels/x.csv needs raw/Labels/x.csv, not a root-level raw/x.csv."""
+        (tmp_path / "cache" / "Labels").mkdir(parents=True)
+        (tmp_path / "cache" / "Labels" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "cache/Labels/x.csv")).run_all()
+        assert any("raw/Labels/x.csv" in e for e in report.errors), report.errors
+
+    def test_non_cache_local_keeps_its_own_source_rule(self, tmp_path: Path) -> None:
+        """An entry that does not point into cache/ is not gated by this check."""
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "x.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        report = DatasetValidator(self._cfg(tmp_path, "raw/x.csv")).run_all()
+        assert not any("disposable" in e for e in report.errors), report.errors

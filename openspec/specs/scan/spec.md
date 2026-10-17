@@ -193,6 +193,8 @@ System MUST handle missing config, no files, conflicts, malformed TOML. Flatten 
 
 System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) → `build/` (gitignored) with diagram `raw/DPTO.csv→cache/DPTO.csv→build/*.parquet`. `scan` MUST create `raw/` (`mkdir -p`) if missing, then MOVE supported files (`.csv`, `.tsv`, `.xlsx`, `.jsonl`, `.parquet`) not already under `raw/`/`cache/`/`EXCLUSIONS` into `raw/` preserving `relative_to(base_dir)` tree via `shutil.move` (`dest = raw_dir / rel`, lazy `mkdir -p` parent), then copy `raw/`→`cache/` via `copy_files` using `shutil.copy2`. The MOVE SHALL NOT be optional: it MUST run on every scan surface — the CLI and both MCP scan tools — with no opt-in flag that can skip it, because `cache/` is the shared, deletion-prone staging directory and the registered sources MUST NOT live only there (#339). System MUST check raw-dest collisions before any move and fail atomically; MUST honor `--dry-run`/`dry_run` (preview only), `--force` (skip prompt), else `[y/N]` abort with no partial moves on `N`.
 
+The system MUST refuse a `[[file]]` entry whose `local` resolves under `cache/` while `raw/` holds no corresponding source (`raw/<path relative to cache/>`): `validate` and `prepare` MUST report it as an error naming the expected `raw/` path and the repair, and both scan adapters MUST report such entries without rewriting the config (#339).
+
 (Previously: copy-only to cache via flatten_first_level, sources untouched, no raw MOVE.)
 
 #### Scenario: Move preserves tree and removes source
@@ -263,3 +265,10 @@ System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) →
 - WHEN `sofer_scan_dry_run` runs with only `config`
 - THEN the output SHALL list `raw/loose.csv` and name the move as mandatory
 - AND no file SHALL be moved, no `raw/` SHALL be created, no `cache/` write, TOML unchanged
+
+#### Scenario: Cache-only registration with no raw source is refused
+
+- GIVEN `[[file]] local = "cache/x.csv"` and no `raw/x.csv`
+- WHEN `sofer_validate` runs
+- THEN it SHALL report an error naming `raw/x.csv` and exit 1
+- AND `sofer_scan_apply` SHALL report the same entry without rewriting the TOML

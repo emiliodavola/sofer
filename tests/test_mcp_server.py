@@ -2757,6 +2757,27 @@ class TestScanMoveToRawPhase:
         assert not (tmp_path / "cache" / "loose.csv").exists(), "dry-run must not copy files"
         assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
 
+    def test_scan_reports_stale_cache_registration(self, tmp_path, restore_tool_config):
+        """#339/T7: a cache/-only entry with no raw/ source is named, never rewritten."""
+        _scanned_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+
+        envelope = _call(
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert envelope["ok"] is True, envelope
+        assert "no raw/ source" in envelope["output"], envelope
+        assert "cache/data.csv" in envelope["output"], envelope
+        assert "Repair:" in envelope["output"], envelope
+        assert 'local = "cache/data.csv"' in (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+
+        preview = _call(
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
+        ).data
+        assert preview["ok"] is True, preview
+        assert "no raw/ source" in preview["output"], preview
+        assert "cache/data.csv" in preview["output"], preview
+
     def test_scan_dry_run_offers_no_opt_out(self, tmp_path, restore_tool_config):
         """#339: the move is never advertised as an opt-in the caller can skip."""
         _scanned_dataset(tmp_path)

@@ -36,9 +36,11 @@ from .scanner import (
     collect_init_moves,
     copy_files,
     discover_files,
+    format_stale_cache_warning,
     merge_entries,
     move_to_raw,
     registration_path,
+    stale_cache_registrations,
     write_toml,
 )
 
@@ -619,6 +621,15 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     # ── Phase 2: discover → check_flatten → merge → copy → write ─────
     exclude_cache = EXCLUSIONS | frozenset({config.OUTPUT_DIR})
     discovered = discover_files(base_dir, extensions, exclude_dirs=exclude_cache)
+
+    # Stale-registration report (#339/D5): name cache/-only entries whose raw/
+    # source is missing, without rewriting them. Reported before the early
+    # return so a config whose only entries are stale still says so.
+    for line in format_stale_cache_warning(
+        stale_cache_registrations(raw_toml.get("file", []), base_dir),
+        config.REPORT_MAX_ITEMS,
+    ):
+        print(line)
 
     if not discovered:
         print("  OK  No supported files found.")

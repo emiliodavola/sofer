@@ -19,6 +19,7 @@ from typing import Any
 from . import config
 from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityResult
 from .repo_compliance import normalize_header
+from .scanner import raw_source_for_local
 
 _META_PLACEHOLDER_FIELDS: tuple[str, ...] = ("description", "license", "source")
 """The ``[meta]`` scalar fields the agent-facing gate inspects (issue #288).
@@ -226,6 +227,29 @@ class DatasetValidator:
             if not resolved.exists():
                 self.report.errors.append(f"Missing: {resolved}")
 
+    def _check_cache_only_registrations(self) -> None:
+        """Fail when a ``cache/``-registered file has no source under ``raw/``.
+
+        ``cache/`` (``OUTPUT_DIR``) is the tool-wide, sibling-shared staging
+        directory that ``publish --clean --clean-cache`` deletes, so a
+        ``[[file]]`` entry that points there with no matching ``raw/`` source has
+        an untracked source: one authorized cleanup destroys the only copy
+        (issue #339). The error names the expected ``raw/`` path and the repair.
+        """
+        base = self.cfg._base_dir if self.cfg._base_dir else Path.cwd()
+        data_dir = base / config.OUTPUT_DIR
+        raw_dir = base / config.RAW_DIR
+        for entry in self.cfg.files:
+            source = raw_source_for_local(entry.local, base, raw_dir, data_dir)
+            if source is None or source.exists():
+                continue
+            self.report.errors.append(
+                f"{entry.local.as_posix()} is registered from {config.OUTPUT_DIR}/ "
+                f"(disposable) but its "
+                f"source {source.relative_to(base).as_posix()} does not exist — re-run scan so "
+                f"{config.RAW_DIR}/ holds the source, or delete the stale [[file]] entry."
+            )
+
     def _check_min_files(self) -> None:
         """Fail if fewer file entries than configured."""
         if len(self.cfg.files) < self.cfg.min_files:
@@ -289,6 +313,10 @@ class DatasetValidator:
     def run_all(self) -> ValidationReport:
         """Execute every built-in check and return the report."""
         self._check_files_exist()
+        # Tracked-source gate (issue #339): a [[file]] entry registered from the
+        # disposable cache/ with no raw/ source is one cleanup away from losing
+        # its only copy, so it is an error, not a warning.
+        self._check_cache_only_registrations()
         self._check_min_files()
         self._check_total_size()
         self._check_csv_columns()

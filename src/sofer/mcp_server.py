@@ -124,8 +124,10 @@ from .scanner import (
     collect_init_moves,
     copy_files,
     discover_files,
+    format_stale_cache_warning,
     merge_entries,
     move_to_raw,
+    stale_cache_registrations,
     write_toml,
 )
 
@@ -2602,6 +2604,12 @@ def sofer_scan_dry_run(
 
         if not lines:
             lines.append(f"Discovered {len(discovered)} supported file(s).")
+        # Stale-registration report (#339/D5), mirrored from sofer_scan_apply.
+        for line in format_stale_cache_warning(
+            stale_cache_registrations(merged.get("file", []), base_dir),
+            sofer_config.REPORT_MAX_ITEMS,
+        ):
+            lines.append(line)
         if registered:
             lines.append(f"Registered {registered} new [[file]] entry(s).")
         else:
@@ -2717,6 +2725,13 @@ def sofer_scan_apply(
         before = len(raw_toml.get("file", []))
         merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
         registered = len(merged.get("file", [])) - before
+        # Stale-registration report (#339/D5): name cache/-only entries whose
+        # raw/ source is missing, without rewriting them.
+        for line in format_stale_cache_warning(
+            stale_cache_registrations(merged.get("file", []), base_dir),
+            sofer_config.REPORT_MAX_ITEMS,
+        ):
+            print(line)
         try:
             copied = copy_files(discovered, base_dir, data_dir, dry_run=False, force=force)
         except FileExistsError as exc:
