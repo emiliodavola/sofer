@@ -192,9 +192,18 @@ ADAPTERS: dict[AgentName, Adapter] = {
         # docs document the local-server option as a Number in ms for fetching
         # tools; the next-major tree declares a `{startup, request}` class (its
         # docs a `{startup, catalog, execution}` object) AND moves servers to
-        # `mcp.servers.<name>`, a layout this adapter does not write. The scalar
-        # is therefore the shape belonging to the layout we DO write, and no
-        # sub-key name has to be guessed.
+        # `mcp.servers.<name>` natively. The scalar is therefore the shape
+        # belonging to the layout we DO write, and no sub-key name has to be
+        # guessed.
+        #
+        # That layout is the V1 position, and it stays (issue #334):
+        # `packages/core/src/config/normalize.ts` (`normalizeMcp`) decodes every
+        # non-container `mcp.<name>` value as the V1 server schema, migrates it
+        # and merges it into the `mcp.servers` mapping it emits in memory,
+        # without rewriting the file — so one entry written at `mcp.sofer` is
+        # read by both generations. Writing `mcp.servers.sofer` here instead
+        # would put the entry where the stable schema (`ConfigMCP.Local`, server
+        # name directly under `mcp`) does not look.
         #
         # That scalar governs establishing the server and listing its tools — the
         # cold start #287 is about — not the per-request deadline (opencode's own

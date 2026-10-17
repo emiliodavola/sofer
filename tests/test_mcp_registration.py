@@ -219,6 +219,39 @@ class TestMerge:
             not bak.exists() or bak.read_bytes() == codex_path.read_bytes()
         )  # at least not modified
 
+    def test_opencode_entry_lands_in_the_position_both_generations_read(
+        self, tmp_path, monkeypatch
+    ):
+        """Pin the opencode entry's position (issue #334).
+
+        `sofer mcp add` writes `mcp.sofer`, the position the stable schema
+        (`ConfigMCP.Local`) and the stable docs declare. A v2 opencode reads
+        that same position: `packages/core/src/config/normalize.ts`
+        (`normalizeMcp`) decodes every non-container `mcp.<name>` value as the
+        V1 server schema, migrates it and merges it into the `mcp.servers`
+        mapping it emits in memory, without rewriting the source file. Writing
+        `mcp.servers.sofer` here instead would put the entry where a stable
+        opencode does not look, so the flat position is a contract rather than
+        an artifact of when the adapter was written.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
+        monkeypatch.setattr(mcp_registration, "validate_cwd", lambda *a, **kw: True)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        rc = cli._cmd_mcp_add(
+            Namespace(agent="opencode", scope="project", cwd=str(proj), dry_run=False)
+        )
+        assert rc == 0
+        data = json.loads((proj / "opencode.json").read_text(encoding="utf-8"))
+        assert data["mcp"]["sofer"] == {
+            "type": "local",
+            "command": ["sofer-mcp"],
+            "cwd": str(proj.resolve()),
+            "timeout": config.MCP_CONNECT_TIMEOUT_SECONDS * 1000,
+        }
+        assert "servers" not in data["mcp"]
+
     def test_gemini_preserve_other(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(mcp_registration, "probe_native", lambda *a, **kw: False)
