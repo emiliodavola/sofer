@@ -58,14 +58,14 @@ report/manifest so it is auditable after the fact."
 
 | # | Task | Spec | State | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | RED: `private = false` without an authorization reason is refused, naming the missing key | S2 | pending | — |
-| T2 | RED: `confidential = false` without an authorization reason is refused; the init template writes `confidential = true` | S2, S5 | pending | — |
+| T1 | RED: `private = false` without an authorization reason is refused, naming the missing key | S2 | **done** | RED against the pre-slice code: `AssertionError: []` (the refusal produced no error) and `AttributeError: 'DatasetConfig' object has no attribute 'public_reason'`. GREEN: `TestVisibilityAuthorization` (8 passed) |
+| T2 | RED: `confidential = false` without an authorization reason is refused; the init template writes `confidential = true` | S2, S5 | **done** | RED: `assert 'confidential = true' in …` on the old template, `AttributeError: … 'confidentiality_reason'`, `AssertionError: []` for the explicit-`false` case. GREEN: `TestVisibilityAuthorization` + `TestInitTemplatePosture` (2 passed) |
 | T3 | RED: the publish plan and `sofer_auth_status` print configured + observed visibility + confidential | S3 | pending | — |
 | T4 | RED: publish fails closed when configured and observed visibility diverge on an existing repo | S3 | pending | — |
 | T5 | RED: `sofer_repo_settings` reads the posture without authorization, and refuses a write without the approval phrase + exact target state | S4 | pending | — |
 | T6 | RED: `sofer_repo_settings` writes via `update_repo_settings`, and fails closed with a named reason when the installed SDK has no such method | S4 | pending | — |
 | T7 | RED: a public target requires its own acknowledgement; `acknowledge_risk` alone no longer reads as public consent | S5 | pending | — |
-| T8 | GREEN: authorization keys (`[dataset].public_reason`, `[meta].confidentiality_reason`), fail-closed validation, model default flip | S2, S5 | pending | — |
+| T8 | GREEN: authorization keys (`[dataset].public_reason`, `[meta].confidentiality_reason`), fail-closed validation, template default (D2 revised: no dataclass flip) | S2, S5 | **done** | commit `1385f12`. `declared_dataset_keys` is the presence signal that tells an explicit `false` from a TOML that never mentions visibility; `confidentiality_reason` joined `META_KEYS` so `sofer_meta_set` can write it; the validator warns when no posture is stated. Fixture fallout cleared (46 failures → 0): the shared `conftest` helper and two test-local TOMLs now state the reason |
 | T9 | GREEN: observed visibility in the plan, `auth_status`, and the divergence gate | S3 | pending | — |
 | T10 | GREEN: `sofer_repo_settings` tool + roster/workflow/schema guards + `_PHASED_INSTRUCTIONS` | S4 | pending | — |
 | T11 | GREEN: posture recorded in the publish report and the manifest | S6 | pending | — |
@@ -113,6 +113,14 @@ report/manifest so it is auditable after the fact."
 
   necesito una rama por issue y luego un push y PR (asignado a mi) por implementación"
 - **L2** (user, verbatim): "usá ODD obligatoriamente"
+- **L4** — first slice delivered (commit `1385f12`, rebased onto the reworded `dev@903237e`): the
+  authorization surface. Two things it settled against this plan: **(a) D2 revised** — the
+  confidentiality default changes in the template, not in the dataclass, because flipping the dataclass
+  would re-mark every existing TOML and force `acknowledge_confidential` on every publish, which
+  "explicit opt-outs" does not ask for; the roadmap carries the same correction (`8d33082`). **(b)** the
+  fallout was entirely test-side: 46 failures, all from TOMLs declaring `confidential = false` with no
+  reason, so the shared `conftest` helper and two test-local TOMLs now state why. Gates at the commit:
+  2439 passed / 9 skipped, TOTAL coverage 94%, the four rule-14 files at 100.00%, ruff/myPy/pyright clean.
 - **L3** — verification (2026-10-17): every claim checked against `dev@ec511e7`; #133 and #148 are
   already closed, so this is the remaining fail-closed gap. Two corrections applied to the issue:
   (a) the Hub settings route **does** exist (`update_repo_settings` → `PUT .../settings`, present at the
