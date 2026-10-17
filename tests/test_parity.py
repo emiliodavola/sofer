@@ -228,6 +228,17 @@ AREAS: list[AreaParity] = [
         },
         note="sofer_auth_status has no CLI counterpart by design (agent preflight, actor design A)",
     ),
+    AreaParity(
+        cli_command=None,
+        mcp_tools=("sofer_repo_settings",),
+        exempt_params={
+            "config": "dataset config path (same shape as the other tools)",
+            "private": "MCP-only: the target visibility to set, with no CLI counterpart",
+            "approval_phrase": "the human gate, same shape as sofer_publish_confirm",
+            "dry_run": "MCP-only preview of a write",
+        },
+        note="sofer_repo_settings has no CLI counterpart by design (issue #338)",
+    ),
 ]
 
 
