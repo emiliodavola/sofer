@@ -93,6 +93,13 @@ class FileEntry:
         upload_as_csv:      Deprecated alias for ``convert_to_parquet`` — only
             honoured for ``.csv`` remotes.  Prefer ``convert_to_parquet``.
         include_in_schema:  Whether this file contributes to the schema report.
+        column_types:       Optional ``{column_name: type}`` forcing named columns
+            to a declared Arrow type instead of pyarrow's inference (issue #337).
+            The only type expressible today is ``"string"``
+            (:data:`sofer.config.COLUMN_TYPES_SUPPORTED`), which is what a
+            zero-padded statistical code needs so its source form survives the
+            conversion.  An unknown type is refused by
+            :func:`_validate_config_types` naming the accepted set.
     """
 
     local: Path
@@ -101,6 +108,7 @@ class FileEntry:
     convert_to_parquet: bool = True
     upload_as_csv: bool = False
     include_in_schema: bool = True
+    column_types: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Honour deprecated ``upload_as_csv`` alias for direct construction.
@@ -473,6 +481,7 @@ class DatasetConfig:
                     convert_val = True
             else:
                 convert_val = True
+            column_types = _parse_column_types(entry, remote_val)
             files.append(
                 FileEntry(
                     local=Path(entry["local"]),
@@ -481,6 +490,7 @@ class DatasetConfig:
                     convert_to_parquet=convert_val,
                     upload_as_csv=upload_as_csv_val,
                     include_in_schema=entry.get("include_in_schema", True),
+                    column_types=column_types,
                 )
             )
 
@@ -680,6 +690,36 @@ class DatasetConfig:
         return errors
 
 
+def _parse_column_types(entry: dict[str, Any], remote: str) -> dict[str, str]:
+    """Read a ``[[file]]`` ``column_types`` table, refusing a non-table shape.
+
+    ``column_types`` is the dtype control of issue #337: it forces named columns
+    to a declared type so a zero-padded code keeps its source form. TOML is
+    untyped, so a wrong *shape* (``column_types = ["ID"]``) is reported here and
+    ignored rather than reaching the converter as something it cannot honour; a
+    wrong *value* is refused by :func:`_validate_config_types`, naming the
+    accepted vocabulary, so a typo never silently does nothing.
+
+    Args:
+        entry: The raw ``[[file]]`` mapping.
+        remote: The entry's remote path, named in the warning.
+
+    Returns:
+        ``{column_name: type}`` with string keys and values, or ``{}`` when the
+        key is absent or malformed.
+    """
+    raw = entry.get("column_types")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        print(
+            f"  [!] [[file]] {remote}: 'column_types' must be a table of "
+            f'{{column = "string"}} — ignored (got {type(raw).__name__}).'
+        )
+        return {}
+    return {str(name): str(value) for name, value in raw.items()}
+
+
 def _validate_config_types(cfg: DatasetConfig) -> list[str]:
     """Validate the *types* of configuration values, independent of files.
 
@@ -742,5 +782,21 @@ def _validate_config_types(cfg: DatasetConfig) -> list[str]:
                 "a list of strings",
                 col_check.expected,
             )
+
+    # -- per-file column types: known vocabulary only (#337) ---------------
+    accepted = ", ".join(repr(name) for name in config.COLUMN_TYPES_SUPPORTED)
+    for entry in cfg.files:
+        for column, declared_type in entry.column_types.items():
+            if not isinstance(column, str) or not column:
+                _add(
+                    f"[[file]] {entry.remote} column_types",
+                    "a non-empty column name key",
+                    column,
+                )
+            if declared_type not in config.COLUMN_TYPES_SUPPORTED:
+                errors.append(
+                    f"[[file]] {entry.remote} column_types[{column!r}] must be one of "
+                    f"{accepted}, got {declared_type!r}"
+                )
 
     return errors

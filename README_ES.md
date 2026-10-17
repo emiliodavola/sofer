@@ -455,12 +455,16 @@ repositorio destino y los límites del reporte son claves de `[tool.sofer]`
 
 ¹ `prepare` convierte `csv/tsv/xlsx/jsonl` a Parquet normalizado por defecto (Excel → un Parquet por hoja como `stem__sheet.parquet`); usa `convert_to_parquet = false` por `[[file]]` para conservar el original. `upload_as_csv = true` es un alias obsoleto de `convert_to_parquet = false` solo para `.csv`. `publish` entrega el paquete preparado sin cambios (`--keep-csv` conserva el `.csv` original junto a su Parquet, solo para CSV).
 
+² **La conversión nunca cambia un valor.** Una columna cuyos valores son códigos con ceros a la izquierda (un `0` inicial seguido de dígitos, p. ej. `"001"`) no es un número, así que `prepare` la fuerza a `string` en lugar de dejar que la inferencia de pyarrow guarde un entero: sondea la fuente (como máximo `leading_zero_probe_rows` filas, por defecto 1000), imprime cada decisión y conserva el texto original. Para dejar esa intención en el config, agregá una tabla inline `column_types = { "<columna>" = "string" }` a la entrada `[[file]]`, nombrando las columnas que querés mantener como strings. `"string"` es el único tipo aceptado hoy; cualquier otro valor se rechaza nombrando el conjunto aceptado. Un valor que la protección no pueda cubrir no se entrega nunca: `prepare` **falla**, nombrando la columna, un valor de muestra y la declaración exacta que lo arregla, no entrega nada para ese archivo y sale con código distinto de cero. `sofer validate` reporta el mismo hallazgo como advertencia antes de que corras `prepare`.
+
 ### Limitaciones de conversión a Parquet
 
 `prepare` convierte CSV a Parquet con la inferencia automática de tipos de
 pyarrow — lo mejor posible, sin garantías. Estos patrones PUEDEN producir tipos
 de columna inesperados (o una conversión fallida, en cuyo caso `prepare` imprime
-una advertencia e incorpora el CSV original tal cual):
+una advertencia e incorpora el CSV original tal cual). Los códigos con ceros a la
+izquierda **no** son uno de esos casos: `prepare` los protege (nota ²) y se niega
+a entregar un valor que no pueda preservar:
 
 | Patrón de CSV | Qué puede fallar | Solución |
 | --- | --- | --- |

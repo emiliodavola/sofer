@@ -474,9 +474,17 @@ def prepare(
     # gates eligibility (convertible set + convert_to_parquet + not recursive
     # + not .parquet passthrough + local exists) and keys the result by the
     # normalized Parquet remote.  XLSX multi-sheet expands to N entries.
-    from ._converters import CONVERTIBLE_SUFFIXES, convert_file_to_parquet, normalize_parquet_remote
+    from ._converters import (
+        CONVERTIBLE_SUFFIXES,
+        ValueAlterationError,
+        convert_file_to_parquet,
+        normalize_parquet_remote,
+    )
 
     converted: dict[str, tuple[Path, Path, str]] = {}
+    # Files whose values pyarrow would change and no forced dtype could protect
+    # (issue #337). Recorded, reported and fatal: never shipped as the package.
+    alterations: list[tuple[str, ValueAlterationError]] = []
     tmpdir = Path(tempfile.mkdtemp())
     try:
         # Validate case-fold collisions on normalized keys before any write (PRP-02b)
@@ -507,7 +515,19 @@ def prepare(
 
             entry_tmp = tmpdir / str(idx)
             entry_tmp.mkdir()
-            dispatch_result = convert_file_to_parquet(local, entry_tmp, cfg)
+            try:
+                dispatch_result = convert_file_to_parquet(
+                    local, entry_tmp, cfg, column_types=entry.column_types
+                )
+            except ValueAlterationError as exc:
+                alterations.append((entry.remote, exc))
+                print(
+                    f"  \u2717  {local.name}: value parity FAILED \u2014 type inference "
+                    f"would alter {len(exc.columns)} column(s)"
+                )
+                for column, sample in exc.columns[: config.REPORT_MAX_ITEMS]:
+                    print(f"       column '{column}': e.g. {sample!r} is not preserved")
+                continue
             if not dispatch_result:
                 # Conversion failed — warn already printed; fallback to original
                 print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")
@@ -683,6 +703,21 @@ def prepare(
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if alterations:
+        # Fail closed (issue #337): shipping an altered value as the authoritative
+        # Parquet is exactly what "do not change the data" forbids. The source
+        # files are untouched, so the fix is a config change, not a data repair.
+        print(f"\n{'=' * 60}")
+        print("  \u2717  VALUE PARITY FAILED \u2014 nothing was delivered for those files")
+        for remote, failure in alterations:
+            mapping = ", ".join(
+                f'{name} = "string"' for name, _sample in failure.columns[: config.REPORT_MAX_ITEMS]
+            )
+            print(f"     {remote}: {len(failure.columns)} column(s) altered by type inference")
+            print(f"       Fix: add column_types = {{ {mapping} }} to its [[file]] entry")
+        print(f"{'=' * 60}\n")
+        return 1
 
     print(f"\n{'=' * 60}")
     print(f"  Result: {len(converted)} parquet(s) generated in {output_dir}")

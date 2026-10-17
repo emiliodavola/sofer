@@ -1577,6 +1577,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "convert_to_parquet=false per [[file]] to keep the original.  This "
             "command never contacts Hugging Face and needs no credentials.\n"
             "\n"
+            "Conversion never changes a value: a zero-padded code column "
+            '("001", "02") is forced to string instead of being inferred as '
+            'a number, and declaring column_types = { COL = "string" } on the '
+            "[[file]] entry makes that intent explicit.  If a value would still "
+            "be altered, the run reports the column and the declaration that "
+            "fixes it, delivers nothing for that file, and exits 1.\n"
+            "\n"
             "Artifacts are written to --output DIR (default: the dataset's "
             "[dataset] build_dir, usually build/).  Existing generated "
             "artifacts block the run unless --force is given."

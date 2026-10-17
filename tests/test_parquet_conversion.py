@@ -200,9 +200,9 @@ class TestDeclaredDialectWins:
         seen: list[tuple[object, ...]] = []
         original = _converters.convert_file_to_parquet
 
-        def _spy(local, staging_dir, cfg_arg=None):
+        def _spy(local, staging_dir, cfg_arg=None, column_types=None):
             seen.append((local, cfg_arg))
-            return original(local, staging_dir, cfg_arg)
+            return original(local, staging_dir, cfg_arg, column_types=column_types)
 
         monkeypatch.setattr(_converters, "convert_file_to_parquet", _spy)
         rc = prepare(cfg, tmp_path / "build")

@@ -173,6 +173,13 @@ probe_chunk_bytes = 8192
 csv_delimiter = ";"
 csv_encoding = "utf-8-sig"
 
+# ── Conversion dtype control (issue #337) ──
+# Types a [[file]] column_types entry may declare: only "string" today, because
+# the requirement is to force a code-like column past pyarrow's inference.
+column_types_supported = ["string"]
+# Rows the zero-padded-code probe reads per CSV before the conversion read.
+leading_zero_probe_rows = 1000
+
 # ── Sniffing ──
 sniff_delimiters = [";", ",", "\t"]
 

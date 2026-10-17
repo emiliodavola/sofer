@@ -441,9 +441,11 @@ the report bounds are `[tool.sofer]` keys (`failure_report_repo`,
 
 ¹ `prepare` converts `csv/tsv/xlsx/jsonl` to normalized Parquet by default (Excel → one Parquet per sheet as `stem__sheet.parquet`); set `convert_to_parquet = false` per `[[file]]` to keep the original. `upload_as_csv = true` is a deprecated alias for `convert_to_parquet = false` on `.csv` only. `publish` delivers the prepared package unchanged (`--keep-csv` keeps the original `.csv` alongside its Parquet, CSV-only).
 
+² **Conversion never changes a value.** A column whose values are zero-padded codes (a leading `0` followed by digits, e.g. `"001"`) is not a number, so `prepare` forces it to `string` instead of letting pyarrow's inference store an integer: it probes the source (at most `leading_zero_probe_rows` rows, default 1000), prints each decision, and keeps the source text. To state that intent in the config, add an inline `column_types = { "<column>" = "string" }` table to the `[[file]]` entry, naming the columns to keep as strings. `"string"` is the only type accepted today; any other value is refused naming the accepted set. A value the protection cannot cover is never shipped: `prepare` **fails**, naming the column, a sample value and the exact declaration that fixes it, delivers nothing for that file, and exits non-zero. `sofer validate` reports the same finding as a warning before you run `prepare`.
+
 ### Parquet conversion limitations
 
-`prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead):
+`prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead). Zero-padded codes are **not** one of them: `prepare` protects them (footnote ²) and refuses to deliver a value it cannot preserve.
 
 | CSV pattern | What can go wrong | Workaround |
 | --- | --- | --- |

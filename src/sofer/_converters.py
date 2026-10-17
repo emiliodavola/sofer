@@ -14,8 +14,9 @@ import csv as csv_module
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pyarrow.csv as pc
@@ -31,6 +32,121 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 CONVERTIBLE_SUFFIXES: frozenset[str] = frozenset({".csv", ".tsv", ".xlsx", ".jsonl"})
+
+#: Suffixes whose reader takes the resolved CSV dialect and therefore supports the
+#: dtype control of issue #337. ``.tsv`` is excluded on purpose: its converter
+#: still uses a fixed tab delimiter and takes no ``column_types``, so the
+#: conversion path itself is unchanged for it.
+DELIMITED_TEXT_SUFFIXES: frozenset[str] = frozenset({".csv"})
+
+#: The declared column type that switches pyarrow's inference off for a column
+#: (issue #337). Kept in step with :data:`sofer.config.COLUMN_TYPES_SUPPORTED`
+#: through :func:`column_type_datatype`, which refuses a name it cannot honour.
+_COLUMN_TYPE_STRING: str = "string"
+
+#: A zero-padded code: a leading zero followed by digits (``"001"``, ``"02"``).
+_ZERO_PADDED_CODE = re.compile(r"^0\d+$")
+
+#: A plain digit run — the rest of a code column's values (``"5"``).
+_PLAIN_DIGITS = re.compile(r"^\d+$")
+
+
+class ValueAlterationError(Exception):
+    """Conversion would change stored values and no forced dtype covers them.
+
+    Raised by :func:`_convert_csv_to_parquet` when the value-parity check still
+    finds values the Parquet table does not carry, after every column the
+    conversion can protect was forced to string (issue #337). Shipping the
+    altered table as the authoritative artifact is exactly what "do not change
+    the data, only curate and document it" forbids, so the caller fails the run.
+
+    Attributes:
+        filename: Name of the source file whose values would change.
+        columns: ``(column_name, sample_source_value)`` pairs, in file order.
+    """
+
+    def __init__(self, filename: str, columns: list[tuple[str, str]]) -> None:
+        self.filename = filename
+        self.columns = columns
+        detail = ", ".join(f"{name!r} (e.g. {sample!r})" for name, sample in columns)
+        super().__init__(f"{filename}: value parity violated for {detail}")
+
+
+def column_type_datatype(declared: str) -> pa.DataType:
+    """Return the Arrow datatype for a declared ``column_types`` value.
+
+    Args:
+        declared: The type name a ``[[file]]`` ``column_types`` entry declares.
+
+    Returns:
+        The Arrow datatype to force that column to.
+
+    Raises:
+        ValueError: When *declared* is not in
+            :data:`sofer.config.COLUMN_TYPES_SUPPORTED`, naming the accepted
+            set — fail-closed at the point of use, so a vocabulary widened in
+            config without a factory here cannot silently do nothing.
+    """
+    if declared not in config.COLUMN_TYPES_SUPPORTED:
+        accepted = ", ".join(repr(name) for name in config.COLUMN_TYPES_SUPPORTED)
+        raise ValueError(f"unsupported column type {declared!r}; accepted: {accepted}")
+    return pa.string()
+
+
+def leading_zero_columns(
+    csv_path: Path,
+    delimiter: str,
+    encoding: str = config.CSV_ENCODING,
+    probe_rows: int = config.LEADING_ZERO_PROBE_ROWS,
+) -> list[str]:
+    """Return the columns whose zero-padded codes pyarrow's inference would alter.
+
+    A value is a zero-padded code when it has a leading zero and is otherwise all
+    digits (``"001"``, ``"02"``) — the official statistical-code shape of issue
+    #337. A column qualifies when every non-empty probed value is all digits and
+    at least one carries the leading zero, so free text that happens to contain a
+    ``0…`` token is never forced to string by accident.
+
+    Only the first *probe_rows* rows are read (a ``[tool.sofer]`` default, rule 1)
+    so detecting the pattern never re-reads a multi-GB corpus.
+
+    Args:
+        csv_path: The CSV file to probe.
+        delimiter: Resolved field delimiter (the declared one, not a guess).
+        encoding: Encoding for the probe read — the one the conversion uses.
+        probe_rows: Maximum number of data rows to inspect.
+
+    Returns:
+        Column names in file order. Empty when nothing looks like a code, and
+        empty (not an error) when the file cannot be read: the conversion path
+        reports unreadable files itself.
+    """
+    try:
+        with open(csv_path, newline="", encoding=encoding) as fh:
+            reader = csv_module.reader(fh, delimiter=delimiter)
+            try:
+                header = next(reader)
+            except StopIteration:
+                return []
+            numeric_only: list[bool] = [True] * len(header)
+            padded: list[bool] = [False] * len(header)
+            for index, row in enumerate(reader):
+                if index >= probe_rows:
+                    break
+                for col, value in enumerate(row[: len(header)]):
+                    token = value.strip()
+                    if not token:
+                        continue
+                    if _ZERO_PADDED_CODE.match(token):
+                        padded[col] = True
+                        continue
+                    if not _PLAIN_DIGITS.match(token):
+                        numeric_only[col] = False
+        return [
+            name for col, name in enumerate(header) if padded[col] and numeric_only[col] and name
+        ]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +449,7 @@ def _check_conversion_parity(
     delimiter: str,
     table: pa.Table,
     encoding: str = config.CSV_ENCODING,
+    alterations: list[tuple[str, str]] | None = None,
 ) -> tuple[bool, list[str]]:
     """Check row/col/name parity between CSV raw and Parquet table.
 
@@ -341,6 +458,11 @@ def _check_conversion_parity(
         delimiter: Resolved field delimiter.
         table: Parquet table produced from *csv_path*.
         encoding: Encoding for the Python-side parity read (the resolved one).
+        alterations: Optional out-parameter. When given, it is extended with one
+            ``(column_name, sample_source_value)`` pair per column whose values
+            the table does not carry, so the converter can act on the finding
+            (issue #337) without reading the CSV a second time. The printed and
+            returned warning strings are unchanged.
 
     Returns:
         ``(ok, warnings)`` — *ok* is False on hard mismatch.
@@ -404,6 +526,8 @@ def _check_conversion_parity(
                 f"  [!] VALUE ALTERED: column '{col_name}' \u2014 "
                 f"e.g. '{first}' changed after type inference"
             )
+            if alterations is not None:
+                alterations.append((col_name, first))
     for w in warnings:
         print(w)
     return (True, warnings)
@@ -464,10 +588,49 @@ def _check_jsonl_parity(
 # ---------------------------------------------------------------------------
 
 
+def _forced_column_types(
+    local: Path,
+    delimiter: str,
+    encoding: str,
+    column_types: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Return the columns to force to a declared type, reporting each decision.
+
+    The operator's ``column_types`` wins. Every other column whose probed values
+    look like zero-padded codes is forced to ``"string"`` by default, because a
+    code with a leading zero is not a number and the conversion would otherwise
+    drop the source form (issue #337). Each automatic decision is printed, so the
+    operator learns it without reading the Parquet.
+
+    Args:
+        local: The CSV being converted.
+        delimiter: Resolved field delimiter.
+        encoding: Encoding the conversion will use.
+        column_types: The ``[[file]]`` declared mapping, if any.
+
+    Returns:
+        ``{column_name: type}`` covering the declared and the auto-detected
+        columns.
+    """
+    forced = dict(column_types or {})
+    for name in leading_zero_columns(local, delimiter, encoding):
+        if name in forced:
+            continue
+        forced[name] = _COLUMN_TYPE_STRING
+        print(
+            f"  [i] {local.name}: column '{name}' carries zero-padded codes \u2014 "
+            f"forcing string dtype (declare "
+            f'column_types = {{ {name} = "{_COLUMN_TYPE_STRING}" }} '
+            f"on that [[file]] to be explicit)"
+        )
+    return forced
+
+
 def _convert_csv_to_parquet(
     local: Path,
     staging_dir: Path,
     cfg: DatasetConfig | None = None,
+    column_types: Mapping[str, str] | None = None,
 ) -> Path | None:
     """Convert *local* CSV to Parquet honouring the declared dialect (PC-U01).
 
@@ -482,9 +645,20 @@ def _convert_csv_to_parquet(
         local: Local CSV path.
         staging_dir: Destination directory for the Parquet file.
         cfg: Optional dataset config carrying the declared dialect.
+        column_types: Optional ``{column: type}`` declared on the ``[[file]]``
+            entry, forced through ``pyarrow.csv.ConvertOptions`` (issue #337).
+            Columns whose probed values look like zero-padded codes are forced
+            to ``"string"`` as well, and each such decision is printed.
 
     Returns:
-        The written Parquet path, or ``None`` on failure (warning printed).
+        The written Parquet path, or ``None`` on failure (warning printed and
+        the caller stages the original CSV).
+
+    Raises:
+        ValueAlterationError: When the value check still finds altered values
+            after every protectable column was forced to string. That is a data
+            integrity failure, not a conversion failure: it must not be
+            degraded into a CSV fallback.
     """
     try:
         delimiter, encoding = _resolve_csv_dialect(local, cfg)
@@ -500,20 +674,30 @@ def _convert_csv_to_parquet(
                     f"differs from sniffed {baseline!r} \u2014 using declared {delimiter!r}"
                 )
         parse_opts = pc.ParseOptions(delimiter=delimiter)
+        forced = _forced_column_types(local, delimiter, encoding, column_types)
+        read_kwargs: dict[str, Any] = {"parse_options": parse_opts}
         if "csv_encoding" in declared:
-            table = pc.read_csv(
-                local,
-                read_options=pc.ReadOptions(encoding=encoding),
-                parse_options=parse_opts,
+            read_kwargs["read_options"] = pc.ReadOptions(encoding=encoding)
+        if forced:
+            read_kwargs["convert_options"] = pc.ConvertOptions(
+                column_types={name: column_type_datatype(kind) for name, kind in forced.items()}
             )
-        else:
-            # Pre-change call shape verbatim: no read_options, so undeclared
-            # datasets stay byte-identical (PC-U01).
-            table = pc.read_csv(local, parse_options=parse_opts)
-        parity_ok, _ = _check_conversion_parity(local, delimiter, table, encoding)
+        # No ``convert_options`` when nothing is forced, so a dataset that needs
+        # no dtype control keeps the pre-change call shape (PC-U01).
+        table = pc.read_csv(local, **read_kwargs)
+        alterations: list[tuple[str, str]] = []
+        parity_ok, _ = _check_conversion_parity(
+            local, delimiter, table, encoding, alterations=alterations
+        )
         if not parity_ok:
             return None
+        if alterations:
+            raise ValueAlterationError(local.name, alterations)
         return _write_parquet_table(table, staging_dir, local.stem)
+    except ValueAlterationError:
+        # Data integrity, not a conversion failure (issue #337): the caller must
+        # see it, so it never degrades into the "stage the original" fallback.
+        raise
     except Exception as exc:
         print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")
         print(f"       ({exc})")
@@ -721,6 +905,7 @@ def convert_file_to_parquet(
     local: Path,
     staging_dir: Path,
     cfg: DatasetConfig | None = None,
+    column_types: Mapping[str, str] | None = None,
 ) -> dict[str, Path]:
     """Dispatch conversion for *local* to Parquet.
 
@@ -735,6 +920,8 @@ def convert_file_to_parquet(
         cfg: Optional dataset config carrying the declared ``[meta]``
             ``csv_delimiter``/``csv_encoding``, threaded into the CSV reader
             (PC-U01).  Ignored for tsv/xlsx/jsonl/parquet.
+        column_types: Optional ``[[file]]`` ``column_types`` mapping, honoured by
+            the CSV path only (issue #337).  Ignored for the other formats.
 
     Returns:
         Mapping ``normalised_stem → parquet_path``.  For single-file formats
@@ -753,7 +940,7 @@ def convert_file_to_parquet(
         # To avoid double-handling, return {} and let caller stage original.
         return {}
     if suffix == ".csv":
-        result = _convert_csv_to_parquet(local, staging_dir, cfg)
+        result = _convert_csv_to_parquet(local, staging_dir, cfg, column_types)
         if result is not None:
             return {local.stem: result}
         return {}

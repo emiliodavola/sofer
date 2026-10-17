@@ -1812,3 +1812,92 @@ class TestNoDuplicateConversionCluster:
                     if f"prepare import {name}" in text or f"prepare.{name}" in text:
                         offenders.append(f"{path.name}:{name}")
         assert offenders == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Issue #337 — value parity: codes survive, unauthorized alterations fail
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPrepareValueParity:
+    """prepare never ships a value pyarrow changed without authorization."""
+
+    def test_zero_padded_codes_survive_prepare(self, tmp_path: Path, capsys) -> None:
+        """T1: the code column reaches the delivered Parquet as its source text."""
+        csv = tmp_path / "DPTO.csv"
+        csv.write_text("IDDPTO;NOMDPTO\n001;Amazonas\n02;Antioquia\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="DPTO.csv")])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+
+        assert rc == 0
+        # The delivered artifact carries the HF-normalized (lower-cased) remote:
+        # asserting the un-normalized name only passes on a case-insensitive FS.
+        table = pq.read_table(out / "dpto.parquet")
+        assert table.schema.field("IDDPTO").type == pa.string()
+        assert table.column("IDDPTO").to_pylist() == ["001", "02"]
+        printed = capsys.readouterr().out
+        assert "VALUE ALTERED" not in printed
+        assert "carries zero-padded codes" in printed
+
+    def test_residual_alteration_fails_prepare(self, tmp_path: Path, capsys) -> None:
+        """T3: a value no forced dtype covers is fatal, and the fix is named."""
+        csv = tmp_path / "plus.csv"
+        csv.write_text("V;NAME\n+5;a\n+6;b\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="plus.csv")])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+
+        assert rc == 1
+        printed = capsys.readouterr().out
+        assert "VALUE PARITY FAILED" in printed
+        assert 'column_types = { V = "string" }' in printed
+        assert not (out / "plus.parquet").exists()
+
+    def test_declared_column_types_removes_the_failure(self, tmp_path: Path) -> None:
+        """T2 end-to-end: the declaration is the operator's fix."""
+        csv = tmp_path / "plus.csv"
+        csv.write_text("V;NAME\n+5;a\n+6;b\n", encoding="utf-8")
+        cfg = _cfg(
+            tmp_path,
+            [FileEntry(local=csv, remote="plus.csv", column_types={"V": "string"})],
+        )
+        out = tmp_path / "build"
+
+        assert prepare(cfg, out) == 0
+        table = pq.read_table(out / "plus.parquet")
+        assert table.column("V").to_pylist() == ["+5", "+6"]
+
+    def test_convert_to_parquet_false_wins_over_column_types(self, tmp_path: Path) -> None:
+        """T5: the per-file escape hatch keeps the original CSV, unpreprocessed."""
+        csv = tmp_path / "codes.csv"
+        csv.write_text("ID;NAME\n001;a\n", encoding="utf-8")
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(
+                    local=csv,
+                    remote="codes.csv",
+                    convert_to_parquet=False,
+                    column_types={"ID": "string"},
+                )
+            ],
+        )
+        out = tmp_path / "build"
+
+        assert prepare(cfg, out) == 0
+        assert not (out / "codes.parquet").exists()
+        assert (out / "codes.csv").read_text(encoding="utf-8").startswith("ID;NAME")
+
+    def test_plain_integer_dataset_is_unaffected(self, tmp_path: Path) -> None:
+        """Existing behaviour: a numeric column stays numeric."""
+        csv = tmp_path / "plain.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="plain.csv")])
+        out = tmp_path / "build"
+
+        assert prepare(cfg, out) == 0
+        table = pq.read_table(out / "plain.parquet")
+        assert table.schema.field("a").type == pa.int64()
