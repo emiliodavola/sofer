@@ -86,3 +86,35 @@ instead of `int64` — the source form is the only correct delivery — and a va
 the conversion would still change now fails `prepare` with a non-zero exit
 instead of shipping. Both belong in the release notes for the next tag (rule 12),
 and consumers that summed such a column must adapt.
+
+## 6. What CI caught, and the local gate set could not
+
+The first run of the delivery PR went red on all ten test-matrix jobs and on the
+`coverage` job, with a single failing test:
+
+```
+E  FileNotFoundError: /tmp/pytest-of-runner/pytest-0/test_zero_padded_codes_survive0/build/DPTO.parquet
+1 failed, 2432 passed, 2 skipped
+```
+
+It was a defect of this change's **test**, not of its code.
+`test_zero_padded_codes_survive_prepare` asserted the *declared* remote name,
+while `prepare` delivers the HF-normalized one —
+`normalize_parquet_remote(parquet_remote_for("DPTO.csv"))` is `"dpto.parquet"` —
+and a case-insensitive Windows filesystem resolved the un-normalized name to the
+right file, so the full local suite passed. The fix asserts `dpto.parquet` and
+names the trap in the test.
+
+**Lesson worth keeping:** a test that builds a path from a normalized identifier
+must use the normalizer (or a lower-cased literal). A full local suite on a
+case-insensitive filesystem cannot catch that class of mistake, and CI does.
+
+## 7. Corrections from review, before merge
+
+`README.md` / `README_ES.md`: the first draft of footnote ² named a concrete file
+and column (`local = "cache/DPTO.csv"`, `column_types = { IDDPTO = "string" }`)
+instead of stating the mechanism in general. Both files now describe the rule and
+use the placeholder form `column_types = { "<column>" = "string" }` (mirrored as
+`"<columna>"`), and the *Parquet conversion limitations* section says explicitly
+that zero-padded codes are **not** one of the gaps it lists, because the
+conversion protects them — otherwise the two sections contradict each other.

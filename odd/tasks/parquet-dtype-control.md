@@ -115,3 +115,12 @@ Parquet readback: schema=IDDPTO: int64, NOMDPTO: string   IDDPTO=[1, 2, 5]
   in the function. A fourth failure was a test that pins "prepare routes CSV conversion through
   `_converters`": its spy did not accept the new keyword, and keeping its assertion was the point.
   Lesson kept for the third phase: run the gate set *before* writing the delivery record, not after.
+- **L7** — the first run of PR #341 went red on all ten test-matrix jobs and on `coverage` with one
+  failure, and it was a defect of this change's *test*, not of its code:
+  `test_zero_padded_codes_survive_prepare` asserted `build/DPTO.parquet` while `prepare` delivers the
+  HF-normalized `build/dpto.parquet`, and the case-insensitive Windows filesystem resolved the wrong
+  name to the right file — which is why the full local suite could not see it. Fixed in the test, where
+  the trap is now named. Second correction from review: footnote ² named a concrete file and column
+  instead of stating the mechanism generally; both READMEs now use the placeholder form and the
+  limitations section says zero-padded codes are not one of its gaps. Neither correction touched the
+  behaviour this change delivers.

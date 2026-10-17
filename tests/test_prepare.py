@@ -1832,7 +1832,9 @@ class TestPrepareValueParity:
         rc = prepare(cfg, out)
 
         assert rc == 0
-        table = pq.read_table(out / "DPTO.parquet")
+        # The delivered artifact carries the HF-normalized (lower-cased) remote:
+        # asserting the un-normalized name only passes on a case-insensitive FS.
+        table = pq.read_table(out / "dpto.parquet")
         assert table.schema.field("IDDPTO").type == pa.string()
         assert table.column("IDDPTO").to_pylist() == ["001", "02"]
         printed = capsys.readouterr().out
