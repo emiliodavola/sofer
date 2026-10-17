@@ -441,6 +441,17 @@ the report bounds are `[tool.sofer]` keys (`failure_report_repo`,
 
 ¹ `prepare` converts `csv/tsv/xlsx/jsonl` to normalized Parquet by default (Excel → one Parquet per sheet as `stem__sheet.parquet`); set `convert_to_parquet = false` per `[[file]]` to keep the original. `upload_as_csv = true` is a deprecated alias for `convert_to_parquet = false` on `.csv` only. `publish` delivers the prepared package unchanged (`--keep-csv` keeps the original `.csv` alongside its Parquet, CSV-only).
 
+² **Conversion never changes a value.** A code column whose values are zero-padded (`"001"`, `"02"`) is not a number, so `prepare` forces it to `string` instead of letting pyarrow's inference store `1`: it probes the source (at most `leading_zero_probe_rows` rows, default 1000), prints each decision, and keeps the source text. Declare it explicitly with an inline table on the entry when you want the intent in the config:
+
+```toml
+[[file]]
+local = "cache/DPTO.csv"
+remote = "DPTO.csv"
+column_types = { IDDPTO = "string" }
+```
+
+`"string"` is the only type accepted today; any other value is refused naming the accepted set. If a value would still be altered (for example a `+5` column), `prepare` **fails** — it names the column, a sample value and the exact `column_types` declaration that fixes it, delivers nothing for that file, and exits non-zero. `sofer validate` reports the same finding as a warning before you run `prepare`.
+
 ### Parquet conversion limitations
 
 `prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead):

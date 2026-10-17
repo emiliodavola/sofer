@@ -455,6 +455,17 @@ repositorio destino y los límites del reporte son claves de `[tool.sofer]`
 
 ¹ `prepare` convierte `csv/tsv/xlsx/jsonl` a Parquet normalizado por defecto (Excel → un Parquet por hoja como `stem__sheet.parquet`); usa `convert_to_parquet = false` por `[[file]]` para conservar el original. `upload_as_csv = true` es un alias obsoleto de `convert_to_parquet = false` solo para `.csv`. `publish` entrega el paquete preparado sin cambios (`--keep-csv` conserva el `.csv` original junto a su Parquet, solo para CSV).
 
+² **La conversión nunca cambia un valor.** Una columna de códigos con ceros a la izquierda (`"001"`, `"02"`) no es un número, así que `prepare` la fuerza a `string` en lugar de dejar que la inferencia de pyarrow guarde `1`: sondea la fuente (como máximo `leading_zero_probe_rows` filas, por defecto 1000), imprime cada decisión y conserva el texto original. Declaralo explícitamente con una tabla inline en la entrada cuando quieras la intención en el config:
+
+```toml
+[[file]]
+local = "cache/DPTO.csv"
+remote = "DPTO.csv"
+column_types = { IDDPTO = "string" }
+```
+
+`"string"` es el único tipo aceptado hoy; cualquier otro valor se rechaza nombrando el conjunto aceptado. Si aun así un valor se alterara (por ejemplo una columna `+5`), `prepare` **falla**: nombra la columna, un valor de muestra y la declaración `column_types` exacta que lo arregla, no entrega nada para ese archivo y sale con código distinto de cero. `sofer validate` reporta el mismo hallazgo como advertencia antes de que corras `prepare`.
+
 ### Limitaciones de conversión a Parquet
 
 `prepare` convierte CSV a Parquet con la inferencia automática de tipos de

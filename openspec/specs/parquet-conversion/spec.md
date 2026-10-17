@@ -322,8 +322,44 @@ when they cause `pyarrow.csv.read_csv()` to raise):
   text: pyarrow may promote the column to `string` or raise.
 - **Extremely long string fields** (>2 GB): pyarrow's `large_string` handles
   this, but the CSV parser may have memory limits.
+- **Zero-padded codes** (e.g. `"001"`, `"02"`): inference stores them as
+  integers and the source form is lost. That outcome SHALL NOT be accepted —
+  see §7.4.
 
 These limitations SHALL be documented in the project README.
+
+### 7.4 Value parity and dtype control (issue #337)
+
+A converted file SHALL NOT change any value relative to its source: the
+requirement is "do not change the data, only curate and document it". Three
+mechanisms enforce it.
+
+**Declared dtype control.** A `[[file]]` entry MAY declare
+`column_types = { COLUMN = "string" }` — an inline table forcing named columns
+past pyarrow's inference and into `pyarrow.csv.ConvertOptions`. `"string"` is
+the only type expressible today (`sofer.config.COLUMN_TYPES_SUPPORTED`); any
+other value SHALL be refused naming the accepted set, both when the
+configuration is validated and at the point of use.
+
+**Automatic code protection.** Before the conversion read, the converter SHALL
+probe at most `[tool.sofer] leading_zero_probe_rows` rows and force every column
+whose non-empty probed values are all digits with at least one leading zero
+(`"001"`, `"02"`) to `string`, printing each decision so the operator sees it
+without reading the Parquet. A code with a leading zero is not a number, so its
+source form is the only correct delivery.
+
+**Fail closed on anything left.** After the conversion the value check SHALL
+compare the source strings with the table's values. When a value the table does
+not carry remains — the automatic protection and the declaration did not cover
+it — the conversion SHALL fail: `prepare` SHALL report each column with a sample
+value and the exact `column_types` declaration that fixes it, deliver nothing for
+that file, and exit non-zero. Such an alteration SHALL NOT be degraded into the
+CSV fallback of §1.1, which is reserved for genuine read failures.
+
+`sofer validate` SHALL report the same finding from the source alone (there is
+no Parquet yet) as a warning naming the file and column, so the decision is
+visible before `prepare` runs. A column already covered by a declaration SHALL
+NOT be reported.
 
 ### 7.3 Encoding
 
@@ -720,3 +756,35 @@ and the behaviour SHALL be pinned by a test.
 - WHEN the conversion runs
 - THEN it SHALL take the sniff fallback
 - AND the decision SHALL be recorded in the owning change's design and pinned by a test
+
+#### Scenario: Zero-padded codes survive the conversion
+- GIVEN a CSV whose `IDDPTO` column holds `001` and `02`, and no `column_types` declaration
+- WHEN the file is converted
+- THEN the Parquet column SHALL be `string`
+- AND its values SHALL be `001` and `02`
+- AND the automatic decision SHALL be printed for that column
+
+#### Scenario: A declared column type forces the dtype
+- GIVEN a `[[file]]` entry with `column_types = { V = "string" }`
+- WHEN the file is converted
+- THEN the `V` column SHALL be `string` carrying its source values
+- AND the conversion SHALL NOT fail
+
+#### Scenario: An uncovered alteration fails prepare
+- GIVEN a CSV whose `V` column holds `+5`, with no declaration covering it
+- WHEN `sofer prepare` runs
+- THEN it SHALL report the column with a sample value and the `column_types` declaration that fixes it
+- AND no Parquet SHALL be delivered for that file
+- AND the exit code SHALL be non-zero
+
+#### Scenario: An unsupported declared type is refused
+- GIVEN `column_types = { ID = "int64" }`
+- WHEN the configuration is validated, or the conversion is attempted
+- THEN the refusal SHALL name the accepted set (`'string'`)
+- AND no converted artifact SHALL be produced for that entry
+
+#### Scenario: validate reports the code column before prepare
+- GIVEN a CSV whose `IDDPTO` column holds `001`, and no `column_types` declaration
+- WHEN `sofer validate` runs
+- THEN it SHALL warn naming the file, the column and the declaration that makes it explicit
+- AND the warning SHALL NOT be an error, because the conversion protects the column
