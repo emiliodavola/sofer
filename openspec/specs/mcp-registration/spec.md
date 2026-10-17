@@ -251,11 +251,13 @@ declared for project scope, `--user-config` SHALL still be ignored.
 
 ---
 
-### Requirement: OpenCode env-drop warning (MCP-REG-03)
+### Requirement: OpenCode env-drop warning (MCP-REG-03) — Modified 2026-10-17, opencode-mcp-entry-position
 
 > Added by change `2026-09-12-fix-mcp-opencode-env` (closes #147).
 > Extended by change `2026-09-25-feat-pi-mcp-agent` (#142) — `--agent all` now
 > expands to four agents and Pi is a name-forwarding agent.
+> Extended 2026-10-17 by `opencode-mcp-entry-position` (issue #334) — the entry's
+> position becomes an explicit clause, with no code change behind it.
 
 `sofer mcp add --agent opencode` (and the opencode member of `--agent all`)
 MUST emit an informational warning on **stderr** when `collect_env()` returns at
@@ -276,6 +278,25 @@ agents `opencode`, `codex`, `gemini`, `pi`; the warning fires for the opencode
 member only, while codex/gemini/pi members continue to persist names only
 (`env_vars` allow-list of keys present / `env` `$KEY` references / `env` `${KEY}`
 references) and MUST NOT emit the warning.
+
+The opencode entry SHALL be written in the **V1 position** — the server name directly under `mcp`
+(`mcp.sofer`), where the stable schema (`ConfigMCP.Local`) and the stable docs read it — and SHALL NOT
+be written under `mcp.servers`. A v2 opencode reads that same position: its configuration normalization
+decodes every non-container `mcp.<name>` value as the V1 server schema, migrates it (the server shape,
+and the scalar `timeout` into the phases that class understands) and merges the result into the
+`mcp.servers` mapping it emits **in memory**, without rewriting the source file
+(`packages/core/src/config/normalize.ts`, `normalizeMcp`; opencode's own "Migrate from V1" page states
+that existing supported V1 configuration keeps working without conversion). One entry therefore serves
+both generations, while `mcp.servers.<name>` would place it where a stable opencode does not look — so
+this position is a contract, not an artifact of when the adapter was written.
+
+> Modified 2026-10-17 by `opencode-mcp-entry-position` (issue #334), researched before the write and
+> with **no code change**: #334 reported the position as a possible defect and made verifying it its own
+> first task — "whether opencode's V1→V2 config migration moves an existing `mcp.<name>` entry to
+> `mcp.servers.<name>` on read". It does, in `normalizeMcp`, so the entry was never mis-registered and the
+> defect was this specification staying silent about why the position is the one it is. Writing
+> `mcp.servers.<name>` instead was refused rather than deferred: the stable release (`opencode-ai@latest`)
+> reads `mcp.<name>`, and the adapter is a single writer for both.
 
 The warning MUST also appear in `--dry-run` output (emitted on the dry-run path,
 before the preview branch), so a preview surfaces the drop instead of hiding it.
@@ -317,6 +338,18 @@ before the preview branch), so a preview surfaces the drop instead of hiding it.
 - GIVEN `HF_TOKEN=hf123` and `SOFER_MCP_APPROVAL_PHRASE=phrase123` set
 - WHEN `sofer mcp add --agent opencode` runs, in both real and `--dry-run` modes
 - THEN neither `hf123` nor `phrase123` SHALL appear in stdout, stderr, or any written config file
+
+#### Scenario: The opencode entry keeps the position both generations read
+
+- GIVEN a project-scope `add --agent opencode` where no `sofer` entry exists yet
+- WHEN the write completes
+- THEN `opencode.json` SHALL carry `mcp.sofer` = `{type:"local",command:["sofer-mcp"],cwd}` plus the
+  timeout keys MCP-REG-05 declares for opencode
+- AND no `mcp.servers` key SHALL be created
+- AND the entry SHALL remain readable by a v2 opencode, whose normalization migrates exactly this flat
+  form into `mcp.servers`
+
+**Evidence:** `test: tests/test_mcp_registration.py::TestMerge::test_opencode_entry_lands_in_the_position_both_generations_read`
 
 ---
 

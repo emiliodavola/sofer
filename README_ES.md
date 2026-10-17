@@ -809,10 +809,14 @@ Ubicaciones y formas por agente:
   clave documenta (el fetch de las tools del servidor, o sea el arranque en frío que duele). Nunca se
   escribe como el objeto anidado que documentan algunos releases, porque eso arriesgaría invalidar todo el
   bloque `mcp` por un nombre de subclave que difiere entre esos releases. Un host cuya entrada no acepta
-  ninguna clave de timeout se sigue nombrando en stderr en lugar de inventarle una. Una cosa que esto
-  **no** arregla, y nombrarla importa más que la clave que arregla: un opencode v2 resuelve sus
-  servidores desde `mcp.servers.<name>`, mientras que este comando sigue escribiendo la entrada en
-  `mcp.<name>` — un defecto mayor de layout, con su propio issue.
+  ninguna clave de timeout se sigue nombrando en stderr en lugar de inventarle una. La **posición** de la
+  entrada de opencode no necesita esa nota, y saber por qué vale más que la clave que la acompaña: un
+  opencode v2 lee sus servidores desde `mcp.servers.<name>` mientras que este comando escribe la entrada
+  en `mcp.<name>` — la posición que declara el schema de v1 y que v2 sigue leyendo, porque v2 normaliza la
+  forma plana de V1 en memoria (decodifica cada `mcp.<name>` con el schema de servidor V1, la migra y la
+  fusiona en `mcp.servers`, sin reescribir tu archivo) y su propia página de migración promete que la
+  configuración V1 soportada sigue funcionando sin conversión. Una entrada sirve para ambas generaciones;
+  escribir `mcp.servers.<name>` acá sería el defecto real, porque ahí es donde un opencode estable no mira.
 - **Las llamadas largas resetean su propio deadline.** Cada tool largo (`sofer_prepare`,
   `sofer_codebook_all`, `sofer_profile_all`, `sofer_render_all`, `sofer_publish_confirm`) reanuncia
   progreso mientras corre, y eso es lo que resetea el timeout por request del host — así un tool largo
