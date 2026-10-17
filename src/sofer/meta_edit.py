@@ -12,8 +12,9 @@ writer is :func:`sofer.scanner.write_toml`, which reserializes the whole
 document with ``tomli_w``; applied to a dataset TOML that strips the ~60
 comment lines the ``sofer init`` template writes as guidance (``cli.py:1049``).
 The issue asks for the opposite: *"preserving every other key and the file's
-formatting where the format allows"*. ``tomllib`` (the stdlib reader already in
-use) is the authority for the three questions a line scanner must not guess:
+formatting where the format allows"*. The project's TOML parser — :mod:`sofer._toml`,
+which selects stdlib ``tomllib`` on Python 3.11+ and the ``tomli`` backport below
+that — is the authority for the three questions a line scanner must not guess:
 
 1. Which line is the real ``[meta]`` header — a line reading ``[meta]`` can sit
    inside a multi-line string of an earlier table.
@@ -21,7 +22,8 @@ use) is the authority for the three questions a line scanner must not guess:
 3. Where a value ends — a pre-existing multi-line array or ``\"\"\"`` string is
    replaced over its whole range, never by a first-line substitution.
 
-Each question is answered by re-parsing the document prefix with ``tomllib``:
+Each question is answered by re-parsing the document prefix with
+:func:`sofer._toml.loads`:
 a prefix that is not valid TOML means the candidate line is inside an open
 value, so it is skipped. The edited text is then parsed again and every
 requested key is read back before :func:`set_meta` replaces the file, so a
@@ -44,9 +46,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
-import tomllib
-
-from . import config
+from . import _toml, config
 from .model import DatasetConfig
 
 MetaKind: TypeAlias = Literal["text", "list", "flag"]
@@ -191,11 +191,11 @@ def _parses(text: str) -> bool:
         text: Candidate TOML text.
 
     Returns:
-        ``True`` when ``tomllib`` accepts the text.
+        ``True`` when the TOML parser accepts the text.
     """
     try:
-        tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, ValueError):
+        _toml.loads(text)
+    except ValueError:
         return False
     return True
 
@@ -213,8 +213,8 @@ def _parse(text: str) -> dict[str, Any]:
         MetaEditError: The text is not a valid TOML document.
     """
     try:
-        return tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        return _toml.loads(text)
+    except ValueError as exc:
         raise MetaEditError(f"not a valid TOML document: {exc}") from exc
 
 
@@ -359,7 +359,7 @@ def _literal_value(literal: str) -> Any:
     Returns:
         The parsed value.
     """
-    return tomllib.loads(f"v = {literal}")["v"]
+    return _toml.loads(f"v = {literal}")["v"]
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +500,7 @@ def _value_end(lines: list[str], start: int, end: int, key: str) -> int:
         candidate = "".join(lines[:stop])
         if not _parses(candidate):
             continue
-        if key in _meta_table(tomllib.loads(candidate)):
+        if key in _meta_table(_toml.loads(candidate)):
             return stop
     raise MetaEditError(f"cannot locate the value of [meta] {key}; edit the file by hand")
 

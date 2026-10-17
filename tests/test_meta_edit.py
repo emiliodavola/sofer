@@ -14,9 +14,8 @@ import re
 from pathlib import Path
 
 import pytest
-import tomllib
 
-from sofer import meta_edit
+from sofer import _toml, meta_edit
 from sofer.cli import _INIT_TEMPLATE
 from sofer.meta_edit import META_KEYS, MetaEditError, apply_meta_edit
 from sofer.model import DatasetConfig
@@ -46,7 +45,7 @@ def _without_meta_block(text: str) -> list[str]:
 
 def _parse(text: str) -> dict:
     """Parse *text* as TOML, asserting it is valid."""
-    return tomllib.loads(text)
+    return _toml.loads(text)
 
 
 class TestRegistry:

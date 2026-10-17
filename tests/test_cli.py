@@ -15,11 +15,10 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest as _pytest
-import tomllib
 import yaml
 from conftest import run_cli
 
-from sofer import cli, config, mcp_registration
+from sofer import _toml, cli, config, mcp_registration
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -3478,7 +3477,7 @@ class TestMetaCommand:
         out = capsys.readouterr().out
         assert rc == 0
         assert "wrote description, license, source, tags" in out
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
+        document = _toml.loads(path.read_text(encoding="utf-8"))
         assert document["meta"]["description"] == "Real"
         assert document["meta"]["tags"] == ["a", "b"]
         # The template's comment guidance survived (the reason for the surgical writer).
@@ -3490,7 +3489,7 @@ class TestMetaCommand:
             self._set(path, ["confidential=false", "language=en,es", "curation_rationale=x"])
         )
         assert rc == 0
-        meta = tomllib.loads(path.read_text(encoding="utf-8"))["meta"]
+        meta = _toml.loads(path.read_text(encoding="utf-8"))["meta"]
         assert meta["confidential"] is False
         assert meta["language"] == ["en", "es"]
         assert meta["curation_rationale"] == "x"
