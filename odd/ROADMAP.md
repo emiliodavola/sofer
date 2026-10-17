@@ -247,6 +247,31 @@ under `src/`, and `ADAPTERS["opencode"]["timeout_key"] is None` (`mcp_registrati
 | #322 | a new `cli.py` handler under the rule-14 100.00% mandate, including the no-binary-on-`PATH` fallback and the child-kill path; Windows process handling in CI |
 | #323 | one new module, one new CLI command pair under the rule-14 100.00% mandate, **two** new MCP tools (roster 15 → 17: `WORKFLOW_METADATA`, `_PHASED_INSTRUCTIONS`, two `AREAS` entries, the schema/roster/workflow/mapping guards, both READMEs), and the writer itself — the largest item in the batch |
 | #320 | small once the research landed: one adapter entry, one guard in `dropped_timeout_note`, the shape assertions the issue asks for, MCP-REG-05 and the READMEs |
+| #334 | the cheapest delivery of the batch — a test, a spec clause and the README pair, with **no code change**. Its cost sat entirely in the research that made "no code change" an answer instead of a guess |
+
+### Follow-up raised by #320 and closed here — issue #334, size **S**
+
+`odd/tasks/opencode-timeout.md` D6/L4 left the *layout* half out of #320 and filed it as
+[#334](https://github.com/emiliodavola/sofer/issues/334), whose first task was to **verify** it ("this is
+a finding, not a verified defect"). **The finding is false**: a v2 opencode reads the flat V1 position.
+`packages/core/src/config/normalize.ts` (`normalizeMcp`) decodes every non-container `mcp.<name>` value
+as the V1 server schema, migrates it and merges it into the `mcp.servers` mapping it emits **in memory**,
+without rewriting the source file; opencode's own "Migrate from V1" page promises the same ("Existing
+supported V1 configuration is intended to keep working"). So the entry was never mis-registered, and the
+defect was the durable text: both READMEs called the layout "a larger defect … tracked separately", which
+is exactly the sentence that sends the next reader to "fix" a working position into the shape a stable
+opencode rejects. Closed with **no code change**
+([`tasks/opencode-mcp-entry-position.md`](tasks/opencode-mcp-entry-position.md)): MCP-REG-03 states the
+position as a contract plus its scenario, one test pins it (`mcp.sofer` present, no `mcp.servers`
+created), the `ADAPTERS["opencode"]` comment carries the reason, and both READMEs say what v2 actually
+does.
+
+**The finding worth keeping from this one:** a defect reported against a *position* in a third-party
+config file is a claim about that tool's reader, and it is decidable by reading the reader — not by
+reasoning from the tool's newest docs. #334's own table listed the v2 *schema* (`mcp.servers`) and the v2
+*docs* and concluded the position was wrong; the file that decides the question (`config/normalize.ts`)
+is the one neither source pointed at. The same shape of mistake as the `verify:` rows rule 6 warns about:
+the cited evidence class was not the one that carries the claim.
 
 ### Finding raised by Batch B (not in any issue)
 

@@ -109,9 +109,9 @@ otherwise — README.md, README_ES.md, and the spec's silence on the position �
 
 | ID | Task | Specs | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | Verdict recorded in this document, with both sources and the exact code path; the issue's S3 question answered as *migrated* | S3, S5, D2 | inline | `docs(odd): record the #334 verdict — v2 migrates the v1 mcp position` |
-| T2 | The position pinned by a test (`TestMerge`: `mcp.sofer` present, no `mcp.servers` created) and the adapter comment corrected | S1, S2, S4, D1, D2 | inline | `test(mcp): pin the opencode entry position both generations read (#334)` |
-| T3 | MCP-REG-03 carries the position contract and its scenario; both READMEs lose the "larger defect in the layout, tracked separately" paragraph and state what v2 actually does | S4, S10, D3 | inline | `docs(mcp): the opencode entry position is one both generations read (#334)` |
+| T1 | Verdict recorded in this document, with both sources and the exact code path; the issue's S3 question answered as *migrated* | S3, S5, D2 | inline | `26830b5` |
+| T2 | The position pinned by a test (`TestMerge`: `mcp.sofer` present, no `mcp.servers` created) and the adapter comment corrected | S1, S2, S4, D1, D2 | inline | `00b9fd9` |
+| T3 | MCP-REG-03 carries the position contract and its scenario; both READMEs lose the "larger defect in the layout, tracked separately" paragraph and state what v2 actually does | S4, S10, D3 | inline | `e51bdae` |
 | T4 | `odd/ROADMAP.md` row; Engram mirror | S8 | inline | `chore(odd): record the #334 delivery` |
 | T5 | Gates: `uv run pytest tests/ -q`, `ruff check`/`format`, `uv run --python 3.13 mypy src/ scripts/`, `uv run pyright`, `scripts/check_test_mapping.py` | S8 | inline | — |
 
@@ -137,3 +137,35 @@ READMEs said the v2 layout was "a larger defect in the layout, tracked separatel
 true (`mcp.servers` is where v2 puts servers natively) and the *defect* part is not: nothing is
 mis-registered, because v2 migrates the flat form it finds. A reader of that sentence would go "fix" a
 working position — exactly the outcome S4 names.
+
+L6 (T1, `26830b5`): the verdict and the plan, committed before the first edit to anything else. The
+research is the whole cost of this delivery (D-cost, ROADMAP): three files from `anomalyco/opencode@dev`
+and one vendor doc page, from which one function decided the answer.
+
+L7 (T2, `00b9fd9`): the pin. **No behaviour changed, so a RED in the TDD sense does not exist here** —
+and that is recorded rather than glossed: the change is documentation, and the only executable content is
+the pin itself. What was checked instead is the thing a pin can be wrong about, its discriminating power:
+written first with the inverted expectation (`assert "servers" in data["mcp"]`, i.e. the shape the refused
+option would produce) it **failed on a real write** —
+`AssertionError: assert 'servers' in {'sofer': {'type': 'local', 'command': ['sofer-mcp'], 'cwd': …, 'timeout': 120000}}`
+— and passes with the contract as written. A test that could not tell the two positions apart would have
+been worth nothing.
+
+L8 (T3, `e51bdae`): the spec clause, its scenario, its `**Evidence:**` row naming the test from L7, and
+the README pair (rule 13). MCP-REG-03 keeps its title — other documents reference it by number and name
+— with the modification marker and note added, following MCP-REG-05's convention.
+
+L9 (T4/T5, state at close): gates on the branch — `uv run pytest tests/ -q` **2380 passed, 9 skipped**;
+`ruff check .` clean; `ruff format --check src/ tests/` **79 files already formatted**; `uv run --python 3.13
+mypy src/ scripts/` **Success: no issues found in 40 source files**; `uv run pyright` **0 errors, 1 warning**,
+and that warning (`src/sofer/_toml.py:27` could not resolve `tomli` from source) was reproduced on the
+stashed `dev` state, so it predates this branch; `scripts/check_test_mapping.py` **OK**. One reported,
+unfixed, out-of-scope item: `ruff format --check .` flags `README.md` and `README_ES.md` for the fenced
+Python in their walkthrough block — pre-existing on `dev` (verified by running the same check on both
+files as `dev` has them), in lines this change does not touch, and outside every gate by declaration:
+`.pre-commit-config.yaml` restricts `ruff-format` to `types_or: [python, pyi, jupyter]` (issue #216) and
+CI runs it on `src/ tests/` only.
+
+L10 (open, not a task): the verdict is **not** on the issue. #334's first task says "Record the answer
+here before proposing a change", and "here" is the issue thread; posting it is a publish action and needs
+the maintainer's word, so the durable answer lives in this file and MCP-REG-03 until then.
