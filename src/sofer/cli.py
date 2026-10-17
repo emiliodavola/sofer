@@ -36,9 +36,9 @@ from .scanner import (
     collect_init_moves,
     copy_files,
     discover_files,
-    flatten_first_level,
     merge_entries,
     move_to_raw,
+    registration_path,
     write_toml,
 )
 
@@ -517,12 +517,12 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             5. ``move_to_raw`` — ``mkdir -p`` parents, ``shutil.move``,
                no flatten.
 
-        Phase 2 — copy ``raw/`` → ``cache/`` (flatten first level):
+        Phase 2 — copy ``raw/`` → ``cache/`` (keyed relative to ``raw/``):
 
             6. Discover files excluding ``cache/``/``EXCLUSIONS``,
                ``check_flatten_collisions``, ``merge_entries``,
                ``copy_files`` (``raw/DPTO.csv`` → ``cache/DPTO.csv`` via
-               :func:`flatten_first_level` + ``shutil.copy2``), ``write_toml``.
+               :func:`registration_path` + ``shutil.copy2``), ``write_toml``.
 
     Atomicity: collision or ``N``/``--dry-run`` leaves TOML and moved files
     untouched — no partial moves. Phase 2 copies files first and writes the
@@ -645,7 +645,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if not candidates and not args.dry_run and not args.force:
         print(f"\n  The following files will be copied to {config.OUTPUT_DIR}/:")
         for f in discovered:
-            flat = flatten_first_level(f.relative_to(base_dir))
+            flat = registration_path(f, base_dir, raw_dir)
             print(f"     -> {config.OUTPUT_DIR}/{flat.as_posix()}")
         try:
             answer = input("\n  Continue? [y/N] ").strip().lower()
@@ -1864,8 +1864,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "(not isatty) skips the [y/N] prompt, else prompt aborts on N.\n"
             "\n"
             "Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) "
-            "-> build/ (gitignored); scan flattens raw/DPTO.csv -> cache/DPTO.csv "
-            "via flatten_first_level."
+            "-> build/ (gitignored); scan keys raw/DPTO.csv -> cache/DPTO.csv "
+            "via registration_path."
         ),
     )
     i.add_argument("name", help="Short name for the dataset.")
@@ -1925,10 +1925,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "no partial moves or TOML write.\n"
             "\n"
             "Phase 2 — COPY raw/ -> cache/: recursively scan (excluding "
-            "cache/ and EXCLUSIONS), flatten the first path segment "
-            "(raw/DPTO.csv -> cache/DPTO.csv), register new files as "
+            "cache/ and EXCLUSIONS), key each file by its path relative to "
+            "raw/ (raw/DPTO.csv -> cache/DPTO.csv, raw/Labels/x.csv -> "
+            "cache/Labels/x.csv), register new files as "
             "[[file]] entries in the TOML, and copy them into the cache/ "
-            "directory via flatten_first_level + shutil.copy2.\n"
+            "directory via registration_path + shutil.copy2. Keying on raw/ "
+            "is what makes a re-scan idempotent whatever the layout."
             "\n"
             "Running scan twice is safe — already-registered files are "
             "skipped (idempotent TOML and cache/)."

@@ -11,7 +11,7 @@ Pipeline: raw/ (tracked) -> cache/ (OUTPUT_DIR, gitignored) -> build/
 via :func:`move_to_raw` (``dest = raw_dir / rel``, lazy ``mkdir -p``
 parent), checks raw-dest collisions atomically via
 :func:`check_raw_collisions`, then copies ``raw/`` → ``cache/`` via
-:func:`flatten_first_level` and :func:`copy_files` (``raw/DPTO.csv`` →
+:func:`registration_path` and :func:`copy_files` (``raw/DPTO.csv`` →
 ``cache/DPTO.csv``). ``EXCLUSIONS`` (``.git``, ``__pycache__``,
 ``.venv``, ``node_modules``, ``dist``, ``build``) are pruned;
 ``cache/`` (``OUTPUT_DIR``) excluded via ``EXCLUSIONS|{OUTPUT_DIR}``;
@@ -132,8 +132,33 @@ def check_raw_collisions(
         raise ValueError("\n".join(errors))
 
 
+def registration_path(src: Path, base_dir: Path, raw_dir: Path) -> Path:
+    """Return the path *src* is registered and copied under (issue #339).
+
+    A file that lives under *raw_dir* is keyed relative to *raw_dir*
+    (``raw/Labels/x.csv`` -> ``Labels/x.csv``); any other file is keyed
+    relative to *base_dir* (a loose ``Labels/x.csv`` -> ``Labels/x.csv``).
+    Keying on the root that owns the file — instead of dropping a fixed first
+    path segment — is what makes the key independent of where discovery found
+    it, so ``scan -> move -> scan`` registers nothing new.
+
+    Args:
+        src: Absolute path to a discovered file.
+        base_dir: The dataset directory that owns the TOML.
+        raw_dir: Absolute path to the tracked source root (``raw/``).
+
+    Returns:
+        The relative path shared by the ``cache/`` destination and the
+        ``[[file]]`` ``local``/``remote`` pair.
+    """
+    try:
+        return src.relative_to(raw_dir)
+    except ValueError:
+        return src.relative_to(base_dir)
+
+
 def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
-    """Raise :class:`ValueError` if two or more discovered files flatten to the same destination.
+    """Raise :class:`ValueError` if two or more discovered files share a destination.
 
     The error message names every colliding source path and the destination they
     conflict on.
@@ -143,15 +168,15 @@ def check_flatten_collisions(discovered: list[Path], base_dir: Path) -> None:
         base_dir: The base directory against which relative paths are computed.
 
     Raises:
-        ValueError: When any flattened destination is produced by more than one
-            source file.  The message names all sources for each collision.
+        ValueError: When any registration destination is produced by more than
+            one source file.  The message names all sources for each collision.
     """
     from collections import defaultdict
 
+    raw_dir = base_dir / config.RAW_DIR
     collisions: dict[Path, list[Path]] = defaultdict(list)
     for src in discovered:
-        relative = src.relative_to(base_dir)
-        flat = flatten_first_level(relative)
+        flat = registration_path(src, base_dir, raw_dir)
         collisions[flat].append(src)
 
     errors: list[str] = []
@@ -285,12 +310,14 @@ def merge_entries(
     """Add new ``[[file]]`` entries for each file in *discovered*.
 
     Deduplication: a discovered file is skipped when its computed destination
-    path (``data_dir / flatten_first_level(relative_to(base_dir))``) resolves
+    path (``data_dir / registration_path(src, base_dir, raw_dir)``) resolves
     to the same absolute path as an existing entry's ``FileEntry.local`` after
     resolving against *base_dir*.
 
-    Paths are flattened by dropping the first segment:
-    ``raw/DPTO.csv`` → ``DPTO.csv``, ``raw/Labels/a.csv`` → ``Labels/a.csv``.
+    Paths are keyed by the root that owns each file: ``raw/DPTO.csv`` →
+    ``DPTO.csv``, ``raw/Labels/a.csv`` → ``Labels/a.csv``, and a loose
+    ``Labels/a.csv`` → ``Labels/a.csv`` too, so the registration does not
+    depend on where discovery found the file (issue #339).
 
     New entries are shaped as::
 
@@ -339,9 +366,9 @@ def merge_entries(
     file_entries: list[dict[str, Any]] = raw_toml.setdefault("file", [])
 
     added = 0
+    raw_dir = base_dir / config.RAW_DIR
     for src in discovered:
-        relative = src.relative_to(base_dir)
-        flat = flatten_first_level(relative)
+        flat = registration_path(src, base_dir, raw_dir)
         dest = data_dir / flat
 
         if dest in existing:
@@ -438,11 +465,11 @@ def copy_files(
     dry_run: bool = False,
     force: bool = False,
 ) -> list[tuple[Path, Path]]:
-    """Copy discovered files into *data_dir*, flattening the first path segment.
+    """Copy discovered files into *data_dir*, keyed by :func:`registration_path`.
 
     Each file is copied via :func:`shutil.copy2` to
-    ``data_dir / <flatten_first_level(relative)>``.  Parent directories are
-    created lazily on first use.
+    ``data_dir / registration_path(src, base_dir, base_dir / RAW_DIR)``.
+    Parent directories are created lazily on first use.
 
     Idempotent re-scan (SCN-08): when a destination already exists with
     content identical to the source, it is skipped (not re-copied, no error),
@@ -468,10 +495,10 @@ def copy_files(
             content and *force* is ``False``.
     """
     copied: list[tuple[Path, Path]] = []
+    raw_dir = base_dir / config.RAW_DIR
 
     for src in discovered:
-        relative = src.relative_to(base_dir)
-        flat = flatten_first_level(relative)
+        flat = registration_path(src, base_dir, raw_dir)
         dest = data_dir / flat
 
         # Idempotency/collision decisions apply identically under dry_run: the

@@ -59,16 +59,16 @@ TOTAL entries for 2 files    = 3     remotes = ['A.csv', 'B.csv', 'Labels/B.csv'
 
 | # | Task | Spec | State | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | RED: MCP default run moves loose files into `raw/` | S1, S2, S5 | pending | — |
-| T2 | RED: `scan → move → scan` registers nothing new (nested tree) | S3 | pending | — |
+| T1 | RED: MCP default run moves loose files into `raw/` | S1, S2, S5 | **done** | RED against pre-fix `src/` (stashed): `tests/test_mcp_server.py::TestScanMoveToRawPhase` → `assert 0 == 1 where 0 = envelope.get('moved')`, the nested file absent from `raw/`, and the dry-run advertising `move_loose` |
+| T2 | RED: `scan → move → scan` registers nothing new (nested tree) | S3 | **done** | RED against pre-fix `src/`: `ImportError: cannot import name 'registration_path' from 'sofer.scanner'` (collection) — the helper and the key rule did not exist |
 | T3 | RED: `validate`/`prepare` refuse a `cache/`-only registration whose source is absent from `raw/` | S4 | pending | — |
-| T4 | GREEN: make Phase 1 unconditional in `sofer_scan_apply`; keep the collision abort and the `dry_run` preview; the stale `move_loose` parameter is removed (see D1) | S1, S2 | pending | — |
-| T5 | GREEN: register every discovered file relative to `raw/` instead of dropping a fixed segment, so layout cannot change the destination | S3 | pending | — |
+| T4 | GREEN: make Phase 1 unconditional in `sofer_scan_apply`; keep the collision abort and the `dry_run` preview; the stale `move_loose` parameter is removed (see D1) | S1, S2 | **done** | `sofer_scan_apply`/`sofer_scan_dry_run` run the move unconditionally; both call `check_raw_collisions` before any move; `grep -rn move_loose src/` → 0 hits; `tests/test_mcp_server.py::TestScanMoveToRawPhase` 6 passed; `tests/test_parity.py` exemption removed |
+| T5 | GREEN: register every discovered file relative to `raw/` instead of dropping a fixed segment, so layout cannot change the destination | S3 | **done** | new `scanner.registration_path` (#339) used by `check_flatten_collisions`, `merge_entries` and `copy_files`; loose and `raw/`-rooted discovery key identically; `TestRegistrationPath` 4 passed |
 | T6 | GREEN: new enforcement check for S4, fail-closed, naming the exact repair | S4 | pending | — |
 | T7 | GREEN: report duplicates/stale `cache/` entries on scan without rewriting unrelated config; name the repair in the envelope | S3 | pending | — |
-| T8 | `workflow.py` + MCP `next` hints + tool descriptions name the mandatory move | S6 | pending | — |
-| T9 | `scan` spec: SCN-02 flatten rule and SCN-07 move contract amended in place; README + README_ES (rule 13) and rule 7 help text | S1-S6 | pending | — |
-| T10 | Gates: pytest, ruff, mypy, pyright, coverage (rule 14: `scanner.py` + `cli.py` at 100.00%), commit slices, push, PR assigned to `@emiliodavola` | — | pending | — |
+| T8 | `workflow.py` + MCP `next` hints + tool descriptions name the mandatory move | S6 | **done** | both tool docstrings/descriptions state the move is mandatory and never an opt-in; `_PHASED_INSTRUCTIONS` names it in the Phase 0 chain |
+| T9 | `scan` spec: SCN-01/SCN-02 key rule and SCN-07 move contract amended in place, plus 3 new scenarios; README + README_ES (rule 13) and rule 7 help text | S1-S6 | **partial** | spec amends landed (SCN-01, SCN-02, SCN-07 + `MCP scan moves without an opt-in flag`, `Nested tree keys identically loose and under raw`, `MCP dry-run previews the mandatory move`); README pair and argparse help updated. `scan` is in the permanent declared-backlog registry, so no `## Test Mapping` row is owed. The SDD change folder and the S4 clause land with T6/T7 |
+| T10 | Gates: pytest, ruff, mypy, pyright, coverage (rule 14: `scanner.py` + `cli.py` at 100.00%), commit slices, push, PR assigned to `@emiliodavola` | — | **partial** | `uv run pytest tests/ -q` → **2387 passed, 9 skipped** (baseline `2380 passed, 9 skipped`); `uv run ruff check src/ tests/ scripts/` clean; `uv run ruff format --check src/ tests/` clean. mypy/pyright/coverage and the push/PR remain |
 
 ## Decisions
 
@@ -104,3 +104,10 @@ TOTAL entries for 2 files    = 3     remotes = ['A.csv', 'B.csv', 'Labels/B.csv'
   entry points are opt-in" is false — the CLI `sofer scan` runs Phase 1 unconditionally
   (`cli.py:550-593`) and only the MCP adapter gates it. One finding added: the stale entry is also never
   removed, so one source is registered under two remotes. Evidence appended to the issue body.
+- **L4** — slice 1 delivered on `fix/339-scan-move-raw-mandatory` (T1, T2, T4, T5, T8, and the T9
+  documentation half): the move is unconditional in both MCP scan tools and `move_loose` is gone from
+  the schema; `scanner.registration_path` keys every file relative to the root that owns it, so a loose
+  `Labels/x.csv` and its post-move `raw/Labels/x.csv` register identically and a re-scan adds nothing.
+  RED was observed against the pre-fix `src/` (stashed) before the GREEN run. Suite 2380 → 2387 passed.
+  Deviation from the plan: none in scope; the SDD change folder was deferred to the T6/T7 slice so the
+  delta it describes is complete when it is written.

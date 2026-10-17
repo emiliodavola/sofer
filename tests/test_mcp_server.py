@@ -2636,8 +2636,8 @@ class TestScanApplyTruthfulReport:
 
 
 # ---------------------------------------------------------------------------
-#  #152 + #154 — MCP scan parity: Phase-1 move-to-raw/ (move_loose) and the
-#  CLI --ext extension filter (extensions) on both scan tools.
+#  #152 + #339 — MCP scan parity: the Phase-1 move-to-raw/ is mandatory in
+#  both scan tools, and registration is keyed relative to raw/.
 # ---------------------------------------------------------------------------
 
 
@@ -2662,19 +2662,17 @@ def _scanned_dataset(root: Path) -> None:
     toml.write_text(text, encoding="utf-8")
 
 
-class TestScanMoveLoosePhase:
-    """#152: MCP scan offers the CLI's Phase-1 move-to-raw/ via explicit opt-in."""
+class TestScanMoveToRawPhase:
+    """#339: sofer_scan_apply runs the CLI's Phase-1 move-to-raw/ unconditionally."""
 
-    def test_scan_apply_move_loose_moves_to_raw(self, tmp_path, restore_tool_config):
-        """move_loose=True moves the loose file into raw/ AND copies it to cache/."""
+    def test_scan_apply_moves_loose_file_into_raw(self, tmp_path, restore_tool_config):
+        """The default call moves the loose file into raw/ AND copies it to cache/."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server,
-            "sofer_scan_apply",
-            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
         assert envelope.get("moved") == 1, envelope
@@ -2685,21 +2683,44 @@ class TestScanMoveLoosePhase:
             encoding="utf-8"
         )
 
-    def test_scan_apply_without_move_loose_leaves_files_loose(self, tmp_path, restore_tool_config):
-        """Opt-in default: nothing moves silently without move_loose=True."""
+    def test_scan_apply_registers_nested_file_under_its_raw_tree(
+        self, tmp_path, restore_tool_config
+    ):
+        """A nested loose file keeps its tree: cache/Labels/nested.csv, not cache/nested.csv."""
         _scanned_dataset(tmp_path)
-        (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        (tmp_path / "Labels").mkdir()
+        (tmp_path / "Labels" / "nested.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
 
         envelope = _call(
             server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
-        assert envelope.get("moved", 0) == 0, envelope
-        assert (tmp_path / "loose.csv").is_file()
-        assert not (tmp_path / "raw").exists()
+        assert (tmp_path / "raw" / "Labels" / "nested.csv").is_file()
+        assert (tmp_path / "cache" / "Labels" / "nested.csv").is_file()
+        assert not (tmp_path / "cache" / "nested.csv").exists()
+        text = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        assert 'local = "cache/Labels/nested.csv"' in text, text
+        assert 'remote = "Labels/nested.csv"' in text, text
 
-    def test_scan_apply_move_loose_collision_aborts_atomically(self, tmp_path, restore_tool_config):
+    def test_scan_apply_twice_registers_nothing_new(self, tmp_path, restore_tool_config):
+        """scan -> move -> scan is idempotent, nested tree included."""
+        _scanned_dataset(tmp_path)
+        (tmp_path / "Labels").mkdir()
+        (tmp_path / "Labels" / "nested.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        server = build_server(root=tmp_path)
+
+        first = _call(server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}).data
+        assert first["ok"] is True, first
+        after_first = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
+        assert after_first.count('local = "cache/') == 2, after_first
+
+        second = _call(server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}).data
+        assert second["ok"] is True, second
+        assert second.get("registered") == 0, second
+        assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == after_first
+
+    def test_scan_apply_collision_aborts_atomically(self, tmp_path, restore_tool_config):
         """A raw/ collision fails BEFORE any move; TOML untouched."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
@@ -2710,9 +2731,7 @@ class TestScanMoveLoosePhase:
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server,
-            "sofer_scan_apply",
-            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+            server, "sofer_scan_apply", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is False, envelope
         assert envelope["exit_code"] == 1
@@ -2720,29 +2739,26 @@ class TestScanMoveLoosePhase:
         assert (tmp_path / "loose.csv").is_file(), "collision must abort before any move"
         assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
 
-    def test_scan_dry_run_move_loose_previews_without_mutation(self, tmp_path, restore_tool_config):
-        """move_loose dry-run previews the moves; no raw/, no cache/, no TOML write."""
+    def test_scan_dry_run_previews_move_without_mutation(self, tmp_path, restore_tool_config):
+        """dry-run previews the mandatory move; no raw/, no cache/, no TOML write."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         before = (tmp_path / "dataset.toml").read_text(encoding="utf-8")
         server = build_server(root=tmp_path)
 
         envelope = _call(
-            server,
-            "sofer_scan_dry_run",
-            {"config": str(tmp_path / "dataset.toml"), "move_loose": True},
+            server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
         assert "raw/loose.csv" in envelope["output"], envelope
+        assert "mandatory" in envelope["output"], envelope
         assert (tmp_path / "loose.csv").is_file(), "dry-run must not move files"
         assert not (tmp_path / "raw").exists(), "dry-run must not scaffold raw/"
         assert not (tmp_path / "cache" / "loose.csv").exists(), "dry-run must not copy files"
         assert (tmp_path / "dataset.toml").read_text(encoding="utf-8") == before
 
-    def test_scan_dry_run_hints_move_loose_when_loose_files_exist(
-        self, tmp_path, restore_tool_config
-    ):
-        """Without move_loose, dry-run reports the loose files and names the opt-in."""
+    def test_scan_dry_run_offers_no_opt_out(self, tmp_path, restore_tool_config):
+        """#339: the move is never advertised as an opt-in the caller can skip."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
         server = build_server(root=tmp_path)
@@ -2751,7 +2767,7 @@ class TestScanMoveLoosePhase:
             server, "sofer_scan_dry_run", {"config": str(tmp_path / "dataset.toml")}
         ).data
         assert envelope["ok"] is True, envelope
-        assert "move_loose" in envelope["output"], envelope
+        assert "move_loose" not in envelope["output"], envelope
 
 
 class TestScanExtensionsFilter:
@@ -2805,9 +2821,7 @@ class TestScanExtensionsFilter:
         assert envelope["exit_code"] == 1
         assert "txt" in envelope["message"] or "txt" in envelope["output"]
 
-    def test_scan_move_loose_with_extensions_filters_both_phases(
-        self, tmp_path, restore_tool_config
-    ):
+    def test_scan_move_with_extensions_filters_both_phases(self, tmp_path, restore_tool_config):
         """extensions filters the Phase-1 move set AND the Phase-2 cache copy."""
         _scanned_dataset(tmp_path)
         (tmp_path / "loose.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
@@ -2817,11 +2831,7 @@ class TestScanExtensionsFilter:
         envelope = _call(
             server,
             "sofer_scan_apply",
-            {
-                "config": str(tmp_path / "dataset.toml"),
-                "extensions": ["csv"],
-                "move_loose": True,
-            },
+            {"config": str(tmp_path / "dataset.toml"), "extensions": ["csv"]},
         ).data
         assert envelope["ok"] is True, envelope
         assert envelope.get("moved") == 1, envelope

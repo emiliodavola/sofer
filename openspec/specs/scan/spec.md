@@ -10,7 +10,7 @@ copying them to `cache/` (`OUTPUT_DIR`, gitignored), and writing the updated con
 
 ### Requirement: File Discovery (SCN-01)
 
-System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.jsonl`) from config dir. `EXCLUSIONS` (`.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, `build`) MUST be skipped. `cache/` (`OUTPUT_DIR`) SHALL be excluded; `raw/` SHALL never be excluded. `flatten_first_level` drops first segment. Symlinks (and Windows junctions) SHALL be excluded from discovery: a linked entry SHALL NOT be discovered, and no entry whose path passes through a linked directory SHALL be discovered — on Python 3.10–3.12 `Path.rglob` follows directory links, so without this guard a link inside the scan root pointing OUTSIDE it would have its contents discovered, copied into `cache/`, registered, and published.
+System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.jsonl`) from config dir. `EXCLUSIONS` (`.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, `build`) MUST be skipped. `cache/` (`OUTPUT_DIR`) SHALL be excluded; `raw/` SHALL never be excluded. `registration_path` SHALL key each file relative to the root that owns it — `raw/` for a file under `raw/`, the dataset root otherwise — so the same file keys identically whether it is discovered loose or under `raw/` (#339); `flatten_first_level` stays the helper for the raw/-rooted case it names. Symlinks (and Windows junctions) SHALL be excluded from discovery: a linked entry SHALL NOT be discovered, and no entry whose path passes through a linked directory SHALL be discovered — on Python 3.10–3.12 `Path.rglob` follows directory links, so without this guard a link inside the scan root pointing OUTSIDE it would have its contents discovered, copied into `cache/`, registered, and published.
 
 #### Scenario: Discover supported
 - GIVEN `raw/survey.csv`, `raw/notes.txt`, `archive/data.parquet`
@@ -47,7 +47,7 @@ System MUST discover supported extensions (`.csv`,`.tsv`,`.parquet`,`.xlsx`,`.js
 
 ### Requirement: TOML Merge (SCN-02)
 
-System MUST load TOML via `tomli`, merge `[[file]]` with `local=cache/<flat>` (`OUTPUT_DIR/<flat>`) and `remote=<flat>` posix, `tomli_w` write. Dedup by resolved absolute path and `remote`. Preserve `[dataset]`,`[meta]`,`[[check]]`,`[[quality]]`. Flatten first segment; root file keeps name.
+System MUST load TOML via `tomli`, merge `[[file]]` with `local=cache/<key>` (`OUTPUT_DIR/<key>`) and `remote=<key>` posix, `tomli_w` write, where `<key>` is `registration_path` — the path relative to `raw/` for a file under `raw/`, and relative to the dataset root otherwise — so `raw/Labels/x.csv` and a loose `Labels/x.csv` both key `Labels/x.csv` (#339). Dedup by resolved absolute path and `remote`. Preserve `[dataset]`,`[meta]`,`[[check]]`,`[[quality]]`. A file at the dataset root keeps its name.
 
 #### Scenario: Merge new files
 - GIVEN `dataset.toml` with 2 `[[file]]` + `[dataset]`/`[meta]`
@@ -191,7 +191,7 @@ System MUST handle missing config, no files, conflicts, malformed TOML. Flatten 
 
 ### Requirement: Source Layout and Move-to-Raw (SCN-07)
 
-System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) → `build/` (gitignored) with diagram `raw/DPTO.csv→cache/DPTO.csv→build/*.parquet`. `scan` MUST create `raw/` (`mkdir -p`) if missing, then MOVE supported files (`.csv`, `.tsv`, `.xlsx`, `.jsonl`, `.parquet`) not already under `raw/`/`cache/`/`EXCLUSIONS` into `raw/` preserving `relative_to(base_dir)` tree via `shutil.move` (`dest = raw_dir / rel`, lazy `mkdir -p` parent), then copy `raw/`→`cache/` via `flatten_first_level` using `shutil.copy2`. System MUST check raw-dest collisions before any move and fail atomically; MUST honor `--dry-run` (preview only), `--force` (skip prompt), else `[y/N]` abort with no partial moves on `N`.
+System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) → `build/` (gitignored) with diagram `raw/DPTO.csv→cache/DPTO.csv→build/*.parquet`. `scan` MUST create `raw/` (`mkdir -p`) if missing, then MOVE supported files (`.csv`, `.tsv`, `.xlsx`, `.jsonl`, `.parquet`) not already under `raw/`/`cache/`/`EXCLUSIONS` into `raw/` preserving `relative_to(base_dir)` tree via `shutil.move` (`dest = raw_dir / rel`, lazy `mkdir -p` parent), then copy `raw/`→`cache/` via `copy_files` using `shutil.copy2`. The MOVE SHALL NOT be optional: it MUST run on every scan surface — the CLI and both MCP scan tools — with no opt-in flag that can skip it, because `cache/` is the shared, deletion-prone staging directory and the registered sources MUST NOT live only there (#339). System MUST check raw-dest collisions before any move and fail atomically; MUST honor `--dry-run`/`dry_run` (preview only), `--force` (skip prompt), else `[y/N]` abort with no partial moves on `N`.
 
 (Previously: copy-only to cache via flatten_first_level, sources untouched, no raw MOVE.)
 
@@ -243,3 +243,23 @@ System MUST enforce `raw/` (tracked) → `cache/` (`OUTPUT_DIR`, gitignored) →
 - GIVEN user views Directory layout
 - WHEN layout rendered
 - THEN `raw/→cache/→build/` and `raw/DPTO.csv→cache/DPTO.csv` SHALL appear
+
+#### Scenario: MCP scan moves without an opt-in flag
+
+- GIVEN a dataset TOML and a loose `loose.csv` outside `raw/`, with no `raw/` directory
+- WHEN `sofer_scan_apply` runs with only `config`
+- THEN `raw/loose.csv` and `cache/loose.csv` SHALL exist, `loose.csv` SHALL NOT remain in the root, and the TOML SHALL carry `local = "cache/loose.csv"` (#339)
+
+#### Scenario: Nested tree keys identically loose and under raw
+
+- GIVEN a loose `Labels/x.csv`
+- WHEN scan moves it and registers it
+- THEN `raw/Labels/x.csv` and `cache/Labels/x.csv` SHALL exist and the TOML SHALL carry `remote = "Labels/x.csv"` — not `x.csv`
+- AND a second scan over the same tree SHALL register no new `[[file]]` entry (#339)
+
+#### Scenario: MCP dry-run previews the mandatory move without mutating
+
+- GIVEN a dataset TOML and a loose `loose.csv`
+- WHEN `sofer_scan_dry_run` runs with only `config`
+- THEN the output SHALL list `raw/loose.csv` and name the move as mandatory
+- AND no file SHALL be moved, no `raw/` SHALL be created, no `cache/` write, TOML unchanged

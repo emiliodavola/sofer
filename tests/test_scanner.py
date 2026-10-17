@@ -18,6 +18,7 @@ from sofer.scanner import (
     discover_files,
     flatten_first_level,
     merge_entries,
+    registration_path,
     write_toml,
 )
 
@@ -79,20 +80,20 @@ class TestCheckFlattenCollisions:
     """Unit tests for :func:`check_flatten_collisions`."""
 
     def test_collision_raises_naming_sources(self) -> None:
-        """Two files from different source dirs colliding on the same dest raise ValueError."""
-        discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
+        """A loose file colliding with the raw/ tree's key raises ValueError."""
+        discovered = [Path("raw/a.csv"), Path("a.csv")]
         with pytest.raises(ValueError, match="Collision in cache/"):
             check_flatten_collisions(discovered, Path("."))
 
     def test_collision_error_names_both_sources(self) -> None:
         """The error message names all colliding source paths."""
-        discovered = [Path("raw/a.csv"), Path("processed/a.csv")]
+        discovered = [Path("raw/a.csv"), Path("a.csv")]
         try:
             check_flatten_collisions(discovered, Path("."))
         except ValueError as exc:
             msg = str(exc)
             assert "raw/a.csv" in msg
-            assert "processed/a.csv" in msg
+            assert "a.csv" in msg
 
     def test_collision_with_more_than_two_sources(self) -> None:
         """Three or more sources colliding on the same destination all appear in the error."""
@@ -453,6 +454,27 @@ class TestDiscoverFiles:
 # ------------------------------------------------------------------
 
 
+class TestRegistrationPath:
+    """#339: the registration key is the path relative to the owning source root."""
+
+    def test_raw_rooted_file_drops_the_raw_segment(self, tmp_path: Path) -> None:
+        src = _touch(tmp_path / "raw" / "DPTO.csv")
+        assert registration_path(src, tmp_path, tmp_path / "raw") == Path("DPTO.csv")
+
+    def test_raw_rooted_nested_file_keeps_its_tree(self, tmp_path: Path) -> None:
+        src = _touch(tmp_path / "raw" / "Labels" / "x.csv")
+        assert registration_path(src, tmp_path, tmp_path / "raw") == Path("Labels/x.csv")
+
+    def test_loose_nested_file_keeps_its_tree(self, tmp_path: Path) -> None:
+        """A loose Labels/x.csv keys like its post-move self — not as x.csv."""
+        src = _touch(tmp_path / "Labels" / "x.csv")
+        assert registration_path(src, tmp_path, tmp_path / "raw") == Path("Labels/x.csv")
+
+    def test_loose_root_file_keeps_its_name(self, tmp_path: Path) -> None:
+        src = _touch(tmp_path / "x.csv")
+        assert registration_path(src, tmp_path, tmp_path / "raw") == Path("x.csv")
+
+
 class TestMergeEntries:
     """Unit tests for :func:`merge_entries`."""
 
@@ -539,13 +561,34 @@ class TestMergeEntries:
         assert len(raw["file"]) == len_after_first
 
     def test_remote_uses_posix_separators(self, tmp_path: Path) -> None:
-        """Remote paths use forward slashes (PurePosixPath) after flattening."""
+        """Remote paths use forward slashes (PurePosixPath) for a nested tree."""
         _touch(tmp_path / "sub" / "nested" / "a.csv")
         discovered = [tmp_path / "sub" / "nested" / "a.csv"]
 
         raw = self._raw_toml()
         merge_entries(discovered, raw, tmp_path, tmp_path / "data")
-        assert raw["file"][0]["remote"] == "nested/a.csv"
+        assert raw["file"][0]["remote"] == "sub/nested/a.csv"
+
+    def test_registration_agrees_across_loose_and_raw_layouts(self, tmp_path: Path) -> None:
+        """#339/S3: one file keys the same whether discovered loose or under raw/."""
+        _touch(tmp_path / "Labels" / "x.csv")
+        loose = self._raw_toml()
+        merge_entries([tmp_path / "Labels" / "x.csv"], loose, tmp_path, tmp_path / "cache")
+        assert loose["file"][0]["local"] == "cache/Labels/x.csv"
+        assert loose["file"][0]["remote"] == "Labels/x.csv"
+
+        _touch(tmp_path / "raw" / "Labels" / "x.csv")
+        moved = self._raw_toml()
+        merge_entries([tmp_path / "raw" / "Labels" / "x.csv"], moved, tmp_path, tmp_path / "cache")
+        assert moved["file"] == loose["file"]
+
+    def test_rescan_after_move_registers_nothing_new(self, tmp_path: Path) -> None:
+        """#339/S3: scan -> move -> scan adds no second entry for a nested file."""
+        _touch(tmp_path / "Labels" / "x.csv")
+        raw = self._raw_toml()
+        merge_entries([tmp_path / "Labels" / "x.csv"], raw, tmp_path, tmp_path / "cache")
+        merge_entries([tmp_path / "raw" / "Labels" / "x.csv"], raw, tmp_path, tmp_path / "cache")
+        assert len(raw["file"]) == 1, raw["file"]
 
     def test_preserves_existing_unrelated_entries(self, tmp_path: Path) -> None:
         """Pre-existing [[file]] entries for unrelated files are kept."""
@@ -615,13 +658,13 @@ class TestCopyFiles:
     """Unit tests for :func:`copy_files`."""
 
     def test_creates_subdirs_lazily(self, tmp_path: Path) -> None:
-        """Parent directories in data/ are created on demand after flattening."""
+        """Parent directories in data/ are created on demand."""
         _touch(tmp_path / "sub" / "nested" / "a.csv")
         discovered = [tmp_path / "sub" / "nested" / "a.csv"]
         data_dir = tmp_path / "data"
 
         copy_files(discovered, tmp_path, data_dir)
-        dest = data_dir / "nested" / "a.csv"
+        dest = data_dir / "sub" / "nested" / "a.csv"
         assert dest.exists()
         assert dest.read_text(encoding="utf-8") == "x"
 
@@ -967,20 +1010,16 @@ class TestIntegration:
         assert config.read_text(encoding="utf-8") == original_toml
 
     def test_scan_flatten_collision_exits_1(self, tmp_path: Path, monkeypatch) -> None:
-        """Flatten collision among raw/ files → exit 1 after MOVE, before copy."""
-
-        # Two loose files from different subdirs that after MOVE preserve tree
-        # won't flatten-collide, so craft raw collision directly:
-        # Use files already under raw that flatten to same name via raw/ root vs
-        # raw-subdir? We simulate by placing files under raw/ that after flatten
-        # share destination: create raw/a.csv and also have a.csv at base that
-        # after move would be raw/a.csv — but we already test raw collision above.
-        # Instead test flatten collision via raw/ vs raw/ nested not covered;
-        # verify check_flatten_collisions still raises for direct call.
+        """The mixed-root collision guard still raises before any copy (#339)."""
+        # Under the #339 rule two files from different subdirectories no longer
+        # collide: each keys relative to its own root once the move has run.
+        # The guard keeps its force for a caller that passes mixed roots — a
+        # loose file that survived Phase 1 next to the raw/ tree it collides
+        # with. Verify it directly, and the reachable collision is the raw/
+        # one Phase 1 aborts on (covered above).
         from sofer.scanner import check_flatten_collisions
 
-        discovered = [tmp_path / "raw" / "a.csv", tmp_path / "processed" / "a.csv"]
-        # Simulate base_dir = tmp_path, both flatten to a.csv
+        discovered = [tmp_path / "raw" / "a.csv", tmp_path / "a.csv"]
         with __import__("pytest").raises(ValueError, match="Collision in cache/"):
             check_flatten_collisions(discovered, tmp_path)
 
@@ -1063,7 +1102,7 @@ class TestRawCacheDiscovery:
         doc = scanner_mod.__doc__ or ""
         assert "raw/" in doc
         assert "cache/" in doc
-        assert "flatten_first_level" in doc
+        assert "registration_path" in doc
 
 
 class TestSourceLayoutCopyOnly:

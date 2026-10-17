@@ -215,12 +215,6 @@ AREAS: list[AreaParity] = [
         exempt_flags={
             "dry_run": "split design: sofer_scan_dry_run is the dry-run surface (MSP-R03)",
         },
-        exempt_params={
-            "move_loose": (
-                "#152: MCP-only Phase-1 opt-in (never silent move; CLI uses the "
-                "interactive [y/N] prompt)"
-            ),
-        },
     ),
     AreaParity(
         cli_command=None,
