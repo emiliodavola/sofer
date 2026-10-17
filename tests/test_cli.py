@@ -18,7 +18,7 @@ import pytest as _pytest
 import yaml
 from conftest import run_cli
 
-from sofer import cli, config, mcp_registration
+from sofer import _toml, cli, config, mcp_registration
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -3386,3 +3386,238 @@ class TestMcpRegistrationTimeoutsCli:
         for flag in ("--timeout", "--connect-timeout", "--no-timeout"):
             assert flag in out
         assert "mcp_request_timeout_seconds" in out
+
+
+# ── sofer meta check / set (issue #323) ──────────────────────────────────────
+
+
+class TestMetaCommand:
+    """`sofer meta check` and `sofer meta set`.
+
+    The handlers run in-process (not through ``run_cli``) because AGENTS.md rule
+    14 requires 100.00% line coverage of ``cli.py`` and a subprocess boundary
+    contributes nothing to the parent's coverage; the user-visible surface
+    (help, dispatch) is checked through the PB-02 subprocess helper in
+    :class:`TestMetaHelpSurface`.
+    """
+
+    @staticmethod
+    def _dataset(tmp_path: Path, text: str | None = None) -> Path:
+        """Write a dataset TOML (the init template by default) and return it."""
+        path = tmp_path / "dataset.toml"
+        path.write_text(
+            text if text is not None else cli._INIT_TEMPLATE.format(name="d", user="u"),
+            encoding="utf-8",
+        )
+        return path
+
+    @staticmethod
+    def _check(path: Path, **extra: object) -> Namespace:
+        fields: dict[str, object] = {"config": str(path), "json": False}
+        fields.update(extra)
+        return Namespace(**fields)
+
+    @staticmethod
+    def _set(path: Path, assignments: list[str], **extra: object) -> Namespace:
+        fields: dict[str, object] = {
+            "config": str(path),
+            "assignments": assignments,
+            "dry_run": False,
+            "json": False,
+        }
+        fields.update(extra)
+        return Namespace(**fields)
+
+    # -- check ------------------------------------------------------------
+
+    def test_check_lists_each_placeholder_and_stays_informational(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_check(self._check(path))
+        out = capsys.readouterr().out
+        assert rc == 0  # D6: a query is never stricter than the validator it queries
+        assert out.count("  !  [meta]") == 4  # description, license, source, tags
+        assert "still looks like a template placeholder" in out
+
+    def test_check_reports_a_clean_config(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(
+            tmp_path,
+            '[dataset]\nname = "d"\nrepo_id = "u/d"\n\n'
+            '[meta]\ndescription = "Real"\nlicense = "MIT"\n'
+            'source = "Some org"\ntags = ["a"]\n',
+        )
+        rc = cli._cmd_meta_check(self._check(path))
+        assert rc == 0
+        assert "no [meta] placeholders" in capsys.readouterr().out
+
+    def test_check_json_is_the_stable_key_object(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_check(self._check(path, json=True))
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert payload["ok"] is True
+        assert payload["exit_code"] == 0
+        assert payload["placeholders"] == 4
+        assert len(payload["warnings"]) == 4
+        assert payload["message"] == "4 [meta] placeholder warning(s)"
+
+    def test_check_exits_1_when_the_config_cannot_be_read(self, tmp_path: Path, capsys) -> None:
+        rc = cli._cmd_meta_check(self._check(tmp_path / "missing.toml"))
+        assert rc == 1
+        assert "cannot read" in capsys.readouterr().err
+
+    # -- set --------------------------------------------------------------
+
+    def test_set_writes_the_keys_it_was_given(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(
+            self._set(path, ["description=Real", "license=MIT", "source=Some org", "tags=a,b"])
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "wrote description, license, source, tags" in out
+        document = _toml.loads(path.read_text(encoding="utf-8"))
+        assert document["meta"]["description"] == "Real"
+        assert document["meta"]["tags"] == ["a", "b"]
+        # The template's comment guidance survived (the reason for the surgical writer).
+        assert "# Usage:" in path.read_text(encoding="utf-8")
+
+    def test_set_reads_each_kind_from_text(self, tmp_path: Path) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(
+            self._set(path, ["confidential=false", "language=en,es", "curation_rationale=x"])
+        )
+        assert rc == 0
+        meta = _toml.loads(path.read_text(encoding="utf-8"))["meta"]
+        assert meta["confidential"] is False
+        assert meta["language"] == ["en", "es"]
+        assert meta["curation_rationale"] == "x"
+
+    def test_set_is_idempotent_and_names_the_unchanged_keys(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        cli._cmd_meta_set(self._set(path, ["description=Real"]))
+        capsys.readouterr()
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"]))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "already up to date" in out
+        assert "unchanged: description" in out
+
+    def test_set_dry_run_writes_nothing(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        before = path.read_bytes()
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"], dry_run=True))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "DRY RUN" in out and "would write description" in out
+        assert path.read_bytes() == before
+
+    def test_set_json_reports_the_write(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"], json=True))
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert payload["ok"] is True
+        assert payload["changed"] is True
+        assert payload["written"] == ["description"]
+        assert payload["dry_run"] is False
+
+    def test_set_json_reports_a_no_op(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        cli._cmd_meta_set(self._set(path, ["description=Real"]))
+        capsys.readouterr()
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"], json=True))
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert payload["changed"] is False
+        assert payload["message"] == "already up to date"
+        assert payload["unchanged"] == ["description"]
+
+    def test_set_json_announces_a_dry_run_plan(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"], dry_run=True, json=True))
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert payload["dry_run"] is True
+        assert payload["message"].startswith("would write:")
+
+    def test_set_requires_key_equals_value(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(self._set(path, ["description"]))
+        assert rc == 1
+        assert "--set expects KEY=VALUE" in capsys.readouterr().err
+
+    def test_set_refuses_a_blank_key(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(self._set(path, ["=Real"]))
+        assert rc == 1
+        assert "--set expects KEY=VALUE" in capsys.readouterr().err
+
+    def test_set_refuses_an_unknown_key(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(self._set(path, ["nope=Real"]))
+        assert rc == 1
+        assert "unknown [meta] key 'nope'" in capsys.readouterr().err
+
+    def test_set_refuses_a_bad_boolean(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        rc = cli._cmd_meta_set(self._set(path, ["confidential=yes"]))
+        assert rc == 1
+        assert "expected 'true' or 'false'" in capsys.readouterr().err
+
+    def test_set_exits_1_when_the_config_cannot_be_read(self, tmp_path: Path, capsys) -> None:
+        rc = cli._cmd_meta_set(self._set(tmp_path / "missing.toml", ["description=x"]))
+        assert rc == 1
+        assert "cannot read" in capsys.readouterr().err
+
+    def test_set_names_a_build_tree_that_predates_the_write(self, tmp_path: Path, capsys) -> None:
+        path = self._dataset(tmp_path)
+        (tmp_path / "build").mkdir()
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"]))
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "predates this write" in err
+        assert "sofer_prepare" in err
+
+    def test_set_reports_a_failed_write_and_leaves_the_file(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        from sofer import meta_edit
+
+        path = self._dataset(tmp_path)
+        before = path.read_bytes()
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(meta_edit.os, "replace", _boom)
+        rc = cli._cmd_meta_set(self._set(path, ["description=Real"]))
+        assert rc == 1
+        assert "cannot write" in capsys.readouterr().err
+        assert path.read_bytes() == before
+
+    def test_set_parser_requires_at_least_one_set(self) -> None:
+        import pytest
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli._build_parser().parse_args(["meta", "set", "dataset.toml"])
+        assert excinfo.value.code == 2
+
+
+class TestMetaHelpSurface:
+    """The user-visible surface, through the PB-02 subprocess boundary."""
+
+    def test_meta_is_listed_in_top_help(self, tmp_path: Path) -> None:
+        result = run_cli(["--help"], cwd=tmp_path)
+        assert result.returncode == 0
+        assert "meta" in result.stdout
+
+    def test_meta_lists_both_children_and_their_flags(self, tmp_path: Path) -> None:
+        result = run_cli(["meta", "--help"], cwd=tmp_path)
+        assert result.returncode == 0
+        assert "check" in result.stdout and "set" in result.stdout
+        set_help = run_cli(["meta", "set", "--help"], cwd=tmp_path)
+        assert set_help.returncode == 0
+        for fragment in ("--set", "--dry-run", "--json", "KEY=VALUE", "[meta]"):
+            assert fragment in set_help.stdout

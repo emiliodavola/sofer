@@ -36,3 +36,20 @@ def load(fp: BinaryIO) -> dict[str, Any]:
     """
     data: dict[str, Any] = _parser().load(fp)
     return data
+
+
+def loads(text: str) -> dict[str, Any]:
+    """Parse TOML from a string.
+
+    Mirrors :func:`tomllib.loads`. Added for the ``[meta]`` editor (issue #323),
+    which re-parses document prefixes to decide where a table, an assignment and
+    a value end — the same selection applies there as everywhere else, so the
+    editor does not import ``tomllib`` directly and break on Python 3.10, where
+    only the ``tomli`` backport exists.
+
+    Decode errors propagate to the caller. Both parsers raise a ``ValueError``
+    subclass (``tomllib.TOMLDecodeError`` / ``tomli.TOMLDecodeError``), so a
+    caller that only needs "this text is not TOML" can catch ``ValueError``.
+    """
+    data: dict[str, Any] = _parser().loads(text)
+    return data

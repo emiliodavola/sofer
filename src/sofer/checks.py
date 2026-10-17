@@ -12,7 +12,9 @@ without modifying this module.
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from . import config
 from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityResult
@@ -62,16 +64,42 @@ def meta_placeholder_warnings(cfg: DatasetConfig) -> list[str]:
         One message per offending field, in a fixed order; ``[]`` when every
         inspected field carries a real value.
     """
+    return meta_placeholder_warnings_for(
+        {
+            "description": cfg.description,
+            "license": cfg.license,
+            "source": cfg.source,
+            "tags": cfg.tags,
+        }
+    )
+
+
+def meta_placeholder_warnings_for(values: Mapping[str, Any]) -> list[str]:
+    """Return the placeholder warnings for one ``[meta]`` mapping.
+
+    The same implementation :func:`meta_placeholder_warnings` delegates to, so
+    the validator and the tools that write ``[meta]`` cannot disagree about what
+    a placeholder is (AGENTS.md rule 4). Taking the mapping directly is what lets
+    ``sofer_meta_set`` report the state its own edit would leave behind — computed
+    from the resulting table in hand, never from a re-read of the file, so a
+    ``dry_run`` reports the planned state rather than the current one.
+
+    A missing or ``None`` value is treated exactly as an empty string, and a
+    non-list ``tags`` as no tags, because the mapping may come from an operator's
+    TOML or from an edit in progress.
+
+    Args:
+        values: The ``[meta]`` table as a mapping.
+
+    Returns:
+        One message per offending field, in a fixed order; ``[]`` when every
+        inspected field carries a real value.
+    """
     prefixes = tuple(p.lower() for p in config.META_PLACEHOLDER_PREFIXES)
-    values = {
-        "description": cfg.description,
-        "license": cfg.license,
-        "source": cfg.source,
-    }
     warnings: list[str] = []
     for field_name in _META_PLACEHOLDER_FIELDS:
-        raw = values[field_name]
-        text = raw.strip()
+        raw = values.get(field_name) or ""
+        text = str(raw).strip()
         if _looks_like_placeholder(text, prefixes):
             shown = text or "(empty)"
             warnings.append(
@@ -79,7 +107,11 @@ def meta_placeholder_warnings(cfg: DatasetConfig) -> list[str]:
                 f"({shown!r}): replace it before prepare, or the generated Dataset "
                 f"Card and LICENSE ship the placeholder."
             )
-    placeholder_tags = [t for t in cfg.tags if _looks_like_placeholder(t.strip(), prefixes)]
+    tags = values.get("tags")
+    raw_tags: list[Any] = tags if isinstance(tags, list) else []
+    placeholder_tags = [
+        str(t) for t in raw_tags if _looks_like_placeholder(str(t).strip(), prefixes)
+    ]
     if placeholder_tags:
         warnings.append(
             f"[meta] tags still look like template placeholders "

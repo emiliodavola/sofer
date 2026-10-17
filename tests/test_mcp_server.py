@@ -457,6 +457,8 @@ class TestToolRoster:
     _EXPECTED: frozenset[str] = frozenset(
         {
             "sofer_validate",
+            "sofer_meta_check",
+            "sofer_meta_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -474,7 +476,7 @@ class TestToolRoster:
         }
     )
 
-    def test_exactly_fifteen_callables(self, server):
+    def test_exactly_seventeen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -695,7 +697,7 @@ class TestAuthStatusPosture:
 
     def test_posture_fields_confined_to_auth_status(self, tmp_path, monkeypatch) -> None:
         """Roster-wide scan: no other tool's output_schema gains any of the 4
-        posture keys; the roster stays at 15 callables."""
+        posture keys; the roster stays at 17 callables."""
         self._clean_hf(monkeypatch)
         _make_dataset(tmp_path)
         server = build_server(root=tmp_path, approval_phrase="x")
@@ -705,7 +707,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 15, [t.name for t in tools]
+        assert len(tools) == 17, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -892,7 +894,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 15
+                    assert len(tools.tools) == 17
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -4838,9 +4840,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 15 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 17 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_fifteen(self, tmp_path):
+    def test_tool_roster_still_seventeen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4849,7 +4851,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 15
+        assert len(names) == 17
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):
@@ -5248,8 +5250,36 @@ class TestWorkflowRegistryConformance:
         assert applied["ok"] is True, applied
 
         nxt3 = applied["next"]
-        assert nxt3["tool"] == "sofer_validate"
-        validated = _call(server, nxt3["tool"], nxt3["arguments"]).data
+        # #323 D8: bootstrap leads into the metadata step, and the step asks for
+        # the values it needs instead of failing a bound continuation.
+        assert nxt3["tool"] == "sofer_meta_set"
+        asked = _call(server, nxt3["tool"], nxt3["arguments"]).data
+        assert asked["ok"] is True, asked
+        assert asked["changed"] is False
+        assert asked["placeholders"] >= 1
+        assert asked["next"]["tool"] == "sofer_meta_set"
+        assert asked["next"]["input_required"] == ["values"]
+
+        written = _call(
+            server,
+            "sofer_meta_set",
+            {
+                "config": "green.toml",
+                "values": {
+                    "description": "Real",
+                    "license": "MIT",
+                    "source": "Org",
+                    "tags": ["a"],
+                },
+            },
+        ).data
+        assert written["ok"] is True, written
+        assert written["changed"] is True
+        assert written["placeholders"] == 0
+
+        nxt4 = written["next"]
+        assert nxt4["tool"] == "sofer_validate"
+        validated = _call(server, nxt4["tool"], nxt4["arguments"]).data
         assert validated["ok"] is True, validated
 
     def test_greenfield_refusal_next_is_input_required(self, tmp_path):
@@ -5585,6 +5615,248 @@ class TestProgressHeartbeat:
             assert "Runs for minutes on a large dataset" in described[name], name
         # A short tool must not carry it, or the note stops meaning anything.
         assert "Runs for minutes" not in described["sofer_validate"]
+
+
+class TestMetaTools:
+    """#323: the metadata step has a tool surface at both ends.
+
+    `sofer_meta_check` reports the state the chain requires without running the
+    validator (read-only, informational), and `sofer_meta_set` is the write half
+    that makes the advertised step executable over MCP — the case the issue is
+    about, since an MCP consumer has no other way to write a file.
+    """
+
+    @staticmethod
+    def _placeholder_dataset(root: Path) -> Path:
+        """Write the `sofer init` template — every [meta] field a placeholder."""
+        from sofer.cli import _INIT_TEMPLATE
+
+        toml = root / "dataset.toml"
+        toml.write_text(_INIT_TEMPLATE.format(name="d", user="u"), encoding="utf-8")
+        return toml
+
+    @staticmethod
+    def _filled_dataset(root: Path) -> Path:
+        """Write a dataset whose [meta] gate is satisfied."""
+        toml = root / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\n'
+            'description = "Real"\nlicense = "MIT"\nsource = "Org"\ntags = ["a"]\n',
+            encoding="utf-8",
+        )
+        return toml
+
+    # -- sofer_meta_check --------------------------------------------------
+
+    def test_check_reports_every_placeholder_and_writes_nothing(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+        assert envelope["placeholders"] == 4
+        assert len(envelope["warnings"]) == 4
+        assert toml.read_bytes() == before
+
+    def test_check_is_clean_on_a_filled_config(self, tmp_path: Path) -> None:
+        self._filled_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["placeholders"] == 0
+        assert envelope["warnings"] == []
+
+    def test_check_next_is_the_executable_fix(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["next"]["tool"] == "sofer_meta_set"
+        assert envelope["next"]["arguments"]["config"] == "dataset.toml"
+
+    def test_check_refuses_an_unreadable_config(self, tmp_path: Path) -> None:
+        (tmp_path / "dataset.toml").write_text("[meta\ndescription = 1\n", encoding="utf-8")
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "Failed to read TOML" in envelope["config_errors"][0]
+
+    def test_check_refuses_a_path_outside_the_root(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.toml").write_text("[meta]\ndescription = 'x'\n", encoding="utf-8")
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(
+                build_server(root=root),
+                "sofer_meta_check",
+                {"config": str(outside / "evil.toml")},
+            )
+
+    # -- sofer_meta_set ----------------------------------------------------
+
+    def test_set_writes_the_values_and_reports_them(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real", "license": "MIT"}},
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["changed"] is True
+        assert envelope["written"] == ["description", "license"]
+        assert envelope["dry_run"] is False
+        assert envelope["build_stale"] is False
+        cfg = DatasetConfig.from_toml(toml)
+        assert cfg.description == "Real"
+        assert cfg.license == "MIT"
+        # The keys nobody mentioned keep their template value.
+        assert cfg.source.startswith("TODO")
+        # The document is otherwise intact: the template's guidance survives.
+        assert "# Usage:" in toml.read_text(encoding="utf-8")
+
+    def test_set_is_idempotent(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+        first = _call(
+            server, "sofer_meta_set", {"config": "dataset.toml", "values": {"source": "Org"}}
+        ).data
+        second = _call(
+            server, "sofer_meta_set", {"config": "dataset.toml", "values": {"source": "Org"}}
+        ).data
+        assert first["changed"] is True
+        assert second["changed"] is False
+        assert second["written"] == []
+        assert second["unchanged"] == ["source"]
+
+    def test_set_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real"}, "dry_run": True},
+        ).data
+        assert envelope["dry_run"] is True
+        assert envelope["changed"] is True
+        assert toml.read_bytes() == before
+
+    def test_set_refuses_an_unknown_key_with_nothing_written(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"nope": "x"}},
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "unknown [meta] key 'nope'" in envelope["config_errors"][0]
+        assert toml.read_bytes() == before
+
+    def test_set_refuses_a_value_of_the_wrong_kind(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"tags": "a,b"}},
+        ).data
+        assert envelope["ok"] is False
+        assert "expected a list of strings" in envelope["config_errors"][0]
+
+    def test_set_names_a_build_tree_that_predates_the_write(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        (tmp_path / "build").mkdir()
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real"}},
+        ).data
+        assert envelope["build_stale"] is True
+        assert "predates this write" in envelope["output"]
+
+    def test_set_without_values_reports_the_state_and_asks_for_them(self, tmp_path: Path) -> None:
+        """A bare continuation (only a config is bound) must be executable."""
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_set", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["changed"] is False
+        assert envelope["written"] == []
+        assert envelope["placeholders"] == 4
+        assert envelope["next"]["tool"] == "sofer_meta_set"
+        assert envelope["next"]["input_required"] == ["values"]
+        assert toml.read_bytes() == before
+
+    def test_set_reports_the_state_the_edit_leaves_behind(self, tmp_path: Path) -> None:
+        """The post-edit state, not the pre-edit one — also under --dry-run."""
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {
+                "config": "dataset.toml",
+                "values": {
+                    "description": "Real",
+                    "license": "MIT",
+                    "source": "Org",
+                    "tags": ["a"],
+                },
+                "dry_run": True,
+            },
+        ).data
+        assert envelope["placeholders"] == 0
+        assert envelope["warnings"] == []
+
+    def test_set_next_is_validate(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real"}},
+        ).data
+        assert envelope["next"]["tool"] == "sofer_validate"
+
+    def test_set_refuses_a_path_outside_the_root(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.toml").write_text("[meta]\ndescription = 'x'\n", encoding="utf-8")
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(
+                build_server(root=root),
+                "sofer_meta_set",
+                {"config": str(outside / "evil.toml"), "values": {"description": "x"}},
+            )
+
+    # -- the advertised chain now names them --------------------------------
+
+    def test_the_instructions_name_both_tools(self) -> None:
+        assert "sofer_meta_check" in ms._PHASED_INSTRUCTIONS
+        assert "sofer_meta_set" in ms._PHASED_INSTRUCTIONS
+        # The step is no longer described as manual: a tool performs it.
+        assert (
+            "Metadata step (between bootstrap and Phase 1, tool-driven)" in ms._PHASED_INSTRUCTIONS
+        )
+
+    def test_init_next_names_the_setter(self) -> None:
+        assert "sofer_meta_set" in ms._workflow_description(ms.sofer_init)
+
+    def test_the_registry_chain_is_executable(self) -> None:
+        assert workflow.metadata_for("sofer_meta_check").next.tool == "sofer_meta_set"
+        assert workflow.metadata_for("sofer_meta_set").next.tool == "sofer_validate"
+        assert workflow.metadata_for("sofer_scan_apply").next.tool == "sofer_meta_set"
 
 
 class TestMetadataStepInTheAdvertisedChain:

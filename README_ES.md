@@ -335,6 +335,8 @@ canalización.
 | --- | --- |
 | `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Requiere `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`); un `--user` faltante sale con 2, y los valores placeholder (`YOUR_USER`) o inseguros salen con 1 antes de cualquier escritura — la línea de éxito imprime el `config_path` absoluto. |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
+| `meta check <config.toml>` | Reporta los campos `[meta]` que todavía llevan un placeholder de `init` (vacíos, o que empiezan con `TODO`, `YOUR_`, `example` — `meta_placeholder_prefixes`). Read-only e informativo: el código de salida es 0 sin importar qué reporte, igual que el warning de `sofer validate` que refleja; solo un config ilegible sale con 1. `--json` emite el objeto de estado estable. |
+| `meta set <config.toml> --set KEY=VALUE` | Escribe claves `[meta]` en el TOML del dataset preservando cada otra clave, comentario y tabla. `--set` es repetible y lee el valor según el tipo de la clave: texto verbatim, lista como ítems separados por comas (`--set tags=a,b`), flag como `true`/`false`. `--dry-run` reporta el plan y no escribe nada; `--json` emite el objeto de estado estable. La escritura es atómica, una negativa no escribe nada, y re-ejecutar con los valores que el archivo ya tiene no escribe nada. Hay 38 claves configurable — todas las claves `[meta]` que la canalización lee. |
 | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto, debe ser un directorio existente), `--timeout SECONDS`, `--connect-timeout SECONDS`, `--no-timeout`, `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) y timeouts de host por agente. Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
 | `mcp doctor [--agent <...\|all>] [--json]` | Mide el arranque en frío **real**: lanza `sofer-mcp` (o el entry point de módulo cuando el console script no está en `PATH`) y cronometra el round trip `initialize` por stdio, imprimiéndolo junto a la clave de entrada por agente y el valor que `mcp add` escribe ahí. Presupuesto: `[tool.sofer] mcp_connect_timeout_seconds`. Informativo — exceder el presupuesto nunca cambia el código de salida, porque una máquina lenta no es un registro roto. No lee ni escribe nada. |
@@ -643,8 +645,9 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 15 callables de herramientas (`sofer_validate`,
-`sofer_prepare`, `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
+El servidor expone 17 callables de herramientas (`sofer_validate`,
+`sofer_meta_check`, `sofer_meta_set`, `sofer_prepare`,
+`sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
 `sofer_auth_status`, `sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
@@ -666,7 +669,10 @@ instantánea de postura del servidor (`approval_configured`, `phrase_source`,
 
 ```
 Phase 0 (Fase 0) Bootstrap [condicional: REQUERIDO si greenfield — sin TOML / [[file]] vacío]
-  sofer_init → sofer_scan_dry_run / sofer_scan_apply
+  sofer_init → sofer_scan_dry_run / sofer_scan_apply → sofer_meta_set
+  Paso de metadata (entre bootstrap y Fase 1): sofer_meta_check reporta los
+  placeholders, sofer_meta_set escribe [meta] description, license, source, tags
+  y cualquier otra clave del card
 Fase 1 Build: sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all
 Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → sofer_publish_confirm
 ```
@@ -679,6 +685,8 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | ------ | ------------- | ------------ | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Bootstrap greenfield; crea TOML + `raw/` (Windows: `cwd` debe permanecer bajo la raíz vía `_contained_path`; `raw/example.csv` es NTFS-safe). |
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Fase 0 preview/apply tras `init`. |
+| M | `sofer_meta_check` | `config` | Lee el estado de metadata sin correr el validador; `readOnlyHint:true`. Reporta el mismo warning que imprime `sofer_validate`. |
+| M | `sofer_meta_set` | `config`, `values`, `dry_run` | Escribe `[meta]` antes de la Fase 1 (la única vía por MCP): description/license/source/tags, más cualquier otra clave del card. Preserva cada otra clave y comentario; `build_stale` nombra un árbol `build/` anterior a la escritura. Llamada sin `values` no escribe nada y devuelve una continuación pidiéndolos. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | Tras validate; escribe Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | Tras prepare; codebooks en lote. |
@@ -814,9 +822,12 @@ Ubicaciones y formas por agente:
   placeholder. Completarlos es un **paso obligatorio entre el bootstrap y la Phase 1**, y es el único
   paso que comparten un humano y un agente: en una corrida vía MCP el **agente** completa lo que los
   datos pueden determinar (description, tags), y el **humano** aporta lo que no (license, source).
-  `sofer_validate` avisa mientras algún valor de `[meta]` siga vacío o empiece con `TODO`, `YOUR_` o
-  `example`, así el paso llega al agente por el envelope en lugar de aparecer recién en la card
-  generada. El aviso nunca cambia el código de salida.
+  `sofer_meta_check` reporta el estado a demanda y `sofer_meta_set` es la escritura que un tool
+  puede hacer (issue #323) — antes de que existieran, el paso era solo prosa, porque un cliente MCP no
+  tiene forma de escribir un archivo.
+  `sofer_validate` también avisa mientras algún valor de `[meta]` siga vacío o empiece con `TODO`,
+  `YOUR_` o `example`, así el paso llega al agente por el envelope en lugar de aparecer recién en la
+  card generada. El aviso nunca cambia el código de salida, y `sofer_meta_check` tampoco.
 - **Resolución del scope user:** las rutas de abajo son la resolución **por defecto** de sofer bajo
   `Path.home()`. Agentes como opencode leen su config del home de **cuenta** del sistema, así que cuando
   los dos difieren la entrada puede terminar en un archivo que el agente nunca lee. Pasá

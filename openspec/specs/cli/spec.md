@@ -674,3 +674,90 @@ command's own keys, and SHALL never emit a Python `repr`.
 - AND the description SHALL name the `initialize` round trip
 
 **Evidence:** `test: tests/test_mcp_doctor.py::TestCliSurface::test_doctor_help_lists_its_flags`, `test: tests/test_mcp_doctor.py::TestCliSurface::test_doctor_help_documents_what_is_measured`
+
+### Requirement: The metadata step has a CLI surface (CLI-R16)
+
+> Added by the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323).
+
+`sofer` SHALL expose `meta` with `check` and `set`, so the CLI and the MCP tools
+`sofer_meta_check` / `sofer_meta_set` stay in step (issue #323 §3).
+
+`meta check CONFIG [--json]` SHALL print one line per `[meta]` field that is empty or still
+begins with a `meta_placeholder_prefixes` value (`[tool.sofer]`, case-insensitive), plus one for
+placeholder `tags`, reusing the validator's own implementation so the query and `sofer validate`
+cannot disagree. It SHALL be informational: the exit code SHALL be 0 whatever it reports — the
+same force as the warning it reports, which #288's decision D3 made non-fatal — and only an
+unreadable config SHALL exit 1. It SHALL write nothing.
+
+`meta set CONFIG --set KEY=VALUE [--dry-run] [--json]` SHALL write the given keys into the dataset
+TOML's `[meta]` table and nothing else: every other key, comment, blank line and table SHALL
+survive byte for byte. `--set` SHALL be repeatable, SHALL be required, and SHALL be the only
+value-bearing flag — one rule for every settable key instead of a flag per key, with the value
+read per the key's kind: text verbatim, a list as comma-separated items, a flag as `true` or
+`false`. An argument without `=`, a blank key, an unknown key and an unreadable boolean SHALL
+each exit 1 with nothing written. The write SHALL be atomic, and SHALL be refused with nothing
+written when the edited document would not parse or would lose a requested value. Re-running with
+the values the file already holds SHALL write nothing. A `build/` tree that predates the write
+SHALL be named on stderr and SHALL NOT change the exit code.
+
+Both children SHALL accept `--json`, emitting the CLI-R10 stable-key object (`ok`, `exit_code`,
+`message`) extended with the command's own keys, and that JSON SHALL be the only stdout the command
+writes. The help of `meta`, `meta check` and `meta set` SHALL document the flags, the kind-aware
+value reading and the informational exit-code contract, and `sofer --help` SHALL list `meta`.
+
+#### Scenario: help lists the metadata children and their flags
+
+- GIVEN `sofer --help`, `sofer meta --help` and `sofer meta set --help`
+- WHEN rendered
+- THEN `meta` SHALL appear in the top-level help
+- AND `check` and `set` SHALL appear in `sofer meta --help`
+- AND `--set`, `--dry-run`, `--json`, `KEY=VALUE` and `[meta]` SHALL appear in `sofer meta set --help`
+
+**Evidence:** `test: tests/test_cli.py::TestMetaHelpSurface::test_meta_is_listed_in_top_help`, `test: tests/test_cli.py::TestMetaHelpSurface::test_meta_lists_both_children_and_their_flags`
+
+#### Scenario: check reports each placeholder and never fails the run
+
+- GIVEN a dataset TOML whose `[meta]` values are the `sofer init` template's placeholders
+- WHEN `sofer meta check` runs
+- THEN it SHALL print one line per offending field and exit 0
+- AND a config whose `[meta]` gate is satisfied SHALL print a single `OK` line and exit 0
+- AND an unreadable config SHALL exit 1
+
+**Evidence:** `test: tests/test_cli.py::TestMetaCommand::test_check_lists_each_placeholder_and_stays_informational`, `test: tests/test_cli.py::TestMetaCommand::test_check_reports_a_clean_config`, `test: tests/test_cli.py::TestMetaCommand::test_check_exits_1_when_the_config_cannot_be_read`
+
+#### Scenario: set writes the keys and preserves the rest of the document
+
+- GIVEN the `sofer init` template
+- WHEN `sofer meta set config.toml --set description=Real --set tags=a,b` runs
+- THEN `[meta]` SHALL carry the new values and the template's comment guidance SHALL survive
+- AND `confidential=false`, `language=en,es` SHALL be read as a flag and a list
+
+**Evidence:** `test: tests/test_cli.py::TestMetaCommand::test_set_writes_the_keys_it_was_given`, `test: tests/test_cli.py::TestMetaCommand::test_set_reads_each_kind_from_text`, `test: tests/test_meta_edit.py::TestApplyMetaEdit::test_only_the_meta_block_changes`
+
+#### Scenario: set refuses malformed input without writing
+
+- GIVEN a parseable dataset TOML
+- WHEN `--set` carries no `=`, a blank key, an unknown key, or a non-boolean for a flag
+- THEN the command SHALL exit 1 and name what it expected
+- AND the file SHALL be byte-identical
+
+**Evidence:** `test: tests/test_cli.py::TestMetaCommand::test_set_requires_key_equals_value`, `test: tests/test_cli.py::TestMetaCommand::test_set_refuses_a_blank_key`, `test: tests/test_cli.py::TestMetaCommand::test_set_refuses_an_unknown_key`, `test: tests/test_cli.py::TestMetaCommand::test_set_refuses_a_bad_boolean`
+
+#### Scenario: set is idempotent, dry-run writes nothing, and a stale build is named
+
+- GIVEN a dataset TOML already carrying the requested values, or a `build/` tree, or `--dry-run`
+- WHEN `sofer meta set` runs
+- THEN the second identical run SHALL write nothing and report the key as unchanged
+- AND `--dry-run` SHALL report the plan and leave the file untouched
+- AND a `build/` tree that predates the write SHALL be named on stderr with exit code 0
+
+**Evidence:** `test: tests/test_cli.py::TestMetaCommand::test_set_is_idempotent_and_names_the_unchanged_keys`, `test: tests/test_cli.py::TestMetaCommand::test_set_dry_run_writes_nothing`, `test: tests/test_cli.py::TestMetaCommand::test_set_names_a_build_tree_that_predates_the_write`
+
+#### Scenario: --json is the only stdout and carries the stable keys — CLI-R10
+
+- GIVEN `sofer meta check --json` and `sofer meta set --json`
+- WHEN stdout is parsed
+- THEN it SHALL decode as one JSON document carrying `ok` and `exit_code`
+- AND no Python `repr` SHALL appear
+
+**Evidence:** `test: tests/test_cli.py::TestMetaCommand::test_check_json_is_the_stable_key_object`, `test: tests/test_cli.py::TestMetaCommand::test_set_json_reports_the_write`, `test: tests/test_cli.py::TestMetaCommand::test_set_json_reports_a_no_op`
