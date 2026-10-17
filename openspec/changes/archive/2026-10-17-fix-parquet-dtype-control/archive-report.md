@@ -22,7 +22,7 @@
 | T8 | Structured parity finding + fatal residue | done | `_check_conversion_parity` out-parameter (D6), `ValueAlterationError` re-raised past the CSV fallback (D4) |
 | T9 | Spec + delta | done | `openspec/specs/parquet-conversion/spec.md` §7.2 rewritten, §7.4 added, five scenarios |
 | T10 | README pair + `prepare` help text | done | README/README_ES footnote ², `cli.py` subcommand description |
-| T11 | Full gate set, commits, push, PR | done in the delivery PR that carries this archive | see §2 |
+| T11 | Full gate set, commits, push, PR | done — PR [#341](https://github.com/emiliodavola/sofer/pull/341) | see §2 of this report |
 
 ## 2. Verification, verbatim
 

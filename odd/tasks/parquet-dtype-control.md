@@ -2,8 +2,8 @@
 
 **Branch:** `fix/337-parquet-dtype-control` from `dev@ec511e7`
 **Issue:** `emiliodavola/sofer#337` — *bug(convert): pyarrow inference still alters zero-padded code values, and no forced-string escape hatch exists*
-**Delivery PR:** pending — assigned to `@emiliodavola` (recorded in the archive commit as soon as it exists)
-**SDD change:** `openspec/changes/2026-10-17-fix-parquet-dtype-control/`
+**Delivery PR:** [#341](https://github.com/emiliodavola/sofer/pull/341) — `fix/337-parquet-dtype-control` → `dev`, assigned to `@emiliodavola`
+**SDD change:** `openspec/changes/archive/2026-10-17-fix-parquet-dtype-control/` (archived inside the PR)
 **Phase:** 2 of the v0.8.0 batch
 
 ## Goal
