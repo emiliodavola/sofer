@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import shutil
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
-from . import _toml, config, failure_report, mcp_registration
+from . import _toml, config, failure_report, mcp_doctor, mcp_registration, meta_edit
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
-from .checks import DatasetValidator, ValidationReport
+from .checks import DatasetValidator, ValidationReport, meta_placeholder_warnings
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
 from .execution_context import resolve_dataset_root, validate_identity
@@ -90,6 +91,35 @@ def _load_and_validate(
     report.ran_checks = quality_report.ran_checks
 
     return cfg, report
+
+
+def _positive_seconds(text: str) -> int:
+    """Argparse type for a positive whole number of seconds.
+
+    Used by ``sofer mcp add``'s host-timeout flags (issues #287, #296). A
+    non-positive host deadline would make the registered server unusable —
+    exactly the failure the flags exist to prevent — so argparse rejects it
+    with exit 2 and a usage message instead of writing it into the config.
+
+    Args:
+        text: Raw command-line value.
+
+    Returns:
+        The parsed positive integer.
+
+    Raises:
+        argparse.ArgumentTypeError: When *text* is not a whole number, or is
+            less than 1.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of seconds, got {text!r}"
+        ) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive number of seconds, got {value}")
+    return value
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -693,20 +723,22 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
            ``mcp_registration.probe_native`` (``which`` + ``mcp --help``
            timeout 3s); when available, try ``delegate_add`` first — on
            success skip file-edit. Delegation is fidelity-gated (#167, #232):
-           when the native CLI cannot forward the same env NAMES and scope as
-           the file edit, ``delegate_add`` declines without spawning, a stderr
-           warning names the reason (``env forwarding`` / ``project scope``,
-           NAMES only), and the file-edit path runs; any other native failure
-           (raise or non-zero exit) falls back with the generic message.
+           when the native CLI cannot forward the same env NAMES, scope and
+           timeouts as the file edit, ``delegate_add`` declines without
+           spawning, a stderr warning names the reason (``env forwarding`` /
+           ``project scope`` / ``timeout``, NAMES only), and the file-edit path
+           runs; any other native failure (raise or non-zero exit) falls back
+           with the generic message.
         5. File-edit path: ``resolve_config_path`` → ``single_scope_note``
            (a single-scope agent under ``--scope project`` prints the
            substitution to stderr here, before the read/merge/dry-run branch) →
            ``read_config`` (unreadable/malformed → print to stderr, return 1,
            no backup/write) → ``build_entry`` (absolute cwd, env forwarding per
-           agent) → ``merge`` (normalize Codex command string/array, preserve
-           other servers, no write when unchanged) → ``--dry-run`` guard (no
-           mutation) → ``backup`` (single ``.bak`` copy2 overwrite) →
-           ``atomic_write`` (tmp in same dir + ``os.replace``).
+           agent, host timeout keys per agent) → ``merge`` (normalize Codex
+           command string/array, preserve other servers, no write when
+           unchanged) → ``--dry-run`` guard (no mutation) → ``backup`` (single
+           ``.bak`` copy2 overwrite) → ``atomic_write`` (tmp in same dir +
+           ``os.replace``).
         6. Aggregate per-agent exit codes — exit 0 iff all succeed else 1.
 
         Env forwarding: ``HF_TOKEN``/``SOFER_MCP_APPROVAL_PHRASE`` are collected
@@ -716,6 +748,16 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
         opencode receives no env. When opencode (or the opencode member of
         ``all``) is chosen with known env keys present, the step-3 warning is
         printed once per run and names the variables that cannot be forwarded.
+
+        Host timeouts (issues #287, #296): the entry carries the host's
+        per-request and connect/startup deadlines so a cold start (16-32 s
+        measured) and a long call (~680 s ``prepare`` measured) do not fail
+        against a host default and look like a broken registration. The values
+        default to ``[tool.sofer] mcp_request_timeout_seconds`` /
+        ``mcp_connect_timeout_seconds``, are overridable per invocation, and are
+        omitted entirely by ``--no-timeout``. The key name and the unit come
+        from the adapter; an agent whose entry accepts none is named on stderr
+        by ``mcp_registration.dropped_timeout_note``.
     """
     # Expand agent
     raw_agent: str = getattr(args, "agent")
@@ -725,6 +767,24 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     cwd_raw: str | None = getattr(args, "cwd", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
     user_config: str | None = getattr(args, "user_config", None)
+
+    # Host timeouts for the entry (issues #287, #296). Values default to the
+    # live [tool.sofer] keys (AGENTS.md rule 1 — never a literal here), the
+    # flags override per invocation, and --no-timeout writes none at all.
+    timeouts: mcp_registration.Timeouts | None
+    if bool(getattr(args, "no_timeout", False)):
+        timeouts = None
+    else:
+        raw_request = getattr(args, "timeout", None)
+        raw_connect = getattr(args, "connect_timeout", None)
+        timeouts = mcp_registration.Timeouts(
+            request_seconds=(
+                config.MCP_REQUEST_TIMEOUT_SECONDS if raw_request is None else raw_request
+            ),
+            connect_seconds=(
+                config.MCP_CONNECT_TIMEOUT_SECONDS if raw_connect is None else raw_connect
+            ),
+        )
 
     # `--user-config` names ONE file, so it is ambiguous for `--agent all`
     # (each agent has its own config). Reject before any write (issue #274).
@@ -779,12 +839,16 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
                 "'environment' literal in opencode.json.",
                 file=sys.stderr,
             )
+        # Informational timeout-drop note for a host whose entry accepts none.
+        timeout_note = mcp_registration.dropped_timeout_note(agent, timeouts)
+        if timeout_note is not None:
+            print(timeout_note, file=sys.stderr)
         # Prefer native delegation for codex/gemini — but only when it is
         # faithful (#167, #232). A decline warns with the reason and falls back.
         if mcp_registration.probe_native(agent, timeout=3.0):
             try:
                 delegated = mcp_registration.delegate_add(
-                    agent, cwd_resolved, list(env.keys()), _scope
+                    agent, cwd_resolved, list(env.keys()), _scope, timeouts
                 )
             except Exception:
                 delegated = False
@@ -798,13 +862,24 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
                 []
                 if native_error
                 else mcp_registration.native_delegation_decline_reasons(
-                    agent, list(env.keys()), _scope
+                    agent, list(env.keys()), _scope, timeouts
                 )
             )
             if reasons:
+                # Name the escape hatch only when it actually restores delegation.
+                # Measured (issue #321): with no env key present the reasons are
+                # exactly ["timeout"] and --no-timeout clears them, but with an
+                # env key present they are ["env forwarding", "timeout"] and
+                # the flag removes only the second, so the hint would point at a
+                # flag that changes nothing.
+                hint = (
+                    "; pass --no-timeout to keep native delegation at the cost of the deadlines"
+                    if reasons == ["timeout"]
+                    else ""
+                )
                 print(
                     f"  !  {agent} native mcp add cannot express "
-                    f"{', '.join(reasons)}; falling back to file edit",
+                    f"{', '.join(reasons)}; falling back to file edit{hint}",
                     file=sys.stderr,
                 )
             else:
@@ -831,7 +906,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
             overall = 1
             continue
 
-        desired = mcp_registration.build_entry(agent, cwd_resolved, env)
+        desired = mcp_registration.build_entry(agent, cwd_resolved, env, timeouts)
         new_doc, changed = mcp_registration.merge(agent, existing, desired)
         if not changed:
             print(f"  OK  {agent} already registered (idempotent)")
@@ -1049,6 +1124,203 @@ min_total_size_mb = 0.0
 # min = 0
 # max = 120
 """
+
+
+def _cmd_mcp_doctor(args: argparse.Namespace) -> int:
+    """Measure the real ``sofer-mcp`` cold start and report it against the written deadline.
+
+    Orchestration:
+
+        1. Resolve the entry point: the ``sofer-mcp`` console script when it is on
+           ``PATH``, else the module entry point (issue #322).
+        2. Measure the stdio ``initialize`` round trip, using the configured
+           ``[tool.sofer] mcp_connect_timeout_seconds`` as the budget - the same
+           value ``mcp add`` writes, never a literal here (AGENTS.md rule 1).
+        3. Collate the per-agent rows from ``timeout_entry_keys``, so the report
+           cannot disagree with what registration writes, and repeat
+           ``dropped_timeout_note`` for an agent whose schema accepts no key.
+        4. Print the report and return 0 even when the measurement exceeds the
+           budget - the same informational contract as the timeout and env-drop
+           notes. Only "nothing could be measured" returns 1. This command never
+           reads a config file and never writes one.
+
+    Args:
+        args: Parsed arguments carrying ``--agent`` and ``--json``.
+
+    Returns:
+        0 when a launch was measured (whatever it measured), else 1.
+    """
+    raw_agent: str | None = getattr(args, "agent", None)
+    agents: list[str] = (
+        list(mcp_registration.AGENT_NAMES) if raw_agent in (None, "all") else [raw_agent]
+    )
+    as_json = bool(getattr(args, "json", False))
+    timeouts = mcp_registration.Timeouts(
+        request_seconds=config.MCP_REQUEST_TIMEOUT_SECONDS,
+        connect_seconds=config.MCP_CONNECT_TIMEOUT_SECONDS,
+    )
+    measurement = mcp_doctor.measure(
+        mcp_doctor.resolve_entry_point(),
+        timeout_seconds=float(config.MCP_CONNECT_TIMEOUT_SECONDS),
+    )
+    report = mcp_doctor.build_report(
+        agents,
+        measurement=measurement,
+        timeouts=timeouts,
+        budget_seconds=config.MCP_CONNECT_TIMEOUT_SECONDS,
+    )
+    exit_code = 0 if measurement.ok else 1
+    if as_json:
+        print(mcp_doctor.render_json(report, exit_code=exit_code))
+    elif measurement.ok:
+        print(mcp_doctor.render_human(report))
+    else:
+        print(mcp_doctor.render_human(report), file=sys.stderr)
+    return exit_code
+
+
+def _cmd_meta_check(args: argparse.Namespace) -> int:
+    """Report the ``[meta]`` fields that still carry an ``init`` placeholder.
+
+    Orchestration:
+
+        1. Load the dataset TOML with :meth:`DatasetConfig.from_toml`, the same
+           dataset-directory anchor every other dataset command uses.
+        2. Reuse :func:`sofer.checks.meta_placeholder_warnings` — the very
+           implementation ``sofer_validate`` calls — so the query and the
+           validator cannot disagree about what a placeholder is.
+        3. Print one line per warning, or a single ``OK`` line when there are
+           none. Informational by contract (maintainer decision D6): the exit
+           code is 0 either way, exactly like the warning it reports, because a
+           non-zero exit here would make this query stricter than the run it
+           queries. Only "the config could not be read" exits 1.
+
+    Args:
+        args: Parsed arguments carrying ``config`` and ``--json``.
+
+    Returns:
+        0 when the config was read (whatever it reports), else 1.
+    """
+    path: str = args.config
+    try:
+        cfg = DatasetConfig.from_toml(path)
+    except Exception as exc:
+        print(f"  X  cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    warnings = meta_placeholder_warnings(cfg)
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "message": f"{len(warnings)} [meta] placeholder warning(s)",
+                    "placeholders": len(warnings),
+                    "warnings": warnings,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if warnings:
+        for warning in warnings:
+            print(f"  !  {warning}")
+    else:
+        print(f"  OK  {path}: no [meta] placeholders")
+    return 0
+
+
+def _cmd_meta_set(args: argparse.Namespace) -> int:
+    """Write the given ``[meta]`` keys into the dataset TOML.
+
+    Orchestration:
+
+        1. Read every ``--set KEY=VALUE`` into a typed mapping with
+           :func:`sofer.meta_edit.parse_meta_value` — the registry kind decides
+           how the text is read (maintainer decision D9). An argument without
+           ``=``, a blank key, an unknown key and an unreadable boolean are all
+           refused before anything is touched (argparse guarantees at least one
+           ``--set``).
+        2. Load the dataset TOML (dataset-directory anchor) so an unreadable or
+           invalid config fails before the write, and so the build-tree note
+           below can use the resolved ``build_dir``.
+        3. Apply the edit with :func:`sofer.meta_edit.set_meta`: it touches only
+           the ``[meta]`` table, preserves every other byte, commits with an
+           atomic replace, and refuses rather than writing a document it cannot
+           parse back. ``--dry-run`` computes and verifies the edit and writes
+           nothing.
+        4. Report the keys written and the keys already holding the requested
+           value; a build tree that predates the write is named on stderr and
+           never changes the exit code (maintainer decision D7). A refusal exits
+           1 with nothing written.
+
+    Args:
+        args: Parsed arguments carrying ``config``, ``assignments``,
+            ``--dry-run`` and ``--json``.
+
+    Returns:
+        0 on success (including a no-op), else 1.
+    """
+    values: dict[str, Any] = {}
+    for entry in list(getattr(args, "assignments", [])):
+        key, separator, raw = entry.partition("=")
+        if not separator or not key.strip():
+            print(f"  X  --set expects KEY=VALUE, got {entry!r}", file=sys.stderr)
+            return 1
+        try:
+            values[key.strip()] = meta_edit.parse_meta_value(key.strip(), raw)
+        except meta_edit.MetaEditError as exc:
+            print(f"  X  {exc}", file=sys.stderr)
+            return 1
+
+    path: str = args.config
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        cfg = DatasetConfig.from_toml(path)
+    except Exception as exc:
+        print(f"  X  cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = meta_edit.set_meta(path, values, dry_run=dry_run)
+    except meta_edit.MetaEditError as exc:
+        print(f"  X  {exc}", file=sys.stderr)
+        return 1
+
+    written = ", ".join(result.written)
+    if bool(getattr(args, "json", False)):
+        # CLI-R10: the machine-readable line is the ONLY stdout the command
+        # writes, so a consumer can parse it without stripping human prose.
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "message": (
+                        (f"would write: {written}" if dry_run else f"wrote: {written}")
+                        if result.changed
+                        else "already up to date"
+                    ),
+                    "dry_run": result.dry_run,
+                    "changed": result.changed,
+                    "written": list(result.written),
+                    "unchanged": list(result.unchanged),
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        if dry_run:
+            print(f"  DRY RUN  {path}: would write {written or 'nothing'}")
+        elif result.changed:
+            print(f"  OK  {path}: wrote {written}")
+        else:
+            print(f"  OK  {path}: already up to date")
+        if not dry_run and result.unchanged:
+            print(f"  i  unchanged: {', '.join(result.unchanged)}")
+    note = meta_edit.build_predates_write(cfg, path)
+    if note is not None:
+        print(note, file=sys.stderr)
+    return 0
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -1735,8 +2007,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "hermes reads a single user-scope config, so --scope project resolves "
             "to that same file and the substitution is named on stderr. "
             "Native codex/gemini delegation is used only when it can forward the "
-            "same env NAMES and scope as the file edit; otherwise the config file "
-            "is edited and a warning naming the reason is printed on stderr."
+            "same env NAMES, scope and timeouts as the file edit; otherwise the "
+            "config file is edited and a warning naming the reason is printed on "
+            "stderr. "
+            "Host timeouts (issues #287, #296): a first launch of sofer-mcp can "
+            "take tens of seconds while its imports warm up, and a tool call on a "
+            "large dataset can run for minutes, so the entry carries the host's "
+            "per-request and connect/startup deadlines (--timeout / "
+            "--connect-timeout, or --no-timeout to omit them). The key name, the "
+            "unit and which budget a key carries are per agent: opencode's single "
+            "scalar `timeout` is its connect budget in milliseconds. An agent "
+            "whose schema accepts no timeout key is named on stderr."
         ),
     )
     mcp_add.add_argument(
@@ -1763,6 +2044,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Explicit user-scope config FILE for the selected agent; wins over the "
             "adapter's env override and the home default. Rejected with --agent all."
+        ),
+    )
+    mcp_add.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "Per-request (tool call) deadline in seconds written into the entry. "
+            "Default: [tool.sofer] mcp_request_timeout_seconds."
+        ),
+    )
+    mcp_add.add_argument(
+        "--connect-timeout",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "Initial-connection / cold-start deadline in seconds written into the "
+            "entry. Default: [tool.sofer] mcp_connect_timeout_seconds."
+        ),
+    )
+    mcp_add.add_argument(
+        "--no-timeout",
+        action="store_true",
+        help=(
+            "Omit the timeout keys entirely, restoring the pre-#287/#296 entry "
+            "shape. For codex and gemini this is also the only path where sofer "
+            "does not rewrite the config file: with the timeouts, native "
+            "delegation declines and the file edit rewrites the whole document."
         ),
     )
     mcp_add.add_argument(
@@ -1812,6 +2121,130 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Preview without writing — no file or .bak is created.",
     )
     mcp_remove.set_defaults(func=_cmd_mcp_remove)
+
+    mcp_doctor_parser = mcp_sub.add_parser(
+        "doctor",
+        help="Measure the real sofer-mcp cold start and print the deadline to configure.",
+        description=(
+            "Measure the real launch: spawn ``sofer-mcp`` (or the module entry "
+            "point when the console script is not on PATH) and time the stdio "
+            "``initialize`` round trip, which is what a host's connect/startup "
+            "deadline covers - import timing measures the wrong thing. Prints the "
+            "measured milliseconds beside the per-agent entry key and the value "
+            "``sofer mcp add`` would write, so the two can be compared. The budget "
+            "is ``[tool.sofer] mcp_connect_timeout_seconds``. Informational: "
+            "exceeding the budget never changes the exit code, because a slow "
+            "machine is not a broken registration. Reads and writes nothing."
+        ),
+    )
+    mcp_doctor_parser.add_argument(
+        "--agent",
+        choices=[*mcp_registration.AGENT_NAMES, "all"],
+        default=None,
+        help="Report one agent's entry key instead of every registered agent.",
+    )
+    mcp_doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable status line as stable JSON (CLI-R10).",
+    )
+    mcp_doctor_parser.set_defaults(func=_cmd_mcp_doctor)
+
+    # ── meta ──────────────────────────────────────────────────────
+    meta = sub.add_parser(
+        "meta",
+        help="Read and fill the dataset [meta] block (init placeholders, card values).",
+        description=(
+            "Read and write the dataset TOML's ``[meta]`` table. ``check`` "
+            "reports which fields still carry a ``sofer init`` placeholder, the "
+            "same warning ``sofer validate`` prints, queryable on demand. "
+            "``set`` writes the keys it is given into ``[meta]``, preserving "
+            "every other key, every comment and the rest of the document. "
+            "The dataset TOML is the only file touched, and both surfaces mirror "
+            "the ``sofer_meta_check`` / ``sofer_meta_set`` MCP tools."
+        ),
+    )
+    meta_sub = meta.add_subparsers(dest="meta_command", required=True)
+
+    meta_check = meta_sub.add_parser(
+        "check",
+        help="Report the [meta] fields still carrying an init placeholder (read-only).",
+        description=(
+            "Print one line per ``[meta]`` field that is empty or still starts "
+            "with a ``meta_placeholder_prefixes`` value (``[tool.sofer]``, "
+            "case-insensitive), plus one for placeholder ``tags``. Read-only: "
+            "no file is written. Informational: the exit code is 0 whatever it "
+            "reports, exactly like the warning ``sofer validate`` prints "
+            "(issue #288's decision); only an unreadable config exits 1."
+        ),
+    )
+    meta_check.add_argument(
+        "config",
+        help="Path to the dataset .toml configuration file to inspect.",
+    )
+    meta_check.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the machine-readable status line as stable JSON (CLI-R10): "
+            "ok, exit_code, message, placeholders, warnings."
+        ),
+    )
+    meta_check.set_defaults(func=_cmd_meta_check)
+
+    meta_set = meta_sub.add_parser(
+        "set",
+        help="Write [meta] keys into the dataset TOML, preserving everything else.",
+        description=(
+            "Write the given ``[meta]`` keys into the dataset TOML. Only the "
+            "``[meta]`` table changes: other keys, comments, blank lines and "
+            "every unrelated table survive byte for byte. The write is atomic "
+            "(tmp + os.replace) and the edited document is parsed back before "
+            "it replaces the file, so a refusal - an unknown key, a value of "
+            "the wrong kind, a document that would not parse - writes nothing. "
+            "``--set KEY=VALUE`` reads VALUE per the key's kind: text verbatim, "
+            "a list as comma-separated items (``--set tags=a,b``, empty for "
+            "``[]``), and a flag as ``true``/``false``. Re-running with the "
+            "values the file already holds writes nothing. A ``build/`` tree "
+            "that predates the write is named on stderr - the Dataset Card and "
+            "LICENSE there still carry the old values until ``sofer prepare`` "
+            "runs again."
+        ),
+    )
+    meta_set.add_argument(
+        "config",
+        help="Path to the dataset .toml configuration file to edit.",
+    )
+    meta_set.add_argument(
+        "--set",
+        dest="assignments",
+        action="append",
+        required=True,
+        metavar="KEY=VALUE",
+        help=(
+            "A [meta] key to write (repeatable), e.g. --set description='What it "
+            "is' --set license=MIT --set source='Some org' --set tags=a,b. The "
+            "value is read per the key's kind: text verbatim, a list as "
+            "comma-separated items, a flag as true/false."
+        ),
+    )
+    meta_set.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Compute and verify the edit, report the keys it would write, and "
+            "leave the file untouched."
+        ),
+    )
+    meta_set.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the machine-readable status line as stable JSON (CLI-R10): "
+            "ok, exit_code, message, dry_run, changed, written, unchanged."
+        ),
+    )
+    meta_set.set_defaults(func=_cmd_meta_set)
 
     # ── report-failure ────────────────────────────────────────────
     rf = sub.add_parser(

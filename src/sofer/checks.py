@@ -12,11 +12,113 @@ without modifying this module.
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from . import config
 from .model import QUALITY_CHECK_NAMES, DatasetConfig, QualityResult
 from .repo_compliance import normalize_header
+
+_META_PLACEHOLDER_FIELDS: tuple[str, ...] = ("description", "license", "source")
+"""The ``[meta]`` scalar fields the agent-facing gate inspects (issue #288).
+
+The set the ``sofer init`` template fills with placeholders; ``tags`` is checked
+separately because it is a list.
+"""
+
+
+def _looks_like_placeholder(text: str, prefixes: tuple[str, ...]) -> bool:
+    """Return True when *text* is empty or opens with a template prefix.
+
+    Args:
+        text: The candidate value, already stripped.
+        prefixes: Lower-cased prefixes that mark a template placeholder.
+
+    Returns:
+        ``True`` for an empty value, or one beginning with a prefix.
+    """
+    return not text or text.lower().startswith(prefixes)
+
+
+def meta_placeholder_warnings(cfg: DatasetConfig) -> list[str]:
+    """Return warnings for ``[meta]`` fields still carrying template placeholders.
+
+    ``sofer init`` writes a TOML whose ``[meta]`` block is all placeholders, and
+    nothing in the pipeline said they had to be replaced: they travelled through
+    validate, prepare, codebook_all, profile_all and render_all with every
+    envelope reporting ``ok: true``, and the only way to notice was to read the
+    generated Dataset Card (issue #288). An MCP consumer has no other source of
+    truth than the tool descriptions and envelopes, so the check belongs in the
+    surface those carry.
+
+    The force is deliberately a **warning** (maintainer decision D3): a failure
+    would break every existing config that still carries a placeholder, which is
+    a contract change rather than a fix. A warning reaches the agent through the
+    envelope while leaving the run's exit code alone.
+
+    Args:
+        cfg: Dataset configuration.
+
+    Returns:
+        One message per offending field, in a fixed order; ``[]`` when every
+        inspected field carries a real value.
+    """
+    return meta_placeholder_warnings_for(
+        {
+            "description": cfg.description,
+            "license": cfg.license,
+            "source": cfg.source,
+            "tags": cfg.tags,
+        }
+    )
+
+
+def meta_placeholder_warnings_for(values: Mapping[str, Any]) -> list[str]:
+    """Return the placeholder warnings for one ``[meta]`` mapping.
+
+    The same implementation :func:`meta_placeholder_warnings` delegates to, so
+    the validator and the tools that write ``[meta]`` cannot disagree about what
+    a placeholder is (AGENTS.md rule 4). Taking the mapping directly is what lets
+    ``sofer_meta_set`` report the state its own edit would leave behind — computed
+    from the resulting table in hand, never from a re-read of the file, so a
+    ``dry_run`` reports the planned state rather than the current one.
+
+    A missing or ``None`` value is treated exactly as an empty string, and a
+    non-list ``tags`` as no tags, because the mapping may come from an operator's
+    TOML or from an edit in progress.
+
+    Args:
+        values: The ``[meta]`` table as a mapping.
+
+    Returns:
+        One message per offending field, in a fixed order; ``[]`` when every
+        inspected field carries a real value.
+    """
+    prefixes = tuple(p.lower() for p in config.META_PLACEHOLDER_PREFIXES)
+    warnings: list[str] = []
+    for field_name in _META_PLACEHOLDER_FIELDS:
+        raw = values.get(field_name) or ""
+        text = str(raw).strip()
+        if _looks_like_placeholder(text, prefixes):
+            shown = text or "(empty)"
+            warnings.append(
+                f"[meta] {field_name} still looks like a template placeholder "
+                f"({shown!r}): replace it before prepare, or the generated Dataset "
+                f"Card and LICENSE ship the placeholder."
+            )
+    tags = values.get("tags")
+    raw_tags: list[Any] = tags if isinstance(tags, list) else []
+    placeholder_tags = [
+        str(t) for t in raw_tags if _looks_like_placeholder(str(t).strip(), prefixes)
+    ]
+    if placeholder_tags:
+        warnings.append(
+            f"[meta] tags still look like template placeholders "
+            f"({', '.join(repr(t) for t in placeholder_tags)}): replace them before "
+            f"prepare, or the generated card advertises placeholder tags."
+        )
+    return warnings
 
 
 class ValidationReport:
@@ -190,4 +292,8 @@ class DatasetValidator:
         self._check_min_files()
         self._check_total_size()
         self._check_csv_columns()
+        # Agent-facing metadata gate (issue #288): a placeholder in [meta] is a
+        # warning, so it never changes the exit code, but it reaches the CLI
+        # summary and the MCP envelope that would otherwise report ok: true.
+        self.report.warnings.extend(meta_placeholder_warnings(self.cfg))
         return self.report

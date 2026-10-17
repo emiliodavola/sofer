@@ -15,6 +15,7 @@ import pytest
 from conftest import call_tool
 from fastmcp import Client
 
+from sofer import config as sofer_config
 from sofer import mcp_registration
 from sofer import mcp_server as ms
 from sofer.mcp_server import build_server
@@ -61,12 +62,33 @@ def _schema_has_description(schema: Any) -> bool:
     return False
 
 
+def _schema_description(schema: Any) -> str:
+    """Return the first description found at any nesting level (or ``""``).
+
+    Mirrors :func:`_schema_has_description`'s version-independent walk: Python
+    3.10 nests an optional parameter's ``description`` inside the ``anyOf``
+    branch while 3.11+ keeps it at the property's top level.
+    """
+    if not isinstance(schema, dict):
+        return ""
+    if schema.get("description"):
+        return str(schema["description"])
+    for key in ("anyOf", "allOf", "oneOf"):
+        for sub in schema.get(key, []):
+            found = _schema_description(sub)
+            if found:
+                return found
+    return ""
+
+
 class TestToolCount:
-    def test_fifteen_tools(self, tmp_path: Path):
+    def test_seventeen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 15, sorted(tools.keys())
+        assert len(tools) == 17, sorted(tools.keys())
         expected = {
             "sofer_validate",
+            "sofer_meta_check",
+            "sofer_meta_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -121,6 +143,35 @@ class TestDescriptions:
             desc = tools[name].description or ""
             assert "Not part of canonical" not in desc, f"{name} still has deprecated phrasing"
             assert "Phase 0" in desc or "Bootstrap" in desc, f"{name} missing Phase 0"
+
+
+class TestBatchOutputDirDescription:
+    """The batch tools name the path the pipeline really writes (issue #294)."""
+
+    @pytest.mark.parametrize(
+        ("tool_name", "configured_dir"),
+        [
+            ("sofer_profile_all", sofer_config.PROFILE_DIR),
+            ("sofer_render_all", sofer_config.RENDER_DIR),
+        ],
+    )
+    def test_output_dir_description_names_the_resolved_default(
+        self, tmp_path: Path, tool_name: str, configured_dir: str
+    ):
+        """Both the default and the override semantics are stated (#294).
+
+        The write root is the artifact cache plus the configured sub-directory,
+        and an override replaces that root, so files land in
+        ``<output_dir>/<sub-directory>`` - never in the bare directory name the
+        description used to advertise.
+        """
+        tools = _tools_dict(tmp_path)
+        schema = tools[tool_name].inputSchema or {}
+        description = _schema_description(schema["properties"]["output_dir"])
+        assert description, f"{tool_name}.output_dir has no description"
+        assert f"{sofer_config.OUTPUT_DIR}/{configured_dir}" in description, description
+        assert f"<output_dir>/{configured_dir}" in description, description
+        assert "server root" in description, description
 
 
 class TestParamDescriptions:
@@ -199,7 +250,9 @@ class TestAnnotations:
         val = ann.readOnlyHint if hasattr(ann, "readOnlyHint") else ann.get("readOnlyHint")  # type: ignore[union-attr]
         assert val is True
 
-    _READ_ONLY_TOOLS = frozenset({"sofer_validate", "sofer_scan_dry_run", "sofer_auth_status"})
+    _READ_ONLY_TOOLS = frozenset(
+        {"sofer_validate", "sofer_scan_dry_run", "sofer_auth_status", "sofer_meta_check"}
+    )
     _WRITING_TOOLS = frozenset(
         {
             "sofer_prepare",
@@ -213,6 +266,7 @@ class TestAnnotations:
             "sofer_render_all",
             "sofer_scan_apply",
             "sofer_init",
+            "sofer_meta_set",
             "sofer_report_failure",
         }
     )
@@ -221,9 +275,9 @@ class TestAnnotations:
         """readOnlyHint is True ONLY for genuinely read-only tools.
 
         Every tool that writes files (codebooks, metadata profiles, README
-        renders, scan_apply registration, init scaffolding, prepare, publish)
-        must report readOnlyHint False so agents treat it as side-effecting.
-        The roster partition covers all 15 tools.
+        renders, scan_apply registration, init scaffolding, prepare, publish,
+        meta_set) must report readOnlyHint False so agents treat it as
+        side-effecting. The roster partition covers all 17 tools.
         """
         tools = _tools_dict(tmp_path)
         assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS
@@ -404,10 +458,8 @@ class TestEnvelope:
             "approval_phrase_where",
             "approval_phrase_restart",
             "approval_phrase_restart_required",
-            "approval_phrase_setup_opencode",
-            "approval_phrase_setup_codex",
-            "approval_phrase_setup_gemini",
             "approval_phrase_verify",
+            *(f"approval_phrase_setup_{agent}" for agent in mcp_registration.AGENT_NAMES),
         }
         assert guidance_keys <= set(envelope["hints"])
         assert envelope["hints"]["approval_phrase_env_var"] == "SOFER_MCP_APPROVAL_PHRASE"

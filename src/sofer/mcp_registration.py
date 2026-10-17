@@ -43,7 +43,15 @@ native CLI can express the same registration the file edit would write. When env
 NAMES must be forwarded, or ``--scope project`` is requested, and the native CLI
 cannot express that faithfully, the delegate declines and the caller edits the
 file instead. The gate is :func:`native_delegation_decline_reasons`, driven by
-the ``native_env`` / ``native_scope`` capabilities of :data:`ADAPTERS`.
+the ``native_env`` / ``native_scope`` / ``native_timeout`` capabilities of
+:data:`ADAPTERS`.
+
+Host timeouts are part of the entry contract (issues #287, #296).
+:func:`build_entry` writes the deadlines the host must allow into the entry,
+using the per-agent key names and unit declared by the adapter
+(``timeout_key`` / ``connect_timeout_key`` / ``timeout_unit``) — the same
+single-source-of-truth rule as env forwarding. The keys are namespaced under
+the ``sofer`` server name only, so no other server in the file changes.
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict
 
@@ -116,6 +125,26 @@ class Adapter(TypedDict):
             ``--scope user|project`` selector. ``True`` for Gemini, whose CLI
             supports it (default is ``project``); ``False`` for Codex, whose
             native commands always act on the global ``$CODEX_HOME`` config.
+        native_timeout: Whether the native ``mcp add`` can set the per-server
+            timeout the file edit writes. ``False`` for every current agent:
+            neither ``codex mcp add`` nor ``gemini mcp add`` takes a timeout
+            flag, so a delegation that ran would drop the values the entry was
+            written for (issues #287, #296).
+        timeout_key: Entry key holding the per-request (tool call) deadline,
+            or ``None`` when the host's schema does not accept one. ``timeout``
+            for Pi/Hermes/Gemini, ``tool_timeout_sec`` for Codex, ``None`` for
+            opencode, whose one ``timeout`` scalar carries the connect budget
+            instead (issue #320; see ``connect_timeout_key``).
+        connect_timeout_key: Entry key holding the initial-connection /
+            cold-start deadline, or ``None`` when the host has no separate key
+            (Pi connects in the background; Gemini's single ``timeout`` covers
+            tool discovery). ``connect_timeout`` for Hermes,
+            ``startup_timeout_sec`` for Codex, and ``timeout`` for opencode —
+            whose single scalar is the documented budget for fetching the
+            server's tools, which is the cold start, not the tool call.
+        timeout_unit: Unit the host expresses those keys in. ``"milliseconds"``
+            for Gemini only (its CLI compares against ``MCP_DEFAULT_TIMEOUT_MSEC``);
+            every other host is ``"seconds"``.
         user_env_dir: Environment variable naming a directory that overrides
             the user-scope config directory (the file name is
             ``user_parts[-1]``); ``None`` for agents without such an override.
@@ -136,6 +165,10 @@ class Adapter(TypedDict):
     delegates: bool
     native_env: bool
     native_scope: bool
+    native_timeout: bool
+    timeout_key: str | None
+    connect_timeout_key: str | None
+    timeout_unit: Literal["seconds", "milliseconds"]
     user_env_dir: str | None
     project_scope: bool
 
@@ -152,6 +185,34 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "delegates": False,
         "native_env": False,
         "native_scope": False,
+        "native_timeout": False,
+        # opencode accepts `timeout` as a single scalar in MILLISECONDS (issue
+        # #320). Verified against opencode's own sources: the stable zod
+        # `ConfigMCP.Local` declares `z.number().int().positive()` and the stable
+        # docs document the local-server option as a Number in ms for fetching
+        # tools; the next-major tree declares a `{startup, request}` class (its
+        # docs a `{startup, catalog, execution}` object) AND moves servers to
+        # `mcp.servers.<name>` natively. The scalar is therefore the shape
+        # belonging to the layout we DO write, and no sub-key name has to be
+        # guessed.
+        #
+        # That layout is the V1 position, and it stays (issue #334):
+        # `packages/core/src/config/normalize.ts` (`normalizeMcp`) decodes every
+        # non-container `mcp.<name>` value as the V1 server schema, migrates it
+        # and merges it into the `mcp.servers` mapping it emits in memory,
+        # without rewriting the file — so one entry written at `mcp.sofer` is
+        # read by both generations. Writing `mcp.servers.sofer` here instead
+        # would put the entry where the stable schema (`ConfigMCP.Local`, server
+        # name directly under `mcp`) does not look.
+        #
+        # That scalar governs establishing the server and listing its tools — the
+        # cold start #287 is about — not the per-request deadline (opencode's own
+        # execution default is 12 h). It is declared as the CONNECT key, so
+        # `timeout_entry_keys` emits it from the connect budget with no new
+        # capability and no wrong-magnitude mapping.
+        "timeout_key": None,
+        "connect_timeout_key": "timeout",
+        "timeout_unit": "milliseconds",
         "user_env_dir": None,
         "project_scope": True,
     },
@@ -166,7 +227,20 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "delegates": True,
         "native_env": False,
         "native_scope": False,
-        "user_env_dir": None,
+        "native_timeout": False,
+        # Codex Configuration Reference: `tool_timeout_sec` (default 60) is the
+        # per-tool deadline and `startup_timeout_sec` (default 10) the startup
+        # one. `codex mcp add` accepts neither.
+        "timeout_key": "tool_timeout_sec",
+        "connect_timeout_key": "startup_timeout_sec",
+        "timeout_unit": "seconds",
+        # `native_scope` above is False precisely because these native commands
+        # act on the global `$CODEX_HOME` config (issue #325). Declaring the
+        # variable here is what makes the file edit land on the same file the
+        # native CLI would write; `user_parts` stays the home-relative fallback
+        # for when it is unset, because `resolve_config_path` joins only its
+        # last component onto the override.
+        "user_env_dir": "CODEX_HOME",
         "project_scope": True,
     },
     "gemini": {
@@ -180,6 +254,14 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "delegates": True,
         "native_env": False,
         "native_scope": True,
+        "native_timeout": False,
+        # gemini-cli `packages/core/src/tools/mcp-client.ts` compares
+        # `serverConfig.timeout` against `MCP_DEFAULT_TIMEOUT_MSEC` (10 min), so
+        # the unit is milliseconds and one key bounds tool discovery AND calls
+        # (its 10 min default already covers the cold start).
+        "timeout_key": "timeout",
+        "connect_timeout_key": None,
+        "timeout_unit": "milliseconds",
         "user_env_dir": None,
         "project_scope": True,
     },
@@ -194,6 +276,13 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "delegates": False,
         "native_env": False,
         "native_scope": False,
+        "native_timeout": False,
+        # Pi `docs/mcp.md`: a server entry supports `timeout` (seconds, default
+        # 60) and progress notifications reset it; enabled servers connect in
+        # the background, so there is no entry-level cold-start deadline.
+        "timeout_key": "timeout",
+        "connect_timeout_key": None,
+        "timeout_unit": "seconds",
         "user_env_dir": "PI_CODING_AGENT_DIR",
         "project_scope": True,
     },
@@ -211,6 +300,13 @@ ADAPTERS: dict[AgentName, Adapter] = {
         "delegates": False,
         "native_env": False,
         "native_scope": False,
+        "native_timeout": False,
+        # Hermes "MCP Config Reference": `timeout` (tool call, default 300 s)
+        # and `connect_timeout` (initial connection, default 60 s), both in
+        # seconds. This is the host #287 measured the 16-32 s cold start on.
+        "timeout_key": "timeout",
+        "connect_timeout_key": "connect_timeout",
+        "timeout_unit": "seconds",
         "user_env_dir": "HERMES_HOME",
         "project_scope": False,
     },
@@ -432,7 +528,67 @@ def read_config(path: Path) -> tuple[dict[str, object], str]:
     return data, fmt
 
 
-def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, Any]:
+@dataclass(frozen=True)
+class Timeouts:
+    """Host-side deadlines written into a registration entry (issues #287, #296).
+
+    The values are seconds, whatever unit the host's key uses; the adapter's
+    ``timeout_unit`` says how :func:`timeout_entry_keys` converts them.
+
+    Attributes:
+        request_seconds: Per-request (tool call) deadline.
+        connect_seconds: Initial-connection / cold-start deadline.
+    """
+
+    request_seconds: int
+    connect_seconds: int
+
+
+def timeout_entry_keys(agent: AgentName, timeouts: Timeouts) -> dict[str, Any]:
+    """Return the host-specific timeout keys for *agent*.
+
+    Two deadlines fail against hosts' defaults and both surface as
+    ``Connection failed`` / ``request timed out`` — indistinguishable from a
+    broken registration (issues #287, #296): the cold start of ``sofer-mcp``
+    (heavy imports before ``initialize`` can be answered) against a host's
+    connect/startup deadline, and a long tool call against its per-request one.
+
+    The key names and the unit come from the adapter, so this stays
+    single-sourced like env forwarding: ``timeout_key`` holds the per-request
+    deadline, ``connect_timeout_key`` the cold-start one, and ``timeout_unit``
+    converts seconds to milliseconds where the host expects them. An agent
+    declaring neither key gets an empty mapping — nothing is written, and the
+    caller names it on stderr instead of inventing a deadline. No registered
+    agent is in that state today (opencode was, until issue #320); the branch
+    keeps its force for any future host whose schema accepts no timeout key
+    (MCP-REG-05).
+
+    Args:
+        agent: Target agent.
+        timeouts: Deadline values in seconds.
+
+    Returns:
+        ``{key: value}`` in adapter-declared order; ``{}`` when the host's
+        entry schema accepts no timeout key.
+    """
+    spec = _adapter(agent)
+    scale = 1000 if spec["timeout_unit"] == "milliseconds" else 1
+    keys: dict[str, Any] = {}
+    request_key = spec["timeout_key"]
+    connect_key = spec["connect_timeout_key"]
+    if request_key is not None:
+        keys[request_key] = timeouts.request_seconds * scale
+    if connect_key is not None:
+        keys[connect_key] = timeouts.connect_seconds * scale
+    return keys
+
+
+def build_entry(
+    agent: AgentName,
+    cwd: Path,
+    env: dict[str, str],
+    timeouts: Timeouts | None = None,
+) -> dict[str, Any]:
     """Build the desired ``sofer`` entry for *agent*.
 
     Env forwarding rules:
@@ -455,6 +611,9 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
         cwd: Absolute, resolved working directory for the server.
         env: Mapping of env keys to values (typically filtered
             ``os.environ``).
+        timeouts: Host deadlines to write, or ``None`` to write none (the
+            entry then matches the pre-change shape exactly, which is what
+            ``--no-timeout`` and :func:`delegate_add` share).
 
     Returns:
         Entry dict ready to merge into the agent's config.
@@ -466,6 +625,8 @@ def build_entry(agent: AgentName, cwd: Path, env: dict[str, str]) -> dict[str, A
         entry["type"] = "local"
     entry["command"] = ["sofer-mcp"] if spec["command"] == "array" else "sofer-mcp"
     entry["cwd"] = cwd_str
+    if timeouts is not None:
+        entry.update(timeout_entry_keys(agent, timeouts))
     if spec["env"] == "allow_list":
         entry["env_vars"] = _present_env_keys(env)
     elif spec["env"] == "refs":
@@ -483,6 +644,36 @@ def _normalize_command(value: object) -> list[str]:
     return []
 
 
+def _timeout_keys_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Return True when *a* and *b* carry the same host timeout keys.
+
+    The timeout keys sit beside the entry fields the env-specific comparison in
+    :func:`_entries_equal` already covers, so they are compared generically here
+    from the adapter's declared key names — one source of truth, no per-agent
+    branch (issues #287, #296). Without this comparison a changed ``--timeout``
+    alone would look like a no-op and the idempotency guard would refuse to
+    rewrite the entry, leaving the host with the old deadline.
+
+    Args:
+        agent: Target agent.
+        a: Existing entry.
+        b: Desired entry.
+
+    Returns:
+        ``True`` when every key the adapter declares is equal in both (a key
+        absent from both counts as equal); ``True`` for an unregistered agent,
+        whose entries are compared structurally elsewhere.
+    """
+    spec = ADAPTERS.get(agent)
+    if spec is None:
+        return True
+    return all(
+        a.get(key) == b.get(key)
+        for key in (spec["timeout_key"], spec["connect_timeout_key"])
+        if key is not None
+    )
+
+
 def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Return True when *a* and *b* are the same entry for *agent*.
 
@@ -491,7 +682,9 @@ def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bo
     string/array variations and compare sorted ``env_vars``; the ``refs`` /
     ``refs_braced`` agents (gemini, pi) compare raw command, ``cwd`` and the
     ``env`` mapping; the ``none`` agents (opencode) compare full structural
-    equality. Unregistered names also fall back to full equality.
+    equality. The adapter-declared timeout keys are compared alongside those
+    fields (see :func:`_timeout_keys_equal`). Unregistered names also fall back
+    to full equality.
     """
     spec = ADAPTERS.get(agent)
     env_kind = spec["env"] if spec is not None else None
@@ -500,13 +693,15 @@ def _entries_equal(agent: AgentName, a: dict[str, Any], b: dict[str, Any]) -> bo
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
-        return sorted(a.get("env_vars", [])) == sorted(b.get("env_vars", []))
+        if sorted(a.get("env_vars", [])) != sorted(b.get("env_vars", [])):
+            return False
+        return _timeout_keys_equal(agent, a, b)
     if env_kind in ("refs", "refs_braced"):
         if a.get("command") != b.get("command"):
             return False
         if a.get("cwd") != b.get("cwd"):
             return False
-        return a.get("env") == b.get("env")
+        return a.get("env") == b.get("env") and _timeout_keys_equal(agent, a, b)
     # opencode (env "none") and unregistered names: full structural equality.
     return a == b
 
@@ -656,37 +851,48 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
 
 
 def native_delegation_decline_reasons(
-    agent: AgentName, env_keys: list[str], scope: Scope
+    agent: AgentName,
+    env_keys: list[str],
+    scope: Scope,
+    timeouts: Timeouts | None = None,
 ) -> list[str]:
     """Return why native delegation must decline, or ``[]`` when it may proceed.
 
     The single fidelity gate shared by ``add`` and ``remove`` (#167, #232):
     native delegation is faithful only when it can express the same
     registration the file-edit path would write. It reads the adapter's
-    ``native_env`` / ``native_scope`` capabilities — one source of truth, no
-    per-agent branch here.
+    ``native_env`` / ``native_scope`` / ``native_timeout`` capabilities — one
+    source of truth, no per-agent branch here.
 
     Args:
         agent: Target agent.
         env_keys: Env NAMES that must be forwarded (empty for ``remove``).
             Keys only, never values.
         scope: Requested ``"user"`` or ``"project"`` scope.
+        timeouts: Deadlines the file edit would write, or ``None`` when none
+            will be written (``remove``, or ``--no-timeout``). A non-``None``
+            value declines for a host whose native CLI takes no timeout flag,
+            because delegating would drop the values the entry exists for.
 
     Returns:
         Reasons the native path is unfaithful, in fixed order: ``"env
         forwarding"`` when *env_keys* is non-empty and the native CLI cannot
         forward NAME references; ``"project scope"`` when *scope* is
-        ``"project"`` and the native CLI has no scope selector. ``[]`` (never
-        ``None``) when delegation may proceed.
+        ``"project"`` and the native CLI has no scope selector; ``"timeout"``
+        when *timeouts* is not ``None`` and the native CLI cannot set them.
+        ``[]`` (never ``None``) when delegation may proceed.
     """
     spec = ADAPTERS.get(agent)
     native_env = spec["native_env"] if spec is not None else False
     native_scope = spec["native_scope"] if spec is not None else False
+    native_timeout = spec["native_timeout"] if spec is not None else False
     reasons: list[str] = []
     if env_keys and not native_env:
         reasons.append("env forwarding")
     if scope == "project" and not native_scope:
         reasons.append("project scope")
+    if timeouts is not None and not native_timeout:
+        reasons.append("timeout")
     return reasons
 
 
@@ -728,16 +934,18 @@ def delegate_add(
     cwd: Path,
     env_keys: list[str],
     scope: Scope = "user",
+    timeouts: Timeouts | None = None,
 ) -> bool:
     """Attempt native ``add`` delegation for *agent*.
 
     Only agents whose adapter declares ``delegates=True`` are delegated; the
-    rest (opencode, pi) return ``False``. The call is fidelity-gated (#167,
-    #232): when :func:`native_delegation_decline_reasons` is non-empty the
-    function returns ``False`` without spawning, so the caller edits the file
-    (which forwards env NAMES and honours the requested scope). When the
-    adapter declares ``native_scope`` the argv carries ``--scope <scope>``.
-    A non-zero exit falls back to the caller's file edit (no shape retry).
+    rest (opencode, pi, hermes) return ``False``. The call is fidelity-gated
+    (#167, #232): when :func:`native_delegation_decline_reasons` is non-empty
+    the function returns ``False`` without spawning, so the caller edits the
+    file (which forwards env NAMES, honours the requested scope and writes the
+    timeouts). When the adapter declares ``native_scope`` the argv carries
+    ``--scope <scope>``. A non-zero exit falls back to the caller's file edit
+    (no shape retry).
 
     Args:
         agent: Target agent.
@@ -746,6 +954,9 @@ def delegate_add(
             for agents whose native CLI cannot forward NAME references.
         scope: Requested ``"user"`` or ``"project"`` scope; forwarded as
             ``--scope`` only when the adapter declares ``native_scope``.
+        timeouts: Deadlines the file edit would write, or ``None`` when none
+            will be written. Non-``None`` declines for codex and gemini, whose
+            native ``mcp add`` accepts no timeout flag (issues #287, #296).
 
     Returns:
         ``True`` on success, ``False`` when delegation is unfaithful, the
@@ -754,7 +965,7 @@ def delegate_add(
     """
     if not _delegates(agent):
         return False
-    if native_delegation_decline_reasons(agent, env_keys, scope):
+    if native_delegation_decline_reasons(agent, env_keys, scope, timeouts):
         return False
     exe = shutil.which(agent)
     if not exe:
@@ -863,6 +1074,38 @@ def dropped_env_keys(agent: AgentName, env: Mapping[str, str]) -> list[str]:
     if spec is not None and spec["env"] == "none":
         return _present_env_keys(env)
     return []
+
+
+def dropped_timeout_note(agent: AgentName, timeouts: Timeouts | None) -> str | None:
+    """Return the stderr note for an agent whose entry accepts no timeout key.
+
+    Informational, and the same contract as the env-drop warning: it never
+    changes the exit code. The guard is "declares NEITHER key", which is what
+    MCP-REG-05 actually says — checking only ``timeout_key`` would print "carries
+    no timeout key" beside the key opencode now receives (issue #320).
+
+    No registered agent declares neither key today (opencode was the example
+    until #320 gave it the scalar its schema accepts); the note keeps its force
+    for any future host whose entry schema accepts no timeout at all.
+
+    Args:
+        agent: Target agent.
+        timeouts: The deadlines the file edit would write, or ``None`` when
+            none were requested.
+
+    Returns:
+        A ready-to-print stderr line, or ``None`` when the agent needs no note.
+    """
+    if timeouts is None:
+        return None
+    spec = ADAPTERS.get(agent)
+    if spec is None or spec["timeout_key"] is not None or spec["connect_timeout_key"] is not None:
+        return None
+    return (
+        f"  !  {agent} registration carries no timeout key: its schema accepts none, "
+        "so no deadline could be written. Configure one manually if the host "
+        "offers it — see README."
+    )
 
 
 def validate_cwd(cwd: Path) -> bool:

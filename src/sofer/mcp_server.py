@@ -57,6 +57,7 @@ any phrase-derived value, and the configured env value never appear in them.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import hmac
 import io
@@ -75,6 +76,8 @@ from pydantic import Field
 try:
     from fastmcp import FastMCP as _FastMCP
     from fastmcp.resources import ResourceSecurity as _ResourceSecurity
+    from fastmcp.server.dependencies import get_context as _get_context
+    from fastmcp.server.middleware import Middleware as _Middleware
 except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monkeypatch
     raise ImportError(
         "sofer's MCP server requires 'fastmcp' — install with: "
@@ -85,11 +88,17 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
-from . import _toml, failure_report, workflow
+from . import _toml, failure_report, meta_edit, workflow
 from . import config as sofer_config
+from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
-from .checks import DatasetValidator, ValidationReport
+from .checks import (
+    DatasetValidator,
+    ValidationReport,
+    meta_placeholder_warnings,
+    meta_placeholder_warnings_for,
+)
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
 from .codebook import generate_all as generate_all_codebooks
@@ -185,7 +194,14 @@ _PHASED_INSTRUCTIONS: str = (
     "Operate sofer's deterministic dataset pipeline.\n"
     "Phased canonical chain (tools/list alone teaches the order):\n"
     "  Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]\n"
-    "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply\n"
+    "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply -> sofer_meta_set\n"
+    "    Metadata step (between bootstrap and Phase 1, tool-driven): read the state "
+    "with sofer_meta_check and write [meta] description, license, source and tags "
+    "with sofer_meta_set, which also writes any other Dataset Card [meta] key. "
+    "sofer_init writes placeholders; sofer_validate warns while any remains, and "
+    "prepare bakes whatever is there into the Dataset Card and LICENSE. On an "
+    "MCP-driven run the agent completes them; the human supplies only what the "
+    "data cannot determine (license, source).\n"
     "  Phase 1 Build: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all\n"
     "  Phase 2 Publish: sofer_publish(dry_run=True) -> STOP (human approval) -> sofer_publish_confirm\n"
     "Each tool lists Requires: and Next: so tools/list is self-sufficient.\n"
@@ -229,30 +245,44 @@ _PHRASE_RESTART_FACT: str = (
 )
 _PHRASE_VERIFY_FACT: str = "after the restart sofer_auth_status reports approval_configured:true"
 
-# Per-agent registration shapes the setup guidance is composed from, verified
-# against ``mcp_registration.build_entry``: opencode's ``mcp.sofer`` entry
-# carries only ``type``/``command``/``cwd`` (NO environment forwarding), codex
-# persists an ``env_vars`` allow-list of NAMES, gemini persists an ``env``
-# mapping of NAME -> ``$NAME`` references. Secret VALUES are never on disk.
-_APPROVAL_PHRASE_AGENT_ENTRY_KEYS: dict[str, tuple[str, ...]] = {
-    "opencode": ("type", "command", "cwd"),
-    "codex": ("env_vars",),
-    "gemini": ("env",),
+# Per-agent setup guidance is DERIVED from the registration registry (issue
+# #295): ``mcp_registration.ADAPTERS[agent]["env"]`` is the capability
+# ``build_entry`` itself branches on, so the prose cannot describe a shape the
+# tooling does not write. One template per capability replaces one hand-kept
+# constant per agent - ``pi`` and ``hermes`` share ``refs_braced``, which is
+# exactly the fact that was missing.
+#
+# Each entry is ``(reference form the registration persists, prose template)``:
+# the form is interpolated as ``{form}`` rather than written into the template,
+# because the braced form contains literal braces that ``str.format`` would
+# read as a field. Secret VALUES are never on disk, and no template may name an
+# on-disk agent config file or directory (APX-01).
+_ENV_CAPABILITY_FACTS: dict[str, tuple[str, str]] = {
+    "none": (
+        "",
+        "{agent} ({invocation}): the entry carries only type, command and cwd - "
+        "no environment is forwarded, so set the variable in the terminal that "
+        "launches {agent} itself",
+    ),
+    "allow_list": (
+        "",
+        "{agent} ({invocation}): the entry persists an env_vars allow-list of "
+        "variable NAMES - set the variable before launching {agent}, and values "
+        "are never written to disk",
+    ),
+    "refs": (
+        "$NAME",
+        "{agent} ({invocation}): the entry persists an env mapping of NAME to "
+        "{form} references expanded at launch - values are never written to disk",
+    ),
+    "refs_braced": (
+        "${NAME}",
+        "{agent} ({invocation}): the entry persists an env mapping of NAME to "
+        "{form} references that {agent} expands from its own launch environment "
+        "- set the variable in the terminal or process that launches {agent}, "
+        "and values are never written to disk",
+    ),
 }
-_OPENCODE_SETUP_FACT: str = (
-    "opencode (sofer mcp add --agent opencode): the entry carries only type, "
-    "command and cwd - no environment is forwarded, so set the variable in the "
-    "terminal that launches opencode itself"
-)
-_CODEX_SETUP_FACT: str = (
-    "codex (sofer mcp add --agent codex): the entry persists an env_vars "
-    "allow-list of variable NAMES - set the variable before launching codex, and "
-    "values are never written to disk"
-)
-_GEMINI_SETUP_FACT: str = (
-    "gemini (sofer mcp add --agent gemini): the entry persists an env mapping of "
-    "NAME to $NAME references expanded at launch - values are never written to disk"
-)
 
 # Composed fail-closed refusal message: verbatim "publish is disabled" prefix,
 # each process-start fact exactly once, ASCII ``-`` separators only, no phrase
@@ -942,11 +972,109 @@ def _workflow_doc_line(tool_name: str) -> str:
     )
 
 
+_LONG_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "sofer_prepare",
+        "sofer_codebook_all",
+        "sofer_profile_all",
+        "sofer_render_all",
+        "sofer_publish_confirm",
+    }
+)
+"""Tools whose body routinely runs for minutes on a real dataset (issue #296).
+
+Named in the issue's own list. A module constant, not a literal inside the
+prose helper, so the set that gets the deadline note is one edit and cannot
+drift from the tools it describes.
+"""
+
+_LONG_TOOL_NOTE: str = (
+    "Runs for minutes on a large dataset (measured ~680 s for sofer_prepare on a "
+    "3.2 GB / 66.2 M-row corpus, ~100 s for sofer_codebook_all): the host's "
+    "per-request timeout must accommodate it. `sofer mcp add` writes one into the "
+    "registration entry, and a long tool re-announces progress while it runs, "
+    "which resets a host deadline the entry could not raise."
+)
+"""Deadline expectation appended to a long tool's description (issue #296 §2)."""
+
+
 def _workflow_description(fn: Callable[..., Any]) -> str:
-    """Tool description = docstring plus the registry workflow line (MSP-R13)."""
+    """Tool description = docstring plus the registry workflow line (MSP-R13).
+
+    A tool whose body routinely runs for minutes on a real dataset also carries
+    :data:`_LONG_TOOL_NOTE`, so the caller learns the deadline expectation from
+    ``tools/list`` alone (issue #296 §2) instead of from a dropped response.
+    """
     doc = (fn.__doc__ or fn.__name__).rstrip()
+    parts = [doc]
     line = _workflow_doc_line(fn.__name__)
-    return f"{doc}\n\n{line}" if line else doc
+    if line:
+        parts.append(line)
+    if fn.__name__ in _LONG_TOOL_NAMES:
+        parts.append(_LONG_TOOL_NOTE)
+    return "\n\n".join(parts)
+
+
+def _batch_output_dir_description(kind: str, configured_dir: str) -> str:
+    """Compose the ``output_dir`` description for a batch tool (issue #294).
+
+    Names the RESOLVED default path - the artifact-cache write root
+    (:data:`sofer_config.OUTPUT_DIR`) plus the configured sub-directory - instead
+    of the bare directory name, which sent readers to a path the pipeline never
+    writes and the default ``.gitignore`` excludes.  It also states the override
+    semantics: ``output_dir`` replaces the write root, so the artifacts land in
+    ``<output_dir>/<sub-directory>``.
+
+    The value is built when the tool function is DEFINED, i.e. from the
+    import-time ``config`` constants; that is the text the schema ships, and
+    ``tests/test_mcp_schema.py::TestBatchOutputDirDescription`` compares against
+    the same constants.
+
+    Args:
+        kind: Human word for the artifacts (``"profiles"`` / ``"renders"``).
+        configured_dir: The ``[tool.sofer]`` sub-directory value in use.
+
+    Returns:
+        The single-line parameter description.
+    """
+    return (
+        f"Override directory for batch {kind} (default: "
+        f"{sofer_config.OUTPUT_DIR}/{configured_dir}); the files land in "
+        f"<output_dir>/{configured_dir}. Must stay under server root."
+    )
+
+
+def _approval_phrase_setup_fact(agent: str) -> str:
+    """Compose one agent's approval-phrase setup fact from its registry entry.
+
+    The ``env`` capability of :data:`sofer.mcp_registration.ADAPTERS` selects
+    both the persisted reference form and the prose template (issue #295).
+
+    Args:
+        agent: A registered agent name (``AGENT_NAMES`` member).
+
+    Returns:
+        The flat, single-line setup fact for *agent*.
+    """
+    reference, template = _ENV_CAPABILITY_FACTS[registration.ADAPTERS[agent]["env"]]
+    return template.format(agent=agent, invocation=f"sofer mcp add --agent {agent}", form=reference)
+
+
+def _approval_phrase_setup_facts() -> dict[str, str]:
+    """Return ``agent -> per-agent setup fact`` for every registered agent.
+
+    Derived at CALL time from :data:`sofer.mcp_registration.ADAPTERS`, never
+    from a parallel table (issue #295): adding an agent to the registry is the
+    only edit the guidance needs, and its ``env`` capability selects the prose
+    template. :data:`sofer.mcp_registration.AGENT_NAMES` is ``tuple(ADAPTERS)``
+    by definition, so the lookup cannot miss; a capability with no template is
+    caught by ``TestHintContentActionable::test_capability_table_covers_every_registry_capability``
+    before it can ship.
+
+    Returns:
+        A fresh ``{agent: fact}`` dict in registry order.
+    """
+    return {agent: _approval_phrase_setup_fact(agent) for agent in registration.AGENT_NAMES}
 
 
 def _approval_phrase_guidance_hints() -> dict[str, Any]:
@@ -965,6 +1093,9 @@ def _approval_phrase_guidance_hints() -> dict[str, Any]:
         - every value is a flat scalar (``str`` or ``True``) - no nested dict
           or list anywhere, i.e. the MSP-R13 flatness invariant asserted by
           ``tests/test_mcp_server.py::TestNextHintContract._is_flat_hint_dict``;
+        - the per-agent setup block is derived from the registration registry
+          (:func:`_approval_phrase_setup_facts`), so it covers every registered
+          agent and cannot describe a shape ``build_entry`` does not write;
         - only the approval-phrase variable NAME is ever exposed: never the
           phrase, a phrase-derived signal, or an on-disk agent config file or
           directory path.
@@ -981,9 +1112,10 @@ def _approval_phrase_guidance_hints() -> dict[str, Any]:
         "approval_phrase_where": _PHRASE_LAUNCH_ENV_FACT,
         "approval_phrase_restart": _PHRASE_RESTART_FACT,
         "approval_phrase_restart_required": True,
-        "approval_phrase_setup_opencode": _OPENCODE_SETUP_FACT,
-        "approval_phrase_setup_codex": _CODEX_SETUP_FACT,
-        "approval_phrase_setup_gemini": _GEMINI_SETUP_FACT,
+        **{
+            f"approval_phrase_setup_{agent}": fact
+            for agent, fact in _approval_phrase_setup_facts().items()
+        },
         "approval_phrase_verify": _PHRASE_VERIFY_FACT,
     }
 
@@ -1070,7 +1202,7 @@ def _refusal(
 
 
 # ---------------------------------------------------------------------------
-#  Tool callables — 15 callables
+#  Tool callables — 17 callables
 # ---------------------------------------------------------------------------
 
 
@@ -1088,7 +1220,7 @@ def sofer_validate(
 
     When to use: as Phase 1 step 1 of the canonical chain; standalone for quick checks before prepare.
     Example: sofer_validate(config="dataset.toml")
-    Requires: dataset TOML exists under server root. Next: sofer_prepare on success.
+    Requires: dataset TOML exists under server root, with [meta] description/license/source/tags filled (no placeholders). Next: sofer_prepare on success.
     """
     with _tool_execution(), _capture_output() as (out, err):
         try:
@@ -1121,6 +1253,187 @@ def sofer_validate(
             "confidential": cfg.confidential,
             "config_errors": config_errors,
             "next": _workflow_next("sofer_validate", config),
+        }
+
+
+def sofer_meta_check(
+    config: Annotated[
+        str,
+        Field(
+            description="Path to the dataset TOML file, relative to the server root or absolute inside it (e.g. 'dataset.toml')"
+        ),
+    ],
+) -> dict[str, Any]:
+    """Report the [meta] fields that still carry a sofer init placeholder, read-only.
+
+    Side effects: none - no file is written, no check reads the data files; only the TOML is parsed. Network usage: none.
+
+    When to use: to read the metadata state the canonical chain requires before Phase 1 without running the full validator; it reports exactly the warning sofer_validate prints.
+    Example: sofer_meta_check(config="dataset.toml")
+    Requires: dataset TOML exists under server root. Next: sofer_meta_set for each reported placeholder, then sofer_prepare.
+
+    Args:
+        config: Path to the dataset TOML, contained under the server root.
+
+    Returns:
+        The standard envelope plus ``placeholders`` (the count) and
+        ``warnings`` (one message per offending field). Informational by
+        contract (AGENTS.md-consistent decision D6 of #323): ``ok`` is True and
+        the exit code is 0 whatever it reports, because a query stricter than
+        the validator it queries would be a new contract. Only an unreadable or
+        uncontained config is a refusal.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        try:
+            toml_path = _contained_path(
+                config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        except PathOutsideRootError:
+            raise
+        try:
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_meta_check",
+                config_path=config,
+            )
+        warnings = meta_placeholder_warnings(cfg)
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": _captured_text(out, err),
+            "placeholders": len(warnings),
+            "warnings": warnings,
+            "config_errors": [],
+            "next": _workflow_next("sofer_meta_check", config),
+        }
+
+
+def sofer_meta_set(
+    config: Annotated[
+        str,
+        Field(
+            description="Path to the dataset TOML file, relative to the server root or absolute inside it (e.g. 'dataset.toml')"
+        ),
+    ],
+    values: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description='[meta] keys to write, e.g. {"description": "What it is", "license": "MIT", "source": "Some org", "tags": ["a", "b"]}. Text keys take a string, list keys an array of strings, and confidential a boolean; an unknown key is refused with the settable list. Omit it to write nothing and get back the placeholders that still need a value.'
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        Field(
+            description="When True, compute and verify the edit and report what it would write; the dataset TOML is left untouched."
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Write the given [meta] keys into the dataset TOML, preserving everything else.
+
+    Side effects: rewrites the dataset TOML's [meta] table only (atomic tmp+os.replace; other keys, comments and tables byte-preserved) unless dry_run. Network usage: none.
+
+    When to use: after sofer_init or sofer_meta_check, to fill [meta] description/license/source/tags and any other card key before sofer_prepare bakes them into the Dataset Card and LICENSE; it is the only way to write them over MCP.
+    Example: sofer_meta_set(config="dataset.toml", values={"description": "Census 2020", "license": "MIT"})
+    Requires: dataset TOML exists under server root; unknown keys or values of the wrong kind are refused with nothing written. Next: sofer_validate, then sofer_prepare (a build tree that predates this write is named in build_stale).
+
+    Args:
+        config: Path to the dataset TOML, contained under the server root.
+        values: ``{key: value}`` to write. The settable surface is one entry per
+            ``[meta]`` key ``DatasetConfig`` reads; a key outside it is refused
+            naming the accepted set. When omitted (or empty) nothing is written:
+            the envelope reports the placeholders that still need a value and
+            returns a continuation asking for them, which is what makes this
+            tool callable as a bare registry continuation with only a config.
+        dry_run: When ``True``, nothing is written.
+
+    Returns:
+        The standard envelope plus ``dry_run``, ``changed``, ``written``,
+        ``unchanged``, ``build_stale`` and the post-edit state in
+        ``placeholders`` / ``warnings`` (computed from the resulting table, so a
+        dry run reports the state it would leave behind). Re-running with the
+        values the file already holds changes nothing, so the call is
+        idempotent.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        try:
+            toml_path = _contained_path(
+                config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        except PathOutsideRootError:
+            raise
+        try:
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_meta_set",
+                config_path=config,
+            )
+        if not values:
+            # The write half of the metadata step, with nothing to write: report
+            # what still needs a value and ask for it. A caller that reached this
+            # tool through the registry (only a config is bound there) gets an
+            # executable answer instead of a validation error, and the point where
+            # human content enters the chain is named explicitly.
+            warnings = meta_placeholder_warnings(cfg)
+            print(
+                f"  !  {toml_path.name}: nothing to write; {len(warnings)} [meta] "
+                "placeholder(s) need a value",
+                file=sys.stderr,
+            )
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "output": _captured_text(out, err),
+                "dry_run": dry_run,
+                "changed": False,
+                "written": [],
+                "unchanged": [],
+                "build_stale": meta_edit.build_predates_write(cfg, toml_path) is not None,
+                "placeholders": len(warnings),
+                "warnings": warnings,
+                "config_errors": [],
+                "next": workflow.WorkflowCall(
+                    "sofer_meta_set",
+                    {"config": config},
+                    reason=(
+                        "Call sofer_meta_set again with the [meta] values to write "
+                        "(description/license/source/tags at minimum)."
+                    ),
+                    input_required=("values",),
+                ).to_dict(),
+            }
+        try:
+            result = meta_edit.set_meta(toml_path, values, dry_run=dry_run)
+        except meta_edit.MetaEditError as exc:
+            print(f"  X  {exc}", file=sys.stderr)
+            return _refusal([str(exc)], tool_name="sofer_meta_set", config_path=config)
+        note = meta_edit.build_predates_write(cfg, toml_path)
+        warnings = meta_placeholder_warnings_for(result.meta)
+        written = ", ".join(result.written)
+        if dry_run:
+            print(f"  DRY RUN  {toml_path.name}: would write {written or 'nothing'}")
+        elif result.changed:
+            print(f"  OK  {toml_path.name}: wrote {written}")
+        else:
+            print(f"  OK  {toml_path.name}: already up to date")
+        if note is not None:
+            print(note, file=sys.stderr)
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": _captured_text(out, err),
+            "dry_run": result.dry_run,
+            "changed": result.changed,
+            "written": list(result.written),
+            "unchanged": list(result.unchanged),
+            "build_stale": note is not None,
+            "placeholders": len(warnings),
+            "warnings": warnings,
+            "config_errors": [],
+            "next": _workflow_next("sofer_meta_set", config),
         }
 
 
@@ -1157,7 +1470,7 @@ def sofer_prepare(
 
     When to use: Phase 1 step 2 after sofer_validate. Standalone when you need a local package without batch docs.
     Example: sofer_prepare(config="dataset.toml", output_dir=None, run_checks=True)
-    Requires: sofer_validate passed. Next: sofer_codebook_all, then sofer_profile_all.
+    Requires: sofer_validate passed with no [meta] placeholder warnings. Next: sofer_codebook_all, then sofer_profile_all.
     """
     with _tool_execution(), _capture_output() as (out, err):
         cfg, _report, config_errors = _load_dataset(config, run_checks=run_checks)
@@ -1778,9 +2091,7 @@ def sofer_profile_all(
     ],
     output_dir: Annotated[
         str | None,
-        Field(
-            description="Override directory for batch profiles (default: profiles). Must stay under server root."
-        ),
+        Field(description=_batch_output_dir_description("profiles", sofer_config.PROFILE_DIR)),
     ] = None,
     delimiter: Annotated[
         str | None,
@@ -1804,7 +2115,8 @@ def sofer_profile_all(
 ) -> dict[str, Any]:
     """Profile every [[file]] entry in a dataset config and write metadata.yaml documents.
 
-    Side effects: batch writes profiles/<rel_stem>.metadata.yaml under the write root.
+    Side effects: batch writes one metadata.yaml per [[file]] under the
+    configured profile_dir, inside the artifact-cache write root.
     Network usage: none.
 
     When to use: Phase 1 step 4 batch; single-file triage use sofer_profile.
@@ -1935,14 +2247,13 @@ def sofer_render_all(
     ],
     output_dir: Annotated[
         str | None,
-        Field(
-            description="Override directory for batch renders (default: renders). Must stay under server root."
-        ),
+        Field(description=_batch_output_dir_description("renders", sofer_config.RENDER_DIR)),
     ] = None,
 ) -> dict[str, Any]:
     """Render README.md for every [[file]] entry from its metadata.yaml.
 
-    Side effects: batch writes renders/<rel_stem>.README.md.
+    Side effects: batch writes one README.md per [[file]] under the configured
+    render_dir, inside the artifact-cache write root.
     Network usage: none.
 
     When to use: Phase 1 step 5 batch after sofer_profile_all.
@@ -2507,7 +2818,7 @@ def sofer_init(
 
     When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
     Example: sofer_init(name="my-dataset", user="myuser")
-    Requires: server root writable. Next: sofer_scan_apply to register files.
+    Requires: server root writable. Next: fill [meta] description/license/source/tags with sofer_meta_set (or edit the TOML by hand), then sofer_scan_apply to register files.
 
     Args:
         name: Dataset name used for ``<name>.toml`` — a safe single path component.
@@ -2780,7 +3091,7 @@ def sofer_report_failure(
 
 
 def _register_tools(server: _FastMCP) -> None:
-    """Register the 15 tool callables on *server*."""
+    """Register the 17 tool callables on *server*."""
     server.tool(
         sofer_validate,
         description=_workflow_description(sofer_validate),
@@ -2803,6 +3114,57 @@ def _register_tools(server: _FastMCP) -> None:
                 "quality_warnings": {"type": "array"},
                 "ran_checks": {"type": "array"},
                 "confidential": {"type": "boolean"},
+                "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_meta_check,
+        description=_workflow_description(sofer_meta_check),
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "placeholders": {"type": "integer"},
+                "warnings": {"type": "array"},
+                "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_meta_set,
+        description=_workflow_description(sofer_meta_set),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "dry_run": {"type": "boolean"},
+                "changed": {"type": "boolean"},
+                "written": {"type": "array"},
+                "unchanged": {"type": "array"},
+                "build_stale": {"type": "boolean"},
+                "placeholders": {"type": "integer"},
+                "warnings": {"type": "array"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
@@ -3405,6 +3767,47 @@ def _register_prompts(server: _FastMCP) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _ProgressHeartbeatMiddleware(_Middleware):
+    """Re-announce progress while a tool call is running.
+
+    A host resets its per-request deadline on a progress notification, which is
+    the only lever a caller has on a host whose timeout is not configurable
+    (issue #296, its proposed solution §3). sofer's tool bodies are synchronous
+    and print their own progress to captured stdout, so threading a callback
+    through ``prepare``/``codebook``/``profile``/``render``/``publish`` would
+    touch five domain modules for a signal the host needs only as a deadline
+    reset. This middleware sits at the single dispatch point instead: every tool
+    is covered, including ones added later, and no domain function changes.
+
+    The heartbeat runs on the event loop while the tool body runs in fastmcp's
+    worker thread, so it keeps firing whatever the body is doing. A client that
+    sent no progress token is unaffected — ``Context.report_progress`` returns
+    without sending when there is no token to answer.
+    """
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        """Run the tool call, re-announcing progress until it finishes."""
+        try:
+            ctx = _get_context()
+        except RuntimeError:  # pragma: no cover - no request context to report to
+            return await call_next(context)
+        interval = float(sofer_config.MCP_PROGRESS_HEARTBEAT_SECONDS)
+        task = asyncio.ensure_future(call_next(context))
+        elapsed = 0.0
+        try:
+            while not task.done():
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    break
+                elapsed += interval
+                name = getattr(context.message, "name", "tool")
+                await ctx.report_progress(elapsed, None, f"{name} still running")
+            return await task
+        except BaseException:
+            task.cancel()
+            raise
+
+
 def build_server(root: Path | None = None, approval_phrase: str | None = None) -> _FastMCP:
     """Build and return the sofer MCP server.
 
@@ -3461,6 +3864,7 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     _register_tools(server)
     _register_resources(server)
     _register_prompts(server)
+    server.add_middleware(_ProgressHeartbeatMiddleware())
     return server
 
 

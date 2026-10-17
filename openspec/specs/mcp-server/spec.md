@@ -90,11 +90,11 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ---
 
-### Requirement: Tool roster and schema contract (MSP-R03)
+### Requirement: Tool roster and schema contract (MSP-R03) — Modified 2026-10-16, feat-meta-tools
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`).
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires.
 
-Server SHALL expose 15 callables: `sofer_validate, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1); `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
+Server SHALL expose 17 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -102,7 +102,7 @@ Server SHALL expose 15 callables: `sofer_validate, sofer_prepare, sofer_publish,
 
 - GIVEN `tools/list`
 - WHEN inspected
-- THEN count SHALL be 15, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
+- THEN count SHALL be 17, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
 
 #### Scenario: Annotations and output_schema typed
 
@@ -614,9 +614,11 @@ NEVER-LEAK (extended to the four posture fields): the phrase, any phrase-derived
 
 ---
 
-### Requirement: Approval-phrase configuration diagnostics (APX-01)
+### Requirement: Approval-phrase configuration diagnostics (APX-01) — Modified 2026-10-15, fix-approval-phrase-agent-coverage
 
-> Added by change `2026-09-11-fix-auth-status-hints` (archived 2026-09-11).
+> Added by change `2026-09-11-fix-auth-status-hints` (archived 2026-09-11). Modified by
+> `2026-10-15-fix-approval-phrase-agent-coverage` (issue #295): per-agent guidance covers the whole
+> registry and is derived from its `env` capability.
 
 System MUST make the unconfigured-approval-phrase state actionable on the two surfaces that report it, instead of today's dead-end `{"action": "configure_approval_phrase"}`-only hint.
 
@@ -626,7 +628,7 @@ When `sofer_auth_status` reports `approval_configured:false`, its flat `hints` o
 - **process-start semantics** — the phrase is read exactly once, when the MCP server process starts (`build_server`), from the `approval_phrase` argument or `SOFER_MCP_APPROVAL_PHRASE`; the running server MUST NOT be presented as re-reading the environment;
 - the required location — the variable MUST be present in the environment of the process that **launches** `sofer-mcp`; a variable set in a separate shell or terminal MUST NOT be presented as sufficient;
 - the restart requirement — the change takes effect only after a full restart of the agent/server host process, signalled both as prose and as a machine-readable flat boolean key `approval_phrase_restart_required: true`; the guidance MUST NOT suggest that re-calling the tool resolves the state without a restart (no runtime re-read);
-- per-agent setup guidance whose named keys MUST be the shapes `mcp_registration.py` actually writes: `sofer mcp add --agent opencode` writes only the `mcp.sofer` entry keys `type`, `command`, `cwd` and forwards **NO** environment (so the guidance MUST NOT claim env forwarding for opencode), `codex` persists an `env_vars` allow-list of environment-variable NAMES, and `gemini` persists an `env` mapping of NAME → `$NAME` references; secret VALUES are never written to disk;
+- per-agent setup guidance that MUST cover **every** member of `mcp_registration.AGENT_NAMES` and MUST be derived from that registry's own `env` capability, never from a parallel hand-kept table: `sofer mcp add --agent <agent>` writes only the `mcp.sofer` entry keys `type`, `command`, `cwd` and forwards **NO** environment when the capability is `none` (so the guidance MUST NOT claim env forwarding for it), persists an `env_vars` allow-list of environment-variable NAMES when it is `allow_list`, and persists an `env` mapping of NAME → `$NAME` references when it is `refs` or NAME → `${NAME}` references when it is `refs_braced`; each fact MUST name the field and the reference form that agent's registration entry actually carries, and secret VALUES are never written to disk;
 - the verification step — after the restart, `sofer_auth_status` reports `approval_configured:true`.
 
 All guidance keys MUST be namespaced with the `approval_phrase_*` prefix (so the bare `approval_phrase` key of the configured branch stays absent when unconfigured) and MUST be **flat scalars** — no nested object or array value anywhere in `hints` (MSP-R13 flatness invariant).
@@ -644,6 +646,21 @@ NEVER-LEAK: guidance and message MUST NOT contain the phrase, any phrase-derived
 - AND `hints["approval_phrase_restart_required"]` SHALL be `True` and every `hints` value SHALL be a scalar (flat payload, no nested dict/list)
 - AND the guidance SHALL name the verification step (`approval_configured:true` after the restart)
 - AND the configured branch SHALL be unaffected: with a configured phrase `hints` SHALL NOT contain any `approval_phrase_*` guidance key
+
+#### Scenario: Per-agent guidance covers every registered agent
+
+- GIVEN a server with no configured approval phrase and the registered agent set `mcp_registration.AGENT_NAMES`
+- WHEN `sofer_auth_status(config)` is called
+- THEN `hints` SHALL carry exactly one `approval_phrase_setup_<agent>` key per registered agent
+- AND each fact SHALL name the entry field and the reference form `build_entry(agent, ...)` really
+  writes for that agent's `env` capability
+- AND an agent added to `ADAPTERS` SHALL appear in the guidance with no edit outside the registry
+
+#### Scenario: A registration capability without a fact fails the guard
+
+- GIVEN an `ADAPTERS` entry whose `env` capability has no guidance template
+- WHEN the single-source guard runs
+- THEN it SHALL fail, so no agent ships with missing or invented guidance
 
 #### Scenario: Publish refusal message carries the same process-start semantics
 
@@ -1114,6 +1131,14 @@ the explicit delimiter SHALL apply to `.csv`.
 - THEN `delimiter` and `encoding` SHALL each carry a description stating the fallback
 - AND neither SHALL be in the `required` list
 
+#### Scenario: batch output_dir descriptions name the resolved default
+
+- GIVEN `tools/list` for `sofer_profile_all` and `sofer_render_all`
+- WHEN the `output_dir` descriptions are inspected
+- THEN each SHALL name `<output_dir>/<sub-directory>` and the resolved default composed from the
+  configured cache root and the configured sub-directory
+- AND neither SHALL present the bare `profiles` / `renders` as the whole default
+
 #### Scenario: scan tools gain no inert parameter
 
 - GIVEN `tools/list` for `sofer_scan_dry_run` / `sofer_scan_apply`
@@ -1178,3 +1203,99 @@ it MUST persist exactly one timestamped file under the configured state director
 - THEN the home directory SHALL appear as `~` and the absolute home path SHALL be absent
 - AND the environment-variable value SHALL NOT appear anywhere in the envelope
 - AND no dataset content SHALL appear
+
+### Requirement: The metadata step is in the agent-facing surface (MSP-META-01) — Modified 2026-10-16, feat-meta-tools
+
+The canonical chain the server advertises SHALL name the metadata step — filling `[meta]`
+`description`, `license`, `source` and `tags` — between bootstrap and Phase 1, because an MCP consumer
+has no source of truth other than the descriptions and envelopes it receives, and a required step that
+is absent from them cannot be inferred (issue #288).
+
+`sofer_validate`'s description SHALL require `[meta] description/license/source/tags filled (no
+placeholders)` and `sofer_prepare`'s SHALL require that validation passed with no placeholder warning;
+the workflow registry SHALL carry the same requirement for `sofer_validate`. `sofer_init`'s
+continuation SHALL name filling `[meta]` before registering files.
+
+`sofer_validate` — and the pre-prepare run, which shares the validator — SHALL emit one **warning** per
+`[meta]` scalar field (`description`, `license`, `source`) that is empty or begins with one of the
+`meta_placeholder_prefixes` values (`[tool.sofer]`, case-insensitive), plus one warning for placeholder
+`tags`. The force SHALL be a warning and SHALL NOT change the exit code or `ValidationReport.passed`: a
+failure would break every existing config that still carries a placeholder, which is a contract change
+rather than a fix (maintainer decision D3).
+
+The step SHALL also have a **tool surface**, because an MCP consumer that reads the warning has no
+other way to write a file (issue #323). `sofer_meta_check(config)` SHALL report the same warnings
+on demand, read-only (`readOnlyHint: true`), and SHALL be informational by the same D3 rule: `ok`
+true and exit code 0 whatever it reports, with the count in `placeholders` and the messages in
+`warnings`. `sofer_meta_set(config, values, dry_run)` SHALL write only the `[meta]` keys it is
+given — every key `DatasetConfig` reads is settable — into the dataset TOML under the server root,
+preserving every other key and comment, with containment via `_contained_path`, an atomic replace,
+and a refusal that writes nothing when the edited document would not parse or would lose a
+requested value. It SHALL name a `build/` tree that predates the write (`build_stale`) rather than
+refuse, and SHALL be idempotent: re-running with the values the file already holds SHALL write
+nothing. Called without `values` it SHALL write nothing, report the placeholders that still need a
+value, and return a continuation with `input_required: ("values",)` — so the registry continuation
+from bootstrap stays executable (MSP-R13). The chain SHALL carry the step: `sofer_scan_apply`’s
+continuation SHALL be `sofer_meta_set`, `sofer_meta_set`’s SHALL be `sofer_validate`, and
+`sofer_meta_check`’s SHALL be `sofer_meta_set` (issue #323 §5). The CLI SHALL mirror both surfaces
+(`sofer meta check`, `sofer meta set`; CLI-R16).
+
+#### Scenario: The metadata step is in the chain the agent reads — issue #288
+
+- GIVEN the server is built
+- WHEN its instructions and `tools/list` descriptions are read
+- THEN the instructions SHALL name the metadata step before Phase 1
+- AND `sofer_validate`'s description SHALL require `[meta] description/license/source/tags filled (no placeholders)`
+- AND `sofer_init`'s continuation SHALL name filling `[meta]`
+
+**Evidence:** `test: tests/test_mcp_server.py::TestMetadataStepInTheAdvertisedChain::test_server_instructions_name_the_metadata_step`, `test: tests/test_mcp_server.py::TestMetadataStepInTheAdvertisedChain::test_validate_requires_filled_meta`, `test: tests/test_mcp_server.py::TestMetadataStepInTheAdvertisedChain::test_init_next_points_at_the_metadata_step`, `test: tests/test_mcp_server.py::TestMetadataStepInTheAdvertisedChain::test_the_workflow_registry_carries_the_requirement`
+
+#### Scenario: A placeholder warns without failing the run — issue #288
+
+- GIVEN a dataset TOML whose `[meta]` values are the `sofer init` template's placeholders
+- WHEN `sofer_validate` runs (or the pre-prepare validation does)
+- THEN the report SHALL carry one warning per offending field, naming it
+- AND `ValidationReport.passed` SHALL remain `True` and the exit code SHALL be unchanged
+
+**Evidence:** `test: tests/test_checks.py::TestMetaPlaceholderGate::test_each_placeholder_field_warns`, `test: tests/test_checks.py::TestMetaPlaceholderGate::test_the_warning_reaches_the_report_and_keeps_passed_true`, `test: tests/test_checks.py::TestMetaPlaceholderGate::test_the_warning_is_visible_in_the_printed_summary`
+
+#### Scenario: The metadata step has a tool surface — issue #323
+
+- GIVEN a dataset TOML whose `[meta]` values are the `sofer init` template's placeholders
+- WHEN `sofer_meta_check` runs
+- THEN it SHALL report `placeholders: 4` and four `warnings`, with `ok: true` and exit code 0
+- AND the file SHALL be byte-identical afterwards
+- AND `sofer_meta_set` with `values` SHALL write them into `[meta]`, preserving every other key and comment, and report the state the edit leaves behind in `placeholders`/`warnings`
+- AND `sofer_meta_set` with an unknown key SHALL refuse with `CONFIG_ERROR` and write nothing
+- AND `sofer_meta_set` with no `values` SHALL write nothing and return a continuation with `input_required: ["values"]`
+
+**Evidence:** `test: tests/test_mcp_server.py::TestMetaTools::test_check_reports_every_placeholder_and_writes_nothing`, `test: tests/test_mcp_server.py::TestMetaTools::test_set_writes_the_values_and_reports_them`, `test: tests/test_mcp_server.py::TestMetaTools::test_set_refuses_an_unknown_key_with_nothing_written`, `test: tests/test_mcp_server.py::TestMetaTools::test_set_without_values_reports_the_state_and_asks_for_them`, `test: tests/test_mcp_server.py::TestMetaTools::test_set_reports_the_state_the_edit_leaves_behind`
+
+#### Scenario: The metadata step is reachable from tools/list — issue #323 §5
+
+- GIVEN the server is built
+- WHEN the workflow registry and the tool descriptions are read
+- THEN `sofer_scan_apply`'s continuation SHALL be `sofer_meta_set`, its SHALL be `sofer_validate`, and `sofer_meta_check`'s SHALL be `sofer_meta_set`
+- AND the server instructions SHALL name both tools in the metadata step, before Phase 1
+- AND `sofer_init`'s continuation SHALL name `sofer_meta_set`
+- AND the metadata step SHALL NOT be described as manual
+
+**Evidence:** `test: tests/test_mcp_server.py::TestMetaTools::test_the_registry_chain_is_executable`, `test: tests/test_mcp_server.py::TestMetaTools::test_the_instructions_name_both_tools`, `test: tests/test_mcp_server.py::TestMetaTools::test_init_next_names_the_setter`, `test: tests/test_workflow.py::test_greenfield_branch_chain`
+
+#### Scenario: Only a prefix marks a placeholder — issue #288
+
+- GIVEN a value that contains a prefix but does not start with one, and one that does
+- WHEN the gate runs
+- THEN only the value beginning with a prefix SHALL be reported
+- AND the match SHALL be case-insensitive
+- AND an empty `tags` list SHALL NOT warn, because there is no value to replace
+
+**Evidence:** `test: tests/test_checks.py::TestMetaPlaceholderGate::test_a_real_value_merely_containing_a_prefix_is_fine`, `test: tests/test_checks.py::TestMetaPlaceholderGate::test_the_match_is_case_insensitive`, `test: tests/test_checks.py::TestMetaPlaceholderGate::test_an_empty_value_warns_for_the_three_scalars`, `test: tests/test_checks.py::TestMetaPlaceholderGate::test_an_example_prefixed_source_is_flagged`
+
+#### Scenario: The prefixes are configuration — issue #288
+
+- GIVEN `[tool.sofer] meta_placeholder_prefixes` is changed
+- WHEN the gate runs
+- THEN it SHALL use the configured values, not a literal
+
+**Evidence:** `test: tests/test_checks.py::TestMetaPlaceholderGate::test_prefixes_are_config_owned`

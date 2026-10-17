@@ -283,12 +283,9 @@ class TestHintContentActionable:
             "approval_phrase_where",
             "approval_phrase_restart",
             "approval_phrase_restart_required",
-            "approval_phrase_setup_opencode",
-            "approval_phrase_setup_codex",
-            "approval_phrase_setup_gemini",
             "approval_phrase_verify",
         }
-    )
+    ) | frozenset(f"approval_phrase_setup_{agent}" for agent in registration.AGENT_NAMES)
 
     def _unconfigured_hints(self, tmp_path: Path, monkeypatch: Any) -> dict[str, Any]:
         """Return the ``sofer_auth_status`` hints of a no-phrase server.
@@ -359,22 +356,69 @@ class TestHintContentActionable:
     def test_auth_status_unconfigured_hint_uses_verified_registration_keys(
         self, tmp_path, monkeypatch, restore_tool_config
     ) -> None:
-        """Per-agent guidance claims only the keys registration really writes.
+        """Per-agent guidance covers EVERY registered agent and claims only the
+        shapes registration really writes (issue #295).
 
-        The claimed key table is asserted against the real
-        :func:`sofer.mcp_registration.build_entry` output, and opencode's value
-        must state that no environment is forwarded (it writes no env field).
+        Each fact is cross-checked against the real
+        :func:`sofer.mcp_registration.build_entry` output for that agent: the
+        environment field the fact names must be the field the entry carries,
+        the reference form must be the one the entry persists (``$NAME`` for
+        ``refs``, ``${NAME}`` for ``refs_braced``), and an agent with no
+        environment forwarding must say so.
         """
         hints = self._unconfigured_hints(tmp_path, monkeypatch)
         env = {"HF_TOKEN": "hf_test_token", "SOFER_MCP_APPROVAL_PHRASE": "a-phrase"}
-        for agent, keys in ms._APPROVAL_PHRASE_AGENT_ENTRY_KEYS.items():
-            entry = registration.build_entry(agent, tmp_path, env)  # type: ignore[arg-type]
-            for key in keys:
-                assert key in entry, (agent, key, sorted(entry))
-                assert key in hints[f"approval_phrase_setup_{agent}"], (agent, key)
-        assert "env" not in ms._APPROVAL_PHRASE_AGENT_ENTRY_KEYS["opencode"]
+        assert registration.AGENT_NAMES, "the registry must not be empty"
+        for agent in registration.AGENT_NAMES:
+            fact = hints[f"approval_phrase_setup_{agent}"]
+            entry = registration.build_entry(agent, tmp_path, env)
+            capability = registration.ADAPTERS[agent]["env"]
+            if capability == "none":
+                assert "env" not in entry and "env_vars" not in entry, (agent, sorted(entry))
+                assert "no environment is forwarded" in fact, (agent, fact)
+            elif capability == "allow_list":
+                assert ms._APPROVAL_PHRASE_ENV_VAR in entry["env_vars"], agent
+                assert "env_vars" in fact and "NAMES" in fact, (agent, fact)
+            else:
+                reference = entry["env"][ms._APPROVAL_PHRASE_ENV_VAR]
+                assert "env" in fact, (agent, fact)
+                if capability == "refs":
+                    assert reference == f"${ms._APPROVAL_PHRASE_ENV_VAR}", agent
+                    assert "$NAME" in fact and "${" not in fact, (agent, fact)
+                else:
+                    assert reference == "${" + ms._APPROVAL_PHRASE_ENV_VAR + "}", agent
+                    assert "${NAME}" in fact, (agent, fact)
         opencode_setup = hints["approval_phrase_setup_opencode"]
         assert "no environment is forwarded" in opencode_setup
+
+    def test_capability_table_covers_every_registry_capability(self) -> None:
+        """A new registration capability fails this guard, not the preflight.
+
+        The capability enum is the single source the guidance prose branches
+        on; an unlisted capability would mean a missing template (issue #295).
+        """
+        capabilities = {spec["env"] for spec in registration.ADAPTERS.values()}
+        missing = capabilities - set(ms._ENV_CAPABILITY_FACTS)
+        assert not missing, f"no setup fact for capabilities: {sorted(missing)}"
+
+    def test_guidance_follows_a_sentinel_registry_agent(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        """Adding an agent to ADAPTERS is the only edit the guidance needs.
+
+        The registry is patched the same way the single-source guard in
+        ``tests/test_mcp_registration.py`` patches it, so a new agent cannot
+        leave the guidance behind (issue #295).
+        """
+        sentinel = {**registration.ADAPTERS["pi"], "env": "refs_braced"}
+        patched = {**registration.ADAPTERS, "sentinel": sentinel}
+        monkeypatch.setattr(registration, "ADAPTERS", patched)
+        monkeypatch.setattr(registration, "AGENT_NAMES", tuple(patched))
+
+        hints = self._unconfigured_hints(tmp_path, monkeypatch)
+        fact = hints["approval_phrase_setup_sentinel"]
+        assert "sentinel" in fact
+        assert "${NAME}" in fact
 
     def test_auth_status_unconfigured_guidance_has_no_phrase_material(
         self, tmp_path, monkeypatch, restore_tool_config
@@ -413,6 +457,8 @@ class TestToolRoster:
     _EXPECTED: frozenset[str] = frozenset(
         {
             "sofer_validate",
+            "sofer_meta_check",
+            "sofer_meta_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -430,7 +476,7 @@ class TestToolRoster:
         }
     )
 
-    def test_exactly_fifteen_callables(self, server):
+    def test_exactly_seventeen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -651,7 +697,7 @@ class TestAuthStatusPosture:
 
     def test_posture_fields_confined_to_auth_status(self, tmp_path, monkeypatch) -> None:
         """Roster-wide scan: no other tool's output_schema gains any of the 4
-        posture keys; the roster stays at 15 callables."""
+        posture keys; the roster stays at 17 callables."""
         self._clean_hf(monkeypatch)
         _make_dataset(tmp_path)
         server = build_server(root=tmp_path, approval_phrase="x")
@@ -661,7 +707,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 15, [t.name for t in tools]
+        assert len(tools) == 17, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -848,7 +894,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 15
+                    assert len(tools.tools) == 17
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -4794,9 +4840,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 15 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 17 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_fifteen(self, tmp_path):
+    def test_tool_roster_still_seventeen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4805,7 +4851,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 15
+        assert len(names) == 17
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):
@@ -5204,8 +5250,36 @@ class TestWorkflowRegistryConformance:
         assert applied["ok"] is True, applied
 
         nxt3 = applied["next"]
-        assert nxt3["tool"] == "sofer_validate"
-        validated = _call(server, nxt3["tool"], nxt3["arguments"]).data
+        # #323 D8: bootstrap leads into the metadata step, and the step asks for
+        # the values it needs instead of failing a bound continuation.
+        assert nxt3["tool"] == "sofer_meta_set"
+        asked = _call(server, nxt3["tool"], nxt3["arguments"]).data
+        assert asked["ok"] is True, asked
+        assert asked["changed"] is False
+        assert asked["placeholders"] >= 1
+        assert asked["next"]["tool"] == "sofer_meta_set"
+        assert asked["next"]["input_required"] == ["values"]
+
+        written = _call(
+            server,
+            "sofer_meta_set",
+            {
+                "config": "green.toml",
+                "values": {
+                    "description": "Real",
+                    "license": "MIT",
+                    "source": "Org",
+                    "tags": ["a"],
+                },
+            },
+        ).data
+        assert written["ok"] is True, written
+        assert written["changed"] is True
+        assert written["placeholders"] == 0
+
+        nxt4 = written["next"]
+        assert nxt4["tool"] == "sofer_validate"
+        validated = _call(server, nxt4["tool"], nxt4["arguments"]).data
         assert validated["ok"] is True, validated
 
     def test_greenfield_refusal_next_is_input_required(self, tmp_path):
@@ -5474,3 +5548,349 @@ class TestExplicitCsvDialectOverrideMcp:
         data = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert data["file"]["delimiter"] == ","
         assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+
+class TestProgressHeartbeat:
+    """#296 §3: a long tool re-announces progress, which resets a host deadline.
+
+    The middleware sits at the single dispatch point, so this exercises it
+    against a purpose-built slow tool rather than waiting on a real multi-minute
+    one — the contract under test is the heartbeat, not any single tool body.
+    """
+
+    @staticmethod
+    def _run(interval: float, sleep_for: float) -> list[float]:
+        """Call a slow tool on a probe server, returning the progress values."""
+        import fastmcp
+
+        seen: list[float] = []
+
+        async def _handler(progress: float, total: float | None, message: str | None) -> None:
+            seen.append(progress)
+
+        def _build() -> fastmcp.FastMCP:
+            server = fastmcp.FastMCP("probe")
+
+            @server.tool
+            async def slow_tool() -> str:
+                await asyncio.sleep(sleep_for)
+                return "done"
+
+            server.add_middleware(ms._ProgressHeartbeatMiddleware())
+            return server
+
+        async def _call() -> None:
+            async with Client(_build(), progress_handler=_handler) as client:
+                await client.call_tool("slow_tool", {})
+
+        original = config.MCP_PROGRESS_HEARTBEAT_SECONDS
+        object.__setattr__(config, "MCP_PROGRESS_HEARTBEAT_SECONDS", interval)
+        try:
+            asyncio.run(_call())
+        finally:
+            object.__setattr__(config, "MCP_PROGRESS_HEARTBEAT_SECONDS", original)
+        return seen
+
+    def test_a_long_tool_reannounces_progress(self) -> None:
+        seen = self._run(interval=0.05, sleep_for=0.35)
+        assert seen, "expected at least one heartbeat notification"
+        assert seen == sorted(seen), "progress must be monotonic"
+
+    def test_a_fast_tool_sends_no_heartbeat(self) -> None:
+        assert self._run(interval=0.5, sleep_for=0.01) == []
+
+    def test_long_tool_descriptions_carry_the_deadline_note(self) -> None:
+        """#296 §2: the agent learns the expectation from ``tools/list``."""
+        server = ms.build_server(root=Path.cwd())
+        import anyio
+
+        async def _descriptions() -> dict[str, str]:
+            async with Client(server) as client:
+                tools = await client.list_tools()
+                return {t.name: (t.description or "") for t in tools}
+
+        described = anyio.run(_descriptions)
+        for name in sorted(ms._LONG_TOOL_NAMES):
+            assert name in described, name
+            assert "Runs for minutes on a large dataset" in described[name], name
+        # A short tool must not carry it, or the note stops meaning anything.
+        assert "Runs for minutes" not in described["sofer_validate"]
+
+
+class TestMetaTools:
+    """#323: the metadata step has a tool surface at both ends.
+
+    `sofer_meta_check` reports the state the chain requires without running the
+    validator (read-only, informational), and `sofer_meta_set` is the write half
+    that makes the advertised step executable over MCP — the case the issue is
+    about, since an MCP consumer has no other way to write a file.
+    """
+
+    @staticmethod
+    def _placeholder_dataset(root: Path) -> Path:
+        """Write the `sofer init` template — every [meta] field a placeholder."""
+        from sofer.cli import _INIT_TEMPLATE
+
+        toml = root / "dataset.toml"
+        toml.write_text(_INIT_TEMPLATE.format(name="d", user="u"), encoding="utf-8")
+        return toml
+
+    @staticmethod
+    def _filled_dataset(root: Path) -> Path:
+        """Write a dataset whose [meta] gate is satisfied."""
+        toml = root / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "d"\nrepo_id = "u/d"\n\n[meta]\n'
+            'description = "Real"\nlicense = "MIT"\nsource = "Org"\ntags = ["a"]\n',
+            encoding="utf-8",
+        )
+        return toml
+
+    # -- sofer_meta_check --------------------------------------------------
+
+    def test_check_reports_every_placeholder_and_writes_nothing(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["exit_code"] == 0
+        assert envelope["placeholders"] == 4
+        assert len(envelope["warnings"]) == 4
+        assert toml.read_bytes() == before
+
+    def test_check_is_clean_on_a_filled_config(self, tmp_path: Path) -> None:
+        self._filled_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["placeholders"] == 0
+        assert envelope["warnings"] == []
+
+    def test_check_next_is_the_executable_fix(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["next"]["tool"] == "sofer_meta_set"
+        assert envelope["next"]["arguments"]["config"] == "dataset.toml"
+
+    def test_check_refuses_an_unreadable_config(self, tmp_path: Path) -> None:
+        (tmp_path / "dataset.toml").write_text("[meta\ndescription = 1\n", encoding="utf-8")
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "Failed to read TOML" in envelope["config_errors"][0]
+
+    def test_check_refuses_a_path_outside_the_root(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.toml").write_text("[meta]\ndescription = 'x'\n", encoding="utf-8")
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(
+                build_server(root=root),
+                "sofer_meta_check",
+                {"config": str(outside / "evil.toml")},
+            )
+
+    # -- sofer_meta_set ----------------------------------------------------
+
+    def test_set_writes_the_values_and_reports_them(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real", "license": "MIT"}},
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["changed"] is True
+        assert envelope["written"] == ["description", "license"]
+        assert envelope["dry_run"] is False
+        assert envelope["build_stale"] is False
+        cfg = DatasetConfig.from_toml(toml)
+        assert cfg.description == "Real"
+        assert cfg.license == "MIT"
+        # The keys nobody mentioned keep their template value.
+        assert cfg.source.startswith("TODO")
+        # The document is otherwise intact: the template's guidance survives.
+        assert "# Usage:" in toml.read_text(encoding="utf-8")
+
+    def test_set_is_idempotent(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        server = build_server(root=tmp_path)
+        first = _call(
+            server, "sofer_meta_set", {"config": "dataset.toml", "values": {"source": "Org"}}
+        ).data
+        second = _call(
+            server, "sofer_meta_set", {"config": "dataset.toml", "values": {"source": "Org"}}
+        ).data
+        assert first["changed"] is True
+        assert second["changed"] is False
+        assert second["written"] == []
+        assert second["unchanged"] == ["source"]
+
+    def test_set_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real"}, "dry_run": True},
+        ).data
+        assert envelope["dry_run"] is True
+        assert envelope["changed"] is True
+        assert toml.read_bytes() == before
+
+    def test_set_refuses_an_unknown_key_with_nothing_written(self, tmp_path: Path) -> None:
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"nope": "x"}},
+        ).data
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "unknown [meta] key 'nope'" in envelope["config_errors"][0]
+        assert toml.read_bytes() == before
+
+    def test_set_refuses_a_value_of_the_wrong_kind(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"tags": "a,b"}},
+        ).data
+        assert envelope["ok"] is False
+        assert "expected a list of strings" in envelope["config_errors"][0]
+
+    def test_set_names_a_build_tree_that_predates_the_write(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        (tmp_path / "build").mkdir()
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real"}},
+        ).data
+        assert envelope["build_stale"] is True
+        assert "predates this write" in envelope["output"]
+
+    def test_set_without_values_reports_the_state_and_asks_for_them(self, tmp_path: Path) -> None:
+        """A bare continuation (only a config is bound) must be executable."""
+        toml = self._placeholder_dataset(tmp_path)
+        before = toml.read_bytes()
+        envelope = _call(
+            build_server(root=tmp_path), "sofer_meta_set", {"config": "dataset.toml"}
+        ).data
+        assert envelope["ok"] is True
+        assert envelope["changed"] is False
+        assert envelope["written"] == []
+        assert envelope["placeholders"] == 4
+        assert envelope["next"]["tool"] == "sofer_meta_set"
+        assert envelope["next"]["input_required"] == ["values"]
+        assert toml.read_bytes() == before
+
+    def test_set_reports_the_state_the_edit_leaves_behind(self, tmp_path: Path) -> None:
+        """The post-edit state, not the pre-edit one — also under --dry-run."""
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {
+                "config": "dataset.toml",
+                "values": {
+                    "description": "Real",
+                    "license": "MIT",
+                    "source": "Org",
+                    "tags": ["a"],
+                },
+                "dry_run": True,
+            },
+        ).data
+        assert envelope["placeholders"] == 0
+        assert envelope["warnings"] == []
+
+    def test_set_next_is_validate(self, tmp_path: Path) -> None:
+        self._placeholder_dataset(tmp_path)
+        envelope = _call(
+            build_server(root=tmp_path),
+            "sofer_meta_set",
+            {"config": "dataset.toml", "values": {"description": "Real"}},
+        ).data
+        assert envelope["next"]["tool"] == "sofer_validate"
+
+    def test_set_refuses_a_path_outside_the_root(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.toml").write_text("[meta]\ndescription = 'x'\n", encoding="utf-8")
+        root = tmp_path / "root"
+        root.mkdir()
+        _make_dataset(root)
+        with pytest.raises(ToolError, match="outside the server root"):
+            _call(
+                build_server(root=root),
+                "sofer_meta_set",
+                {"config": str(outside / "evil.toml"), "values": {"description": "x"}},
+            )
+
+    # -- the advertised chain now names them --------------------------------
+
+    def test_the_instructions_name_both_tools(self) -> None:
+        assert "sofer_meta_check" in ms._PHASED_INSTRUCTIONS
+        assert "sofer_meta_set" in ms._PHASED_INSTRUCTIONS
+        # The step is no longer described as manual: a tool performs it.
+        assert (
+            "Metadata step (between bootstrap and Phase 1, tool-driven)" in ms._PHASED_INSTRUCTIONS
+        )
+
+    def test_init_next_names_the_setter(self) -> None:
+        assert "sofer_meta_set" in ms._workflow_description(ms.sofer_init)
+
+    def test_the_registry_chain_is_executable(self) -> None:
+        assert workflow.metadata_for("sofer_meta_check").next.tool == "sofer_meta_set"
+        assert workflow.metadata_for("sofer_meta_set").next.tool == "sofer_validate"
+        assert workflow.metadata_for("sofer_scan_apply").next.tool == "sofer_meta_set"
+
+
+class TestMetadataStepInTheAdvertisedChain:
+    """#288: the metadata step is in the surface the agent reads.
+
+    An MCP consumer has no other source of truth than the descriptions and
+    envelopes it receives, so a required step that is absent from them cannot be
+    inferred — and the rest of the pipeline signals success either way.
+    """
+
+    def test_validate_requires_filled_meta(self) -> None:
+        description = ms._workflow_description(ms.sofer_validate)
+        assert "[meta] description/license/source/tags filled (no placeholders)" in description
+
+    def test_prepare_requires_validate_without_placeholder_warnings(self) -> None:
+        description = ms._workflow_description(ms.sofer_prepare)
+        assert "no [meta] placeholder warnings" in description
+
+    def test_init_next_points_at_the_metadata_step(self) -> None:
+        description = ms._workflow_description(ms.sofer_init)
+        assert "fill [meta] description/license/source/tags" in description
+
+    def test_server_instructions_name_the_metadata_step(self) -> None:
+        instructions = ms._PHASED_INSTRUCTIONS
+        assert "Metadata step" in instructions
+        assert "[meta] description, license, source and tags" in instructions
+        # It sits between bootstrap and Phase 1, which is where the agent looks.
+        assert instructions.index("Metadata step") < instructions.index("Phase 1 Build")
+
+    def test_the_workflow_registry_carries_the_requirement(self) -> None:
+        entry = ms.workflow.metadata_for("sofer_validate")
+        assert "[meta] placeholders replaced" in entry.requires
+
+    def test_the_server_instructions_still_describe_the_full_chain(self) -> None:
+        """The metadata step must not have replaced a phase."""
+        for phase in ("Phase 0 Bootstrap", "Phase 1 Build", "Phase 2 Publish"):
+            assert phase in ms._PHASED_INSTRUCTIONS

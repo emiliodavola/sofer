@@ -300,7 +300,65 @@ def validate_layout(files: list[str]) -> list[str]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def validate_split_mapping(remotes: list[str]) -> list[str]:
+def _config_name_hint(config_names: list[str] | None, warn_limit: int | None = None) -> str:
+    """Return the ``load_dataset`` recommendation the warning prints.
+
+    Names the configs the card actually emitted when they are known: the
+    instruction ``name='<config>'`` is not actionable without opening the card's
+    frontmatter, and for an agent driving the MCP surface the tool result carries
+    the warning but not the card (issue #303). Falls back to the placeholder form
+    when they are not known, which is the only case the caller cannot name them
+    (no built card on disk).
+
+    Args:
+        config_names: Emitted ``config_name`` values, or ``None``/empty when the
+            caller does not have them.
+        warn_limit: How many names to list before eliding; defaults to the
+            ``[tool.sofer]`` cap so a corpus with dozens of groups still yields a
+            readable line.
+
+    Returns:
+        A bare ``name='...'`` list (the caller supplies the surrounding prose).
+    """
+    if not config_names:
+        return "name='<config>'"
+    limit = config.CARD_CONFIG_GROUP_WARN_LIMIT if warn_limit is None else warn_limit
+    shown = [f"name='{name}'" for name in config_names[:limit]]
+    remaining = len(config_names) - len(shown)
+    listed = ", ".join(shown)
+    if remaining > 0:
+        listed += f", ... and {remaining} more"
+    return listed
+
+
+def _carries_split_keyword(path: str) -> bool:
+    """Test whether *path* names the split it was assigned to.
+
+    The same predicate the per-file consistency message is built on: the last
+    path segment's name, or the first directory segment, must carry a keyword.
+    It is factored out so the split-level and the per-file readings cannot
+    disagree.
+
+    Args:
+        path: Remote file path, possibly directory-qualified.
+
+    Returns:
+        ``True`` when the filename or its first directory names a split.
+    """
+    basename = path.rsplit("/", 1)[-1] if "/" in path else path
+    if detect_split_keyword(basename) is not None:
+        return True
+    if "/" in path or "\\" in path:
+        first_dir = re.split(r"[/\\]", path)[0].lower()
+        return detect_split_keyword(first_dir) is not None
+    return False
+
+
+def validate_split_mapping(
+    remotes: list[str],
+    config_names: list[str] | None = None,
+    warn_limit: int | None = None,
+) -> list[str]:
     """Validate that remote file paths map correctly to HF split detection rules.
 
     Checks:
@@ -308,15 +366,28 @@ def validate_split_mapping(remotes: list[str]) -> list[str]:
           (``detect_split_keyword`` already enforces this — files that pass
           detection are valid).
         - Files within a detected split must all contain the split keyword in
-          their filename or directory name.
+          their filename or directory name.  This message is emitted only when
+          the split carries a keyword in *some* of its files: a split whose
+          files all lack one is the single-split fallback the next bullet
+          already describes, and restating that once per file would scale the
+          warning with the corpus size — 65 tables printed 66 lines for one
+          problem (issue #316).
         - Single-split fallback: when *multiple* files all fall into ``train``
           (no split keyword detected in any file), emit a warning about the
           ``load_dataset()`` behaviour.  The generated card groups those files
           by column schema, so the warning states what a single-config card and
-          a multi-config card each do (issue #292).
+          a multi-config card each do, and — when *config_names* is supplied —
+          names the emitted configs instead of leaving a placeholder the reader
+          cannot resolve without opening the card (issue #303, RC-Universal-Card
+          "Actionable warning" S4).
 
     Args:
         remotes: Remote file paths (existing or planned).
+        config_names: ``configs[].config_name`` values read back from the built
+            card, or ``None`` when the card is absent (the placeholder form is
+            used instead).
+        warn_limit: How many names to list before eliding; ``None`` reads the
+            ``[tool.sofer]`` cap.
 
     Returns:
         A list of warning strings (empty = layout follows HF conventions).
@@ -333,37 +404,30 @@ def validate_split_mapping(remotes: list[str]) -> list[str]:
     if len(data_files) > 1:
         has_fallback = any("No splits detected" in w for w in report.warnings)
         if has_fallback:
-            # The card groups these files by column schema, so the historical
-            # unconditional claim ("ALL files land in one 'train' split") only
-            # holds for a single-config card; a multi-config card is loaded one
-            # table at a time. State both outcomes (issue #292, S4).
             warnings.append(
                 f"Default-load warning: {len(data_files)} data files have no "
                 f"split keywords. The generated card groups them by column "
                 f"schema: a single-config card loads every file into one 'train' "
                 f"split when load_dataset() is called without a config name "
                 f"(which may be slow for large repos), while a multi-config card "
-                f"is loaded one table at a time with load_dataset(repo, "
-                f"name='<config>'). Consider adding split keywords to filenames "
+                f"is loaded one table at a time, one call per emitted config "
+                f"({_config_name_hint(config_names, warn_limit)}). Consider "
+                f"adding split keywords to filenames "
                 f"(e.g. 'train.csv', 'test.csv') or using directory-based splits "
                 f"(e.g. 'train/data.csv') to split a table across splits."
             )
 
     # ── Per-split keyword consistency ─────────────────────────────────────
+    # Only a split that carries a keyword in *some* of its files can have a
+    # genuinely inconsistent file. A split where none of the files carries one
+    # is the fallback split the summary above already describes, so restating
+    # it per file adds nothing and makes the warning count grow with the corpus
+    # (issue #316).
     for s in report.splits:
+        if not any(_carries_split_keyword(f) for f in s.files):
+            continue
         for f in s.files:
-            basename = f.rsplit("/", 1)[-1] if "/" in f else f
-            kw = detect_split_keyword(basename)
-
-            # Check directory name as well (dir-based splits)
-            dir_kw: str | None = None
-            if "/" in f or "\\" in f:
-                import re as _re
-
-                first_dir = _re.split(r"[/\\]", f)[0].lower()
-                dir_kw = detect_split_keyword(first_dir)
-
-            if kw is None and dir_kw is None:
+            if not _carries_split_keyword(f):
                 warnings.append(
                     f"File '{f}' was assigned to split '{s.name}' but does "
                     f"not contain a detectable split keyword. It may not be "

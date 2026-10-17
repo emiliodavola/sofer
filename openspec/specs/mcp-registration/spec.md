@@ -251,11 +251,13 @@ declared for project scope, `--user-config` SHALL still be ignored.
 
 ---
 
-### Requirement: OpenCode env-drop warning (MCP-REG-03)
+### Requirement: OpenCode env-drop warning (MCP-REG-03) — Modified 2026-10-17, opencode-mcp-entry-position
 
 > Added by change `2026-09-12-fix-mcp-opencode-env` (closes #147).
 > Extended by change `2026-09-25-feat-pi-mcp-agent` (#142) — `--agent all` now
 > expands to four agents and Pi is a name-forwarding agent.
+> Extended 2026-10-17 by `opencode-mcp-entry-position` (issue #334) — the entry's
+> position becomes an explicit clause, with no code change behind it.
 
 `sofer mcp add --agent opencode` (and the opencode member of `--agent all`)
 MUST emit an informational warning on **stderr** when `collect_env()` returns at
@@ -268,8 +270,7 @@ alternative. The warning MUST be informational, not a gate: it MUST NOT change
 the exit code, MUST NOT alter stdout registration output, and MUST NOT hard-fail
 the command or `--agent all`.
 
-The generated opencode entry MUST remain exactly
-`mcp.sofer={type:"local",command:["sofer-mcp"],cwd}`. No env name or value
+The generated opencode entry MUST remain `{type:"local",command:["sofer-mcp"],cwd}` plus the host timeout keys MCP-REG-05 declares for it — never any other key. No env name or value
 (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) SHALL ever be written into
 `opencode.json`, and no other format change that would start persisting secret
 values is permitted. `--agent all` SHALL expand to exactly the four registered
@@ -277,6 +278,25 @@ agents `opencode`, `codex`, `gemini`, `pi`; the warning fires for the opencode
 member only, while codex/gemini/pi members continue to persist names only
 (`env_vars` allow-list of keys present / `env` `$KEY` references / `env` `${KEY}`
 references) and MUST NOT emit the warning.
+
+The opencode entry SHALL be written in the **V1 position** — the server name directly under `mcp`
+(`mcp.sofer`), where the stable schema (`ConfigMCP.Local`) and the stable docs read it — and SHALL NOT
+be written under `mcp.servers`. A v2 opencode reads that same position: its configuration normalization
+decodes every non-container `mcp.<name>` value as the V1 server schema, migrates it (the server shape,
+and the scalar `timeout` into the phases that class understands) and merges the result into the
+`mcp.servers` mapping it emits **in memory**, without rewriting the source file
+(`packages/core/src/config/normalize.ts`, `normalizeMcp`; opencode's own "Migrate from V1" page states
+that existing supported V1 configuration keeps working without conversion). One entry therefore serves
+both generations, while `mcp.servers.<name>` would place it where a stable opencode does not look — so
+this position is a contract, not an artifact of when the adapter was written.
+
+> Modified 2026-10-17 by `opencode-mcp-entry-position` (issue #334), researched before the write and
+> with **no code change**: #334 reported the position as a possible defect and made verifying it its own
+> first task — "whether opencode's V1→V2 config migration moves an existing `mcp.<name>` entry to
+> `mcp.servers.<name>` on read". It does, in `normalizeMcp`, so the entry was never mis-registered and the
+> defect was this specification staying silent about why the position is the one it is. Writing
+> `mcp.servers.<name>` instead was refused rather than deferred: the stable release (`opencode-ai@latest`)
+> reads `mcp.<name>`, and the adapter is a single writer for both.
 
 The warning MUST also appear in `--dry-run` output (emitted on the dry-run path,
 before the preview branch), so a preview surfaces the drop instead of hiding it.
@@ -289,7 +309,7 @@ before the preview branch), so a preview surfaces the drop instead of hiding it.
 - THEN stderr SHALL carry a warning naming both variables (names only, never values)
 - AND the warning SHALL state the opencode entry carries no env and point at the README alternative
 - AND the exit code SHALL remain `0` and stdout registration output SHALL be unchanged
-- AND the written `opencode.json` `mcp.sofer` entry SHALL be exactly `{type:"local",command:["sofer-mcp"],cwd}` with no env key
+- AND the written `opencode.json` `mcp.sofer` entry SHALL be `{type:"local",command:["sofer-mcp"],cwd}` plus the host timeout keys of MCP-REG-05, with no env key
 
 #### Scenario: Warning is previewed in dry-run
 
@@ -318,6 +338,18 @@ before the preview branch), so a preview surfaces the drop instead of hiding it.
 - GIVEN `HF_TOKEN=hf123` and `SOFER_MCP_APPROVAL_PHRASE=phrase123` set
 - WHEN `sofer mcp add --agent opencode` runs, in both real and `--dry-run` modes
 - THEN neither `hf123` nor `phrase123` SHALL appear in stdout, stderr, or any written config file
+
+#### Scenario: The opencode entry keeps the position both generations read
+
+- GIVEN a project-scope `add --agent opencode` where no `sofer` entry exists yet
+- WHEN the write completes
+- THEN `opencode.json` SHALL carry `mcp.sofer` = `{type:"local",command:["sofer-mcp"],cwd}` plus the
+  timeout keys MCP-REG-05 declares for opencode
+- AND no `mcp.servers` key SHALL be created
+- AND the entry SHALL remain readable by a v2 opencode, whose normalization migrates exactly this flat
+  form into `mcp.servers`
+
+**Evidence:** `test: tests/test_mcp_registration.py::TestMerge::test_opencode_entry_lands_in_the_position_both_generations_read`
 
 ---
 
@@ -387,3 +419,117 @@ forward env NAMES faithfully. Opencode and Pi MUST remain file-edit only
 - GIVEN `env_keys` is empty and the requested scope is expressible (`gemini` for either scope, `codex` for user)
 - WHEN native delegation is invoked
 - THEN the native CLI SHALL be called and a zero exit SHALL short-circuit the file edit
+
+### Requirement: Host timeouts in the registered entry (MCP-REG-05) — Modified 2026-10-16, opencode-timeout
+
+`sofer mcp add` MUST write the host's per-request (tool call) and connect/startup deadlines into the
+`sofer` entry, using the key name and unit the adapter declares for that agent, so that neither the
+measured 16–32 s cold start of `sofer-mcp` (its heavy imports precede the `initialize` answer) nor a
+tool call measured in minutes fails against a host default and reports as a broken registration
+(issues #287, #296). The values MUST default to the `[tool.sofer]` keys
+`mcp_request_timeout_seconds` and `mcp_connect_timeout_seconds` — never to a literal in the call path
+(AGENTS.md rule 1) — MUST be overridable per invocation with `--timeout` / `--connect-timeout`, MUST
+be omitted entirely by `--no-timeout`, and MUST be rejected with exit 2 when non-positive.
+
+Per agent, the declared key, unit and budget decide the emitted shape, and the ADAPTER says which
+budget a key carries — never the caller and never a magnitude guess. **opencode** declares its single
+scalar `timeout` in **milliseconds** as its *connect* key, because that is the budget its schema and its
+docs give that key (fetching the server's tools, i.e. the cold start above), so `add` writes
+`timeout = <connect_seconds × 1000>` and SHALL NOT write the nested object other releases document for
+that key — a wrong shape there risks failing validation of the whole `mcp` block, and the sub-key name
+disagrees between those releases (issue #320). The emitted shape MUST be pinned by a test asserting the
+value, its type and its unit, not merely that a key is present.
+
+The timeout keys SHALL be namespaced under the `sofer` server name only. Writing them MUST NOT change
+any other server in the file, MUST keep the existing contracts (preserve unrelated keys, one `.bak`
+before the first mutation, atomic write, no write on `--dry-run`), and MUST still be idempotent:
+re-running with the same values MUST NOT write and MUST NOT create a `.bak`, while a changed
+`--timeout` alone MUST be detected as a change and MUST rewrite the entry.
+
+An agent whose entry schema accepts no timeout key SHALL keep an entry without one, and `add` SHALL
+name that on stderr rather than reporting a clean success — the same informational contract as the
+OpenCode env-drop warning (MCP-REG-03). The guard SHALL be "declares NEITHER key": an agent that
+declares a connect key but no per-request key SHALL NOT be named as carrying no timeout, and `add`
+SHALL NOT print that note beside a key it just wrote. No registered agent is in that state today —
+opencode was, until issue #320 gave it the key its schema accepts — and the clause keeps its force for
+any future host whose schema accepts none.
+
+Because neither `codex mcp add` nor `gemini mcp add` accepts a timeout flag, a registration carrying
+timeouts MUST decline native delegation with the reason `timeout` and fall back to the file edit
+(MCP-REG-04), and `--no-timeout` MUST restore the delegation path by restoring the pre-change entry
+shape.
+
+The value written SHALL be checkable against the machine that carries it: `sofer mcp doctor` (CLI-R15)
+MUST report this machine's own `initialize` round trip beside the key and the value `add` writes, and
+MUST name the flags that raise them. Like the two notes above it is informational and MUST NOT change
+the exit code (issue #322).
+
+#### Scenario: The entry carries each host's keys and unit
+
+- GIVEN an existing directory passed as `--cwd`
+- WHEN `sofer mcp add --agent <agent>` runs for `pi`, `hermes`, `codex` and `gemini`
+- THEN the written entry SHALL carry `timeout` / `connect_timeout` for `hermes`, `timeout` for `pi`,
+  `tool_timeout_sec` / `startup_timeout_sec` for `codex`
+- AND `gemini`'s single `timeout` key SHALL be expressed in milliseconds
+- AND every value SHALL come from the `[tool.sofer]` defaults unless a flag overrode it
+
+**Evidence:** `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_entry_carries_each_host_timeout_key_and_unit`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_opencode_writes_the_scalar_its_schema_accepts`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_add_writes_the_default_timeout_keys`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_timeout_flags_override_the_defaults`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_gemini_timeout_is_written_in_milliseconds`
+
+#### Scenario: A host without a timeout key is named, not silently skipped
+
+- GIVEN an agent whose adapter declares neither a per-request nor a connect timeout key (no registered agent is in that state today — `opencode` was, until issue #320 gave it the scalar its schema accepts)
+- WHEN `sofer mcp add` writes the entry
+- THEN the entry SHALL NOT carry a timeout key
+- AND stderr SHALL name that the entry carries none, with the reason
+- AND the exit code SHALL be unchanged
+- AND an agent declaring either of the two keys SHALL NOT be named that way, so the note is never printed beside a key that was just written
+
+**Evidence:** `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_a_host_with_no_timeout_key_is_still_named`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_dropped_timeout_note_needs_a_host_without_any_key`
+
+#### Scenario: Idempotent when unchanged, rewriting when the timeout changes
+
+- GIVEN a registration already carrying the configured timeouts
+- WHEN `sofer mcp add` runs again with the same values
+- THEN no write and no `.bak` SHALL occur
+- AND when it runs with a different `--timeout`
+- THEN the entry SHALL be rewritten with the new value and a `.bak` SHALL exist
+
+**Evidence:** `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_same_timeout_is_idempotent`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_changed_timeout_is_not_swallowed_by_the_idempotency_guard`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_changed_timeout_rewrites_the_entry_and_backs_up`
+
+#### Scenario: --no-timeout restores the pre-change shape
+
+- GIVEN `--no-timeout`
+- WHEN `sofer mcp add` writes the entry
+- THEN no timeout key SHALL appear
+- AND `--dry-run` SHALL still write nothing
+
+**Evidence:** `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_no_timeout_omits_the_keys`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_entry_without_timeouts_keeps_the_pre_change_shape`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_dry_run_with_timeouts_writes_nothing`
+
+#### Scenario: A non-positive timeout is refused before any write
+
+- GIVEN `--timeout 0`, `-1`, `abc` or `1.5`
+- WHEN `sofer mcp add` parses the arguments
+- THEN it SHALL exit 2 with a usage message naming the flag
+- AND no config file SHALL be written
+
+**Evidence:** `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_parser_rejects_a_non_positive_timeout`
+
+#### Scenario: Native delegation declines when it cannot reproduce the timeouts
+
+- GIVEN a native `codex` or `gemini` binary is available and a timeout will be written
+- WHEN `sofer mcp add` runs
+- THEN the delegation SHALL decline with the reason `timeout`, named on stderr
+- AND the file edit SHALL run and carry the keys
+- AND with `--no-timeout` the delegation SHALL proceed as before
+
+**Evidence:** `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_native_delegation_declines_with_the_timeout_reason`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_decline_reason_order_is_env_scope_timeout`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_timeouts_decline_native_delegation_naming_the_reason`, `test: tests/test_cli.py::TestMcpRegistrationTimeoutsCli::test_no_timeout_restores_native_delegation`, `test: tests/test_mcp_registration.py::TestRegistrationTimeouts::test_no_timeouts_leaves_delegation_available`
+
+#### Scenario: The written deadline can be checked against this machine — issue #322
+
+- GIVEN `sofer mcp doctor --agent <agent>` on a host whose entry carries a timeout key
+- WHEN it reports
+- THEN it SHALL name the same key and value `sofer mcp add` writes for that agent
+- AND an agent whose entry accepts no timeout key SHALL be named by the same note
+- AND the exit code SHALL be unchanged whatever the measurement
+
+**Evidence:** `test: tests/test_mcp_doctor.py::TestAgentRows::test_the_row_value_matches_what_mcp_add_would_write`, `test: tests/test_mcp_doctor.py::TestAgentRows::test_opencode_reports_its_scalar_connect_budget`, `test: tests/test_mcp_doctor.py::TestCommandHandler::test_a_measurement_over_budget_still_exits_zero`

@@ -86,6 +86,27 @@ AREAS: list[AreaParity] = [
         mcp_tools=("sofer_validate",),
         positionals={"config": "config"},
     ),
+    # #323: the metadata step's two surfaces. `--json` is CLI presentation of
+    # the same envelope the tool always returns, so it has no MCP parameter.
+    AreaParity(
+        cli_command="meta check",
+        mcp_tools=("sofer_meta_check",),
+        positionals={"config": "config"},
+        exempt_flags={
+            "json": "CLI presentation of the same envelope; the MCP tool always returns it",
+        },
+    ),
+    AreaParity(
+        cli_command="meta set",
+        mcp_tools=("sofer_meta_set",),
+        # One uniform --set KEY=VALUE flag reads every registry kind
+        # (maintainer decision D9), so it maps to the tool's `values` mapping.
+        flag_map={"set": "values", "dry_run": "dry_run"},
+        positionals={"config": "config"},
+        exempt_flags={
+            "json": "CLI presentation of the same envelope; the MCP tool always returns it",
+        },
+    ),
     AreaParity(
         cli_command="prepare",
         mcp_tools=("sofer_prepare",),

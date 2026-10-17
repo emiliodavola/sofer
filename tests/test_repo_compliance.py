@@ -1,5 +1,6 @@
 """Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
+import inspect
 import re
 from pathlib import Path, PurePosixPath
 
@@ -10,6 +11,7 @@ import sofer.config as config
 from sofer.model import DatasetConfig, FileEntry
 from sofer.publish import publish
 from sofer.repo_compliance import (
+    _MORE_INFO,
     _SIZE_CATEGORIES,
     ColumnSchema,
     _classify_parquet_read_failure,
@@ -21,7 +23,9 @@ from sofer.repo_compliance import (
     build_license_file,
     build_schema_report,
     build_schema_report_with_rows,
+    card_config_names,
     normalize_header,
+    schema_config_plan,
 )
 
 # ── ColumnSchema ──────────────────────────────────────────────────────────────
@@ -198,8 +202,8 @@ class TestBuildSchemaReport:
         )
         schema = build_schema_report(cfg)
         names = [s.name for s in schema]
-        # Only first occurrence kept; second duplicate skipped
-        assert names == ["value"]
+        # One entry per origin (#304)
+        assert names == ["value", "value"]
 
     def test_file_not_found_skipped_silently(self, tmp_path):
         """A missing CSV file should be skipped without raising."""
@@ -964,8 +968,8 @@ class TestBuildSchemaReportDisambiguationParquet:
 
         schema = build_schema_report(cfg, staging_dir=tmp_path)
         names = [s.name for s in schema]
-        # Only first occurrence kept
-        assert names == ["value"]
+        # One entry per origin (#304)
+        assert names == ["value", "value"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1407,6 +1411,230 @@ class TestMixedSchemaConfigs:
         rows = {d["config_name"]: d["splits"][0]["num_examples"] for d in fm["dataset_info"]}
         assert rows["persona"] == 10
         assert rows["hogar"] == config.CARD_FALLBACK_ROWS_PER_FILE
+
+
+# ── Per-origin schema relation map (RC-R05/R06/R23, issue #304) ──────────────
+
+_PERSONA_2010 = "PROV;ANO\n1;2010\n2;2010\n"
+_PERSONA_2022 = "PROV;ANO\n1;2022\n2;2022\n"
+_HOGAR_2010 = "PROV;HOGAR\n1;7\n2;8\n"
+
+
+def _csv_corpus(tmp_path, sheets: dict[str, str]) -> DatasetConfig:
+    """Write ``remote -> CSV text`` files under *tmp_path* and return the config.
+
+    Remotes keep a convertible suffix (``.csv``) because the schema collection
+    loop decides eligibility from ``entry.remote``, and ``planned_remotes`` then
+    maps each one to its normalized ``.parquet`` remote — the CSV-fallback
+    origin/remote split this suite exists to pin (RC-R05, #304).
+    """
+    entries = []
+    for remote, text in sheets.items():
+        local = tmp_path / PurePosixPath(remote).name
+        local.write_text(text, encoding="utf-8-sig")
+        entries.append(FileEntry(local=local, remote=remote, convert_to_parquet=True))
+    return DatasetConfig(name="census", repo_id="user/census", files=entries, _base_dir=tmp_path)
+
+
+class TestSchemaRelationMap:
+    """One entry per ``(origin, name)``; one origin resolution for grouping,
+    features and row counts (issue #304)."""
+
+    def test_same_schema_table_pair_shares_one_config(self, tmp_path):
+        """Two tables with an identical schema land in ONE config (#304).
+
+        persona_2010 and persona_2022 declare the same columns; hogar_2010
+        differs. Today persona_2022 gets no schema entry, is treated as an
+        empty signature, and is split into a third config of its own.
+        """
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        plan = schema_config_plan(cfg, schema)
+        assert plan is not None
+        assert [name for name, _remotes in plan] == ["persona_2010", "hogar_2010"]
+        assert plan[0][1] == ["persona_2010.parquet", "persona_2022.parquet"]
+        assert plan[1][1] == ["hogar_2010.parquet"]
+
+    def test_every_origin_carries_its_own_entries(self, tmp_path):
+        """All three origins contribute entries; a repeated name appears once
+        per origin (RC-R05)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        assert [c.origin for c in schema] == [
+            "persona_2010.csv",
+            "persona_2010.csv",
+            "hogar_2010.csv",
+            "hogar_2010.csv",
+            "persona_2022.csv",
+            "persona_2022.csv",
+        ]
+        assert [c.name for c in schema] == ["PROV", "ANO", "PROV", "HOGAR", "PROV", "ANO"]
+
+    def test_group_features_are_scoped_and_deduped(self, tmp_path):
+        """dataset_info.features resolves each group's declared ``.csv``
+        origins (S6) and lists a shared column once (RC-R23 D5)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        by_name = {d["config_name"]: d for d in fm["dataset_info"]}
+        assert set(by_name) == {"persona_2010", "hogar_2010"}
+        assert [f["name"] for f in by_name["persona_2010"]["features"]] == ["PROV", "ANO"]
+        assert [f["name"] for f in by_name["hogar_2010"]["features"]] == ["PROV", "HOGAR"]
+
+    def test_single_config_features_are_deduped(self, tmp_path):
+        """A single config fed by two same-schema tables lists each column once."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "persona_2022.csv": _PERSONA_2022},
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert [f["name"] for f in fm["dataset_info"]["features"]] == ["PROV", "ANO"]
+
+    def test_unreadable_remote_makes_the_corpus_ungroupable(self, tmp_path):
+        """An eligible-but-unassessed remote never invents a group: with two
+        known signatures the corpus is ungroupable (S4, D1)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "hogar_2010.csv": _HOGAR_2010},
+        )
+        ghost = tmp_path / "ghost.csv"
+        cfg.files.append(FileEntry(local=ghost, remote="ghost.csv", convert_to_parquet=True))
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        assert schema_config_plan(cfg, schema) is None
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert "configs" not in fm
+        assert "dataset_info" not in fm
+
+    def test_unreadable_remote_joins_the_sole_signature_group(self, tmp_path):
+        """With exactly one known signature the unassessed remote joins it
+        instead of creating a group of its own (S4, D1)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "persona_2022.csv": _PERSONA_2022},
+        )
+        cfg.files.append(
+            FileEntry(local=tmp_path / "ghost.csv", remote="ghost.csv", convert_to_parquet=True)
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        plan = schema_config_plan(cfg, schema)
+        assert plan is not None
+        assert len(plan) == 1
+        assert plan[0][1] == [
+            "persona_2010.parquet",
+            "persona_2022.parquet",
+            "ghost.parquet",
+        ]
+
+    def test_declared_non_schema_remote_keeps_its_own_group(self, tmp_path):
+        """``include_in_schema = false`` is a declared opt-out, not an unknown
+        signature: the file keeps its own config and stays in data_files
+        (RC-R03, RC-R12, D1)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {"persona_2010.csv": _PERSONA_2010, "hogar_2010.csv": _HOGAR_2010},
+        )
+        labels = tmp_path / "labels.csv"
+        labels.write_text("CODIGO;ETIQUETA\n1;uno\n", encoding="utf-8-sig")
+        cfg.files.append(
+            FileEntry(
+                local=labels,
+                remote="labels.csv",
+                convert_to_parquet=True,
+                include_in_schema=False,
+            )
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        plan = schema_config_plan(cfg, schema)
+        assert plan is not None
+        assert [name for name, _remotes in plan] == [
+            "persona_2010",
+            "hogar_2010",
+            "labels",
+        ]
+        card = build_dataset_card(cfg, schema=schema)
+        fm = _parse_frontmatter(card)
+        assert {c["config_name"] for c in fm["configs"]} == {
+            "persona_2010",
+            "hogar_2010",
+            "labels",
+        }
+        assert "labels.parquet" in card
+        assert "CODIGO" not in card
+
+    def test_data_fields_lists_every_table(self, tmp_path):
+        """RC-R06/RC-R21: one Data Fields table per origin, no table dropped and
+        a repeated name shown once per table that declares it (S2)."""
+        cfg = _csv_corpus(
+            tmp_path,
+            {
+                "persona_2010.csv": _PERSONA_2010,
+                "hogar_2010.csv": _HOGAR_2010,
+                "persona_2022.csv": _PERSONA_2022,
+            },
+        )
+        schema = build_schema_report(cfg, csv_delimiter=";")
+        card = build_dataset_card(cfg, schema=schema)
+        body = card.split("\n---\n", 1)[1]
+        assert body.count("</summary>") == 3
+        assert "Data Fields -- persona_2010" in body
+        assert "Data Fields -- persona_2022" in body
+        assert body.count("`PROV`") == 3
+
+    def test_empty_columns_note_dedups_repeated_names(self):
+        """Data Quality Notes names a repeated empty column once."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[FileEntry(local=Path("a.csv"), remote="a.parquet")],
+        )
+        schema = [
+            ColumnSchema(
+                name="VACIO",
+                dtype="numeric",
+                nullable=True,
+                example="",
+                unique=0,
+                missing=100.0,
+                origin="a.parquet",
+            ),
+            ColumnSchema(
+                name="VACIO",
+                dtype="numeric",
+                nullable=True,
+                example="",
+                unique=0,
+                missing=100.0,
+                origin="b.parquet",
+            ),
+        ]
+        card = build_dataset_card(cfg, schema=schema)
+        line = next(ln for ln in card.splitlines() if ln.startswith("- **Empty columns:**"))
+        assert line == "- **Empty columns:** `VACIO`"
 
 
 # ── 4. size_categories validation ────────────────────────────────────────────
@@ -2151,9 +2379,14 @@ class TestColumnOriginAttribution:
         )
         assert cs.origin == ""
 
-    def test_duplicate_name_keeps_first_occurrence_origin(self, tmp_path):
-        """A column name in two files yields ONE entry attributed to its first
-        source — with remotes differing from basenames (S9)."""
+    def test_duplicate_name_yields_one_entry_per_origin(self, tmp_path):
+        """A column name in two files yields ONE entry PER source, each carrying
+        its own origin — with remotes differing from basenames (S9, #304).
+
+        Returning a single first-occurrence entry destroyed the per-origin
+        attribution the config grouping needs: a file whose columns all repeat
+        an earlier file's contributed no entry at all.
+        """
         first = tmp_path / "first.csv"
         first.write_text("value\na\n", encoding="utf-8-sig")
         second = tmp_path / "second.csv"
@@ -2169,8 +2402,7 @@ class TestColumnOriginAttribution:
         )
         schema = build_schema_report(cfg)
         value_cols = [s for s in schema if s.name == "value"]
-        assert len(value_cols) == 1
-        assert value_cols[0].origin == "data/first.csv"
+        assert [s.origin for s in value_cols] == ["data/first.csv", "other/second.csv"]
 
     def test_multi_file_origins_are_remotes_not_basenames(self, tmp_path):
         """S8 (RC-R05): every origin is a declared remote, never a bare
@@ -3277,7 +3509,7 @@ class TestDuplicateWarningRouting:
             _base_dir=tmp_path,
         )
         schema = build_schema_report(cfg)
-        assert len(schema) == 1  # only first occurrence kept
+        assert len(schema) == 2  # one entry per origin (#304)
         captured = capsys.readouterr()
         assert "[!] Duplicate column" in captured.out
         assert "value" in captured.out
@@ -3300,8 +3532,8 @@ class TestDuplicateWarningRouting:
             _base_dir=tmp_path,
         )
         schema = build_schema_report(cfg)
-        # Only the first file's a, b, c, d → 4 columns + 5 unique columns = 9
-        assert len(schema) == 9
+        # Every file contributes its own entries (#304): 5 files x 5 columns = 25
+        assert len(schema) == 25
         captured = capsys.readouterr()
         # Summary mode because 4 > threshold 3
         assert "[i]" in captured.out
@@ -3628,3 +3860,335 @@ class TestReadCsvSampleConfiguredFallback:
         headers, rows = _read_csv_sample(f, delimiter=",", encoding="latin-1")
         assert headers == ["name"]
         assert rows == [["caf\u00e9"]]
+
+
+class TestCardConfigNames:
+    """#303: the dry-run warning names the configs the card actually emitted.
+
+    The names are computed inside ``build_dataset_card``, which returns only the
+    card text; reading them back from the artifact is the only way the caller
+    that prints the warning can name them without a second derivation that could
+    disagree with what shipped.
+    """
+
+    @staticmethod
+    def _write_card(tmp_path: Path, card: str) -> Path:
+        build = tmp_path / "build"
+        build.mkdir(exist_ok=True)
+        (build / "README.md").write_text(card, encoding="utf-8")
+        return build
+
+    def test_reads_the_names_a_real_card_emitted(self, tmp_path) -> None:
+        """Writer and reader agree, through the public card builder."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[
+                FileEntry(local=Path("persona.csv"), remote="persona.parquet"),
+                FileEntry(local=Path("hogar.csv"), remote="hogar.parquet"),
+            ],
+        )
+        card = build_dataset_card(cfg, schema=_mixed_schema())
+        build = self._write_card(tmp_path, card)
+
+        emitted = _parse_frontmatter(card)["configs"]
+        assert isinstance(emitted, list)
+        expected = [c["config_name"] for c in emitted]
+        assert card_config_names(build) == expected
+        assert len(expected) == 2
+
+    def test_single_config_card_names_its_one_config(self, tmp_path) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            files=[FileEntry(local=Path("a.csv"), remote="a.parquet")],
+        )
+        schema = [_col("ID", "a.parquet")]
+        build = self._write_card(tmp_path, build_dataset_card(cfg, schema=schema))
+        assert card_config_names(build) == ["census"]
+
+    def test_missing_card_returns_empty(self, tmp_path) -> None:
+        assert card_config_names(tmp_path / "absent") == []
+
+    def test_valid_frontmatter_without_configs_returns_empty(self, tmp_path) -> None:
+        """An ungroupable corpus emits no `configs` block (S2/D1)."""
+        build = self._write_card(tmp_path, "---\npretty_name: x\n---\n\n# Card\n")
+        assert card_config_names(build) == []
+
+    def test_unfenced_card_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "# Card\n\nNo frontmatter here.\n")
+        assert card_config_names(build) == []
+
+    def test_prose_before_the_fence_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "junk\n---\nconfigs: []\n---\n")
+        assert card_config_names(build) == []
+
+    def test_malformed_yaml_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "---\nconfigs: [unclosed\n---\n")
+        assert card_config_names(build) == []
+
+    def test_non_mapping_frontmatter_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "---\n- a\n- b\n---\n")
+        assert card_config_names(build) == []
+
+    def test_entry_without_a_string_config_name_returns_empty(self, tmp_path) -> None:
+        """A guess is worse than the placeholder: name nothing, fall back."""
+        for configs in ('[{"data_files": []}]', '[{"config_name": 7}]', '[{"config_name": ""}]'):
+            build = self._write_card(tmp_path, f"---\nconfigs: {configs}\n---\n")
+            assert card_config_names(build) == [], configs
+
+    def test_configs_that_is_not_a_list_returns_empty(self, tmp_path) -> None:
+        build = self._write_card(tmp_path, "---\nconfigs: {a: 1}\n---\n")
+        assert card_config_names(build) == []
+
+
+class TestCardSectionKeys:
+    """#291: the five sentinel sections become fillable [meta] keys.
+
+    A config with every ROTW field filled still shipped a card full of
+    `[More Information Needed]` / `[Not specified]`, because those sections had
+    no key at all and no tool argument that could reach them.
+    """
+
+    @staticmethod
+    def _filled() -> DatasetConfig:
+        """A config with every ROTW field the card reads set to a real value.
+
+        `language` and `collection_method` are not among the sections #291 names
+        (they already had keys); they are set here because the issue's premise is
+        "a config with every ROTW field filled", and a fixture that leaves one
+        unset would prove the wrong thing.
+        """
+        return DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            description="Household census",
+            license="MIT",
+            source="Example Org",
+            tags=["census"],
+            language=["en"],
+            collection_method="Online survey",
+            citation="@misc{census2025, title={Census}}",
+            repository="https://github.com/example/census",
+            direct_use="Tabular benchmarking.",
+            out_of_scope_use="Not for individual-level inference.",
+            bias_risks_limitations="Rural districts are under-sampled.",
+            contact="data@example.org",
+        )
+
+    def test_a_fully_filled_config_emits_no_sentinel(self) -> None:
+        """The issue's acceptance: nothing left `[More Information Needed]`.
+
+        Curation Rationale is filled here through `[meta] study_design` (a file
+        whose content the caller resolves and passes). Since #324 that section
+        also has a free-text key of its own; `TestCurationRationaleKey` covers
+        that path, and this test keeps the file path working.
+        """
+        card = build_dataset_card(
+            self._filled(), schema=[], study_design_content="Curation rationale text."
+        )
+        assert _MORE_INFO not in card
+        assert "[Not specified]" not in card
+        assert "Curation rationale text." in card
+
+    def test_curation_rationale_needs_study_design(self) -> None:
+        """The #291 fixture declares neither fill path for that one section.
+
+        `self._filled()` sets the five #291 keys only, so neither
+        `study_design_content` nor `[meta] curation_rationale` is set and one
+        sentinel survives — and only that one.
+        """
+        card = build_dataset_card(self._filled(), schema=[])
+        assert card.count(_MORE_INFO) == 1
+        assert "### Curation Rationale\n\n" + _MORE_INFO in card
+        assert "[Not specified]" not in card
+
+    def test_each_key_fills_its_own_section(self) -> None:
+        card = build_dataset_card(self._filled(), schema=[])
+        assert "https://github.com/example/census" in card
+        assert "Tabular benchmarking." in card
+        assert "Not for individual-level inference." in card
+        assert "Rural districts are under-sampled." in card
+        assert "data@example.org" in card
+
+    def test_repository_falls_back_to_the_source(self) -> None:
+        """Option 3 of the issue: the source is already the best available value."""
+        cfg = DatasetConfig(name="census", repo_id="user/census", source="Example Org — Data Team")
+        card = build_dataset_card(cfg, schema=[])
+        assert "- **Repository:** Example Org — Data Team" in card
+
+    def test_a_declared_repository_beats_the_source(self) -> None:
+        card = build_dataset_card(self._filled(), schema=[])
+        assert "- **Repository:** https://github.com/example/census" in card
+        assert "- **Repository:** Example Org" not in card
+
+    def test_unset_keys_keep_their_sentinel(self) -> None:
+        """The spec's placeholder rule is unchanged for an unfilled section."""
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=Path("a.csv"), remote="a.parquet")],
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert card.count(_MORE_INFO) == 4
+        assert "[Not specified]" in card
+
+    def test_multiline_values_render_verbatim(self) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            direct_use="Line one.\n\nLine two with a - dash and a # hash.",
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert "Line one.\n\nLine two with a - dash and a # hash." in card
+
+    def test_whitespace_only_values_keep_their_sentinel(self) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            direct_use="   \n  ",
+            contact=" ",
+            bias_risks_limitations="\t",
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert _MORE_INFO in card
+        assert "[Not specified]" in card
+
+    def test_the_sentinel_is_the_single_shared_constant(self) -> None:
+        """Four sites, one constant (AGENTS.md rule 4)."""
+        source = inspect.getsource(build_dataset_card)
+        assert source.count('"[More Information Needed]"') == 0
+        assert source.count("_MORE_INFO") == 4
+
+
+class TestCurationRationaleKey:
+    """#324: `[meta] curation_rationale` fills the section without a file.
+
+    Curation Rationale was the one card section whose only fill path was
+    `[meta] study_design` — a *path* to a markdown file — while every
+    neighbouring section takes a plain multi-line string. A user with three
+    paragraphs of rationale and nothing else to say had to create a file.
+
+    The key is additive: a config that declares neither `curation_rationale`
+    nor `study_design` is unchanged, and `study_design` keeps working alone.
+    """
+
+    @staticmethod
+    def _section(card: str) -> str:
+        """Return the Curation Rationale section body (between headings)."""
+        return card.split("### Curation Rationale")[1].split("###")[0]
+
+    def test_the_key_fills_the_section_without_a_file(self) -> None:
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="Collected by stratified random sampling.",
+        )
+        card = build_dataset_card(cfg, schema=[])
+        section = self._section(card)
+        assert "Collected by stratified random sampling." in section
+        assert _MORE_INFO not in section
+
+    def test_the_key_wins_over_the_study_design_file(self) -> None:
+        """Precedence: key, then file, then sentinel (issue #324 option 1)."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="Inline rationale.",
+            study_design="design.md",
+        )
+        card = build_dataset_card(cfg, schema=[], study_design_content="From the file.")
+        section = self._section(card)
+        assert "Inline rationale." in section
+        assert "From the file." not in section
+
+    def test_a_whitespace_only_key_falls_back_to_the_file(self) -> None:
+        """A value that is only whitespace is not content (spec §2.1.2)."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="  \n\t ",
+        )
+        card = build_dataset_card(cfg, schema=[], study_design_content="From the file.")
+        section = self._section(card)
+        assert "From the file." in section
+        assert _MORE_INFO not in section
+
+    def test_a_whitespace_only_key_alone_keeps_the_sentinel(self) -> None:
+        cfg = DatasetConfig(name="census", repo_id="user/census", curation_rationale=" \n ")
+        card = build_dataset_card(cfg, schema=[])
+        assert "### Curation Rationale\n\n" + _MORE_INFO in card
+
+    def test_neither_source_keeps_the_sentinel(self) -> None:
+        cfg = DatasetConfig(name="census", repo_id="user/census")
+        card = build_dataset_card(cfg, schema=[])
+        assert "### Curation Rationale\n\n" + _MORE_INFO in card
+
+    def test_declaring_study_design_alone_is_unchanged(self) -> None:
+        """The only fill path that existed before #324 still behaves as it did."""
+        cfg = DatasetConfig(name="census", repo_id="user/census", study_design="design.md")
+        card = build_dataset_card(cfg, schema=[], study_design_content="From the file.")
+        assert "### Curation Rationale\n\nFrom the file." in card
+
+    def test_an_undeclared_study_design_with_a_key_is_enough(self) -> None:
+        """The key needs no `study_design` path to be declared alongside it."""
+        cfg = DatasetConfig(
+            name="census",
+            repo_id="user/census",
+            curation_rationale="Only the key is declared.",
+            study_design=None,
+        )
+        card = build_dataset_card(cfg, schema=[])
+        assert "Only the key is declared." in self._section(card)
+
+
+class TestCardSectionKeysFromToml:
+    """The keys are read from `[meta]`, so a TOML can carry them."""
+
+    def test_meta_keys_are_parsed(self, tmp_path: Path) -> None:
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            "[dataset]\n"
+            'name = "census"\n'
+            'repo_id = "user/census"\n'
+            "\n"
+            "[meta]\n"
+            'repository = "https://github.com/example/census"\n'
+            'direct_use = """\nMulti\nline.\n"""\n'
+            'out_of_scope_use = "None."\n'
+            'bias_risks_limitations = "Sampling bias."\n'
+            'contact = "data@example.org"\n'
+            'curation_rationale = """\nWhy this dataset exists.\n"""\n'
+            "\n"
+            "[[file]]\n"
+            'local = "a.csv"\n'
+            'remote = "a.parquet"\n',
+            encoding="utf-8",
+        )
+        cfg = DatasetConfig.from_toml(toml)
+        assert cfg.repository == "https://github.com/example/census"
+        assert cfg.direct_use.strip() == "Multi\nline."
+        assert cfg.out_of_scope_use == "None."
+        assert cfg.bias_risks_limitations == "Sampling bias."
+        assert cfg.contact == "data@example.org"
+        assert cfg.curation_rationale.strip() == "Why this dataset exists."
+
+    def test_absent_meta_keys_default_to_empty(self, tmp_path: Path) -> None:
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            "[dataset]\n"
+            'name = "census"\n'
+            'repo_id = "user/census"\n'
+            "\n"
+            "[[file]]\n"
+            'local = "a.csv"\n'
+            'remote = "a.parquet"\n',
+            encoding="utf-8",
+        )
+        cfg = DatasetConfig.from_toml(toml)
+        assert cfg.repository == ""
+        assert cfg.direct_use == ""
+        assert cfg.out_of_scope_use == ""
+        assert cfg.bias_risks_limitations == ""
+        assert cfg.contact == ""
+        assert cfg.curation_rationale == ""

@@ -199,6 +199,8 @@ build_dir = "build"   # prepare output directory (default: "build")
 description = "Short description"
 license = "MIT"
 tags = ["tag1", "tag2"]
+# Esas tres son un ejemplo, no el conjunto completo: todas las claves [meta]
+# que lee la card están listadas en openspec/specs/repo-compliance/spec.md §2.1.1.
 
 # Every file or directory to publish gets its own [[file]] section.
 # Los archivos fuente viven en raw/; scan los copia a cache/ (cache/ es lo que lee prepare).
@@ -333,8 +335,11 @@ canalización.
 | --- | --- |
 | `init <name>` | Genera una plantilla `.toml` lista para editar con placeholder Windows-safe `[[file]] local = "raw/example.csv"` (NTFS valido, `ntpath.splitdrive` → `""`, sin colon). Requiere `--user USUARIO` (usuario/org HF para `repo_id "USUARIO/<name>"`); un `--user` faltante sale con 2, y los valores placeholder (`YOUR_USER`) o inseguros salen con 1 antes de cualquier escritura — la línea de éxito imprime el `config_path` absoluto. |
 | `scan [config.toml]` | MUEVE archivos soportados sueltos a `raw/<relative>` preservando árbol (`mkdir -p raw/`, `check_raw_collisions` antes de cualquier movimiento, `--dry-run` imprime `-> raw/<rel>`, `--force`/`[y/N]` gate, atómico), luego aplana `raw/DPTO.csv` → `cache/DPTO.csv`, registra en TOML y copia a `cache/`. Flags: `--dry-run`, `--force`, `--ext` (filtro repetible). |
-| `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto, debe ser un directorio existente), `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`). Prefiere `mcp add` nativo cuando está disponible. |
+| `meta check <config.toml>` | Reporta los campos `[meta]` que todavía llevan un placeholder de `init` (vacíos, o que empiezan con `TODO`, `YOUR_`, `example` — `meta_placeholder_prefixes`). Read-only e informativo: el código de salida es 0 sin importar qué reporte, igual que el warning de `sofer validate` que refleja; solo un config ilegible sale con 1. `--json` emite el objeto de estado estable. |
+| `meta set <config.toml> --set KEY=VALUE` | Escribe claves `[meta]` en el TOML del dataset preservando cada otra clave, comentario y tabla. `--set` es repetible y lee el valor según el tipo de la clave: texto verbatim, lista como ítems separados por comas (`--set tags=a,b`), flag como `true`/`false`. `--dry-run` reporta el plan y no escribe nada; `--json` emite el objeto de estado estable. La escritura es atómica, una negativa no escribe nada, y re-ejecutar con los valores que el archivo ya tiene no escribe nada. Hay 38 claves configurable — todas las claves `[meta]` que la canalización lee. |
+| `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Registra `sofer-mcp` con el/los agente(s) seleccionado(s). Flags: `--scope user\|project`, `--cwd PATH` (absoluto, debe ser un directorio existente), `--timeout SECONDS`, `--connect-timeout SECONDS`, `--no-timeout`, `--dry-run`. Idempotente, preserva otros, respalda a `.bak`, escritura atómica, env por agente (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) y timeouts de host por agente. Prefiere `mcp add` nativo cuando está disponible. |
 | `mcp remove --agent <...\|all>` | Elimina `sofer-mcp` del/los agente(s) seleccionado(s). Flags: `--scope`, `--dry-run`. Idempotente, preserva otros, respalda, atómico, prefiere `mcp remove` nativo. |
+| `mcp doctor [--agent <...\|all>] [--json]` | Mide el arranque en frío **real**: lanza `sofer-mcp` (o el entry point de módulo cuando el console script no está en `PATH`) y cronometra el round trip `initialize` por stdio, imprimiéndolo junto a la clave de entrada por agente y el valor que `mcp add` escribe ahí. Presupuesto: `[tool.sofer] mcp_connect_timeout_seconds`. Informativo — exceder el presupuesto nunca cambia el código de salida, porque una máquina lenta no es un registro roto. No lee ni escribe nada. |
 | `profile <dataset>` | Inspecciona un archivo de datos en modo solo lectura (CSV, TSV, Parquet, Excel, JSONL) y escribe un `metadata.yaml` que documenta el esquema detectado, los tipos semánticos por columna y el posible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` o `__<sanitized>.metadata.yaml` por hoja para `.xlsx` N>1, `PurePath.suffixes`, sanitización + `seen _{n}`, colisión normalizada `__+`→`_` `ValueError` con `::sheet`), `--force` (guardia de sobreescritura), `--config` (ruta TOML para batch), `--delimiter D` / `--encoding E` (dialecto CSV explícito, gana sobre la config). `--output` relativo anclado al dir TOML (Option B); `cache/` intacto con `--output`. |
 | `render <package>` | Renderiza un `README.md` anotado con estados a partir de `metadata.yaml` (el archivo en sí o el directorio que lo contiene). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` o `__<sanitized>.README.md` por hoja para `.xlsx` N>1 con misma paridad sanitización/dedup/colisión, omite `metadata.yaml` faltante), `--force`, `--config`. |
 | `codebook <file>` | Genera un codebook en markdown para un archivo. Soporta CSV, TSV, Parquet, Excel, JSONL. Flags: `-o/--output FILE`, `--max-sample N`, `--delimiter D` / `--encoding E` (dialecto CSV explícito, gana sobre la config). |
@@ -365,10 +370,14 @@ canalización.
 | `--ext <ext>` | `scan` | Filtra `scan` a extensiones específicas (repetible, p. ej. `--ext csv --ext jsonl`); si se omite, todos los formatos soportados. |
 | `--user USUARIO` | `init` | Usuario/org HF para `repo_id` (p. ej. `--user myuser` → `repo_id "myuser/<name>"`); obligatorio — un `--user` faltante sale con 2, los valores placeholder (`YOUR_USER`) o inseguros salen con 1, sin escribir archivos. |
 | `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Escribe la salida en `DIR` en lugar de la ubicación por defecto (`[dataset] build_dir` para `prepare`; para `codebook`, `-o`/`--output` es la ruta del archivo de salida, por defecto stdout). `publish --clean` respeta `--output` solo para `build`; `cache/` siempre en `cfg._base_dir/cache`. |
-| `--agent` / `--scope` | `mcp add`, `mcp remove` | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all> [--scope user\|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` igual sin `--cwd`. |
+| `--agent` / `--scope` | `mcp add`, `mcp remove`, `mcp doctor` | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all> [--scope user\|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` igual sin `--cwd`; `doctor --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` restringe el reporte a la clave de entrada de un agente (no acepta `--scope`). |
 | `--cwd PATH` | `mcp add` | `cwd` absoluto para el servidor; debe ser un directorio existente (si no, sale con 1 indicando la ruta resuelta). Un árbol fuera del home y del cwd del proceso se acepta con un warning que lo nombra. |
-| `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
+| `--user-config PATH` | `mcp add`, `mcp remove` | Archivo de config de scope user **explícito** para el agente elegido; gana sobre el override de env del adapter (Pi: `PI_CODING_AGENT_DIR`, codex: `CODEX_HOME`) y sobre el default de `Path.home()`. Rechazado con `--agent all` — una ruta no puede nombrar cuatro archivos distintos. |
 | `--dry-run` (mcp) | `mcp add`, `mcp remove` | Previsualiza sin escribir — no se crea archivo ni `.bak`. |
+| `--timeout SECONDS` | `mcp add` | Deadline por request (llamada a tool) escrita en la entrada, en segundos. Default: `[tool.sofer] mcp_request_timeout_seconds`. Un valor no positivo sale con código 2. |
+| `--connect-timeout SECONDS` | `mcp add` | Deadline de conexión inicial / arranque en frío escrita en la entrada, en segundos. Default: `[tool.sofer] mcp_connect_timeout_seconds`. |
+| `--no-timeout` | `mcp add` | Omite las claves de timeout, restaurando la forma de entrada previa a #287/#296 y con ella la delegación nativa de codex/gemini — el único camino en el que sofer no reescribe el archivo de config, porque una edición TOML o JSON reescribe el documento entero (una edición TOML puede borrar comentarios). |
+| `--json` | `mcp doctor` | Emite la línea de estado legible por máquina como JSON estable (CLI-R10): `ok`, `exit_code` y `message`, más `measured_ms`, `entry_point`, `connect_timeout_seconds`, `exceeds_budget`, `guidance` y una fila por agente. |
 
 ### Solución de problemas de subida a HF
 
@@ -636,8 +645,9 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 15 callables de herramientas (`sofer_validate`,
-`sofer_prepare`, `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
+El servidor expone 17 callables de herramientas (`sofer_validate`,
+`sofer_meta_check`, `sofer_meta_set`, `sofer_prepare`,
+`sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
 `sofer_auth_status`, `sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
@@ -659,7 +669,10 @@ instantánea de postura del servidor (`approval_configured`, `phrase_source`,
 
 ```
 Phase 0 (Fase 0) Bootstrap [condicional: REQUERIDO si greenfield — sin TOML / [[file]] vacío]
-  sofer_init → sofer_scan_dry_run / sofer_scan_apply
+  sofer_init → sofer_scan_dry_run / sofer_scan_apply → sofer_meta_set
+  Paso de metadata (entre bootstrap y Fase 1): sofer_meta_check reporta los
+  placeholders, sofer_meta_set escribe [meta] description, license, source, tags
+  y cualquier otra clave del card
 Fase 1 Build: sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all
 Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → sofer_publish_confirm
 ```
@@ -672,13 +685,15 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | ------ | ------------- | ------------ | ------------- |
 | 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Bootstrap greenfield; crea TOML + `raw/` (Windows: `cwd` debe permanecer bajo la raíz vía `_contained_path`; `raw/example.csv` es NTFS-safe). |
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force` | Fase 0 preview/apply tras `init`. |
+| M | `sofer_meta_check` | `config` | Lee el estado de metadata sin correr el validador; `readOnlyHint:true`. Reporta el mismo warning que imprime `sofer_validate`. |
+| M | `sofer_meta_set` | `config`, `values`, `dry_run` | Escribe `[meta]` antes de la Fase 1 (la única vía por MCP): description/license/source/tags, más cualquier otra clave del card. Preserva cada otra clave y comentario; `build_stale` nombra un árbol `build/` anterior a la escritura. Llamada sin `values` no escribe nada y devuelve una continuación pidiéndolos. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | Tras validate; escribe Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | Tras prepare; codebooks en lote. |
 | 4a | `sofer_profile` | `dataset`, `output_dir`, `force`, `delimiter`, `encoding` | Triage de un archivo (`assess_dataset`). |
-| 4b | `sofer_profile_all` | `config`, `output_dir`, `delimiter`, `encoding` | Fase 1 paso 4 en lote (`profiles/`). |
+| 4b | `sofer_profile_all` | `config`, `output_dir`, `delimiter`, `encoding` | Fase 1 paso 4 en lote (`cache/profiles/`). |
 | 5a | `sofer_render` | `package`, `output_dir`, `force` | Render de un archivo tras `sofer_profile`. |
-| 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`renders/`); requiere `profile_all`. |
+| 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`cache/renders/`); requiere `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` previsualiza; **STOP** antes de confirm. |
 | 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Solo tras aprobación humana. |
 | * | `sofer_auth_status` | `config` | Preflight sin publicar; `readOnlyHint:true`. |
@@ -748,7 +763,7 @@ Ubicaciones y formas por agente:
 | ------- | ------- | ------ | ------- |
 | opencode | `--scope project` | `./opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
 | opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
-| codex | `--scope user` | `~/.codex/config.toml` | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
+| codex | `--scope user` | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
 | codex | `--scope project` | `./.codex/config.toml` | same |
 | gemini | `--scope user` | `~/.config/gemini/settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"$HF_TOKEN",…}}` |
 | gemini | `--scope project` | `./.gemini/settings.json` | same |
@@ -757,6 +772,66 @@ Ubicaciones y formas por agente:
 | hermes | `--scope user` | `$HERMES_HOME/config.yaml` (por defecto `~/.hermes/config.yaml`) | `mcp_servers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
 | hermes | `--scope project` | el mismo archivo de scope user — hermes no tiene config de proyecto, y la sustitución se nombra en stderr | same |
 
+- **Timeouts de host (issues #287, #296).** `sofer mcp add` también escribe en la entrada `sofer` el
+  deadline **por request** y el de **conexión/arranque** del host, para que dos fallos dejen de
+  parecer una registración rota. Los dos son reales: `sofer-mcp` importa pandas, pyarrow, datasets y
+  fastmcp antes de poder responder `initialize`, así que un **primer arranque tras instalar o
+  actualizar es más lento que uno en caliente**, y cuando excede el deadline de conexión del host este
+  reporta `Connection failed … timed out` — que se lee igual que una registración rota. Medí ese primer
+  arranque **en tu máquina** con `sofer mcp doctor`, que lo imprime junto a la clave y el valor
+  escritos acá y nombra los flags que los suben; el valor escrito sale de `[tool.sofer]`, nunca de un
+  número congelado en este documento. Una llamada a un tool sobre un corpus real corre minutos
+  (`sofer_prepare` medido ~680 s, `sofer_codebook_all` ~100 s sobre 3.2 GB / 66.2 M filas) contra un
+  default documentado de 60 s, donde el servidor **termina, escribe sus artefactos y pierde solo la
+  respuesta** — así que quien llama no puede distinguir una falla de un éxito que no escuchó. El
+  nombre de la clave y la unidad son por agente:
+
+  | Agente | Clave por request | Clave de conexión/arranque | Unidad | Default del host |
+  | ------- | ------- | ------- | ------- | ------- |
+  | pi | `timeout` | — (conecta en background) | segundos | 60, lo resetean las progress notifications |
+  | hermes | `timeout` | `connect_timeout` | segundos | 300 / 60 |
+  | codex | `tool_timeout_sec` | `startup_timeout_sec` | segundos | 60 / 10 |
+  | gemini | `timeout` | — (la misma clave cubre el discovery) | **milisegundos** | 600 000 |
+  | opencode | — | `timeout` | **milisegundos** | 5 000 para el fetch de tools; 30 000 en el código |
+
+  Los defaults salen de `[tool.sofer] mcp_request_timeout_seconds` (900) y
+  `mcp_connect_timeout_seconds` (120); se overridean por invocación con `--timeout` / `--connect-timeout`,
+  o se omiten ambas claves con `--no-timeout`. Escribir un timeout es además la razón por la que la
+  delegación nativa de codex/gemini ahora declina con la razón `timeout` — ningún `<agente> mcp add`
+  acepta un flag de timeout — y `--no-timeout` es lo que restaura ese camino. La declinación nombra ese
+  flag en stderr, pero solo cuando `timeout` es la razón *única*: con una clave de env presente las razones
+  son `env forwarding, timeout` y el flag limpia solo la segunda, así que nombrarlo ahí mandaría al usuario
+  a un flag que no cambia nada. El intercambio no se evita haciendo las dos cosas — escribir los timeouts
+  después de una escritura nativa pasaría igual por el writer de sofer, y para codex eso es una reescritura
+  `tomli_w` del documento entero, que es justo lo que `--no-timeout` evita. **opencode** era la excepción,
+  y ya no lo es: recibe `timeout` como un escalar único en **milisegundos** que lleva el presupuesto de
+  *conexión* — la forma que acepta el schema del layout que escribe este comando, y el presupuesto que esa
+  clave documenta (el fetch de las tools del servidor, o sea el arranque en frío que duele). Nunca se
+  escribe como el objeto anidado que documentan algunos releases, porque eso arriesgaría invalidar todo el
+  bloque `mcp` por un nombre de subclave que difiere entre esos releases. Un host cuya entrada no acepta
+  ninguna clave de timeout se sigue nombrando en stderr en lugar de inventarle una. La **posición** de la
+  entrada de opencode no necesita esa nota, y saber por qué vale más que la clave que la acompaña: un
+  opencode v2 lee sus servidores desde `mcp.servers.<name>` mientras que este comando escribe la entrada
+  en `mcp.<name>` — la posición que declara el schema de v1 y que v2 sigue leyendo, porque v2 normaliza la
+  forma plana de V1 en memoria (decodifica cada `mcp.<name>` con el schema de servidor V1, la migra y la
+  fusiona en `mcp.servers`, sin reescribir tu archivo) y su propia página de migración promete que la
+  configuración V1 soportada sigue funcionando sin conversión. Una entrada sirve para ambas generaciones;
+  escribir `mcp.servers.<name>` acá sería el defecto real, porque ahí es donde un opencode estable no mira.
+- **Las llamadas largas resetean su propio deadline.** Cada tool largo (`sofer_prepare`,
+  `sofer_codebook_all`, `sofer_profile_all`, `sofer_render_all`, `sofer_publish_confirm`) reanuncia
+  progreso mientras corre, y eso es lo que resetea el timeout por request del host — así un tool largo
+  también sobrevive en un host cuyo timeout no se puede configurar. Sus descripciones en `tools/list`
+  lo dicen, y nombran la duración esperada.
+- **Quién completa `[meta]` (issue #288).** `sofer init` escribe un bloque `[meta]` con valores
+  placeholder. Completarlos es un **paso obligatorio entre el bootstrap y la Phase 1**, y es el único
+  paso que comparten un humano y un agente: en una corrida vía MCP el **agente** completa lo que los
+  datos pueden determinar (description, tags), y el **humano** aporta lo que no (license, source).
+  `sofer_meta_check` reporta el estado a demanda y `sofer_meta_set` es la escritura que un tool
+  puede hacer (issue #323) — antes de que existieran, el paso era solo prosa, porque un cliente MCP no
+  tiene forma de escribir un archivo.
+  `sofer_validate` también avisa mientras algún valor de `[meta]` siga vacío o empiece con `TODO`,
+  `YOUR_` o `example`, así el paso llega al agente por el envelope en lugar de aparecer recién en la
+  card generada. El aviso nunca cambia el código de salida, y `sofer_meta_check` tampoco.
 - **Resolución del scope user:** las rutas de abajo son la resolución **por defecto** de sofer bajo
   `Path.home()`. Agentes como opencode leen su config del home de **cuenta** del sistema, así que cuando
   los dos difieren la entrada puede terminar en un archivo que el agente nunca lee. Pasá

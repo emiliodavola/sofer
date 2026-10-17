@@ -20,7 +20,7 @@ Publish any dataset to Hugging Face Hub with built-in validation and data-sharin
 
 ```
 src/sofer/
-├── cli.py               # argparse CLI, 10 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure
+├── cli.py               # argparse CLI, 11 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, meta, mcp, report-failure
 ├── model.py             # DatasetConfig dataclass, TOML loading, config validation
 ├── config.py            # Tool-wide defaults from [tool.sofer] in pyproject.toml
 ├── checks.py            # DatasetValidator — data integrity checks

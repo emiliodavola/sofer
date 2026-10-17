@@ -21,7 +21,8 @@ skipped without I/O, without accumulator updates, and without ``ran_checks``
 entries.  ``_check_encoding_validation`` enforces UTF-8-only
 (``utf-8-sig → utf-8``) — ``latin-1``/``cp1252`` are not retried; a
 ``ValueError`` from :func:`sofer._csv_reader.stream_csv` remains the safety
-net for mislabeled ``.csv`` files containing binary bytes.
+net for mislabeled ``.csv`` files containing binary bytes.  The probe reads at
+most ``config.PROBE_CHUNK_BYTES`` of the file it judges (issue #326).
 """
 
 from __future__ import annotations
@@ -673,12 +674,19 @@ class QualityValidator:
                 )
 
     def _check_encoding_validation(self, resolved: Path) -> None:
-        """Probe the first 8 KB with ``utf-8-sig → utf-8``.
+        """Probe the first ``config.PROBE_CHUNK_BYTES`` with ``utf-8-sig → utf-8``.
 
         Non-eligible paths return immediately with no finding and no
         ``ran_checks`` mutation (defensive guard for direct calls).  Only
         text-eligible files (``.csv``/``.tsv``) are probed; ``latin-1``/
         ``cp1252`` are not retried.
+
+        The prefix is read with a **bounded** read (issue #326): the probe only
+        answers a question about the file's first ``probe_chunk_bytes``, so
+        materializing the file to slice it made the pass's peak follow the
+        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.  The
+        bytes judged are the same ones ``read_bytes()[:n]`` judged, including
+        the truncation of a multi-byte sequence that straddles the boundary.
         """
         if not is_text_eligible(resolved):
             return
@@ -686,9 +694,10 @@ class QualityValidator:
             return
         self._ran_checks.add("encoding_validation")
         sev = self._checks["encoding_validation"]["severity"]
-        # Read first 8 KB and try each encoding
+        # Read the first probe-sized chunk and try each encoding
         try:
-            chunk = resolved.read_bytes()[: config.PROBE_CHUNK_BYTES]
+            with resolved.open("rb") as fh:
+                chunk = fh.read(config.PROBE_CHUNK_BYTES)
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
             return
