@@ -81,11 +81,15 @@ report/manifest so it is auditable after the fact."
   manifest, so the intent is auditable after the fact (S6). The issue offers both forms
   ("`allow_public = true`, or a required `public_reason`"); the reason form carries S2's "so the intent
   lives in the config and in the report" without a second key per bit.
-- **D2 — the model default flips to `confidential = True`.** The init template does (S5), and letting
-  the dataclass default disagree with the template would leave every hand-written TOML on the old
-  permissive default. This is a breaking change for existing configs — they must either declare
-  `confidential = true` (no-op) or add `confidentiality_reason` — and it is documented as such in the
-  PR body and both READMEs (rule 12, pre-1.0 minor).
+- **D2 — the default changes in the template, not in the model, and an explicit opt-out carries the
+  reason.** The issue asks for `confidential = true` **in the init template** (S5) and for *explicit*
+  opt-outs to require an authorization value (S2). Flipping the dataclass default instead would silently
+  re-mark every existing TOML and force `acknowledge_confidential` on every publish — a global posture
+  change nobody asked for, whose blast radius is every documented chain. So: the template writes `true`;
+  an explicit `[meta] confidential = false` requires a `confidentiality_reason`; a TOML that never
+  mentions the key keeps its own default and the validator surfaces that absence as a warning naming
+  both ways to say it. `[dataset] private` is already fail-closed by default, and an explicit `false`
+  requires `public_reason`.
 - **D3 — the settings write uses the SDK, with feature detection.** `HfApi.update_repo_settings` exists
   in the declared floor; the code calls it only when present and otherwise fails closed naming the
   required `huggingface-hub` upgrade, so the "route is absent" case degrades into a named action instead

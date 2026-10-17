@@ -19,6 +19,7 @@ import yaml
 from conftest import run_cli
 
 from sofer import _toml, cli, config, mcp_registration
+from sofer.model import DatasetConfig
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -1689,6 +1690,7 @@ class TestSubprocessBoundary:
             "\n"
             "[meta]\n"
             "confidential = false\n"
+            'confidentiality_reason = "fixture: nothing sensitive"\n'
             'readme = "custom.md"\n'
             "\n"
             "[[file]]\n"
@@ -3621,3 +3623,22 @@ class TestMetaHelpSurface:
         assert set_help.returncode == 0
         for fragment in ("--set", "--dry-run", "--json", "KEY=VALUE", "[meta]"):
             assert fragment in set_help.stdout
+
+
+class TestInitTemplatePosture:
+    """#338: the template states the posture and how to authorize a change."""
+
+    def test_template_marks_confidential_and_documents_the_opt_out(self) -> None:
+        text = cli._INIT_TEMPLATE.format(name="ds", user="alice")
+        assert "confidential = true" in text
+        assert "public_reason" in text
+        assert "confidentiality_reason" in text
+
+    def test_generated_toml_validates_without_a_visibility_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cli._cmd_init(Namespace(name="ds", user="alice"))
+        cfg = DatasetConfig.from_toml(tmp_path / "ds.toml")
+        # The template's [meta] placeholders are reported by validate(); what must
+        # not appear is a posture error, because the template states its posture.
+        assert not any("public_reason" in e for e in cfg.validate()), cfg.validate()
+        assert not any("confidentiality_reason" in e for e in cfg.validate()), cfg.validate()

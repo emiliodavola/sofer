@@ -287,6 +287,23 @@ class DatasetValidator:
                     f'column_types = {{ {column} = "string" }} to be explicit).'
                 )
 
+    def _check_visibility_posture(self) -> None:
+        """Warn when a TOML states no confidentiality posture (issue #338).
+
+        Repositories are confidential by mandate and ``sofer init`` writes
+        ``confidential = true``, so a TOML that declares nothing is behind the
+        template rather than making a decision. The warning names both ways to
+        say it and never changes the exit code: the exposure gate is
+        ``[dataset] private``, which is fail-closed by default and refuses an
+        unauthorized ``false`` (``_validate_visibility_authorization``).
+        """
+        if "confidential" in self.cfg.declared_meta_keys:
+            return
+        self.report.warnings.append(
+            "[meta] states no confidentiality posture — add `confidential = true` (the init "
+            "template's default) or `confidential = false` plus a `confidentiality_reason`."
+        )
+
     def _check_min_files(self) -> None:
         """Fail if fewer file entries than configured."""
         if len(self.cfg.files) < self.cfg.min_files:
@@ -355,6 +372,7 @@ class DatasetValidator:
         # its only copy, so it is an error, not a warning.
         self._check_cache_only_registrations()
         self._check_column_value_parity()
+        self._check_visibility_posture()
         self._check_min_files()
         self._check_total_size()
         self._check_csv_columns()

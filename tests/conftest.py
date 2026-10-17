@@ -314,12 +314,20 @@ def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-d
         "",
         "[meta]",
         f"confidential = {str(confidential).lower()}",
-        "",
-        "[[file]]",
-        'local = "data.csv"',
-        'remote = "data.csv"',
-        "",
     ]
+    if not confidential:
+        # #338: an explicit opt-out carries its own authorization, so the fixture
+        # states one instead of producing a config `validate()` must refuse.
+        lines.append('confidentiality_reason = "test fixture: nothing sensitive"')
+    lines.extend(
+        [
+            "",
+            "[[file]]",
+            'local = "data.csv"',
+            'remote = "data.csv"',
+            "",
+        ]
+    )
     toml = root / "dataset.toml"
     toml.write_text("\n".join(lines), encoding="utf-8")
     return toml

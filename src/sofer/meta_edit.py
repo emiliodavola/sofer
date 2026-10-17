@@ -99,6 +99,7 @@ META_KEYS: Mapping[str, MetaKind] = MappingProxyType(
         "recipe": "text",
         # -- data-sharing / card fields -----------------------------------
         "confidential": "flag",
+        "confidentiality_reason": "text",
         "language": "list",
         "pretty_name": "text",
         "task_categories": "list",

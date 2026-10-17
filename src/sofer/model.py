@@ -299,6 +299,20 @@ class DatasetConfig:
         min_files:         Minimum number of file entries expected.
         min_total_size_mb: Minimum total data size in MB.
         column_checks:     List of :class:`ColumnCheck` entries.
+
+        public_reason:     Required non-empty authorization when ``private`` is
+            explicitly ``false`` (issue #338). Repositories are private by
+            mandate, so the change of posture must be stated, not flipped: the
+            reason is echoed into the publish plan, ``sofer_auth_status`` and the
+            manifest, which is what makes it auditable after the fact.
+        confidentiality_reason:
+            The same authorization for an explicit ``[meta] confidential =
+            false``. Absent by design when the dataset keeps the marking.
+        declared_dataset_keys:
+            Presence signal for ``[dataset]``, mirroring
+            :attr:`declared_meta_keys`: it is what distinguishes an explicit
+            ``private = false`` (which requires an authorization) from a TOML
+            that never mentions visibility.
     """
 
     # -- identity ----------------------------------------------------------
@@ -306,6 +320,10 @@ class DatasetConfig:
     repo_id: str
     repo_type: str = "dataset"
     private: bool = True
+    #: Authorization for an explicit ``private = false`` (issue #338).
+    public_reason: str = ""
+    #: ``[dataset]`` keys declared in the TOML (presence signal, issue #338).
+    declared_dataset_keys: frozenset[str] = field(default_factory=frozenset)
     skip_cross_file_schema: bool = False
     build_dir: str = "build"
 
@@ -313,6 +331,8 @@ class DatasetConfig:
     description: str = ""
     license: str = ""
     confidential: bool = False
+    #: Authorization for an explicit ``[meta] confidential = false`` (issue #338).
+    confidentiality_reason: str = ""
     source: str = ""
     tags: list[str] = field(default_factory=list)
 
@@ -569,11 +589,14 @@ class DatasetConfig:
             repo_id=ds["repo_id"],
             repo_type=ds.get("repo_type", "dataset"),
             private=ds.get("private", True),
+            public_reason=ds.get("public_reason", ""),
+            declared_dataset_keys=frozenset(ds.keys()),
             skip_cross_file_schema=ds.get("skip_cross_file_schema", False),
             build_dir=ds.get("build_dir", "build"),
             description=meta.get("description", ""),
             license=meta.get("license", ""),
             confidential=meta.get("confidential", False),
+            confidentiality_reason=meta.get("confidentiality_reason", ""),
             source=meta.get("source", ""),
             tags=meta.get("tags", []),
             files=files,
@@ -643,6 +666,9 @@ class DatasetConfig:
         # (GitHub #118). Runs first so invalid values never reach the
         # file/path resolution below as an arbitrary Python type.
         errors.extend(_validate_config_types(self))
+        # Posture authorization (issue #338): a change of visibility or of the
+        # confidentiality marking must carry its own reason.
+        errors.extend(_validate_visibility_authorization(self))
 
         # placeholder detection
         repo_user = self.repo_id.split("/")[0] if "/" in self.repo_id else ""
@@ -720,6 +746,47 @@ def _parse_column_types(entry: dict[str, Any], remote: str) -> dict[str, str]:
     return {str(name): str(value) for name, value in raw.items()}
 
 
+def _validate_visibility_authorization(cfg: DatasetConfig) -> list[str]:
+    """Refuse a posture change that carries no authorization (issue #338).
+
+    Repositories are private and confidential by mandate: a TOML may still open
+    them, but only by saying so. ``[dataset] private = false`` requires a
+    non-empty ``public_reason``, and an explicit ``[meta] confidential = false``
+    requires a non-empty ``confidentiality_reason``. Both are echoed into the
+    publish plan, ``sofer_auth_status`` and the manifest, which is what makes the
+    intent auditable after the fact.
+
+    A TOML that never mentions visibility is untouched: the ``private`` default is
+    already closed, and an absent ``confidential`` keeps its own default — the
+    validator surfaces that absence as a warning (see
+    :func:`sofer.checks.DatasetValidator`) rather than turning it into an error
+    here.
+
+    Args:
+        cfg: The parsed configuration to inspect.
+
+    Returns:
+        A list of stable error messages (empty = every posture change is
+        authorized).
+    """
+    errors: list[str] = []
+    if not cfg.private and not cfg.public_reason.strip():
+        errors.append(
+            "[dataset] private = false requires a non-empty public_reason "
+            "(repositories are private by mandate; state why this one is public)."
+        )
+    if (
+        "confidential" in cfg.declared_meta_keys
+        and not cfg.confidential
+        and not cfg.confidentiality_reason.strip()
+    ):
+        errors.append(
+            "[meta] confidential = false requires a non-empty confidentiality_reason "
+            "(state why this dataset is not confidential)."
+        )
+    return errors
+
+
 def _validate_config_types(cfg: DatasetConfig) -> list[str]:
     """Validate the *types* of configuration values, independent of files.
 
@@ -755,6 +822,12 @@ def _validate_config_types(cfg: DatasetConfig) -> list[str]:
         value = getattr(cfg, field_name)
         if not isinstance(value, bool):
             _add(field_name, "a boolean", value)
+
+    # -- posture authorization values (#338) -------------------------------
+    for field_name in ("public_reason", "confidentiality_reason"):
+        value = getattr(cfg, field_name)
+        if not isinstance(value, str):
+            _add(field_name, "a string", value)
 
     # -- thresholds --------------------------------------------------------
     if not isinstance(cfg.min_files, int) or isinstance(cfg.min_files, bool):

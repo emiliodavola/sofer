@@ -459,3 +459,40 @@ class TestColumnValueParityWarning:
         report = DatasetValidator(self._cfg(tmp_path, "gone.csv")).run_all()
         assert any("Missing" in e for e in report.errors)
         assert not any("zero-padded" in w for w in report.warnings), report.warnings
+
+
+# ── Confidentiality posture warning (#338) ────────────────────────────────────
+
+
+class TestVisibilityPostureWarning:
+    """A TOML that states no confidentiality posture is told so, not blocked."""
+
+    def _cfg(
+        self, tmp_path: Path, declared: frozenset[str], confidential: bool = False
+    ) -> DatasetConfig:
+        (tmp_path / "data.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        return DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            confidential=confidential,
+            declared_meta_keys=declared,
+            files=[FileEntry(local=Path("data.csv"), remote="data.csv")],
+            _base_dir=tmp_path,
+        )
+
+    def test_absent_posture_is_reported(self, tmp_path: Path) -> None:
+        report = DatasetValidator(self._cfg(tmp_path, frozenset())).run_all()
+        assert any("no confidentiality posture" in w for w in report.warnings), report.warnings
+        assert report.errors == []
+
+    def test_declared_true_is_not_reported(self, tmp_path: Path) -> None:
+        report = DatasetValidator(
+            self._cfg(tmp_path, frozenset({"confidential"}), confidential=True)
+        ).run_all()
+        assert not any("no confidentiality posture" in w for w in report.warnings)
+
+    def test_declared_false_is_not_reported(self, tmp_path: Path) -> None:
+        report = DatasetValidator(
+            self._cfg(tmp_path, frozenset({"confidential", "confidentiality_reason"}))
+        ).run_all()
+        assert not any("no confidentiality posture" in w for w in report.warnings)

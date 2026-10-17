@@ -5049,7 +5049,9 @@ class TestDocPathContainment:
         """Overwrite *proj*/dataset.toml with an extra [meta] doc declaration."""
         (proj / "dataset.toml").write_text(
             "[dataset]\nname='x'\nrepo_id='u/x'\n\n"
-            f"[meta]\nconfidential = false\n{field} = {value!r}\n\n"
+            f"[meta]\nconfidential = false\n"
+            'confidentiality_reason = "fixture: nothing sensitive"\n'
+            f"{field} = {value!r}\n\n"
             '[[file]]\nlocal = "data.csv"\nremote = "data.csv"\n',
             encoding="utf-8",
         )
