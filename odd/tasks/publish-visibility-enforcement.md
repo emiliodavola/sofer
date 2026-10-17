@@ -4,7 +4,7 @@
 **Issue:** `emiliodavola/sofer#338` — *feat(publish): private and confidential must be enforced defaults; only explicit user authorization may change them*
 **Delivery PR:** pending — assigned to `@emiliodavola`
 **SDD change:** `openspec/changes/2026-10-17-feat-visibility-enforcement/`
-**Phase:** 3 of the v0.8.0 batch (last: the largest, the only one that changes a default and adds a tool)
+**Phase:** 3 of the 2026-10-17 batch (last: the largest, the only one that changes a default and adds a tool)
 
 ## Goal
 

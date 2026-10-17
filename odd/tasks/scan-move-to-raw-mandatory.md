@@ -4,7 +4,7 @@
 **Issue:** `emiliodavola/sofer#339` — *bug(scan): moving sources into raw/ is opt-in, so the default MCP flow leaves them in the disposable cache/*
 **Delivery PR:** [#340](https://github.com/emiliodavola/sofer/pull/340) — `fix/339-scan-move-raw-mandatory` → `dev`, assigned to `@emiliodavola`
 **SDD change:** `openspec/changes/2026-10-17-fix-scan-move-raw-mandatory/`
-**Phase:** 1 of the v0.8.0 batch (first, because it is the only one of the three with a data-loss path)
+**Phase:** 1 of the 2026-10-17 batch (first, because it is the only one of the three with a data-loss path)
 
 ## Goal
 
