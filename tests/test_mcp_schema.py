@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import call_tool
+from conftest import call_tool, repo_info_private
 from fastmcp import Client
 
 from sofer import config as sofer_config
@@ -82,9 +82,9 @@ def _schema_description(schema: Any) -> str:
 
 
 class TestToolCount:
-    def test_seventeen_tools(self, tmp_path: Path):
+    def test_eighteen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 17, sorted(tools.keys())
+        assert len(tools) == 18, sorted(tools.keys())
         expected = {
             "sofer_validate",
             "sofer_meta_check",
@@ -102,6 +102,7 @@ class TestToolCount:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_auth_status",
+            "sofer_repo_settings",
             "sofer_report_failure",
         }
         assert set(tools.keys()) == expected
@@ -267,6 +268,7 @@ class TestAnnotations:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_meta_set",
+            "sofer_repo_settings",
             "sofer_report_failure",
         }
     )
@@ -276,8 +278,8 @@ class TestAnnotations:
 
         Every tool that writes files (codebooks, metadata profiles, README
         renders, scan_apply registration, init scaffolding, prepare, publish,
-        meta_set) must report readOnlyHint False so agents treat it as
-        side-effecting. The roster partition covers all 17 tools.
+        meta_set, repo_settings) must report readOnlyHint False so agents treat it as
+        side-effecting. The roster partition covers all 18 tools.
         """
         tools = _tools_dict(tmp_path)
         assert set(tools) == self._READ_ONLY_TOOLS | self._WRITING_TOOLS
@@ -498,6 +500,7 @@ class TestHappyPath:
 
         monkeypatch.setattr(pub_mod._api, "create_repo", lambda *a, **kw: None)
         monkeypatch.setattr(pub_mod._api, "list_repo_files", lambda *a, **kw: [])
+        monkeypatch.setattr(pub_mod._api, "repo_info", repo_info_private)
         monkeypatch.setattr(pub_mod._api, "upload_folder", lambda *a, **kw: None)
 
         def _fake_hf_api(*_a, **_kw):
@@ -571,3 +574,15 @@ class TestExplicitDialectParams:
             props = (tools[name].inputSchema or {}).get("properties", {})
             assert "delimiter" not in props, name
             assert "encoding" not in props, name
+
+
+class TestAcknowledgeRiskWording:
+    """#338: acknowledging the upload is not consenting to a public target."""
+
+    def test_acknowledge_risk_no_longer_claims_public(self, tmp_path: Path):
+        props = _tools_dict(tmp_path)["sofer_publish_confirm"].inputSchema["properties"]
+        risk = props["acknowledge_risk"]["description"]
+        assert "irreversible" in risk
+        assert "irreversible and public" not in risk
+        assert "acknowledge_public" in risk
+        assert "acknowledge_public" in props

@@ -137,6 +137,10 @@ AREAS: list[AreaParity] = [
         exempt_params={
             "acknowledge_risk": "MCP-only human gate (actor design A)",
             "acknowledge_confidential": "MCP-only human gate (actor design A)",
+            "acknowledge_public": (
+                "MCP-only human gate: a public target is its own decision, not covered by "
+                "acknowledge_risk (issue #338)"
+            ),
             "approval_phrase": "MCP-only human gate (actor design A)",
         },
     ),
@@ -219,8 +223,25 @@ AREAS: list[AreaParity] = [
     AreaParity(
         cli_command=None,
         mcp_tools=("sofer_auth_status",),
-        exempt_params={"config": "dataset config path (same shape as the other tools)"},
+        exempt_params={
+            "config": "dataset config path (same shape as the other tools)",
+            "check_remote": (
+                "MCP-only opt-in: the CLI preflight has no network switch; the agent asks "
+                "for the repository's current visibility explicitly (issue #338)"
+            ),
+        },
         note="sofer_auth_status has no CLI counterpart by design (agent preflight, actor design A)",
+    ),
+    AreaParity(
+        cli_command=None,
+        mcp_tools=("sofer_repo_settings",),
+        exempt_params={
+            "config": "dataset config path (same shape as the other tools)",
+            "private": "MCP-only: the target visibility to set, with no CLI counterpart",
+            "approval_phrase": "the human gate, same shape as sofer_publish_confirm",
+            "dry_run": "MCP-only preview of a write",
+        },
+        note="sofer_repo_settings has no CLI counterpart by design (issue #338)",
     ),
 ]
 

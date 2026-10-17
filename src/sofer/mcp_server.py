@@ -114,6 +114,7 @@ from .model import DatasetConfig, QualityResult, resolve_doc_path
 from .prepare import prepare as run_prepare
 from .prepare import resolve_output_dir
 from .profile import profile as run_profile
+from .publish import _repo_visibility
 from .publish import publish as run_publish
 from .quality import QualityValidator
 from .render import render as run_render
@@ -209,6 +210,10 @@ _PHASED_INSTRUCTIONS: str = (
     "data cannot determine (license, source).\n"
     "  Phase 1 Build: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all\n"
     "  Phase 2 Publish: sofer_publish(dry_run=True) -> STOP (human approval) -> sofer_publish_confirm\n"
+    "    Posture (issue #338): sofer_auth_status reports the configured visibility and, with "
+    "check_remote=true, the repository's current one; sofer_repo_settings reads it too and sets it "
+    "only with the approval phrase plus the exact target state. A publish whose configured "
+    "visibility differs from the repository's is refused.\n"
     "Each tool lists Requires: and Next: so tools/list is self-sufficient.\n"
     "Publishing to Hugging Face Hub happens ONLY through sofer_publish_confirm, "
     "which requires explicit human authorization (acknowledge_risk=True; "
@@ -1631,13 +1636,26 @@ def sofer_publish_confirm(
     acknowledge_risk: Annotated[
         bool,
         Field(
-            description="Confirm you understand the publish is irreversible and public when acknowledged. Must be true."
+            description=(
+                "Confirm you understand the publish is irreversible (it overwrites the target's "
+                "files). Must be true. A PUBLIC target is a separate acknowledgement: "
+                "acknowledge_public."
+            )
         ),
     ] = False,
     acknowledge_confidential: Annotated[
         bool,
         Field(
             description="Confirm you acknowledge the dataset is marked confidential when true. Required if [meta] confidential is set."
+        ),
+    ] = False,
+    acknowledge_public: Annotated[
+        bool,
+        Field(
+            description=(
+                "Confirm the human was told this target is PUBLIC and approved it. Required when "
+                "[dataset] private = false; acknowledge_risk alone is not consent to publish publicly."
+            )
         ),
     ] = False,
     approval_phrase: Annotated[
@@ -1746,6 +1764,28 @@ def sofer_publish_confirm(
                     "partial": False,
                 },
             )
+        if not cfg.private and not acknowledge_public:
+            # A public target is its own decision (issue #338, D6): the risk
+            # acknowledgement states that the upload is irreversible, never that
+            # the destination is public.
+            return _error_envelope(
+                "PUBLISH_PUBLIC_NOT_ACKD",
+                "this target is PUBLIC — tell the human, then pass acknowledge_public=True",
+                next_hint={"acknowledge_public": True},
+                config_errors=config_errors,
+                extra={
+                    "confidential": cfg.confidential,
+                    "acknowledge_risk": acknowledge_risk,
+                    "acknowledge_confidential": acknowledge_confidential,
+                    "acknowledge_public": acknowledge_public,
+                    "skipped_protected": [],
+                    "partial": False,
+                },
+            )
+
+        # Record the posture for the delivery report (issue #338, S6). One
+        # read-only call; an unreadable remote is reported, never raised.
+        observed_visibility, _observed_private = _read_posture(cfg, _get_hf_token())
         if _APPROVAL_PHRASE is None:
             # Fail-closed: without a server-configured approval phrase there is
             # no human-in-the-loop gate, so the irreversible HF publish is
@@ -1812,6 +1852,19 @@ def sofer_publish_confirm(
             "confidential": cfg.confidential,
             "acknowledge_risk": acknowledge_risk,
             "acknowledge_confidential": acknowledge_confidential,
+            "acknowledge_public": acknowledge_public,
+            "posture": {
+                "configured": "private" if cfg.private else "PUBLIC",
+                "public_reason": cfg.public_reason,
+                "confidential": cfg.confidential,
+                "confidentiality_reason": cfg.confidentiality_reason,
+                "observed": observed_visibility,
+                "acknowledged": {
+                    "risk": acknowledge_risk,
+                    "confidential": acknowledge_confidential,
+                    "public": acknowledge_public,
+                },
+            },
             "skipped_protected": sorted(protected),
             "partial": bool(protected),
             "config_errors": config_errors,
@@ -2322,11 +2375,22 @@ def sofer_auth_status(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file to check publish authorization for")
     ],
+    check_remote: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, also read the target repository's CURRENT visibility from the Hub "
+                "(one read-only call, needs the token). Default false: the preflight stays "
+                "offline and reports only the configured posture."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
-    """Check whether a dataset is ready to publish (token, confidential, approval phrase).
+    """Check whether a dataset is ready to publish (token, posture, approval phrase).
 
-    Side effects: none — read-only probe, no network.
-    Network usage: none.
+    Side effects: none — read-only probe.
+    Network usage: none by default; ``check_remote=true`` makes one read-only
+    Hub call to report the repository's current visibility (issue #338).
 
     ``ok`` reflects publish readiness — config validity AND auth state. A
     config that fails validation or containment checks reports ``ok:False``
@@ -2417,11 +2481,27 @@ def sofer_auth_status(
             and token is not None
             and (not requires_approval_phrase or approval_configured)
         )
+        remote_visibility = "not checked"
+        if check_remote:
+            if token is None:
+                remote_visibility = "unknown: no token"
+            else:
+                try:
+                    observed = _repo_visibility(cfg)
+                    remote_visibility = (
+                        "absent" if observed is None else ("private" if observed else "public")
+                    )
+                except Exception as exc:  # a preflight reports, it never raises
+                    remote_visibility = f"unknown: {exc}"
         return {
             "ok": ok,
             "exit_code": 0 if ok else 1,
             "output": "",
             "token": token_status,
+            "private": cfg.private,
+            "public_reason": cfg.public_reason,
+            "confidentiality_reason": cfg.confidentiality_reason,
+            "remote_visibility": remote_visibility,
             "confidential": cfg.confidential,
             "requires_ack_confidential": requires_ack_confidential,
             "approval_configured": approval_configured,
@@ -2433,6 +2513,180 @@ def sofer_auth_status(
             "next": _workflow_next("sofer_auth_status", config),
             "hints": next_hint,
             "config_errors": config_errors,
+        }
+
+
+def _read_posture(cfg: DatasetConfig, token: str | None) -> tuple[str, bool | None]:
+    """Return ``(label, private_flag)`` for the target repository (issue #338).
+
+    A read is allowed to be inconclusive and reports why instead of raising: the
+    label is what the caller shows, and ``None`` means the flag is unknown. The
+    label vocabulary is the one ``sofer_auth_status`` already uses, so the two
+    surfaces cannot drift.
+
+    Args:
+        cfg: Dataset configuration (``repo_id``, ``repo_type``).
+        token: The resolved HF token, or ``None`` when there is none.
+
+    Returns:
+        ``(label, flag)`` with label one of ``private`` / ``public`` / ``absent``
+        / ``unknown: <reason>``, and flag ``True``/``False``/``None``.
+    """
+    if token is None:
+        return ("unknown: no token", None)
+    try:
+        observed = _repo_visibility(cfg)
+    except Exception as exc:  # a preflight reports, it never raises
+        return (f"unknown: {exc}", None)
+    if observed is None:
+        return ("absent", None)
+    return ("private" if observed else "public", observed)
+
+
+def sofer_repo_settings(
+    config: Annotated[
+        str, Field(description="Path to the dataset TOML file whose target repository is inspected")
+    ],
+    private: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "The exact target visibility to SET: true private, false public. Omit it to read "
+                "the posture and change nothing. A write needs approval_phrase (the same human "
+                "gate as publish) and a token."
+            )
+        ),
+    ] = None,
+    approval_phrase: Annotated[
+        str | None,
+        Field(
+            description=(
+                "The human approval phrase configured for this server. Required for a write, "
+                "never for a read."
+            )
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        Field(description="When true, report what a write would change and change nothing."),
+    ] = False,
+) -> dict[str, Any]:
+    """Read the target repository's visibility, and set it only with explicit authorization.
+
+    Side effects: a read changes nothing; a write (``private`` given, ``dry_run=False``, valid ``approval_phrase``) updates the repository's visibility on the Hub.
+    Network usage: one read-only call (``repo_info``); the write path adds one ``update_repo_settings`` call and re-reads.
+
+    Reading is free and needs no phrase: an agent must be able to see whether the target is public
+    before anyone approves delivering to it. Writing needs the approval phrase **and** the exact
+    target state, because repositories are private by mandate and only an explicit human
+    authorization may change that. When the installed ``huggingface-hub`` has no
+    ``update_repo_settings``, the write is refused naming the requirement instead of failing
+    obscurely.
+
+    A write that disagrees with the dataset's own ``[dataset] private`` is reported, not blocked
+    here: the next ``sofer_publish_confirm`` refuses that divergence, and that refusal is the gate
+    that protects the upload (issue #338).
+
+    When to use: preflight before a publish (read), or to correct a repository's visibility after a publish refused a posture mismatch.
+    Example: sofer_repo_settings(config="dataset.toml")
+    Requires: dataset TOML exists under server root; a token and the phrase for a write. Next: sofer_auth_status, then sofer_publish.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        toml_path = _contained_path(
+            config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+        )
+        _reload_tool_config(toml_path.parent)
+        try:
+            cfg = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_repo_settings",
+                config_path=config,
+            )
+        config_errors = cfg.validate()
+        token = _get_hf_token()
+        remote_visibility, target_private = _read_posture(cfg, token)
+        configured_errors = config_errors
+
+        if private is None or dry_run:
+            would_change = (
+                private is not None and target_private is not None and target_private != private
+            )
+            return {
+                "ok": not configured_errors,
+                "exit_code": 0 if not configured_errors else 1,
+                "output": _captured_text(out, err),
+                "private": cfg.private,
+                "public_reason": cfg.public_reason,
+                "confidentiality_reason": cfg.confidentiality_reason,
+                "remote_visibility": remote_visibility,
+                "target_private": target_private,
+                "changed": False,
+                "would_change": would_change,
+                "config_errors": configured_errors,
+                "next": _workflow_next("sofer_repo_settings", config),
+            }
+
+        if token is None:
+            return _error_envelope(
+                "REPO_SETTINGS_TOKEN_REQUIRED",
+                "setting a repository's visibility needs a token (HF_TOKEN)",
+                next_hint={"token": "set HF_TOKEN"},
+                config_errors=configured_errors,
+            )
+        if _APPROVAL_PHRASE is None:
+            # Fail-closed, exactly like publish: without a server-configured
+            # phrase there is no human-in-the-loop gate, so a visibility change
+            # is refused instead of being compared against nothing (which would
+            # also be a TypeError at runtime).
+            return _error_envelope(
+                "REPO_SETTINGS_APPROVAL_NOT_CONFIGURED",
+                _APPROVAL_PHRASE_NOT_CONFIGURED_MESSAGE,
+                next_hint={"action": _APPROVAL_PHRASE_ACTION},
+                config_errors=configured_errors,
+            )
+        if approval_phrase is None or not hmac.compare_digest(approval_phrase, _APPROVAL_PHRASE):
+            return _error_envelope(
+                "REPO_SETTINGS_APPROVAL_REQUIRED",
+                "approval phrase required — ask the human to confirm this visibility change",
+                next_hint={"approval_phrase": "<from human>"},
+                config_errors=configured_errors,
+            )
+
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=token)
+        if not hasattr(api, "update_repo_settings"):
+            return _error_envelope(
+                "REPO_SETTINGS_UNSUPPORTED",
+                "the installed huggingface-hub has no HfApi.update_repo_settings — upgrade it to "
+                "change a repository's visibility",
+                config_errors=configured_errors,
+            )
+        try:
+            api.update_repo_settings(repo_id=cfg.repo_id, repo_type=cfg.repo_type, private=private)
+        except Exception as exc:
+            return _error_envelope(
+                "REPO_SETTINGS_WRITE_FAILED",
+                f"could not set the visibility of {cfg.repo_id}: {type(exc).__name__}: {exc}",
+                config_errors=configured_errors,
+            )
+        after_label, after_private = _read_posture(cfg, token)
+        return {
+            "ok": not configured_errors,
+            "exit_code": 0 if not configured_errors else 1,
+            "output": _captured_text(out, err),
+            "private": cfg.private,
+            "public_reason": cfg.public_reason,
+            "confidentiality_reason": cfg.confidentiality_reason,
+            "remote_visibility": after_label,
+            "target_private": after_private,
+            "changed": after_private is not None and after_private != target_private,
+            "would_change": False,
+            "diverges_from_config": after_private is not None and after_private != cfg.private,
+            "config_errors": configured_errors,
+            "next": _workflow_next("sofer_repo_settings", config),
         }
 
 
@@ -3081,7 +3335,7 @@ def sofer_report_failure(
 
 
 def _register_tools(server: _FastMCP) -> None:
-    """Register the 17 tool callables on *server*."""
+    """Register the 18 tool callables on *server*."""
     server.tool(
         sofer_validate,
         description=_workflow_description(sofer_validate),
@@ -3225,6 +3479,11 @@ def _register_tools(server: _FastMCP) -> None:
                 "confidential": {"type": "boolean"},
                 "acknowledge_risk": {"type": "boolean"},
                 "acknowledge_confidential": {"type": "boolean"},
+                "acknowledge_public": {"type": "boolean"},
+                "posture": {
+                    "type": "object",
+                    "description": "Configured visibility and reasons, the observed repository visibility, and the three acknowledgements — the auditable delivery posture (issue #338).",
+                },
                 "skipped_protected": {"type": "array"},
                 "partial": {"type": "boolean"},
                 "config_errors": {"type": "array"},
@@ -3454,6 +3713,19 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "token": {"type": "string"},
                 "confidential": {"type": "boolean"},
+                "private": {"type": "boolean"},
+                "public_reason": {
+                    "type": "string",
+                    "description": "The declared authorization for a public target; empty while the dataset is private.",
+                },
+                "confidentiality_reason": {
+                    "type": "string",
+                    "description": "The declared authorization for an explicit confidential = false; empty otherwise.",
+                },
+                "remote_visibility": {
+                    "type": "string",
+                    "description": '"not checked" by default; with check_remote=true: "private" | "public" | "absent" | "unknown: <reason>" (one read-only Hub call).',
+                },
                 "requires_ack_confidential": {"type": "boolean"},
                 "approval_configured": {"type": "boolean"},
                 "requires_approval_phrase": {"type": "boolean"},
@@ -3502,6 +3774,41 @@ def _register_tools(server: _FastMCP) -> None:
                 "issue_url": {"type": "string"},
                 "persisted_path": {"type": "string"},
                 "retry_command": {"type": "string"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_repo_settings,
+        description=_workflow_description(sofer_repo_settings),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "private": {"type": "boolean"},
+                "public_reason": {"type": "string"},
+                "confidentiality_reason": {"type": "string"},
+                "remote_visibility": {
+                    "type": "string",
+                    "description": '"private" | "public" | "absent" | "unknown: <reason>" — the repository\'s current visibility.',
+                },
+                "target_private": {"type": ["boolean", "null"]},
+                "changed": {"type": "boolean"},
+                "would_change": {"type": "boolean"},
+                "diverges_from_config": {
+                    "type": "boolean",
+                    "description": "After a write: whether the repository now disagrees with [dataset] private. The next publish refuses that divergence.",
+                },
+                "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],

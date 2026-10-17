@@ -92,9 +92,9 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ### Requirement: Tool roster and schema contract (MSP-R03) — Modified 2026-10-16, feat-meta-tools
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires.
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires. Modified by `2026-10-17-feat-visibility-enforcement` (issue #338) — 18 callables (+ `sofer_repo_settings`), `sofer_auth_status` gains the opt-in `check_remote` read, and MSP-R15 is **corrected**: the Phase-1 move has been mandatory since #339, so the `move_loose` opt-in this clause described no longer exists.
 
-Server SHALL expose 17 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03.
+Server SHALL expose 18 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`.
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -102,7 +102,7 @@ Server SHALL expose 17 callables: `sofer_validate, sofer_meta_check, sofer_meta_
 
 - GIVEN `tools/list`
 - WHEN inspected
-- THEN count SHALL be 17, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
+- THEN count SHALL be 18, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
 
 #### Scenario: Annotations and output_schema typed
 
@@ -980,32 +980,39 @@ Canonical branches: greenfield `sofer_init -> sofer_scan_dry_run -> sofer_scan_a
 - AND the error SHALL name the unsupported suffix and the supported set
 ---
 
-### Requirement: Scan Phase-1 move opt-in (MSP-R15)
+### Requirement: Scan Phase-1 move is mandatory (MSP-R15) — Modified 2026-10-17, feat-visibility-enforcement
 
-> Added by change `fix-scan-parity-mcp` (closes #152).
+> Added by change `fix-scan-parity-mcp` (closes #152). Modified by `fix-scan-move-raw-mandatory` (issue
+> #339) — the opt-in became a mandate; this `mcp-server` clause was missed then and corrected by
+> `feat-visibility-enforcement` (issue #338) when the divergence was found.
 
-`sofer_scan_dry_run` and `sofer_scan_apply` SHALL accept a `move_loose: bool = False` argument. It is an explicit opt-in: `False` SHALL keep the cache-only behavior (never a silent move), and `True` shall run the Phase-1 MOVE (see MST-R06) before the cache copy. Collisions against existing `raw/` destinations SHALL abort atomically before any move (`registered: 0`, TOML untouched). `sofer_scan_apply` SHALL report `moved: int` in a successful envelope (declared in `output_schema`). `sofer_scan_dry_run` with `move_loose=True` SHALL preview the moves with no mutation; without it, the dry-run SHALL report the loose file count and name the `move_loose=True` opt-in as a hint.
+`sofer_scan_dry_run` and `sofer_scan_apply` SHALL run the Phase-1 MOVE (see MST-R06) unconditionally: no
+argument SHALL allow skipping it, because `cache/` is the shared, deletion-prone staging directory and
+the registered sources MUST NOT live only there. `sofer_scan_dry_run` SHALL preview the moves with no
+mutation. Collisions against existing `raw/` destinations SHALL abort atomically before any move
+(`registered: 0`, TOML untouched). `sofer_scan_apply` SHALL report `moved: int` in a successful envelope
+(declared in `output_schema`).
 
-#### Scenario: Dry-run previews moves without mutation
+#### Scenario: Dry-run previews the mandatory move without mutation
 
 - GIVEN a loose file outside `raw/`/`cache/`
-- WHEN `sofer_scan_dry_run` runs with `move_loose=True`
-- THEN the output SHALL show `-> raw/<rel>`
+- WHEN `sofer_scan_dry_run` runs with only `config`
+- THEN the output SHALL show `-> raw/<rel>` and name the move as mandatory
 - AND no file SHALL be moved, `raw/` SHALL NOT be scaffolded, and the TOML SHALL be untouched
 
 #### Scenario: Collision aborts before any move
 
 - GIVEN a loose file whose `raw/` destination already exists
-- WHEN `sofer_scan_apply` runs with `move_loose=True`
+- WHEN `sofer_scan_apply` runs
 - THEN an `ok:false` refusal SHALL be returned naming the collision
 - AND the loose file SHALL remain at its original path and the TOML SHALL be untouched
 
-#### Scenario: Default leaves files loose
+#### Scenario: There is no opt-out
 
-- GIVEN loose supported files and `move_loose` omitted
+- GIVEN loose supported files and no extra arguments
 - WHEN `sofer_scan_apply` runs
-- THEN the loose files SHALL remain in place (no `raw/` writes)
-- AND the cache copy/registration SHALL behave as before
+- THEN the loose files SHALL end up under `raw/` with their tree and the envelope SHALL report `moved`
+- AND no parameter SHALL exist that skips the move
 ---
 
 ### Requirement: Publish cleanup (MSP-R16)
@@ -1299,3 +1306,54 @@ continuation SHALL be `sofer_meta_set`, `sofer_meta_set`’s SHALL be `sofer_val
 - THEN it SHALL use the configured values, not a literal
 
 **Evidence:** `test: tests/test_checks.py::TestMetaPlaceholderGate::test_prefixes_are_config_owned`
+
+---
+
+### Requirement: Visibility control with an explicit gate (MSP-R20) — Added 2026-10-17, feat-visibility-enforcement
+
+`sofer_repo_settings` SHALL report the target repository's current visibility together with the
+configured posture, and SHALL change it only when the call carries the approval phrase and the exact
+target state (`private: bool`). A read SHALL NOT require an authorization, SHALL change nothing, and
+SHALL report an unreachable or unreadable remote as an explicit `unknown: <reason>` value rather than
+raising — an unknown state is never reported as agreement. Without a token the read SHALL say
+`unknown: no token` and SHALL NOT call the Hub.
+
+A write SHALL be refused when no approval phrase is configured on the server
+(`REPO_SETTINGS_APPROVAL_NOT_CONFIGURED`), when the supplied phrase does not match
+(`REPO_SETTINGS_APPROVAL_REQUIRED`), when there is no token (`REPO_SETTINGS_TOKEN_REQUIRED`), and when
+the installed `huggingface-hub` has no `HfApi.update_repo_settings` (`REPO_SETTINGS_UNSUPPORTED`,
+naming the method). A failed write SHALL surface as `REPO_SETTINGS_WRITE_FAILED` with its cause. After a
+successful write the tool SHALL re-read and report `changed` plus `diverges_from_config`.
+
+#### Scenario: A read needs no authorization
+
+- GIVEN a dataset TOML and a token
+- WHEN `sofer_repo_settings` runs with only `config`
+- THEN the envelope SHALL carry the configured posture and `remote_visibility`
+- AND nothing SHALL be changed on the Hub
+
+#### Scenario: A write without the phrase is refused
+
+- GIVEN `private=false` and a server with an approval phrase configured
+- WHEN `sofer_repo_settings` runs without `approval_phrase`
+- THEN it SHALL refuse with `REPO_SETTINGS_APPROVAL_REQUIRED` and SHALL NOT call the Hub
+
+#### Scenario: A dry run predicts without writing
+
+- GIVEN a repository whose visibility differs from the requested one
+- WHEN `sofer_repo_settings` runs with `private` and `dry_run=true`
+- THEN it SHALL report `would_change: true` with `changed: false` and SHALL NOT call the Hub
+
+#### Scenario: An SDK without the settings method fails closed
+
+- GIVEN an installed `huggingface-hub` whose `HfApi` has no `update_repo_settings`
+- WHEN a write is attempted with a valid phrase
+- THEN it SHALL refuse with `REPO_SETTINGS_UNSUPPORTED` naming the method
+
+#### Scenario: A write that disagrees with the config is reported
+
+- GIVEN `[dataset] private = true` and a write that makes the repository public
+- WHEN the write succeeds
+- THEN the envelope SHALL report `diverges_from_config: true`
+- AND the next `sofer_publish_confirm` SHALL refuse that divergence (PUB-13)
+

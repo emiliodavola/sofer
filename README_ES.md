@@ -651,12 +651,13 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 17 callables de herramientas (`sofer_validate`,
+El servidor expone 18 callables de herramientas (`sofer_validate`,
 `sofer_meta_check`, `sofer_meta_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`, `sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
+`sofer_auth_status`, `sofer_repo_settings`,
+`sofer_report_failure`), 4 recursos (`sofer://dataset/{config}`,
 `sofer://codebook/{data_file}`, `sofer://metadata/{data_file}` y el recurso
 estático `sofer://status`) y 3 prompts
 (`prepare_dataset`, `assess_dataset`, `finalize_and_publish`). No se expone
@@ -685,7 +686,8 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 
 - **Fase 0** `init→scan` es REQUERIDA para greenfield (sin `.toml` o `[[file]]` vacío), opcional en otro caso. Build asume `[[file]]` existentes.
 - Cada herramienta lista `Requires:` y `Next:` por lo que `tools/list` por sí sola enseña el orden; `instructions` del servidor es la única fuente del diagrama por fases y del aviso UNTRUSTED.
-- `sofer_auth_status` es el preflight: verifica `token`/`confidential`/`approval_phrase` sin red.
+- `sofer_auth_status` es el preflight: verifica `token`/`confidential`/`approval_phrase` sin red, y reporta la visibilidad configurada; `check_remote=true` agrega la visibilidad *actual* del repositorio (una llamada de sólo lectura).
+- `sofer_repo_settings` lee esa misma postura y puede fijar la visibilidad del destino; una escritura necesita la frase de aprobación **y** el estado exacto (`private=true|false`). Un publish cuya visibilidad configurada difiera de la del repositorio se rechaza.
 
 | Paso | Herramienta | Args clave | Cuándo usar |
 | ------ | ------------- | ------------ | ------------- |
@@ -701,8 +703,9 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 5a | `sofer_render` | `package`, `output_dir`, `force` | Render de un archivo tras `sofer_profile`. |
 | 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`cache/renders/`); requiere `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` previsualiza; **STOP** antes de confirm. |
-| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Solo tras aprobación humana. |
-| * | `sofer_auth_status` | `config` | Preflight sin publicar; `readOnlyHint:true`. |
+| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `acknowledge_public`, `approval_phrase`, `force` | Solo tras aprobación humana. Un destino público (`[dataset] private = false`) necesita su propio `acknowledge_public`: `acknowledge_risk` cubre la subida irreversible, no la exposición. El envelope registra la postura (configurada, observada, reconocida). |
+| * | `sofer_auth_status` | `config`, `check_remote` | Preflight sin publicar; reporta la visibilidad configurada y, con `check_remote=true`, la actual del repositorio; `readOnlyHint:true`. |
+| * | `sofer_repo_settings` | `config`, `private`, `approval_phrase`, `dry_run` | Lee la visibilidad y la postura del repositorio destino; `private` + `approval_phrase` fija la visibilidad (requiere token). `openWorldHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Codebook de un archivo. |
 | * | `sofer_report_failure` | `error`, `command`, `trace`, `confirm`, `force` | Prepara un reporte de fallo confidencial y (solo con `confirm=true`) lo envía vía `gh`; antes busca issues abiertos duplicados. `openWorldHint:true`. |
 

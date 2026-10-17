@@ -27,6 +27,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -290,6 +291,25 @@ class McpStdioServer:
         )
 
 
+#: Minimal stand-in for ``HfApi.repo_info`` in offline tests: a private repository
+#: (issue #338 — the publish gate reads the target's current visibility, so every
+#: fake api must answer ``repo_info`` or the real client is reached).
+_REPO_INFO_PRIVATE = SimpleNamespace(private=True)
+
+#: The same stand-in for a repository that is currently public.
+_REPO_INFO_PUBLIC = SimpleNamespace(private=False)
+
+
+def repo_info_private(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    """Stub for ``HfApi.repo_info``: a repository that is currently private."""
+    return _REPO_INFO_PRIVATE
+
+
+def repo_info_public(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    """Stub for ``HfApi.repo_info``: a repository that is currently public."""
+    return _REPO_INFO_PUBLIC
+
+
 def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-ds") -> Path:
     """Write a minimal, quality-passing dataset (TOML + CSV) under *root*.
 
@@ -314,12 +334,20 @@ def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-d
         "",
         "[meta]",
         f"confidential = {str(confidential).lower()}",
-        "",
-        "[[file]]",
-        'local = "data.csv"',
-        'remote = "data.csv"',
-        "",
     ]
+    if not confidential:
+        # #338: an explicit opt-out carries its own authorization, so the fixture
+        # states one instead of producing a config `validate()` must refuse.
+        lines.append('confidentiality_reason = "test fixture: nothing sensitive"')
+    lines.extend(
+        [
+            "",
+            "[[file]]",
+            'local = "data.csv"',
+            'remote = "data.csv"',
+            "",
+        ]
+    )
     toml = root / "dataset.toml"
     toml.write_text("\n".join(lines), encoding="utf-8")
     return toml

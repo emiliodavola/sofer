@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from conftest import repo_info_private
 
 from sofer import config
 from sofer import publish as publish_mod
@@ -19,6 +20,7 @@ def _mock_hf_api(monkeypatch) -> None:
     """Stub every HF API method publish could reach (offline tests)."""
     monkeypatch.setattr(publish_mod._api, "create_repo", lambda *a, **kw: None)
     monkeypatch.setattr(publish_mod._api, "list_repo_files", lambda *a, **kw: [])
+    monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_private)
     monkeypatch.setattr(publish_mod._api, "upload_folder", lambda *a, **kw: None)
 
 

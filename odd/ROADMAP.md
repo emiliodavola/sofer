@@ -374,7 +374,7 @@ PR is assigned to `@emiliodavola` and carries `Closes #N`.
 | --- | --- | --- | --- |
 | 1 | #339 | PR [#340](https://github.com/emiliodavola/sofer/pull/340) — merged as `a7f631e` | The move into `raw/` is unconditional in both scan tools and every file is keyed relative to the root that owns it; `validate`/`prepare` refuse a `cache/`-only registration with no `raw/` source. Suite `2380 → 2399`, TOTAL coverage 94%, the four rule-14 files at 100.00% |
 | 2 | #337 | PR [#341](https://github.com/emiliodavola/sofer/pull/341) — merged as `e960ee4` | Declared `column_types`, automatic protection of zero-padded codes, and a fail-closed value check that stops `prepare` from shipping an altered value. Suite `2399 → 2426`, TOTAL coverage 94%, the four rule-14 files at 100.00%; CI green 13/13 after two corrections |
-| 3 | #338 | — | in progress |
+| 3 | #338 | PR [#342](https://github.com/emiliodavola/sofer/pull/342) — open, awaiting review | Declared posture and its authorization keys, the writer guard, the target-posture gate in the publish plan, `sofer_repo_settings` (read free, write with the approval phrase plus the exact state), and a public target's own acknowledgement. Suite `2463 → 2476`, TOTAL coverage 94%, the four rule-14 files at 100.00%. Two corrections rode along: the **MSP-R15** clause that #339 left describing a removed opt-in, and the `acknowledge_risk` wording |
 
 Two corrections landed on #341 between its first push and the merge, both found outside the local gate
 set: the README footnote named a concrete file and column instead of stating the mechanism generally
@@ -402,10 +402,12 @@ as examples:
   vocabulary (D2); leading-zero columns are auto-forced as a deliberate default change (D3); a residual
   alteration is fatal (D4); `validate` predicts and `prepare` confirms the same finding shape (D5).
 - **#338** — a required reason string per posture change (`public_reason` / `confidentiality_reason`)
-  rather than a boolean (D1); the model default for `confidential` flips to `True`, documented as
-  breaking (D2); the settings write uses `update_repo_settings` with feature detection (D3); reads need
-  no phrase and writes never happen without one (D4); divergence is a refusal (D5); `acknowledge_risk`
-  keeps its name and loses its claim about "public" (D6).
+  rather than a boolean (D1); the confidentiality default changes in the **template**, not in the
+  dataclass — an explicit `false` carries the reason and an absent key is surfaced as a warning (D2,
+  revised while implementing: flipping the dataclass default would re-mark every existing TOML and force
+  `acknowledge_confidential` on every publish); the settings write uses `update_repo_settings` with
+  feature detection (D3); reads need no phrase and writes never happen without one (D4); divergence is a
+  refusal (D5); `acknowledge_risk` keeps its name and loses its claim about "public" (D6).
 
 #### Cost, as measured against this repository's own obligations
 

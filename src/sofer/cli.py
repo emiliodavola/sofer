@@ -1073,13 +1073,21 @@ _INIT_TEMPLATE = """\
 name = "{name}"
 repo_id = "{user}/{name}"
 repo_type = "dataset"
+# Private by mandate. Publishing a public repository is an explicit decision and
+# carries its own authorization, so the intent is recorded instead of implied:
+#   private = false
+#   public_reason = "why this dataset is public"
 private = true
 build_dir = "build"
 
 [meta]
 description = "TODO: short description"
 license = "TODO: MIT / restricted / …"
-confidential = false
+# Confidential by mandate: a dataset of sensitive or legally protected data keeps
+# this true. Dropping the marking is an explicit decision with its own reason:
+#   confidential = false
+#   confidentiality_reason = "why this dataset is not confidential"
+confidential = true
 source = "TODO: organisation name"
 tags = ["TODO: tag1", "TODO: tag2"]
 
