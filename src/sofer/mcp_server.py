@@ -1636,13 +1636,26 @@ def sofer_publish_confirm(
     acknowledge_risk: Annotated[
         bool,
         Field(
-            description="Confirm you understand the publish is irreversible and public when acknowledged. Must be true."
+            description=(
+                "Confirm you understand the publish is irreversible (it overwrites the target's "
+                "files). Must be true. A PUBLIC target is a separate acknowledgement: "
+                "acknowledge_public."
+            )
         ),
     ] = False,
     acknowledge_confidential: Annotated[
         bool,
         Field(
             description="Confirm you acknowledge the dataset is marked confidential when true. Required if [meta] confidential is set."
+        ),
+    ] = False,
+    acknowledge_public: Annotated[
+        bool,
+        Field(
+            description=(
+                "Confirm the human was told this target is PUBLIC and approved it. Required when "
+                "[dataset] private = false; acknowledge_risk alone is not consent to publish publicly."
+            )
         ),
     ] = False,
     approval_phrase: Annotated[
@@ -1751,6 +1764,28 @@ def sofer_publish_confirm(
                     "partial": False,
                 },
             )
+        if not cfg.private and not acknowledge_public:
+            # A public target is its own decision (issue #338, D6): the risk
+            # acknowledgement states that the upload is irreversible, never that
+            # the destination is public.
+            return _error_envelope(
+                "PUBLISH_PUBLIC_NOT_ACKD",
+                "this target is PUBLIC — tell the human, then pass acknowledge_public=True",
+                next_hint={"acknowledge_public": True},
+                config_errors=config_errors,
+                extra={
+                    "confidential": cfg.confidential,
+                    "acknowledge_risk": acknowledge_risk,
+                    "acknowledge_confidential": acknowledge_confidential,
+                    "acknowledge_public": acknowledge_public,
+                    "skipped_protected": [],
+                    "partial": False,
+                },
+            )
+
+        # Record the posture for the delivery report (issue #338, S6). One
+        # read-only call; an unreadable remote is reported, never raised.
+        observed_visibility, _observed_private = _read_posture(cfg, _get_hf_token())
         if _APPROVAL_PHRASE is None:
             # Fail-closed: without a server-configured approval phrase there is
             # no human-in-the-loop gate, so the irreversible HF publish is
@@ -1817,6 +1852,19 @@ def sofer_publish_confirm(
             "confidential": cfg.confidential,
             "acknowledge_risk": acknowledge_risk,
             "acknowledge_confidential": acknowledge_confidential,
+            "acknowledge_public": acknowledge_public,
+            "posture": {
+                "configured": "private" if cfg.private else "PUBLIC",
+                "public_reason": cfg.public_reason,
+                "confidential": cfg.confidential,
+                "confidentiality_reason": cfg.confidentiality_reason,
+                "observed": observed_visibility,
+                "acknowledged": {
+                    "risk": acknowledge_risk,
+                    "confidential": acknowledge_confidential,
+                    "public": acknowledge_public,
+                },
+            },
             "skipped_protected": sorted(protected),
             "partial": bool(protected),
             "config_errors": config_errors,
@@ -3431,6 +3479,11 @@ def _register_tools(server: _FastMCP) -> None:
                 "confidential": {"type": "boolean"},
                 "acknowledge_risk": {"type": "boolean"},
                 "acknowledge_confidential": {"type": "boolean"},
+                "acknowledge_public": {"type": "boolean"},
+                "posture": {
+                    "type": "object",
+                    "description": "Configured visibility and reasons, the observed repository visibility, and the three acknowledgements — the auditable delivery posture (issue #338).",
+                },
                 "skipped_protected": {"type": "array"},
                 "partial": {"type": "boolean"},
                 "config_errors": {"type": "array"},

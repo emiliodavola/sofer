@@ -703,7 +703,7 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 5a | `sofer_render` | `package`, `output_dir`, `force` | Render de un archivo tras `sofer_profile`. |
 | 5b | `sofer_render_all` | `config`, `output_dir` | Fase 1 paso 5 en lote (`cache/renders/`); requiere `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` previsualiza; **STOP** antes de confirm. |
-| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Solo tras aprobación humana. |
+| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `acknowledge_public`, `approval_phrase`, `force` | Solo tras aprobación humana. Un destino público (`[dataset] private = false`) necesita su propio `acknowledge_public`: `acknowledge_risk` cubre la subida irreversible, no la exposición. El envelope registra la postura (configurada, observada, reconocida). |
 | * | `sofer_auth_status` | `config`, `check_remote` | Preflight sin publicar; reporta la visibilidad configurada y, con `check_remote=true`, la actual del repositorio; `readOnlyHint:true`. |
 | * | `sofer_repo_settings` | `config`, `private`, `approval_phrase`, `dry_run` | Lee la visibilidad y la postura del repositorio destino; `private` + `approval_phrase` fija la visibilidad (requiere token). `openWorldHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Codebook de un archivo. |

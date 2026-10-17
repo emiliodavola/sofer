@@ -296,10 +296,18 @@ class McpStdioServer:
 #: fake api must answer ``repo_info`` or the real client is reached).
 _REPO_INFO_PRIVATE = SimpleNamespace(private=True)
 
+#: The same stand-in for a repository that is currently public.
+_REPO_INFO_PUBLIC = SimpleNamespace(private=False)
+
 
 def repo_info_private(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
     """Stub for ``HfApi.repo_info``: a repository that is currently private."""
     return _REPO_INFO_PRIVATE
+
+
+def repo_info_public(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    """Stub for ``HfApi.repo_info``: a repository that is currently public."""
+    return _REPO_INFO_PUBLIC
 
 
 def _make_dataset(root: Path, *, confidential: bool = False, name: str = "test-ds") -> Path:

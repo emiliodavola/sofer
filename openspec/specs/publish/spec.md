@@ -480,6 +480,18 @@ visibility.
 - WHEN the confirm plan is printed
 - THEN it SHALL carry the configured visibility, the observed one and the confidential flag
 
+#### Scenario: A public target requires its own acknowledgement
+
+- GIVEN `[dataset] private = false` with its `public_reason`, and a human who approved the upload
+- WHEN a publish is confirmed with `acknowledge_risk` but no `acknowledge_public`
+- THEN it SHALL refuse with `PUBLISH_PUBLIC_NOT_ACKD` naming the acknowledgement, and SHALL NOT upload
+
+#### Scenario: The delivery report records the posture
+
+- GIVEN a confirmed publish
+- WHEN the envelope is returned
+- THEN it SHALL carry `posture` with the configured visibility and its reason, the observed repository visibility, and the three acknowledgements (`risk`, `confidential`, `public`)
+
 #### Scenario: An unreadable remote is not an agreement
 
 - GIVEN a `repo_info` call that fails for a reason other than not-found

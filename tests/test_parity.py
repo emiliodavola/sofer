@@ -137,6 +137,10 @@ AREAS: list[AreaParity] = [
         exempt_params={
             "acknowledge_risk": "MCP-only human gate (actor design A)",
             "acknowledge_confidential": "MCP-only human gate (actor design A)",
+            "acknowledge_public": (
+                "MCP-only human gate: a public target is its own decision, not covered by "
+                "acknowledge_risk (issue #338)"
+            ),
             "approval_phrase": "MCP-only human gate (actor design A)",
         },
     ),

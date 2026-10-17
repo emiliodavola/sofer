@@ -574,3 +574,15 @@ class TestExplicitDialectParams:
             props = (tools[name].inputSchema or {}).get("properties", {})
             assert "delimiter" not in props, name
             assert "encoding" not in props, name
+
+
+class TestAcknowledgeRiskWording:
+    """#338: acknowledging the upload is not consenting to a public target."""
+
+    def test_acknowledge_risk_no_longer_claims_public(self, tmp_path: Path):
+        props = _tools_dict(tmp_path)["sofer_publish_confirm"].inputSchema["properties"]
+        risk = props["acknowledge_risk"]["description"]
+        assert "irreversible" in risk
+        assert "irreversible and public" not in risk
+        assert "acknowledge_public" in risk
+        assert "acknowledge_public" in props

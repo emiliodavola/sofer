@@ -28,6 +28,7 @@ from conftest import (
     call_tool,
     mcp_payload,
     repo_info_private,
+    repo_info_public,
 )
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -6270,3 +6271,101 @@ class TestRepoSettingsTool:
         assert envelope["ok"] is False, envelope
         assert envelope["error_code"] == "REPO_SETTINGS_APPROVAL_NOT_CONFIGURED"
         assert envelope["hints"] == {"action": "configure_approval_phrase"}
+
+
+class TestPublishPublicGate:
+    """#338/S5: acknowledging the upload is not consenting to a public target."""
+
+    @staticmethod
+    def _public_dataset(tmp_path: Path) -> str:
+        """A dataset that declares itself public, with the required reason."""
+        _make_dataset(tmp_path)
+        toml = tmp_path / "dataset.toml"
+        text = toml.read_text(encoding="utf-8").replace(
+            'repo_id = "user/test-ds"',
+            'repo_id = "user/test-ds"\nprivate = false\npublic_reason = "open data mandate"',
+        )
+        toml.write_text(text, encoding="utf-8")
+        _prepare_package(tmp_path)
+        return str(toml)
+
+    def test_a_public_target_needs_its_own_acknowledgement(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        config = self._public_dataset(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        uploaded: list[str] = []
+        monkeypatch.setattr(
+            publish_mod._api, "upload_folder", lambda *a, **kw: uploaded.append("upload")
+        )
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": config,
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "PUBLISH_PUBLIC_NOT_ACKD"
+        assert envelope["hints"] == {"acknowledge_public": True}
+        assert uploaded == [], "a refused publish must not upload"
+
+    def test_acknowledge_public_lets_it_through_and_is_recorded(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        config = self._public_dataset(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "repo_info", repo_info_public)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": config,
+                "acknowledge_risk": True,
+                "acknowledge_public": True,
+                "approval_phrase": "test-phrase",
+            },
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["posture"]["configured"] == "PUBLIC"
+        assert envelope["posture"]["public_reason"] == "open data mandate"
+        assert envelope["posture"]["observed"] == "public"
+        assert envelope["posture"]["acknowledged"]["public"] is True
+
+    def test_the_posture_is_recorded_for_a_private_target(
+        self, tmp_path, monkeypatch, restore_tool_config
+    ) -> None:
+        _make_dataset(tmp_path)
+        _prepare_package(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        server = build_server(root=tmp_path, approval_phrase="test-phrase")
+
+        envelope = _call(
+            server,
+            "sofer_publish_confirm",
+            {
+                "config": str(tmp_path / "dataset.toml"),
+                "acknowledge_risk": True,
+                "approval_phrase": "test-phrase",
+            },
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["posture"]["configured"] == "private"
+        assert envelope["posture"]["observed"] == "private"
+        assert envelope["posture"]["acknowledged"] == {
+            "risk": True,
+            "confidential": False,
+            "public": False,
+        }

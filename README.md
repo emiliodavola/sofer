@@ -663,7 +663,7 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 | 5a | `sofer_render` | `package`, `output_dir`, `force` | Single-file render after `sofer_profile`. |
 | 5b | `sofer_render_all` | `config`, `output_dir` | Phase 1 step 5 batch (`cache/renders/`); requires `profile_all`. |
 | 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
-| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `approval_phrase`, `force` | Only after human approval. |
+| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `acknowledge_public`, `approval_phrase`, `force` | Only after human approval. A public target (`[dataset] private = false`) needs its own `acknowledge_public` — `acknowledge_risk` covers the irreversible upload, not the exposure. The envelope records the posture (configured, observed, acknowledged). |
 | * | `sofer_auth_status` | `config`, `check_remote` | Preflight without publish; reports the configured visibility, and the repository's current one with `check_remote=true`; `readOnlyHint:true`. |
 | * | `sofer_repo_settings` | `config`, `private`, `approval_phrase`, `dry_run` | Read the target repository's visibility and posture; `private` + `approval_phrase` sets the visibility (needs a token). `openWorldHint:true`. |
 | * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Single-file codebook. |
