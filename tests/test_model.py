@@ -666,3 +666,44 @@ class TestInferenceStatus:
             "INFERRED",
             "UNKNOWN",
         }
+
+
+# ── [[file]] column_types (issue #337) ────────────────────────────────────────
+
+
+class TestFileColumnTypes:
+    """The declared dtype control: parsed, and its vocabulary is closed."""
+
+    def _toml(self, tmp_path: Path, entry_extra: str) -> Path:
+        p = tmp_path / "ds.toml"
+        p.write_text(
+            '[dataset]\nname = "ds"\nrepo_id = "u/ds"\n\n'
+            f'[[file]]\nlocal = "raw/a.csv"\nremote = "a.csv"\n{entry_extra}',
+            encoding="utf-8",
+        )
+        return p
+
+    def test_declared_column_types_is_parsed(self, tmp_path: Path) -> None:
+        """A table of {column = "string"} reaches the FileEntry."""
+        p = self._toml(tmp_path, 'column_types = { ID = "string", CODE = "string" }\n')
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[0].column_types == {"ID": "string", "CODE": "string"}
+
+    def test_absent_column_types_defaults_to_empty(self, tmp_path: Path) -> None:
+        p = self._toml(tmp_path, "")
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[0].column_types == {}
+
+    def test_unknown_type_is_refused_naming_the_accepted_set(self, tmp_path: Path) -> None:
+        """A typo fails closed instead of silently doing nothing."""
+        p = self._toml(tmp_path, 'column_types = { ID = "int64" }\n')
+        cfg = DatasetConfig.from_toml(p)
+        errors = cfg.validate()
+        assert any("must be one of 'string'" in e and "ID" in e for e in errors), errors
+
+    def test_non_table_shape_is_ignored_with_a_warning(self, tmp_path: Path, capsys) -> None:
+        """A wrong shape never reaches the converter, and says so."""
+        p = self._toml(tmp_path, 'column_types = ["ID"]\n')
+        cfg = DatasetConfig.from_toml(p)
+        assert cfg.files[0].column_types == {}
+        assert "must be a table" in capsys.readouterr().out

@@ -21,6 +21,7 @@ from sofer._converters import (
     _read_csv_raw_values,
     _write_parquet_table,
     convert_file_to_parquet,
+    leading_zero_columns,
     normalize_parquet_remote,
     sanitize_sheet_name,
 )
@@ -496,3 +497,133 @@ class TestConvertFileToParquetRetargetedArms:
         table = pq.read_table(result["data"])
         col_type = table.schema.field("empty_col").type
         assert pa.types.is_string(col_type) or pa.types.is_large_string(col_type)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Issue #337 — declared dtype control and zero-padded code protection
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLeadingZeroProbe:
+    """The probe that decides which columns a numeric conversion would alter."""
+
+    def test_zero_padded_code_column_is_detected(self, tmp_path: Path) -> None:
+        csv = tmp_path / "codes.csv"
+        csv.write_text("ID;NAME\n001;a\n02;b\n5;c\n", encoding="utf-8")
+        assert leading_zero_columns(csv, ";") == ["ID"]
+
+    def test_plain_integer_column_is_not_detected(self, tmp_path: Path) -> None:
+        csv = tmp_path / "plain.csv"
+        csv.write_text("ID;NAME\n1;a\n2;b\n", encoding="utf-8")
+        assert leading_zero_columns(csv, ";") == []
+
+    def test_text_with_an_incidental_zero_token_is_not_detected(self, tmp_path: Path) -> None:
+        """A column that is not all digits is never forced to string."""
+        csv = tmp_path / "mixed.csv"
+        csv.write_text("NOTE\n007 licence\nsee 001 above\n", encoding="utf-8")
+        assert leading_zero_columns(csv, ";") == []
+
+    def test_empty_cells_do_not_disqualify_a_code_column(self, tmp_path: Path) -> None:
+        csv = tmp_path / "gaps.csv"
+        csv.write_text("ID\n001\n\n02\n", encoding="utf-8")
+        assert leading_zero_columns(csv, ";") == ["ID"]
+
+    def test_probe_stops_at_the_configured_row_budget(self, tmp_path: Path) -> None:
+        """A code that only appears past the budget is not probed (bounded cost)."""
+        rows = ["ID"] + ["1"] * 5 + ["001"]
+        csv = tmp_path / "late.csv"
+        csv.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        assert leading_zero_columns(csv, ";", probe_rows=5) == []
+        assert leading_zero_columns(csv, ";", probe_rows=10) == ["ID"]
+
+    def test_unreadable_file_returns_empty(self, tmp_path: Path) -> None:
+        assert leading_zero_columns(tmp_path, ";") == []
+
+    def test_header_only_file_returns_empty(self, tmp_path: Path) -> None:
+        csv = tmp_path / "empty.csv"
+        csv.write_text("ID;NAME\n", encoding="utf-8")
+        assert leading_zero_columns(csv, ";") == []
+
+
+class TestColumnTypeControl:
+    """#337: the declared dtype and the automatic code protection."""
+
+    def test_declared_column_types_forces_string(self, tmp_path: Path) -> None:
+        """A declared column reaches the Parquet as its source string form."""
+        csv = tmp_path / "declared.csv"
+        csv.write_text("ID;NAME\n1;a\n2;b\n", encoding="utf-8")
+        staging = tmp_path / "stage"
+
+        result = convert_file_to_parquet(csv, staging, None, column_types={"ID": "string"})
+
+        table = pq.read_table(result["declared"])
+        assert table.schema.field("ID").type == pa.string()
+        assert table.column("ID").to_pylist() == ["1", "2"]
+
+    def test_zero_padded_column_is_protected_without_config(self, tmp_path: Path, capsys) -> None:
+        """T1: the source form survives without any declaration, and says so."""
+        csv = tmp_path / "codes.csv"
+        csv.write_text("ID;NAME\n001;a\n02;b\n", encoding="utf-8")
+        staging = tmp_path / "stage"
+
+        result = convert_file_to_parquet(csv, staging, None)
+
+        table = pq.read_table(result["codes"])
+        assert table.schema.field("ID").type == pa.string()
+        assert table.column("ID").to_pylist() == ["001", "02"]
+        out = capsys.readouterr().out
+        assert "carries zero-padded codes" in out
+        assert 'column_types = { ID = "string" }' in out
+
+    def test_unknown_declared_type_is_refused_naming_the_set(self) -> None:
+        """T2: the vocabulary is closed; a typo fails closed."""
+        from sofer._converters import column_type_datatype
+
+        with pytest.raises(ValueError, match="accepted: 'string'"):
+            column_type_datatype("int64")
+
+    def test_unsupported_declared_type_fails_closed(self, tmp_path: Path, capsys) -> None:
+        """An unvalidated type never converts: the original CSV is staged."""
+        csv = tmp_path / "declared.csv"
+        csv.write_text("ID;NAME\n1;a\n", encoding="utf-8")
+
+        result = convert_file_to_parquet(
+            csv, tmp_path / "stage", None, column_types={"ID": "int64"}
+        )
+
+        assert result == {}
+        out = capsys.readouterr().out
+        assert "conversion failed" in out
+        assert "accepted: 'string'" in out
+
+    def test_residual_alteration_raises_instead_of_shipping(self, tmp_path: Path) -> None:
+        """T3: an alteration no forced dtype covers is fatal (D4)."""
+        from sofer._converters import ValueAlterationError
+
+        csv = tmp_path / "plus.csv"
+        csv.write_text("V;NAME\n+5;a\n+6;b\n", encoding="utf-8")
+
+        with pytest.raises(ValueAlterationError) as excinfo:
+            convert_file_to_parquet(csv, tmp_path / "stage", None)
+
+        assert excinfo.value.filename == "plus.csv"
+        assert [name for name, _ in excinfo.value.columns] == ["V"]
+
+    def test_declared_type_wins_over_the_probe(self, tmp_path: Path, capsys) -> None:
+        """A declared column is not re-announced as an automatic decision."""
+        csv = tmp_path / "codes.csv"
+        csv.write_text("ID;NAME\n001;a\n", encoding="utf-8")
+
+        convert_file_to_parquet(csv, tmp_path / "stage", None, column_types={"ID": "string"})
+
+        assert "carries zero-padded codes" not in capsys.readouterr().out
+
+    def test_dataset_without_codes_keeps_the_pre_change_read(self, tmp_path: Path) -> None:
+        """No code column and no declaration → the table is inferred as before."""
+        csv = tmp_path / "plain.csv"
+        csv.write_text("ID;NAME\n1;a\n", encoding="utf-8")
+
+        result = convert_file_to_parquet(csv, tmp_path / "stage", None)
+
+        table = pq.read_table(result["plain"])
+        assert table.schema.field("ID").type == pa.int64()
