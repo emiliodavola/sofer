@@ -980,11 +980,13 @@ Canonical branches: greenfield `sofer_init -> sofer_scan_dry_run -> sofer_scan_a
 - AND the error SHALL name the unsupported suffix and the supported set
 ---
 
-### Requirement: Scan Phase-1 move is mandatory (MSP-R15) — Modified 2026-10-17, feat-visibility-enforcement
+### Requirement: Scan Phase-1 move is mandatory (MSP-R15) — Modified 2026-10-18, fix-scan-registered-count
 
 > Added by change `fix-scan-parity-mcp` (closes #152). Modified by `fix-scan-move-raw-mandatory` (issue
 > #339) — the opt-in became a mandate; this `mcp-server` clause was missed then and corrected by
-> `feat-visibility-enforcement` (issue #338) when the divergence was found.
+> `feat-visibility-enforcement` (issue #338) when the divergence was found. Modified by
+> `fix-scan-registered-count` (issue #345) — the `registered` integer in both scan envelopes is the
+> merge's own count.
 
 `sofer_scan_dry_run` and `sofer_scan_apply` SHALL run the Phase-1 MOVE (see MST-R06) unconditionally: no
 argument SHALL allow skipping it, because `cache/` is the shared, deletion-prone staging directory and
@@ -992,6 +994,15 @@ the registered sources MUST NOT live only there. `sofer_scan_dry_run` SHALL prev
 mutation. Collisions against existing `raw/` destinations SHALL abort atomically before any move
 (`registered: 0`, TOML untouched). `sofer_scan_apply` SHALL report `moved: int` in a successful envelope
 (declared in `output_schema`).
+
+`registered: int` in both scan envelopes SHALL be the number of `[[file]]` entries the merge of that
+same call appended, as reported by the merge itself and never as a before/after difference of entry
+counts (#345). `[[file]]` placeholders the merge strips (`TODO:`, `raw/example*`) SHALL NOT be
+subtracted from it, so on a fresh `sofer_init` tree the field SHALL equal the number of newly
+registered files (`discovered` when nothing was registered before) and SHALL agree with the TOML
+written by the same call. Both tools SHALL report the same value for the same tree, and an idempotent
+re-scan SHALL report `registered: 0`. The field's `description` in both `output_schema` blocks SHALL
+state this meaning.
 
 #### Scenario: Dry-run previews the mandatory move without mutation
 
@@ -1013,6 +1024,13 @@ mutation. Collisions against existing `raw/` destinations SHALL abort atomically
 - WHEN `sofer_scan_apply` runs
 - THEN the loose files SHALL end up under `raw/` with their tree and the envelope SHALL report `moved`
 - AND no parameter SHALL exist that skips the move
+
+#### Scenario: The init placeholders are not subtracted from the count (#345)
+
+- GIVEN a fresh `sofer_init` tree with N loose supported files and the two `raw/example*` placeholders in the TOML
+- WHEN `sofer_scan_apply` runs, and separately `sofer_scan_dry_run` on a second identical tree
+- THEN both SHALL report `registered: N` while the written TOML holds N `[[file]]` entries
+- AND an immediate re-scan of the applied tree SHALL report `registered: 0`
 ---
 
 ### Requirement: Publish cleanup (MSP-R16)

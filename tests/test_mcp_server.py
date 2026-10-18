@@ -2644,6 +2644,68 @@ class TestScanApplyTruthfulReport:
         assert "Failed to write TOML" in envelope["message"]
 
 
+class TestScanRegisteredCount:
+    """#345: ``registered`` counts the entries the merge appended.
+
+    ``sofer_init`` scaffolds two ``raw/example*`` placeholders that the same
+    merge strips, so a before/after difference of entry counts subtracted two
+    entries that were never appended: every greenfield scan reported ``N - 2``
+    while the TOML it wrote carried ``N``. The contract these tests pin is the
+    one the envelope field is read for — ``registered`` is what this call added,
+    so a greenfield scan reports every file and a re-scan reports zero.
+    """
+
+    def _init_tree(self, root: Path, files: int) -> tuple[Any, Path]:
+        """Scaffold a greenfield ``sofer_init`` tree with *files* loose CSVs."""
+        server = build_server(root=root)
+        init = _call(
+            server,
+            "sofer_init",
+            {"name": "count-ds", "user": "myuser", "cwd": str(root)},
+        ).data
+        assert init["ok"] is True, init
+        for index in range(files):
+            (root / f"t{index}.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        return server, root / "count-ds.toml"
+
+    def test_apply_counts_every_newly_registered_file(self, tmp_path, restore_tool_config):
+        """A greenfield scan of 5 files reports 5 — the init placeholders are
+        stripped, never subtracted."""
+        server, config_path = self._init_tree(tmp_path, 5)
+
+        envelope = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["discovered"] == 5, envelope
+        assert envelope["registered"] == 5, envelope
+        written = config_path.read_text(encoding="utf-8")
+        assert "raw/example" not in written, "the init placeholders must be stripped"
+        assert written.count('local = "cache/t') == 5
+
+    def test_dry_run_reports_the_count_the_apply_then_reports(self, tmp_path, restore_tool_config):
+        """The preview and the apply agree: both report the merge's own count."""
+        server, config_path = self._init_tree(tmp_path, 5)
+
+        dry = _call(server, "sofer_scan_dry_run", {"config": str(config_path)}).data
+        assert dry["ok"] is True, dry
+        assert dry["registered"] == 5, dry
+
+        applied = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+        assert applied["registered"] == dry["registered"], (dry, applied)
+
+    def test_rescan_registers_nothing(self, tmp_path, restore_tool_config):
+        """A re-scan over an already-registered tree appends nothing."""
+        server, config_path = self._init_tree(tmp_path, 5)
+        first = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+        assert first["registered"] == 5, first
+
+        second = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+
+        assert second["ok"] is True, second
+        assert second["discovered"] == 5, second
+        assert second["registered"] == 0, second
+
+
 # ---------------------------------------------------------------------------
 #  #152 + #339 — MCP scan parity: the Phase-1 move-to-raw/ is mandatory in
 #  both scan tools, and registration is keyed relative to raw/.
