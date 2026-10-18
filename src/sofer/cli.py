@@ -37,7 +37,7 @@ from .scanner import (
     copy_files,
     discover_files,
     format_stale_cache_warning,
-    merge_entries,
+    merge_entries_counted,
     move_to_raw,
     registration_path,
     stale_cache_registrations,
@@ -522,9 +522,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         Phase 2 — copy ``raw/`` → ``cache/`` (keyed relative to ``raw/``):
 
             6. Discover files excluding ``cache/``/``EXCLUSIONS``,
-               ``check_flatten_collisions``, ``merge_entries``,
+               ``check_flatten_collisions``, ``merge_entries_counted``,
                ``copy_files`` (``raw/DPTO.csv`` → ``cache/DPTO.csv`` via
                :func:`registration_path` + ``shutil.copy2``), ``write_toml``.
+               The count printed as ``Registered N`` is the merge's own
+               ``added`` (issue #345), so it agrees with the written TOML.
 
     Atomicity: collision or ``N``/``--dry-run`` leaves TOML and moved files
     untouched — no partial moves. Phase 2 copies files first and writes the
@@ -642,11 +644,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"  X  {exc}", file=sys.stderr)
         return 1
 
-    # 3. Merge new entries into the raw TOML dict.
-    before_count = len(raw_toml.get("file", []))
-    raw_toml = merge_entries(discovered, raw_toml, base_dir, data_dir)
-    after_count = len(raw_toml.get("file", []))
-    new_count = after_count - before_count
+    # 3. Merge new entries into the raw TOML dict. The reported count is the
+    #    merge's own (#345): a before/after difference of entry counts
+    #    subtracted the ``raw/example*`` init placeholders that this same merge
+    #    strips, so a greenfield scan printed ``N - 2``.
+    raw_toml, new_count = merge_entries_counted(discovered, raw_toml, base_dir, data_dir)
 
     print(f"  OK  Discovered {len(discovered)} supported file(s).")
 
@@ -1959,7 +1961,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "is what makes a re-scan idempotent whatever the layout."
             "\n"
             "Running scan twice is safe — already-registered files are "
-            "skipped (idempotent TOML and cache/)."
+            "skipped (idempotent TOML and cache/), and the reported count is "
+            "the number of [[file]] entries this run appended."
         ),
     )
     s.add_argument(

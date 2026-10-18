@@ -941,6 +941,72 @@ class TestScanTruthfulReport:
         assert "Registered 1 new [[file]] entry(s)." in out
 
 
+class TestScanCountWithInitPlaceholders:
+    """#345: ``Registered N`` is the merge's own count, so it agrees with the TOML.
+
+    ``sofer init`` scaffolds two ``raw/example*`` placeholders that the same
+    merge strips. Measuring the count as a before/after difference of entry
+    counts subtracted them anyway, so a greenfield scan of N files printed
+    ``N - 2`` while the TOML it wrote held N entries. The CLI carries the same
+    defect as the MCP scan envelopes and is fixed in the same change.
+    """
+
+    _INIT_STYLE_TOML = """[dataset]
+name = "test"
+repo_id = "u/t"
+
+[[file]]
+local = "raw/example.csv"
+remote = "file.csv"
+
+[[file]]
+local = "raw/example/"
+remote = "subfolder/"
+recursive = true
+"""
+
+    def _init_style_config(self, tmp_path: Path, files: int) -> Path:
+        """A config carrying the two init placeholders plus *files* loose CSVs."""
+        for index in range(files):
+            (tmp_path / f"t{index}.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        config_path = tmp_path / "dataset.toml"
+        config_path.write_text(self._INIT_STYLE_TOML, encoding="utf-8")
+        return config_path
+
+    def test_placeholders_do_not_shift_the_count(self, tmp_path, monkeypatch, capsys):
+        """Four loose files over an init-style config print ``Registered 4``."""
+        config_path = self._init_style_config(tmp_path, 4)
+        monkeypatch.chdir(tmp_path)
+
+        rc = cli._cmd_scan(Namespace(config=str(config_path), dry_run=False, force=True, ext=None))
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Registered 4 new [[file]] entry(s)." in out
+        written = config_path.read_text(encoding="utf-8")
+        assert "raw/example" not in written, "the init placeholders must be stripped"
+        assert written.count('local = "cache/t') == 4
+
+    def test_dry_run_previews_the_same_count(self, tmp_path, monkeypatch, capsys):
+        """The dry-run preview reports the merge count for files already under raw/.
+
+        ``scan --dry-run`` returns right after the MOVE preview when there are
+        loose candidates (Phase 2 is skipped by design), so this exercises the
+        reachable preview path: sources already in ``raw/`` and no candidates.
+        """
+        config_path = self._init_style_config(tmp_path, 3)
+        (tmp_path / "raw").mkdir()
+        for index in range(3):
+            (tmp_path / f"t{index}.csv").rename(tmp_path / "raw" / f"t{index}.csv")
+        monkeypatch.chdir(tmp_path)
+
+        rc = cli._cmd_scan(Namespace(config=str(config_path), dry_run=True, force=True, ext=None))
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN  Would register 3 new [[file]] entry(s)." in out
+
+
 # ── Fix 1: ran_checks propagation ─────────────────────────────────────────
 
 

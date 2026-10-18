@@ -126,7 +126,7 @@ from .scanner import (
     copy_files,
     discover_files,
     format_stale_cache_warning,
-    merge_entries,
+    merge_entries_counted,
     move_to_raw,
     stale_cache_registrations,
     write_toml,
@@ -150,6 +150,16 @@ _UNTRUSTED_NOTE: str = (
 _OUTPUT_FIELD_DESCRIPTION: str = (
     "Captured stdout/stderr, truncated to output_max_bytes with a "
     "'... [truncated: N bytes]' marker when larger."
+)
+
+# Documented on both scan tools' output_schema (issue #345): the count is what
+# the TOML merge of that same call appended, so it agrees with the written
+# config and reads 0 on an idempotent re-scan.
+_REGISTERED_FIELD_DESCRIPTION: str = (
+    "Number of [[file]] entries this call appended, as reported by the TOML "
+    "merge itself: on a tree with nothing registered yet it equals the number "
+    "of newly registered files, and an idempotent re-scan reports 0. "
+    "Init placeholders the merge strips are never subtracted from it."
 )
 
 # Error-envelope fields merged into every tool's output_schema so the
@@ -2835,9 +2845,11 @@ def sofer_scan_dry_run(
                 "message": str(exc),
                 "next": {},
             }
-        before = len(raw_toml.get("file", []))
-        merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
-        registered = len(merged.get("file", [])) - before
+        # #345: the count comes from the merge itself. Measuring it as a
+        # before/after difference of entry counts subtracted the ``raw/example*``
+        # init placeholders that this same merge strips, so every greenfield
+        # scan reported two fewer registrations than the TOML it wrote.
+        merged, registered = merge_entries_counted(discovered, raw_toml, base_dir, data_dir)
         try:
             planned = copy_files(discovered, base_dir, data_dir, dry_run=True, force=False)
         except FileExistsError as exc:
@@ -2976,9 +2988,8 @@ def sofer_scan_apply(
                 "message": str(exc),
                 "next": {},
             }
-        before = len(raw_toml.get("file", []))
-        merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
-        registered = len(merged.get("file", [])) - before
+        # #345: the count comes from the merge itself (see sofer_scan_dry_run).
+        merged, registered = merge_entries_counted(discovered, raw_toml, base_dir, data_dir)
         # Stale-registration report (#339/D5): name cache/-only entries whose
         # raw/ source is missing, without rewriting them.
         for line in format_stale_cache_warning(
@@ -3641,7 +3652,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "discovered": {"type": "integer"},
-                "registered": {"type": "integer"},
+                "registered": {
+                    "type": "integer",
+                    "description": _REGISTERED_FIELD_DESCRIPTION,
+                },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
@@ -3664,7 +3678,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "discovered": {"type": "integer"},
-                "registered": {"type": "integer"},
+                "registered": {
+                    "type": "integer",
+                    "description": _REGISTERED_FIELD_DESCRIPTION,
+                },
                 "copied": {"type": "integer"},
                 "moved": {"type": "integer"},
                 "config_errors": {"type": "array"},

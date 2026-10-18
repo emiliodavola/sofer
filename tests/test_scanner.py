@@ -19,6 +19,7 @@ from sofer.scanner import (
     flatten_first_level,
     format_stale_cache_warning,
     merge_entries,
+    merge_entries_counted,
     registration_path,
     stale_cache_registrations,
     write_toml,
@@ -544,6 +545,48 @@ class TestMergeEntries:
         assert files[0]["remote"] == "a.csv"
         assert files[1]["local"] == "data/b.csv"
         assert files[1]["remote"] == "b.csv"
+
+    def test_counted_merge_reports_the_entries_it_appended_after_the_strip(
+        self, tmp_path: Path
+    ) -> None:
+        """#345: the count is what the merge appended, not a list-length delta.
+
+        ``sofer_init`` scaffolds two ``raw/example*`` placeholders that this
+        same merge strips, so they are never part of the merged list. A
+        before/after difference of entry counts subtracted them from the
+        result anyway, which is what made every greenfield scan report two
+        fewer registrations than the TOML it wrote.
+        """
+        _touch(tmp_path / "a.csv")
+        _touch(tmp_path / "b.csv")
+        raw = self._raw_toml(
+            file=[
+                {"local": "raw/example.csv", "remote": "file.csv"},
+                {"local": "raw/example/", "remote": "subfolder/", "recursive": True},
+            ]
+        )
+        discovered = sorted([tmp_path / "a.csv", tmp_path / "b.csv"])
+
+        merged, added = merge_entries_counted(discovered, raw, tmp_path, tmp_path / "data")
+
+        assert added == 2
+        assert len(merged["file"]) == 2
+        assert [e["local"] for e in merged["file"]] == ["data/a.csv", "data/b.csv"]
+
+    def test_counted_merge_reports_zero_when_nothing_was_appended(self, tmp_path: Path) -> None:
+        """An idempotent re-merge appends nothing, so it reports 0 — the count
+        is a property of this call, not of the config's size."""
+        _touch(tmp_path / "a.csv")
+        (tmp_path / "data").mkdir()
+        _touch(tmp_path / "data" / "a.csv")
+        raw = self._raw_toml(file=[{"local": "data/a.csv", "remote": "a.csv"}])
+
+        merged, added = merge_entries_counted(
+            [tmp_path / "a.csv"], raw, tmp_path, tmp_path / "data"
+        )
+
+        assert added == 0
+        assert len(merged["file"]) == 1
 
     def test_dedup_by_resolved_path(self, tmp_path: Path) -> None:
         """A discovered file whose dest already has a registered entry is skipped."""
