@@ -244,6 +244,34 @@ def test_layer_probe_still_reads_the_dataset_root(tmp_path: Path) -> None:
     assert render.path == "renders/data.README.md"
 
 
+def test_layer_outside_the_root_is_reported_without_raising(tmp_path: Path, monkeypatch) -> None:
+    """A cache the root does not contain is reported absolutely, never raised.
+
+    ``config.OUTPUT_DIR`` is a configured value, so it can point outside the
+    dataset root. The probe must not turn that into a ``ValueError`` inside
+    ``prepare``: the entry is reported with the absolute path instead.
+    """
+    from sofer.manifest import config as manifest_config
+
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    out.mkdir()
+    narrow = tmp_path / "narrow-root"
+    narrow.mkdir()
+    cfg._base_dir = narrow  # the root the manifest relativizes against
+    cache = tmp_path / "elsewhere" / "cache"
+    (cache / "profiles").mkdir(parents=True)
+    (cache / "profiles" / "data.metadata.yaml").write_text("x: 1\n", encoding="utf-8")
+    monkeypatch.setattr(manifest_config, "OUTPUT_DIR", str(cache))
+
+    manifest = build_package_manifest(cfg, out)
+
+    profile = next(e for e in manifest.entries if e.artifact_type == "profile")
+    assert profile.status == ArtifactStatus.STAGED
+    assert profile.classification is ArtifactClass.INTERMEDIATE
+    assert profile.path == (cache / "profiles" / "data.metadata.yaml").as_posix()
+
+
 def test_manifest_without_classification_reads_as_publishable(tmp_path: Path) -> None:
     """A manifest written before the field existed still loads (#346 compat)."""
     legacy = {
