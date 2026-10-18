@@ -319,6 +319,33 @@ def test_recursive_tree_is_a_directory_entry_never_a_delivered_file(tmp_path: Pa
     assert "empty/" not in {e.path for e in manifest.delivered()}
 
 
+def test_codebook_all_refreshes_the_durable_manifest(tmp_path: Path) -> None:
+    """The file on disk follows the delivery, never a prepare-time snapshot (#349).
+
+    On the canonical chain ``prepare`` runs before ``codebook_all``
+    (``mcp_server.py:16``), so a manifest written by ``prepare`` alone declares
+    ``codebooks/`` ``optional`` while the pages are staged right after. The durable
+    document SHALL be the one a recount would produce.
+    """
+    from sofer.codebook import generate_all as generate_all_codebooks
+    from sofer.prepare import prepare
+
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    assert prepare(cfg, out) == 0
+    stale = PackageManifest.from_dir(out)
+    assert stale is not None
+    assert stale.of_type("codebook_page")[0].status is ArtifactStatus.OPTIONAL
+
+    generate_all_codebooks(cfg, output_dir=out)
+
+    durable = PackageManifest.from_dir(out)
+    assert durable == build_package_manifest(cfg, out)
+    pages = durable.of_type("codebook_page")
+    assert pages, "codebook_all wrote pages, so the durable manifest must declare them"
+    assert all(page.status is ArtifactStatus.STAGED for page in pages)
+
+
 def test_manifest_without_classification_reads_as_publishable(tmp_path: Path) -> None:
     """A manifest written before the field existed still loads (#346 compat)."""
     legacy = {
