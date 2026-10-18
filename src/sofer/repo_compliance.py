@@ -1480,6 +1480,77 @@ def _build_dataset_info(
     return info
 
 
+def _md_visible(value: str) -> str:
+    """Render *value* as printable text safe for a Markdown table cell.
+
+    A sampled value can hold anything the source file held: a corpus reported in
+    #348 has a data value that is a single NUL byte, and interpolating it
+    verbatim made ``build/README.md`` — the Dataset Card, published as the
+    repository's landing page — a file that ``grep`` and ``diff`` classify as
+    binary. A ``|`` is the same class of defect one step milder: it splits the
+    row into extra cells.
+
+    Args:
+        value: Raw data-derived text (a column name, an origin, a sample value).
+
+    Returns:
+        The same text with every Unicode ``Cc`` character replaced by its
+        ``\\xNN`` escape (so a NUL reads ``\\x00`` and a newline ``\\x0a``, and
+        neither can break the row or the file), and every ``|`` escaped as
+        ``\\|``. GFM honours the backslash inside a code span, which is what
+        keeps the cell from splitting. The escape character itself is a backslash
+        in both cases, so the result is idempotent-safe to read but never
+        re-escaped here.
+    """
+    escaped = "".join(
+        f"\\x{ord(ch):02x}" if unicodedata.category(ch) == "Cc" else ch for ch in value
+    )
+    return escaped.replace("|", "\\|")
+
+
+def _md_cell(value: str) -> str:
+    """Render *value* as one code-spanned Markdown table cell.
+
+    Args:
+        value: Raw data-derived text.
+
+    Returns:
+        The value escaped by :func:`_md_visible` inside a code span. The fence is
+        one backtick, or two when the escaped text itself contains a backtick — a
+        single-backtick span would end early and leave the rest of the value
+        outside the span, which is the same defect as an unescaped separator: the
+        cell would stop meaning what the data says.
+    """
+    text = _md_visible(value)
+    fence = "``" if "`" in text else "`"
+    return f"{fence}{text}{fence}"
+
+
+def _data_fields_row(entry: ColumnSchema) -> str:
+    """Render one Data Fields table row.
+
+    The single home for the row format, shared by the flat table and the
+    per-sheet collapsible tables (RC-R21), so the two branches cannot drift.
+    Every data-derived cell goes through :func:`_md_cell`.
+
+    Args:
+        entry: The column to render.
+
+    Returns:
+        A Markdown table row with the seven cells
+        ``Column | Type | File | Nullable | Example | Unique (sample) | Missing (%)``.
+        The File cell stays unfenced (its value is a file name, and the card has
+        always printed it bare); ``dtype``, ``unique`` and ``missing`` are
+        generated vocabularies and numbers, so they are interpolated as-is.
+    """
+    file_cell = _md_visible(entry.origin) if entry.origin else "-"
+    nullable = "Yes" if entry.nullable else "No"
+    return (
+        f"| {_md_cell(entry.name)} | {entry.dtype} | {file_cell} | {nullable} | "
+        f"{_md_cell(entry.example)} | {entry.unique} | {entry.missing}% |"
+    )
+
+
 def build_dataset_card(
     cfg: DatasetConfig,
     schema: list[ColumnSchema],
@@ -1761,11 +1832,7 @@ def build_dataset_card(
                 "|--------|------|------|----------|---------|-----------------|-------------|"
             )
             for s in schema:
-                file_cell = s.origin if s.origin else "-"
-                lines.append(
-                    f"| `{s.name}` | {s.dtype} | {file_cell} | {'Yes' if s.nullable else 'No'} | "
-                    f"`{s.example}` | {s.unique} | {s.missing}% |"
-                )
+                lines.append(_data_fields_row(s))
             lines.append("")
             lines.append(
                 f"*Statistics (unique, missing%) based on a {config.SCHEMA_SAMPLE_SIZE:,}-row sample."  # noqa: E501
@@ -1781,11 +1848,7 @@ def build_dataset_card(
                     "|--------|------|------|----------|---------|-----------------|-------------|",
                 ]
                 for s in cols:
-                    file_cell = s.origin if s.origin else "-"
-                    table_lines.append(
-                        f"| `{s.name}` | {s.dtype} | {file_cell} | {'Yes' if s.nullable else 'No'} | "  # noqa: E501
-                        f"`{s.example}` | {s.unique} | {s.missing}% |"
-                    )
+                    table_lines.append(_data_fields_row(s))
                 table_str = "\n".join(table_lines)
                 lines.append(
                     f"<details><summary>Data Fields -- {label} ({len(cols)} columns)</summary>"
