@@ -57,4 +57,4 @@ The delivered set SHALL be the `publishable` entries whose `status` is `staged` 
 - GIVEN a `manifest.json` whose entries carry no `classification`
 - WHEN it is read
 - THEN every entry SHALL read `publishable` — including a legacy `profile`/`render` entry, which a consumer needing the true class SHALL re-derive by rebuilding the manifest (`publish` does)
-- AND the JSON roundtrip SHALL stay byte-stable
+- AND re-reading and re-writing the result SHALL be byte-identical (the new form is a fixed point); a legacy input is not preserved byte-for-byte, because reading it records the classification

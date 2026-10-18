@@ -138,6 +138,32 @@ The verifier also flagged a process blocker worth keeping: it observed
 while it was reading it. Verification must target a frozen commit — which is what
 the follow-up run does.
 
+### Second round, on the frozen commit
+
+Re-run pinned to `14e1d5f` (the verifier recorded branch, HEAD and an empty
+`git status --porcelain` before and after its checks): **no FAIL.** Claims 1, 3, 4,
+5 and 6 PASS, and claim 2 PASS — the recursive counterexample is gone and the
+identity is asserted against the real staged set. It also confirmed the
+`except ValueError` branch is now exercised by a committed test, and that
+`tests/test_manifest.py` + `tests/test_prepare.py` + `tests/test_publish.py` are
+`235 passed`.
+
+Three precision flags remained, none blocking. Two were corrected here:
+
+- **Legacy roundtrip.** The scenario said the roundtrip "SHALL stay byte-stable",
+  but reading a legacy payload records the classification, so the output is not the
+  input. PUB-12 now says the new form is a byte-identical **fixed point** and a
+  legacy input is explicitly not preserved byte-for-byte.
+- **PRP-11 path scope.** The prepare spec still said `path (relative to the output
+  dir)` while intermediate layers are root-relative (and absolute when outside it).
+  It now states both scopes, matching PUB-12.
+
+The third — the `if not layer_path.is_file(): continue` taken-path (a layer
+directory holding a subdirectory) has no committed test — is a **pre-existing**
+coverage gap inherited from the `if layer_path.is_file():` guard that preceded this
+change, not a branch this change introduced. Left as is and recorded here rather
+than silently fixed by mutating the harness.
+
 ## 4. Deviations, recorded honestly
 
 1. **Test-first did not hold for the initial unit.** The implementation came before
@@ -164,3 +190,8 @@ the follow-up run does.
    this repo must use `coverage run --data-file=<scratch>`.
 7. **The claim was over-general when first written** (see §3): corrected in code,
    spec, delta and design after the verifier falsified it.
+8. **Two documents were imprecise, and the second verification round caught them:**
+   the legacy "byte-stable" claim (it is a fixed point, not input-preserving) and
+   PRP-11's path scope (intermediate layers are root-relative). Both are corrected in
+   this commit; a third flag, one uncovered pre-existing `continue`, is recorded and
+   left alone.
