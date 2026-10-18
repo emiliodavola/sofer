@@ -23,7 +23,17 @@ red-then-green for each surface:
 - **GREEN:** the same selections pass with the change in place, and the
   idempotent re-scan reports `0` without a code path special-casing it.
 
-The measured RED output is recorded in the archive report.
+```
+$ uv run pytest tests/ -q
+2483 passed, 9 skipped, 6 warnings in 114.44s        # baseline on dev@c68e090: 2476 passed, 9 skipped
+```
+
+The measured RED output and the full gate transcript are recorded verbatim in the
+change's `archive-report.md`.
+
+**Status:** implementation complete on `fix/345-scan-registered-count`; the branch
+is not pushed and no PR exists — push and PR creation are the maintainer's
+decision.
 
 ---
 
@@ -31,12 +41,12 @@ The measured RED output is recorded in the archive report.
 
 | # | Task | Spec | State |
 | --- | --- | --- | --- |
-| T1 | `scanner.merge_entries_counted` returns `(toml, added)`; `merge_entries` is a thin wrapper over it | S2 | pending |
-| T2 | `sofer_scan_dry_run` and `sofer_scan_apply` report the counted value; `registered` schema descriptions state the semantics | S1, S3 | pending |
-| T3 | `cli._cmd_scan` reports the counted value in `Registered N` and in the dry-run preview | S5 | pending |
-| T4 | Tests: MCP apply + dry-run on a fresh `sofer_init` tree, idempotent re-scan, CLI line, scanner unit test | S1, S4 | pending |
-| T5 | `scan` and `mcp-server` spec deltas; archive report | S1-S3 | pending |
-| T6 | Full gate set: `pytest`, `ruff check`, `ruff format --check`, `mypy`, `pyright`, `scanner.py` + `cli.py` at 100.00%, `scripts/check_test_mapping.py` | — | pending |
+| T1 | `scanner.merge_entries_counted` returns `(toml, added)`; `merge_entries` is a thin wrapper over it | S2 | done |
+| T2 | `sofer_scan_dry_run` and `sofer_scan_apply` report the counted value; `registered` schema descriptions state the semantics | S1, S3 | done |
+| T3 | `cli._cmd_scan` reports the counted value in `Registered N` and in the dry-run preview | S5 | done |
+| T4 | Tests: MCP apply + dry-run on a fresh `sofer_init` tree, idempotent re-scan, CLI line, scanner unit test | S1, S4 | done |
+| T5 | `scan` and `mcp-server` spec deltas; archive report | S1-S3 | done |
+| T6 | Full gate set: `pytest`, `ruff check`, `ruff format --check`, `mypy`, `pyright`, `scanner.py` + `cli.py` at 100.00%, `scripts/check_test_mapping.py` | — | done |
 
 ## Work units
 
