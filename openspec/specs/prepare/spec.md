@@ -402,16 +402,17 @@ When `prepare` invokes codebook generation with `--all-files` (via `generate_all
 - THEN no XLSX sheet iteration SHALL exist in `prepare.py` beyond the `generate_all` delegation (provenance stays in `codebook.py`/`_converters.py`)
 
 
-### Requirement: Prepare writes the package manifest (PRP-11)
+### Requirement: Prepare writes the package manifest (PRP-11) — Modified 2026-10-18, fix-manifest-publishable-intermediate
 
-`prepare` SHALL write `manifest.json` into the output directory alongside the staged artifacts, one entry per artifact of the selected build profile with `source` (real config path), `artifact_type`, `path` (relative to the output dir), and `status` (`staged` | `expected` | `optional` | `missing`). The multi-sheet Excel expansion SHALL be reflected (`stem__sheet.parquet` per sheet). The manifest is the single source of truth consumed by publish dry-run and confirm.
+`prepare` SHALL write `manifest.json` into the output directory alongside the staged artifacts, one entry per artifact of the selected build profile with `source` (real config path), `artifact_type`, `path` (relative to the output dir), `status` (`staged` | `expected` | `optional` | `missing`), and `classification` (`publishable` | `intermediate`, see PUB-12). The multi-sheet Excel expansion SHALL be reflected (`stem__sheet.parquet` per sheet). A recursive remote SHALL be recorded as ONE directory entry whose `path` ends with `/` (its files are enumerated at copy time, never by the manifest), so no reader counts a tree as one delivered file. The manifest is the single source of truth consumed by publish dry-run and confirm.
 
-(Previously: prepare produced artifacts without a machine-readable contents declaration.)
+(Previously: prepare produced artifacts without a machine-readable contents declaration. Then: the entry carried only `source`/`artifact_type`/`path`/`status`, and a recursive remote was recorded as a bare path indistinguishable from a file.)
 
 #### Scenario: Manifest written by prepare with staged statuses
 
 - GIVEN a successful prepare
-- THEN `output_dir/manifest.json` SHALL exist and decode as JSON with the documented stable keys
+- THEN `output_dir/manifest.json` SHALL exist and decode as JSON with the documented stable keys (`source`, `artifact_type`, `path`, `status`, `classification`)
+- AND a recursive remote's entry SHALL end its `path` with `/`
 
 #### Scenario: Multi-sheet sources recorded per sheet
 

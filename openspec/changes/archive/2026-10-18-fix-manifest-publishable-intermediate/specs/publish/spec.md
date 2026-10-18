@@ -19,7 +19,9 @@ The publish flow SHALL operate on one machine-readable package manifest listing 
 
 Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
 
-`classification` SHALL be the serialized delivery axis, independent of `status`: every entry SHALL carry `publishable` or `intermediate`, a manifest written before the field existed SHALL load with `publishable` as the default (the field is additive), and no `intermediate` entry SHALL ever be part of the delivery set or be `missing` — the absence of a local-only layer is never a publication blocker. `profiles` and `renders` SHALL be `intermediate` and SHALL be probed where `profile_all`/`render_all` actually write them (the artifact cache, `<root>/<output_dir>/<dir>`), with the dataset root accepted as the explicit-location fallback, and the recorded `path` SHALL be relative to the root. The delivery set SHALL be derivable as `classification == publishable AND status == staged`, and that set SHALL equal what the copy path stages for the same tree: the manifest SHALL NOT describe an artifact the copy path cannot stage, and SHALL NOT count a local-only layer as part of the upload (`2026-10-18-fix-manifest-publishable-intermediate`, issue #346).
+`classification` SHALL be the serialized delivery axis, independent of `status`: every entry SHALL carry `publishable` or `intermediate`, a manifest written before the field existed SHALL load with `publishable` as the default (the field is additive), and no `intermediate` entry SHALL ever be part of the delivery set or be `missing` — the absence of a local-only layer is never a publication blocker. `profiles` and `renders` SHALL be `intermediate` and SHALL be probed where `profile_all`/`render_all` actually write them (the artifact cache, `<root>/<output_dir>/<dir>`), with the dataset root accepted as the explicit-location fallback, and the recorded `path` SHALL be relative to the root.
+
+The delivered set SHALL be the `publishable` entries whose `status` is `staged` **and whose `path` is a file path** (no trailing slash). For those it SHALL equal the files the copy path stages for the same tree. A recursive remote SHALL be recorded as ONE directory entry whose `path` ends with `/`, because its files are enumerated at copy time: it SHALL NOT be counted as a delivered file, and a tree that stages zero files SHALL contribute nothing to the delivered set. The manifest SHALL NOT count a local-only layer as part of the upload, and SHALL NOT present a directory entry as an uploaded file (`2026-10-18-fix-manifest-publishable-intermediate`, issue #346).
 
 (Previously: the package boundary was implicit — plan_remote_files derived the dry-run set and codebook_remotes were collected from the output dir, with a warning when codebooks were absent that could be a false positive for optional artifacts. Then: the boundary was demanded but only `.status` was serialized, so `profile`/`render` entries were indistinguishable from deliverable artifacts in the JSON and were probed at a root nothing writes to.)
 
@@ -34,18 +36,25 @@ Missing **required** artifacts SHALL block confirm with a stable `error_code` an
 - GIVEN a prepared package whose `cache/profiles` and `cache/renders` hold the layers `profile_all`/`render_all` wrote
 - WHEN the manifest is built
 - THEN the `profile` and `render` entries SHALL read `classification: intermediate` with paths under `cache/`
-- AND the `publishable` **staged** entries SHALL equal, path for path, the files the copy path stages for that tree
+- AND the `publishable` **staged file** entries SHALL equal, path for path, the files the copy path stages for that tree
+
+#### Scenario: A recursive tree is a directory entry, never a delivered file (#346) — Added
+
+- GIVEN a recursive remote whose tree holds files, and an empty recursive remote
+- WHEN the manifest is built and the package is staged
+- THEN both SHALL be recorded as ONE entry each whose `path` ends with `/`
+- AND neither SHALL appear in the delivered set, so the empty tree contributes zero delivered files while its sibling's files land in the upload
 
 #### Scenario: An absent optional artifact is publishable but not delivered (#346) — Added
 
 - GIVEN a package with no `codebook.md` (no `--all-files` prepare ran)
 - WHEN the manifest is built
 - THEN that entry SHALL be `classification: publishable` with `status: optional`
-- AND it SHALL NOT appear in the delivered set (`publishable` AND `staged`), so the delivery count never overstates the upload
+- AND it SHALL NOT appear in the delivered set (`publishable`, `staged`, file path), so the delivery count never overstates the upload
 
 #### Scenario: A manifest written before the field existed still loads (#346) — Added
 
 - GIVEN a `manifest.json` whose entries carry no `classification`
 - WHEN it is read
-- THEN every entry SHALL read `publishable`
+- THEN every entry SHALL read `publishable` — including a legacy `profile`/`render` entry, which a consumer needing the true class SHALL re-derive by rebuilding the manifest (`publish` does)
 - AND the JSON roundtrip SHALL stay byte-stable

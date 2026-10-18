@@ -41,11 +41,22 @@ requires (`missing` + required ⇒ block), which is why this is additive.
 The identity that makes the manifest trustworthy is derived, not stored:
 
 ```
-delivered()  ==  classification == publishable  AND  status == staged
+delivered()  ==  classification == publishable  AND  status == staged  AND  path is a FILE path
 ```
 
 and `test_delivered_set_is_the_staged_set` asserts it against the real
-`_copy_package` output on the same tree.
+`_copy_package` output on the same tree, while
+`test_recursive_tree_is_a_directory_entry_never_a_delivered_file` pins the
+directory case.
+
+Why the third term exists: a recursive remote is recorded as ONE entry, and its
+files are enumerated by the copy path, not by the manifest. Without the file-path
+restriction the identity was false on recursive trees — an independent verifier
+showed `delivered()` containing `assets` and an empty `empty` while the staged set
+held `assets/a.txt` and `assets/nested/b.txt`: the empty tree stated an upload of
+zero files as one delivered artifact, which is the overstatement #346 is about.
+Directory entries therefore carry a trailing slash (the marker `codebooks/`,
+`profiles/` and `renders/` already used) and are excluded from the delivered set.
 
 Why not "publishable() is the delivery set": an absent optional artifact
 (`codebook.md` before an `--all-files` prepare) is publishable in principle and is
