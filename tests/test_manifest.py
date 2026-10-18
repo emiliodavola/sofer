@@ -272,6 +272,53 @@ def test_layer_outside_the_root_is_reported_without_raising(tmp_path: Path, monk
     assert profile.path == (cache / "profiles" / "data.metadata.yaml").as_posix()
 
 
+def test_recursive_tree_is_a_directory_entry_never_a_delivered_file(tmp_path: Path) -> None:
+    """#346: a recursive remote stages files; the manifest must not count it as one.
+
+    A verifier found that ``delivered()`` was not path-for-path the staged set on a
+    recursive tree: the manifest records one directory entry, and an empty tree
+    staged zero files while still appearing as delivered. Directory entries now
+    carry a trailing slash and are excluded from the delivered set, so counting it
+    never overstates the upload.
+    """
+    from sofer.publish import _copy_package
+
+    (tmp_path / "assets" / "nested").mkdir(parents=True)
+    (tmp_path / "assets" / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_path / "assets" / "nested" / "b.txt").write_text("b\n", encoding="utf-8")
+    toml = tmp_path / "dataset.toml"
+    toml.write_text(
+        '[dataset]\nname = "x"\nrepo_id = "user/x"\n\n'
+        '[[file]]\nlocal = "assets"\nremote = "assets/"\nrecursive = true\n\n'
+        '[[file]]\nlocal = "empty"\nremote = "empty/"\nrecursive = true\n',
+        encoding="utf-8",
+    )
+    cfg = DatasetConfig.from_toml(toml)
+    out = tmp_path / "build"
+    out.mkdir()
+    (out / "README.md").write_text("# x\n", encoding="utf-8")
+    (out / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    (out / "assets" / "nested").mkdir(parents=True)
+    (out / "assets" / "a.txt").write_text("a\n", encoding="utf-8")
+    (out / "assets" / "nested" / "b.txt").write_text("b\n", encoding="utf-8")
+    (out / "empty").mkdir()
+
+    manifest = build_package_manifest(cfg, out, keep_csv=True)
+    trees = [e for e in manifest.entries if e.artifact_type == "data"]
+    assert sorted(e.path for e in trees) == ["assets/", "empty/"]
+    assert all(e.is_directory for e in trees)
+    dest = tmp_path / "staged"
+    dest.mkdir()
+
+    _copy_package(cfg, out, dest, keep_csv=True)
+
+    staged = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    # the trees' files land, but no directory entry is ever a delivered file
+    assert staged == ["LICENSE", "README.md", "assets/a.txt", "assets/nested/b.txt"]
+    assert sorted(e.path for e in manifest.delivered()) == ["LICENSE", "README.md"]
+    assert "empty/" not in {e.path for e in manifest.delivered()}
+
+
 def test_manifest_without_classification_reads_as_publishable(tmp_path: Path) -> None:
     """A manifest written before the field existed still loads (#346 compat)."""
     legacy = {

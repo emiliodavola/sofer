@@ -98,6 +98,19 @@ class ManifestEntry:
             ),
         )
 
+    @property
+    def is_directory(self) -> bool:
+        """Whether this entry denotes a tree rather than one file.
+
+        A recursive remote is recorded as ONE directory entry (path with a
+        trailing slash, the same marker the ``codebooks/``/``profiles/``
+        placeholders use) because its files are enumerated at copy time, not by
+        the manifest. Reading such an entry as a single delivered file would
+        overstate the upload — and a tree that stages zero files would count as
+        one (#346).
+        """
+        return self.path.endswith("/")
+
 
 @dataclass(frozen=True)
 class PackageManifest:
@@ -151,20 +164,28 @@ class PackageManifest:
         return [e for e in self.entries if e.classification is ArtifactClass.INTERMEDIATE]
 
     def delivered(self) -> list[ManifestEntry]:
-        """Publishable artifacts that are present: the set the upload stages.
+        """Publishable **file** entries that are present: what the upload stages.
 
         Derived, never a third classification: ``publishable`` answers *does this
         belong to the delivery*, ``status`` answers *is it here*, and this is the
-        conjunction. It equals what ``_copy_package`` stages for the same tree, so
-        counting it is counting what arrives (#346). An absent optional artifact —
-        ``codebook.md`` before an ``--all-files`` prepare, a codebook page no flow
-        promised — is publishable in principle and still not delivered, which is
-        why ``publishable()`` alone must not be read as the delivery set.
+        conjunction restricted to file entries. For them it equals the files
+        ``_copy_package`` stages for the same tree, so counting it is counting what
+        arrives (#346). An absent optional artifact — ``codebook.md`` before an
+        ``--all-files`` prepare, a codebook page no flow promised — is publishable
+        in principle and still not delivered, which is why ``publishable()`` alone
+        must not be read as the delivery set.
+
+        Directory entries (:attr:`ManifestEntry.is_directory`) are excluded: a
+        recursive remote is a tree whose files the copy path enumerates, so it is
+        never one delivered file, and a tree that stages nothing (an empty
+        directory) contributes nothing here.
         """
         return [
             e
             for e in self.entries
-            if e.classification is ArtifactClass.PUBLISHABLE and e.status is ArtifactStatus.STAGED
+            if e.classification is ArtifactClass.PUBLISHABLE
+            and e.status is ArtifactStatus.STAGED
+            and not e.is_directory
         ]
 
     def of_type(self, artifact_type: str) -> list[ManifestEntry]:
@@ -254,9 +275,13 @@ def build_package_manifest(
             artifact_type = "csv"
         else:
             artifact_type = "data"
+        # A recursive remote is a TREE, not a file: its files are enumerated at
+        # copy time, so the recorded path keeps the directory marker (#346) and
+        # never counts as one delivered file.
+        recorded = f"{remote.rstrip('/')}/" if is_recursive else remote
         _add(
             artifact_type,
-            remote,
+            recorded,
             ArtifactStatus.STAGED if present else ArtifactStatus.MISSING,
         )
 
