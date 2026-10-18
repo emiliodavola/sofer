@@ -50,10 +50,11 @@ worth fixing: it **overstates** the delivery."
 | --- | --- | --- | --- |
 | T1 | `ArtifactClass` enum (`publishable`/`intermediate`) carried by every entry, in the JSON and in `from_dict` with a backward-compatible default | S2, S3 | `b8c5e9d` |
 | T2 | `PackageManifest.publishable()` / `.intermediate()` / `.delivered()` selectors; only `delivered()` is the delivery set | S1, S4 | `b8c5e9d` |
-| T3 | Probe the layers where they are actually written (artifact cache), keeping the dataset-root location working | S1 | `b8c5e9d` |
-| T4 | Tests: every entry classified, delivered == staged, the cache probe, the root fallback, and an old manifest without the field | S1-S5 | `b8c5e9d` |
-| T5 | PUB-12 spec clause (field + probe + delivered identity) in the delta and the canonical spec, plus the archive report | S1-S3 | `c87a43c` |
-| T6 | Gates: pytest 2493/9 on `dev@e23a6e8`, the four core modules at 100.00%, ruff, mypy, pyright, mapping checker | — | `b8c5e9d` |
+| T3 | Probe the layers where they are actually written (artifact cache), keeping the dataset-root location working | S1 | `b8c5e9d`, `7bde2b9` |
+| T4 | Tests: every entry classified, delivered == staged, the cache probe, the root fallback, and an old manifest without the field | S1-S5 | `b8c5e9d`, `7bde2b9` |
+| T5 | PUB-12 spec clause (field + probe + delivered identity) in the delta and the canonical spec, plus the archive report | S1-S3 | `c87a43c`, `bc67a3c` |
+| T6 | Gates: pytest 2495/9 on `dev@e23a6e8`, the four core modules at 100.00%, ruff, mypy, pyright, mapping checker | — | `b8c5e9d`, re-taken after `bc67a3c` |
+| T7 | A recursive tree is a directory entry with a trailing slash, never a delivered file (found by the independent verifier) | S1, S4 | `e565331`, `bc67a3c` |
 
 ## Log
 
@@ -93,10 +94,40 @@ collection) was too weak to be the carrier, so the probe in L5 is. Recorded as a
 deviation in the archived `tasks.md` and in the archive report.
 
 **L8** — rebase and final evidence: PR #351 merged into `dev` as `e23a6e8`; `b8c5e9d`
-was rebased onto it (clean) and the battery re-taken there — suite `2493 passed,
-9 skipped` (2476 + 7 from #345 + 5 from #348 + 5 from this change), the four core
-modules at 100.00%, TOTAL 94%, ruff/mypy/pyright clean, `check_test_mapping.py` OK.
-One commit attempt was aborted by a pre-commit/hook stash conflict (the ruff-format
-hook rewrote a line also present in pre-commit's stash); recovery was to stage the
-formatted version, never `--no-verify`. Commits: `b8c5e9d`, `c87a43c`, and the
-closeout commit that archives the change.
+was rebased onto it (clean) and the battery re-taken there. One commit attempt was
+aborted by a pre-commit/hook stash conflict (the ruff-format hook rewrote a line also
+present in pre-commit's stash); recovery was to stage the formatted version, never
+`--no-verify`.
+
+**L9** — independent verification round (the native `assess` was unavailable:
+`package-local-binary-missing`, `changedPaths: 0`, so it said nothing about the
+candidate). Verdict: backward compat PASS (with the legacy `profile`/`render` default
+caveat, now stated in PUB-12), consumers PASS in code but with **doc drift** in
+`openspec/specs/prepare/spec.md` (PRP-11 still listed four keys), probe-cannot-crash
+PASS with the `except ValueError` branch **uncovered in the commit**, blocking rule
+PASS, and `delivered() == staged` **FAIL**: on recursive remotes the manifest holds
+one entry per tree, so `delivered()` listed `assets` and an empty `empty` while the
+copy path staged `assets/a.txt` and `assets/nested/b.txt`. My claim came from a
+non-recursive fixture and was over-general.
+
+**L10** — what the FAIL changed: `e565331` records a recursive remote's path with a
+trailing slash (the marker `codebooks/`/`profiles/`/`renders/` already used), adds
+`ManifestEntry.is_directory`, excludes directory entries from `delivered()`, and pins
+the case with a populated tree plus an empty tree; `bc67a3c` narrows the claim to
+"publishable AND staged AND a file path" in the canonical spec, the delta and the
+design, and fixes the PRP-11 drift. Re-measured: `delivered()` = `['LICENSE',
+'README.md']`, entries `assets/` and `empty/`, staged files unchanged. The verifier
+also flagged that it saw the tree change mid-run (I was editing while it read);
+verification now targets a frozen commit.
+
+**L11** — a mistake of mine while checking coverage: `coverage run --branch -m pytest
+tests/test_manifest.py` (a subset) overwrote `.coverage`, so the coverage-contract
+guard failed a clean suite with `profile.py measured 52.7%`. `.coverage` is gitignored,
+so nothing reached the repo; repaired by re-running the full suite under coverage.
+Subset measurements here must use `coverage run --data-file=<scratch>`.
+
+**L12** — final evidence after the fix, on `dev@e23a6e8`: manifest tests 14 passed,
+suite `2495 passed, 9 skipped` (2476 + 7 from #345 + 5 from #348 + 7 from this
+change), the four core modules at 100.00% with exit 0 each, TOTAL 94% (7686 stmts),
+ruff/mypy/pyright clean, `check_test_mapping.py` OK. Commits: `b8c5e9d`, `c87a43c`,
+`5c3925e`, `7bde2b9`, `e565331`, `bc67a3c`, plus the closeout commit for this report.
