@@ -30,11 +30,16 @@ The measured RED output is recorded in the archive report.
 
 | # | Task | Spec | State |
 | --- | --- | --- | --- |
-| T1 | `_md_visible` + `_md_cell` in `repo_compliance.py` | S1, S4 | pending |
-| T2 | Both Data Fields branches render `s.name`, `origin` and `s.example` through the helper | S1, S2 | pending |
-| T3 | Tests: no raw control byte in the card, a pipe cannot split the row, a backtick keeps the value, ordinary values unchanged | S1-S3 | pending |
-| T4 | RC-R21 clause + RC-R21.10/.11 in the canonical spec, the delta and the archive report | S1-S4 | pending |
-| T5 | Gates: `pytest`, `ruff check`, `ruff format --check`, `mypy`, `pyright`, `scripts/check_test_mapping.py` | — | pending |
+| T1 | `_md_visible` + `_md_cell` in `repo_compliance.py` | S1, S4 | done |
+| T2 | Both Data Fields branches render `s.name`, `origin` and `s.example` through the helper | S1, S2 | done |
+| T3 | Tests: no raw control byte in the card, a pipe cannot split the row, a backtick keeps the value, ordinary values unchanged | S1-S3 | done |
+| T4 | RC-R21 clause + RC-R21.10/.11 in the canonical spec, the delta and the archive report | S1-S4 | done |
+| T5 | Gates: `pytest`, `ruff check`, `ruff format --check`, `mypy`, `pyright`, `scripts/check_test_mapping.py` | — | done |
+
+**Status:** implementation complete on `fix/348-card-control-char-escape`, rebased
+onto `dev@d07557e`; the branch is not pushed and no PR exists — push and PR
+creation are the maintainer's decision. The measured RED/GREEN output and the
+end-to-end differential are recorded in the change's `archive-report.md`.
 
 ## Work units
 
