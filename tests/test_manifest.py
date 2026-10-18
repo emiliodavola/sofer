@@ -12,6 +12,7 @@ from pathlib import Path
 
 from sofer.manifest import (
     MANIFEST_NAME,
+    ArtifactClass,
     ArtifactStatus,
     PackageManifest,
     build_package_manifest,
@@ -150,3 +151,114 @@ def test_codebooks_required_when_flow_promises_them(tmp_path):
     cb2 = next(e for e in promised.entries if e.artifact_type == "codebook_page")
     assert cb2.status == ArtifactStatus.MISSING
     assert "codebooks/" in [e.path for e in promised.required_missing()]
+
+
+# ── #346: the delivery class is explicit, not inferred from artifact_type ────
+
+
+def _prepared_tree(tmp_path: Path) -> tuple[DatasetConfig, Path, Path]:
+    """A prepared package plus the local-only layers the pipeline writes.
+
+    Returns ``(cfg, build_dir, root)`` with ``data.parquet``, the card, the
+    license, one codebook page, and ``profile``/``render`` layers sitting where
+    ``profile_all``/``render_all`` put them: under the artifact cache.
+    """
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    out.mkdir()
+    (out / "data.parquet").write_bytes(b"PAR1")
+    (out / "README.md").write_text("# x\n", encoding="utf-8")
+    (out / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    (out / "codebooks").mkdir()
+    (out / "codebooks" / "data.md").write_text("# codebook\n", encoding="utf-8")
+    profiles = root / "cache" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "data.metadata.yaml").write_text("x: 1\n", encoding="utf-8")
+    renders = root / "cache" / "renders"
+    renders.mkdir(parents=True)
+    (renders / "data.README.md").write_text("# render\n", encoding="utf-8")
+    return cfg, out, root
+
+
+def test_every_entry_carries_an_explicit_classification(tmp_path: Path) -> None:
+    """#346: no reader has to know which artifact types are never uploaded."""
+    cfg, out, _root = _prepared_tree(tmp_path)
+
+    manifest = build_package_manifest(cfg, out)
+
+    assert all(isinstance(e.classification, ArtifactClass) for e in manifest.entries)
+    assert {e.artifact_type for e in manifest.intermediate()} == {"profile", "render"}
+    publishable_types = {e.artifact_type for e in manifest.publishable()}
+    assert publishable_types == {"card", "license", "parquet", "codebook", "codebook_page"}
+    # the absent optional codebook.md is publishable in principle, not delivered
+    assert "codebook.md" in {e.path for e in manifest.publishable()}
+    assert "codebook.md" not in {e.path for e in manifest.delivered()}
+
+
+def test_delivered_set_is_the_staged_set(tmp_path: Path) -> None:
+    """#346: what the manifest calls delivered is exactly what gets staged.
+
+    This is the defect the issue reports, as one assertion: the manifest declared
+    135 artifacts while `_copy_package` could stage 133. The two sets are now
+    compared directly, on the same tree.
+    """
+    from sofer.publish import _copy_package
+
+    cfg, out, root = _prepared_tree(tmp_path)
+    manifest = build_package_manifest(cfg, out)
+    dest = root / "staged"
+    dest.mkdir()
+
+    _copy_package(cfg, out, dest, keep_csv=False)
+
+    staged = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    delivered = sorted(e.path for e in manifest.delivered())
+    assert staged == delivered
+    assert manifest.intermediate(), "the layers exist and are not part of the delivery"
+
+
+def test_layer_probe_reads_the_artifact_cache(tmp_path: Path) -> None:
+    """#346: the layers are reported where the pipeline writes them."""
+    cfg, out, _root = _prepared_tree(tmp_path)
+
+    manifest = build_package_manifest(cfg, out)
+
+    profile = next(e for e in manifest.entries if e.artifact_type == "profile")
+    assert profile.status == ArtifactStatus.STAGED
+    assert profile.classification is ArtifactClass.INTERMEDIATE
+    assert profile.path == "cache/profiles/data.metadata.yaml"
+
+
+def test_layer_probe_still_reads_the_dataset_root(tmp_path: Path) -> None:
+    """An explicitly located layer under the dataset root is still reported."""
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    out.mkdir()
+    (root / "renders").mkdir()
+    (root / "renders" / "data.README.md").write_text("# r\n", encoding="utf-8")
+
+    manifest = build_package_manifest(cfg, out)
+
+    render = next(e for e in manifest.entries if e.artifact_type == "render")
+    assert render.status == ArtifactStatus.STAGED
+    assert render.path == "renders/data.README.md"
+
+
+def test_manifest_without_classification_reads_as_publishable(tmp_path: Path) -> None:
+    """A manifest written before the field existed still loads (#346 compat)."""
+    legacy = {
+        "source": "dataset.toml",
+        "artifacts": [
+            {
+                "source": "dataset.toml",
+                "artifact_type": "parquet",
+                "path": "data.parquet",
+                "status": "staged",
+            }
+        ],
+    }
+
+    manifest = PackageManifest.from_dict(legacy)
+
+    assert manifest.entries[0].classification is ArtifactClass.PUBLISHABLE
+    assert manifest.entries[0].to_dict()["classification"] == "publishable"
