@@ -11,11 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
 from conftest import _make_dataset, call_tool
 from fastmcp import Client
 
-from sofer import file_edit
+from sofer import _toml, file_edit
 from sofer.mcp_server import build_server
 from sofer.model import DatasetConfig
 
@@ -74,7 +73,7 @@ class TestApplyFileEdit:
         assert updated.startswith("# leading guidance comment\n[dataset]")
         assert "# files below" in updated
         assert "# trailing guidance comment" in updated
-        parsed = tomllib.loads(updated)
+        parsed = _toml.loads(updated)
         assert parsed["dataset"]["name"] == "test-ds"
         assert parsed["meta"]["description"] == "d"
         assert parsed["file"] == [
@@ -85,7 +84,7 @@ class TestApplyFileEdit:
     def test_missing_file_array_is_appended(self, tmp_path) -> None:
         text = '[dataset]\nname = "x"\nrepo_id = "u/x"\n\n[meta]\ndescription = "d"\n'
         updated = file_edit.apply_file_edit(text, [{"local": "a.csv", "remote": "a.csv"}])
-        assert tomllib.loads(updated)["file"] == [{"local": "a.csv", "remote": "a.csv"}]
+        assert _toml.loads(updated)["file"] == [{"local": "a.csv", "remote": "a.csv"}]
         assert updated.startswith(text)
 
     def test_unknown_key_is_refused(self, tmp_path) -> None:
@@ -146,7 +145,7 @@ class TestApplyFileEdit:
         )
 
         assert result.changed is True
-        assert tomllib.loads(path.read_text(encoding="utf-8"))["file"] == [
+        assert _toml.loads(path.read_text(encoding="utf-8"))["file"] == [
             {"local": "new.csv", "remote": "new.csv"}
         ]
         assert not (tmp_path / "dataset.toml.tmp").exists()
