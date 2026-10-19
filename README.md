@@ -382,7 +382,8 @@ enforcement: `prepare` writes `build/manifest.json`, every later build phase
 (`codebook_all`, `profile_all`, `render_all`) refreshes it, and `publish` reads it
 instead of deriving its own. A manifest that does not declare the delivery this
 tree holds — a file it omits, or one it promises and the tree no longer has — is
-therefore refused before any network call — re-run the build chain
+therefore refused before any network call, and so is a record that cannot be read
+(`UNREADABLE_MANIFEST`). The recovery is the same — re-run the build chain
 (`sofer prepare --force --all-files`) and retry — while `--dry-run` only warns and
 still prints the plan.
 

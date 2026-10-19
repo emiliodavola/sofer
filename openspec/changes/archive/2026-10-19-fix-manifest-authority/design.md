@@ -79,6 +79,8 @@ paths; a dry-run and the local target warn and continue. Why a set of paths:
 - **The refusal is precise.** Naming the paths that diverged is what makes the printed
   recovery actionable; "older than the newest artifact" could not say what changed.
 
+**What the set does and does not cover.** The comparison is over the *presence* of publishable entries, so it also catches a recursive tree the delivery no longer holds — the tree itself is never a delivered file, and `required_missing()` cannot see it either because the entry stays `staged`. It deliberately does not cover three things: content (the record carries no hashes), an `intermediate` layer (never delivered), and the original CSVs a `keep_csv` upload adds at publish time (they are read from the configuration, not from the package tree, so the record has never described them).
+
 The cost is one extra recount per publish — filesystem-only and cheap — and that the
 record is now a statement about the *set* it approves, which is exactly what PUB-12
 promises.

@@ -20,6 +20,7 @@
 | T6 | `publish` CLI description + `README.md` + `README_ES.md` | done | `57dd0a7` |
 | T7 | Gates and the differential check against the base commit | done | §2 below |
 | T8 | The independent verification's findings, fixed rather than documented away: an unreadable record is refused with `UNREADABLE_MANIFEST` instead of crashing, and the rule became a path-set comparison instead of an mtime proxy, which deleted the `stat` scan | done | the follow-up commits on this branch |
+| T9 | The **second** verification round: its finding that a promised recursive tree the delivery no longer holds went undetected (the upload succeeded without it), closed by comparing the presence of every publishable entry, files and trees alike, and pinned by a test; plus the `UNREADABLE_MANIFEST` clause and the `keep_csv` limit reaching the canonical spec, the delta, the design, the CLI help and both READMEs | done | the follow-up commits on this branch |
 
 **The change in one line:** the manifest on disk stopped being a prepare-time
 snapshot nobody read, and became the object `publish` plans and enforces with —
@@ -147,6 +148,18 @@ The change deleted `_newest_declared_artifact` and its whole `stat` scan, so the
 second finding is structurally impossible rather than patched, and two existing fixtures
 moved to the supported flow (a hand-added codebook page now needs the chain re-run — which
 is exactly what the printed recovery says).
+
+**A false claim in this record, caught by the second verification round.** The `da39960`
+commit message and the ODD doc said PUB-12 had gained the `UNREADABLE_MANIFEST` clause; it
+had not — the block lived only in `publish.py`, its tests and the ODD entry. The follow-up
+commit adds the clause, its scenario and the matching clause in the archived delta, D3b,
+the CLI help and both READMEs. The same round found a real hole with behaviour behind it: a
+record still promising a recursive tree the delivery no longer holds was not detected, and
+the verifier showed the upload succeeding without the tree. `_delivery_divergence` now
+compares the *presence* of every publishable entry, trees included, and the case is pinned
+by a test. One under-declaration the rule cannot enforce is now stated instead of implied:
+a `keep_csv` upload adds the original CSVs from the configuration, so the record never
+declared them and the comparison must not refuse on that account.
 
 **Found while verifying #349, recorded as out of scope (separate issues):**
 

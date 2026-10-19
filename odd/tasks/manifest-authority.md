@@ -293,3 +293,29 @@ exit code against `47bf12c` for `prepare`, `codebook --all-files --config`,
 `publish --target local`. The arc lands as the `publish` fix and the record/spec commit.
 Re-verification of the changed rule follows the independent verifier that passed the
 rejected version; its verdict closes this document.
+
+**L18** — the second verification round (same read-only verifier, frozen
+`0ece5ea..da39960`) returned PASS on behaviour and three things to fix, all now closed:
+
+- **A false claim in this record, caught by the verifier.** L15 and the `da39960` commit
+  message said PUB-12 had gained the `UNREADABLE_MANIFEST` clause; it had not — the block
+  existed only in `publish.py`, its tests, L15 and the archive report. The clause, its
+  scenario and the matching clause in the archived delta, design D3b, the publish CLI
+  help and both READMEs are added in the follow-up commit. That is the defect class rule
+  15 names, one level down: a durable record asserting a state its artifact does not have.
+- **A real hole in the rule, with behaviour behind it.** A record still promising a
+  recursive tree the delivery no longer holds went undetected: the tree entry is a
+  directory, `delivered()` excludes those by design (#346), and `required_missing()`
+  cannot see it either because the status stays `staged`. The verifier showed the upload
+  succeeding without the tree. `_delivery_divergence` now compares the *presence* of every
+  publishable entry, files and trees alike (`_promised_paths`), and the case is pinned by
+  `test_a_withdrawn_recursive_tree_refuses_the_upload`.
+- **An under-declaration the rule cannot enforce**, now stated instead of implied: a
+  `keep_csv` upload adds the original CSVs at publish time from the configuration, so the
+  record — which describes the package tree — has never declared them and the comparison
+  must not refuse on that account. The canonical spec, the delta and D3b say so.
+
+The verifier could not reach a genuine pre-#346 manifest, so the legacy-default path (a
+staged `profile`/`render` entry in a record without `classification`, which reads back as
+`publishable` and would be reported `withdrawn`) stays a flagged risk, unproven in either
+direction.

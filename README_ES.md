@@ -394,7 +394,8 @@ control: `prepare` escribe `build/manifest.json`, cada fase posterior del build
 (`codebook_all`, `profile_all`, `render_all`) lo refresca, y `publish` lo lee en
 lugar de derivar el suyo. Por eso un manifest que no declara la entrega que el árbol
 tiene — un archivo que omite, o uno que promete y el árbol ya no tiene — se rechaza
-antes de cualquier llamada de red — volvé a correr
+antes de cualquier llamada de red, y lo mismo pasa con un record que no se puede
+leer (`UNREADABLE_MANIFEST`). El recovery es el mismo — volvé a correr
 la cadena (`sofer prepare --force --all-files`) y reintentá — mientras que
 `--dry-run` solo avisa y sigue imprimiendo el plan.
 
