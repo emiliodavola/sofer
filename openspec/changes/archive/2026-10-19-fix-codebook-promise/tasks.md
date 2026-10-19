@@ -12,5 +12,5 @@
 | T4 | `publish.py`: parameter deleted from `publish` and `_delivery_divergence`, both call sites updated | done | the fix commit |
 | T5 | PUB-12 delta and canonical spec; README/README_ES note the tree-derived rule | done | `specs/publish/spec.md`, `openspec/specs/publish/spec.md`, both READMEs |
 | T6 | Gates: full suite under coverage, four 100.00% modules, ruff, mypy, pyright, test-mapping checker, differential check | done | `archive-report.md` §2 |
-| T7 | Independent verifier over the diff, then the native review assessment | in progress | `archive-report.md` §3 |
-| T8 | Archive inside the branch; push; PR assigned to `emiliodavola` | pending | |
+| T7 | Independent verifier over the diff, then the native review assessment | done | `archive-report.md` §3; verifier PASS WITH ADVISORIES; native review approved and acknowledged |
+| T8 | Archive inside the branch; push; PR assigned to `emiliodavola` | done | this folder under `openspec/changes/archive/`; the archive commit |
