@@ -212,7 +212,6 @@ def build_package_manifest(
     output_dir: Path,
     *,
     keep_csv: bool = False,
-    codebooks_required: bool = False,
 ) -> PackageManifest:
     """Classify every artifact of the selected build profile under *output_dir*.
 
@@ -224,12 +223,18 @@ def build_package_manifest(
     an explicit location, so the entry reports the tree instead of a path nobody
     writes to (#346).
 
+    The codebook promise is derived from the tree, never from the caller:
+    ``generate_all`` always writes the root ``codebook.md`` index but creates
+    ``codebooks/`` only when it writes a page, so an index without pages is
+    exactly "the flow promised codebooks and produced none" (#354). An absent
+    set is therefore ``MISSING`` (and blocks confirm) only when the index is
+    present; without it the set was never promised and stays ``OPTIONAL``
+    (PUB-08).
+
     Args:
         cfg: Dataset configuration (source identity for the manifest).
         output_dir: The prepared package directory (mirror layout root).
         keep_csv: Whether original CSVs upload alongside Parquet.
-        codebooks_required: Whether the surrounding flow promised per-file
-            codebooks, which makes an absent ``codebooks/`` block instead of warn.
 
     Returns:
         A :class:`PackageManifest` with one entry per artifact, each carrying an
@@ -288,18 +293,21 @@ def build_package_manifest(
             ArtifactStatus.STAGED if present else ArtifactStatus.MISSING,
         )
 
-    # Per-file codebooks (RC-C01): uploaded when present; optional when absent.
-    # When the surrounding flow promised them (codebooks_required, e.g. the MCP
-    # canonical chain after codebook_all), their absence is MISSING and blocks.
+    # Per-file codebooks (RC-C01): the package's root ``codebook.md`` index is
+    # the durable record of the promise (#354) -- ``generate_all`` always writes
+    # it, but creates ``codebooks/`` only when it writes a page. An existing but
+    # empty directory is therefore an absence, not a silent no-op: promised and
+    # page-less is MISSING and blocks; never promised and absent is OPTIONAL.
     codebooks_dir = output_dir / config.CODEBOOKS_DIR
-    if codebooks_dir.is_dir():
-        for cb_path in sorted(codebooks_dir.rglob("*.md")):
+    pages = sorted(codebooks_dir.rglob("*.md")) if codebooks_dir.is_dir() else []
+    if pages:
+        for cb_path in pages:
             _add(
                 "codebook_page",
                 cb_path.relative_to(output_dir).as_posix(),
                 ArtifactStatus.STAGED,
             )
-    elif codebooks_required:
+    elif (output_dir / "codebook.md").is_file():
         _add(
             "codebook_page",
             f"{config.CODEBOOKS_DIR}/",
@@ -374,7 +382,6 @@ def write_manifest(
     output_dir: Path,
     *,
     keep_csv: bool = False,
-    codebooks_required: bool = False,
     only_if_present: bool = False,
 ) -> Path | None:
     """Write (or refresh) the durable ``manifest.json`` in *output_dir*.
@@ -388,12 +395,14 @@ def write_manifest(
     ``only_if_present=True``: it then gets ``None`` back instead of inventing a
     package record for a tree ``prepare`` never prepared.
 
+    The codebook promise is read from the tree (:func:`build_package_manifest`),
+    so no caller carries it: a refresh can never downgrade what the package
+    itself records (#354).
+
     Args:
         cfg: Dataset configuration (source identity for the manifest).
         output_dir: The package directory the manifest describes.
         keep_csv: Whether original CSVs belong to the delivery (PUB-07).
-        codebooks_required: Whether the surrounding flow promised per-file
-            codebooks, which makes an absent ``codebooks/`` block instead of warn.
         only_if_present: Refresh only when a manifest already exists here.
 
     Returns:
@@ -408,7 +417,6 @@ def write_manifest(
             cfg,
             output_dir,
             keep_csv=keep_csv,
-            codebooks_required=codebooks_required,
         ).json_bytes()
     )
     return path
@@ -426,7 +434,6 @@ def refresh_manifest(
     written_to: Path | None = None,
     *,
     keep_csv: bool = False,
-    codebooks_required: bool = False,
 ) -> Path | None:
     """Refresh the durable manifest of the package a phase just wrote into.
 
@@ -443,8 +450,6 @@ def refresh_manifest(
             refresh then targets the resolved package directory, because that is
             the record whose entries (``cache/<layer>/...``) the write changes.
         keep_csv: Whether original CSVs belong to the delivery (PUB-07).
-        codebooks_required: Whether the surrounding flow promised per-file
-            codebooks, which makes an absent ``codebooks/`` block instead of warn.
 
     Returns:
         The path rewritten, or ``None`` when no manifest owns that directory.
@@ -454,6 +459,5 @@ def refresh_manifest(
         cfg,
         target,
         keep_csv=keep_csv,
-        codebooks_required=codebooks_required,
         only_if_present=True,
     )

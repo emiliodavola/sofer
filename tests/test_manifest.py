@@ -16,6 +16,7 @@ from sofer.manifest import (
     ArtifactStatus,
     PackageManifest,
     build_package_manifest,
+    write_manifest,
 )
 from sofer.model import DatasetConfig
 
@@ -137,7 +138,14 @@ def test_manifest_json_roundtrip_stable(tmp_path):
     assert PackageManifest.from_json(manifest.json_bytes()).json_bytes() == manifest.json_bytes()
 
 
-def test_codebooks_required_when_flow_promises_them(tmp_path):
+def test_codebook_md_promises_the_pages_that_are_absent(tmp_path: Path) -> None:
+    """#354: the root index is the record of the promise.
+
+    ``generate_all`` always writes ``codebook.md`` but creates ``codebooks/``
+    only when it writes a page, so an index without pages is exactly
+    "promised and empty".  Without the index the set was never promised and
+    PUB-08's optional contract holds.
+    """
     cfg, root = _dataset(tmp_path)
     out = root / "build"
     out.mkdir()
@@ -146,11 +154,63 @@ def test_codebooks_required_when_flow_promises_them(tmp_path):
     optional = build_package_manifest(cfg, out)
     cb = next(e for e in optional.entries if e.artifact_type == "codebook_page")
     assert cb.status == ArtifactStatus.OPTIONAL
+    assert "codebooks/" not in [e.path for e in optional.required_missing()]
 
-    promised = build_package_manifest(cfg, out, codebooks_required=True)
+    (out / "codebook.md").write_text("# index\n", encoding="utf-8")
+
+    promised = build_package_manifest(cfg, out)
     cb2 = next(e for e in promised.entries if e.artifact_type == "codebook_page")
     assert cb2.status == ArtifactStatus.MISSING
     assert "codebooks/" in [e.path for e in promised.required_missing()]
+
+
+def test_an_empty_codebooks_dir_is_never_a_silent_absence(tmp_path: Path) -> None:
+    """#354: a directory that exists but holds no page is still an absence.
+
+    The old probe emitted no ``codebook_page`` entry at all for an empty
+    ``codebooks/``, so neither the block nor the warning could fire.
+    """
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    out.mkdir()
+    (out / "data.parquet").write_bytes(b"PAR1")
+    (out / "codebooks").mkdir()
+
+    optional = build_package_manifest(cfg, out)
+    assert optional.of_type("codebook_page")[0].status is ArtifactStatus.OPTIONAL
+
+    (out / "codebook.md").write_text("# index\n", encoding="utf-8")
+
+    promised = build_package_manifest(cfg, out)
+    assert promised.of_type("codebook_page")[0].status is ArtifactStatus.MISSING
+
+
+def test_the_promise_survives_the_later_phase_refreshes(tmp_path: Path) -> None:
+    """#354: ``profile_all``/``render_all`` must not downgrade the promise.
+
+    They refresh the durable record with no knowledge of the flow that
+    promised the pages; deriving the promise from the tree is what keeps the
+    entry ``missing`` across those refreshes.
+    """
+    from sofer.manifest import refresh_manifest
+    from sofer.prepare import prepare
+
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    assert prepare(cfg, out) == 0
+    # What ``prepare --all-files`` leaves when every source was skipped:
+    # the root index exists, no page does.
+    (out / "codebook.md").write_text("# index\n", encoding="utf-8")
+    write_manifest(cfg, out)
+    written = PackageManifest.from_dir(out)
+    assert written is not None
+    assert written.of_type("codebook_page")[0].status is ArtifactStatus.MISSING
+
+    refresh_manifest(cfg, out)
+
+    refreshed = PackageManifest.from_dir(out)
+    assert refreshed is not None
+    assert refreshed.of_type("codebook_page")[0].status is ArtifactStatus.MISSING
 
 
 # ── #346: the delivery class is explicit, not inferred from artifact_type ────
@@ -340,6 +400,7 @@ def test_codebook_all_refreshes_the_durable_manifest(tmp_path: Path) -> None:
     generate_all_codebooks(cfg, output_dir=out)
 
     durable = PackageManifest.from_dir(out)
+    assert durable is not None
     assert durable == build_package_manifest(cfg, out)
     pages = durable.of_type("codebook_page")
     assert pages, "codebook_all wrote pages, so the durable manifest must declare them"

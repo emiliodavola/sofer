@@ -627,8 +627,6 @@ def _delivery_divergence(
     cfg: DatasetConfig,
     source: Path,
     manifest: PackageManifest,
-    *,
-    codebooks_required: bool = False,
 ) -> tuple[list[str], list[str]]:
     """What the tree delivers but the record does not, and the reverse (#349).
 
@@ -641,7 +639,6 @@ def _delivery_divergence(
         cfg: Dataset configuration.
         source: The package directory the record describes.
         manifest: The durable record read from *source*.
-        codebooks_required: Whether the surrounding flow promised per-file codebooks.
 
     Returns:
         ``(undeclared, withdrawn)`` -- sorted paths the delivery holds that the
@@ -649,9 +646,7 @@ def _delivery_divergence(
     """
     from .manifest import build_package_manifest
 
-    recount = build_package_manifest(
-        cfg, source, keep_csv=False, codebooks_required=codebooks_required
-    )
+    recount = build_package_manifest(cfg, source, keep_csv=False)
     recorded = _promised_paths(manifest)
     delivered = _promised_paths(recount)
     return sorted(delivered - recorded), sorted(recorded - delivered)
@@ -833,7 +828,6 @@ def publish(
     clean: bool = False,
     clean_cache: bool = False,
     token: str | None = None,
-    codebooks_required: bool = False,
 ) -> int:
     """Deliver the prepared dataset package for *cfg* to *target*.
 
@@ -957,9 +951,7 @@ def publish(
                 )
             # A preview or a local delivery still needs a plan: recount for it only,
             # after naming what happened to the record.
-            manifest = build_package_manifest(
-                cfg, source, keep_csv=False, codebooks_required=codebooks_required
-            )
+            manifest = build_package_manifest(cfg, source, keep_csv=False)
 
     # ── PUB-12 divergence backstop (#349) ────────────────────────────
     # The durable record is authoritative only while it declares the delivery the
@@ -968,9 +960,7 @@ def publish(
     # carries no hashes), so the comparison is path for path over the deliverable
     # set -- an in-place edit of a declared file is NOT a divergence.
     if manifest is not None and manifest_path is not None and manifest_path.is_file():
-        undeclared, withdrawn = _delivery_divergence(
-            cfg, source, manifest, codebooks_required=codebooks_required
-        )
+        undeclared, withdrawn = _delivery_divergence(cfg, source, manifest)
         if undeclared or withdrawn:
             refuses = target == "hf" and not dry_run
             print(
