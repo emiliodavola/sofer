@@ -397,7 +397,11 @@ tiene — un archivo que omite, o uno que promete y el árbol ya no tiene — se
 antes de cualquier llamada de red, y lo mismo pasa con un record que no se puede
 leer (`UNREADABLE_MANIFEST`). El recovery es el mismo — volvé a correr
 la cadena (`sofer prepare --force --all-files`) y reintentá — mientras que
-`--dry-run` solo avisa y sigue imprimiendo el plan.
+`--dry-run` solo avisa y sigue imprimiendo el plan. Los codebooks por archivo son
+obligatorios exactamente cuando el paquete tiene el índice raíz `codebook.md`: un
+índice sin ninguna página bajo `codebooks/` bloquea el confirm, mientras que un
+paquete que nunca generó codebooks los mantiene opcionales y se entrega sin
+advertencia.
 
 Si un publish reporta `0 uploaded, N failed` con un `I/O error`, vuelve a
 ejecutarlo con el backend de transferencia xet deshabilitado **antes** de asumir

@@ -2612,6 +2612,35 @@ class TestDurableManifest:
         assert "ghost.parquet" in captured.out
         assert "missing required artifacts" in captured.out
 
+    def test_a_promised_codebook_set_that_is_absent_refuses_the_confirm(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """#354: ``codebook.md`` without pages blocks with the existing recovery.
+
+        ``generate_all`` always writes the root index and creates
+        ``codebooks/`` only when it writes a page, so the pair is the promise.
+        Before this change the record marked the absent set ``optional`` and
+        the delivery shipped silently.
+        """
+        from sofer.checks import ValidationReport
+        from sofer.manifest import write_manifest
+
+        cfg, out = self._prepared(tmp_path)
+        # What ``prepare --all-files`` leaves when every source was skipped.
+        (out / "codebook.md").write_text("# index\n", encoding="utf-8")
+        write_manifest(cfg, out)
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "codebook_page: codebooks/" in captured.out
+        assert "missing required artifacts" in captured.out
+        assert "Recovery:" in captured.out
+
     def test_a_record_that_omits_a_delivered_file_refuses_the_upload(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:

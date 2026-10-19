@@ -392,11 +392,11 @@ entries.)
 - THEN `./staging/` SHALL be removed and `cfg._base_dir / "cache"` SHALL remain unless `--clean-cache` given
 
 
-### Requirement: Package artifact manifest with explicit publishable/intermediate boundary (PUB-12) — Modified 2026-10-19, fix-manifest-authority
+### Requirement: Package artifact manifest with explicit publishable/intermediate boundary (PUB-12) — Modified 2026-10-19, fix-manifest-authority; codebook promise 2026-10-19, fix-codebook-promise
 
 The publish flow SHALL operate on one machine-readable package manifest listing every artifact of the selected build profile — `source` (the real config path), `artifact_type`, `path`, `status`, and `classification` — with artifacts classified as **publishable** (parquet incl. multi-sheet expansion, csv when keep_csv, README, LICENSE, codebook.md, codebooks/**) or **intermediate** (profiles, renders, per-sheet intermediates, schema/card inputs). `prepare` SHALL write the manifest into the output dir, and every later phase that adds a package artifact (`codebook_all`, `profile_all`, `render_all`) SHALL refresh it at the end of a successful run, so the durable file on disk is always the one a recount of the same tree would produce. A phase SHALL refresh only a directory that already owns a manifest: no phase SHALL create a package record for a tree `prepare` never prepared. publish dry-run and confirm SHALL read the SAME manifest — the durable file — to plan and to enforce contents (no divergence); `publish` SHALL NOT recompute it while the durable file exists, and a package that carries none (a tree prepared before this change) SHALL be recomputed and announced verbatim: `[!] No durable package manifest in <dir> - recomputed from the tree (a package prepared before #349).`
 
-Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
+Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). **The per-file codebook set SHALL be required exactly when the package carries its root `codebook.md` index**: `codebook_all` and `prepare --all-files` always write that index and create `codebooks/` only when they write a page, so an index with no page under `codebooks/` — including an existing but empty directory — SHALL be recorded `missing` and SHALL block confirm, while a package with neither SHALL record `codebooks/` `optional` and SHALL NOT warn. No caller-supplied flag SHALL record the promise, and a later-phase refresh SHALL NOT downgrade a promised absence back to `optional` (`2026-10-19-fix-codebook-promise`, issue #354). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
 
 **Divergence from the tree** is the backstop, distinct from the config-path staleness above: the record SHALL declare, path for path, the deliverable set a recount of the same tree produces — the `publishable` entries whose `status` is `staged` and whose `path` is a file path. A record that omits a delivered file, or promises one the delivery no longer holds, SHALL refuse the `hf` confirm with the stable marker `STALE_MANIFEST` — the block naming the record, the undeclared paths, the withdrawn paths and the recovery — BEFORE any network call and before staging; a dry-run and the local target SHALL print the same block as a warning and continue to plan. The comparison SHALL be over paths, never content: the record carries no hashes, so an in-place edit of a declared file is NOT a divergence and SHALL NOT refuse a delivery. `intermediate` entries SHALL NOT be compared — a local-only layer is regenerable churn, not a delivery fact. A record SHALL promise the **presence** of a recursive remote's tree as well as of its files: a tree the delivery no longer holds SHALL be reported under `withdrawn` even though the tree itself is never a delivered file. A record that cannot be read SHALL be refused the same way — before any network call and before staging, with the stable marker `UNREADABLE_MANIFEST` naming the record and the error; a dry-run and the local target SHALL print that block as a warning, recount for the preview and continue to plan. A record SHALL NOT be refused for a `keep_csv` delivery: the record describes the package tree, and the original CSVs such a delivery adds are read from the configuration, never declared by it. The recovery SHALL read `re-run the build chain (\`sofer prepare --force --all-files\`) and retry.`
 
@@ -422,6 +422,27 @@ The delivered set SHALL be the `publishable` entries whose `status` is `staged` 
 - GIVEN a manifest missing a required codebook that the profile promises
 - WHEN confirm runs
 - THEN it SHALL fail with a stable `error_code` and a `recovery` naming re-run prepare
+
+#### Scenario: A promised codebook set that is absent blocks confirm (#354) — Added 2026-10-19
+
+- GIVEN a package that carries the root `codebook.md` index and no page under `codebooks/`
+- WHEN the durable manifest is built or refreshed, and confirm runs
+- THEN the `codebook_page` entry SHALL read `missing`
+- AND the confirm SHALL refuse before staging with the existing recovery naming the build chain
+- AND a later `profile_all`/`render_all` refresh SHALL NOT turn that entry back into `optional`
+
+#### Scenario: A package that never promised codebooks keeps them optional (#354) — Added 2026-10-19
+
+- GIVEN a package with neither `codebook.md` nor any page under `codebooks/`
+- WHEN the manifest is built and confirm runs
+- THEN the `codebook_page` entry SHALL read `optional`
+- AND no codebook-missing warning SHALL be emitted
+
+#### Scenario: An empty codebooks directory is an absence, not a silent no-op (#354) — Added 2026-10-19
+
+- GIVEN a package whose `codebooks/` directory exists but holds no page
+- WHEN the manifest is built
+- THEN the entry SHALL be `missing` when the root index is present and `optional` when it is not — never absent from the record
 
 #### Scenario: Optional absent artifact does not warn
 
