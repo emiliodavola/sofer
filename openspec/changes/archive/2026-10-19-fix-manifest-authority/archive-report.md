@@ -17,7 +17,7 @@
 | T3 | `publish` reads `from_dir`; recomputes only for a tree with no durable record; refuses a stale record before the network and before staging | done | `3ed11cf`; `TestDurableManifest` (6 cases) |
 | T4 | Tests for every new line and branch, RED first | done | `3ed11cf`; `tests/test_manifest.py` 17 passed, `tests/test_publish.py` 134 passed |
 | T5 | PUB-12 reconciliation and the PRP-11 creator/refresher clause, in the delta and both canonical specs | done | this folder's `specs/`; `check_test_mapping.py` exit 0 |
-| T6 | `publish` CLI description + `README.md` + `README_ES.md` | done | the specs/docs commit on this branch |
+| T6 | `publish` CLI description + `README.md` + `README_ES.md` | done | `57dd0a7` |
 | T7 | Gates and the differential check against the base commit | done | §2 below |
 
 **The change in one line:** the manifest on disk stopped being a prepare-time
@@ -152,5 +152,5 @@ document unable to answer the only question a reader brings to it.
 | --- | --- |
 | `d05acd4` | `fix(manifest): refresh the durable manifest at every phase that adds package artifacts (#349)` |
 | `3ed11cf` | `fix(publish): plan and enforce against the durable manifest (#349)` |
-| the specs/docs commit | `docs: declare the durable manifest as the object of record (#349)` |
+| `57dd0a7` | `docs: declare the durable manifest as the object of record (#349)` |
 | this commit | `chore(odd): archive the change inside its delivery branch (#349)` |

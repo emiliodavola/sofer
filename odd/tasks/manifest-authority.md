@@ -71,9 +71,9 @@ rules 7 and 13).
 | T2 | Refresh at the post-prepare phase boundaries: `codebook_all` (CLI + MCP), `profile_all`, `render_all` | S5, S6 | `d05acd4` |
 | T3 | `publish` reads `from_dir`; staleness fails closed with a stable code and the truthful recovery; legacy tree recomputes with a notice | S3, S7 | `3ed11cf` |
 | T4 | Tests: per-phase invariant, legacy tree without the file, stale manifest blocks, plus one regression test per existing command the change touches | S5-S7 | `3ed11cf` |
-| T5 | Specs: reconcile PUB-12, update PRP-11, add the scenarios and the change folder archived inside the PR | S8 | pending |
-| T6 | Docs: recovery text and CLI help name the real recovery; `README.md` + `README_ES.md` in the same commit | S8 | pending |
-| T7 | Gates: suite, the four 100.00% core modules with zero pragmas, ruff, mypy 3.13, pyright, `check_test_mapping.py`, and the differential check of every command sharing the changed code against the base commit | — | pending |
+| T5 | Specs: reconcile PUB-12, update PRP-11, add the scenarios and the change folder archived inside the PR | S8 | `57dd0a7` |
+| T6 | Docs: recovery text and CLI help name the real recovery; `README.md` + `README_ES.md` in the same commit | S8 | `57dd0a7` |
+| T7 | Gates: suite, the four 100.00% core modules with zero pragmas, ruff, mypy 3.13, pyright, `check_test_mapping.py`, and the differential check of every command sharing the changed code against the base commit | — | closeout commit |
 
 ## Out of scope (found while verifying #349 — recorded, not implemented here)
 
@@ -200,3 +200,12 @@ directory and invocating the batch form as `codebook --all-files --config datase
 The `sed`-based path normalization I tried first did not substitute on file input in
 this environment; it was abandoned in favour of removing the path difference at the
 source, rather than debugged into the evidence.
+
+**L13** — closeout: the change folder moved to
+`openspec/changes/archive/2026-10-19-fix-manifest-authority/` inside this branch
+(AGENTS.md rule 15) together with its `archive-report.md`, which carries the verbatim
+gate evidence, the six deviations and the three findings recorded as out of scope.
+Commits on `fix/349-manifest-authority` from `dev@47bf12c`: `d05acd4` (the refresh
+unit), `3ed11cf` (`publish` plans and enforces against the durable record), `57dd0a7`
+(the specs, the CLI help and both READMEs) and the closeout commit carrying the move
+and this entry. Push and the pull request are the maintainer's decision.
