@@ -2688,6 +2688,43 @@ class TestDurableManifest:
         assert "STALE_MANIFEST" in captured.out
         assert "withdrawn:  README.md" in captured.out
 
+    def test_a_withdrawn_recursive_tree_refuses_the_upload(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A promised tree that vanished is a delivery fact, not only its files.
+
+        The record keeps the tree entry ``staged``, so ``required_missing()`` stays
+        empty and nothing else would notice that the upload silently drops it.
+        """
+        from sofer.checks import ValidationReport
+
+        tree = tmp_path / "raw" / "assets"
+        tree.mkdir(parents=True)
+        (tree / "a.txt").write_text("a\n", encoding="utf-8")
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=csv, remote="data.csv"),
+                FileEntry(local=tree, remote="assets/", recursive=True),
+            ],
+        )
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        assert (out / "assets" / "a.txt").is_file()
+
+        _shutil.rmtree(out / "assets")
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "STALE_MANIFEST" in captured.out
+        assert "withdrawn:  assets/" in captured.out
+
     def test_an_unreadable_record_refuses_the_upload_without_network(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:

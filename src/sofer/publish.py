@@ -599,6 +599,30 @@ def _path_listing(paths: list[str]) -> str:
     return f"{listed} … and {rest} more" if rest else listed
 
 
+def _promised_paths(manifest: PackageManifest) -> set[str]:
+    """Publishable entries whose content the record promises is present (#349).
+
+    Directory entries are included on purpose. A recursive tree is never a delivered
+    file, but its *presence* is a delivery fact: a record that still promises a tree
+    the package no longer holds would approve an upload that silently drops it, and
+    ``required_missing()`` cannot see it because the entry is still ``staged``.
+
+    Args:
+        manifest: A package manifest, durable or recounted.
+
+    Returns:
+        The paths of its ``publishable`` entries whose status is ``staged``.
+    """
+    from .manifest import ArtifactClass, ArtifactStatus
+
+    return {
+        entry.path
+        for entry in manifest.entries
+        if entry.classification is ArtifactClass.PUBLISHABLE
+        and entry.status is ArtifactStatus.STAGED
+    }
+
+
 def _delivery_divergence(
     cfg: DatasetConfig,
     source: Path,
@@ -608,9 +632,9 @@ def _delivery_divergence(
 ) -> tuple[list[str], list[str]]:
     """What the tree delivers but the record does not, and the reverse (#349).
 
-    Both sides are the deliverable set -- publishable, staged, file entries -- built
-    the same way, so only a record that disagrees with a recount of the same tree is
-    a divergence. An intermediate layer is never delivered and never compared: a
+    Both sides are the promissed set -- publishable, staged entries -- built the same
+    way, so only a record that disagrees with a recount of the same tree is a
+    divergence. An intermediate layer is never delivered and never compared: a
     local-only layer is regenerable churn, not a delivery fact.
 
     Args:
@@ -628,8 +652,8 @@ def _delivery_divergence(
     recount = build_package_manifest(
         cfg, source, keep_csv=False, codebooks_required=codebooks_required
     )
-    recorded = {entry.path for entry in manifest.delivered()}
-    delivered = {entry.path for entry in recount.delivered()}
+    recorded = _promised_paths(manifest)
+    delivered = _promised_paths(recount)
     return sorted(delivered - recorded), sorted(recorded - delivered)
 
 
