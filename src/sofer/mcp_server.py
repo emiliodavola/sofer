@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 """MCP server exposing sofer's deterministic dataset pipeline to agents.
 
-Serves the pipeline as 15 MCP callables (10 logical tools), 3 resources, and
+Serves the pipeline as 19 MCP callables (10 logical tools), 3 resources, and
 3 prompts over stdio (fastmcp v3.4.x, optional ``mcp`` extra). Thin adapter
 over domain modules — never re-implements logic, never calls an LLM, and ships
 no remote/streamable-http transport in v1. Its network access is the HF upload
@@ -47,11 +47,12 @@ Security model (REVISION-2 design, findings CF-1/CF-2):
 Every tool docstring states its side effects and network usage verbatim.
 The token and approval phrase are never logged, returned, or placed in
 docstrings or resources; the unconfigured-approval preflight guidance carries
-the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only. The four
+the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only. The five
 ``sofer_auth_status`` posture fields (``phrase_source``, ``server_process_id``,
-``server_started_at``, ``server_version``) are non-secret process-lifecycle
-metadata: ``phrase_source`` describes the configuration path only — the phrase,
-any phrase-derived value, and the configured env value never appear in them.
+``server_started_at``, ``server_version``, ``server_root``) are non-secret
+process-lifecycle metadata: ``phrase_source`` describes the configuration path
+only — the phrase, any phrase-derived value, and the configured env value never
+appear in them.
 """
 
 from __future__ import annotations
@@ -88,7 +89,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
-from . import _toml, failure_report, meta_edit, workflow
+from . import _toml, failure_report, file_edit, meta_edit, workflow
 from . import config as sofer_config
 from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
@@ -218,6 +219,9 @@ _PHASED_INSTRUCTIONS: str = (
     "prepare bakes whatever is there into the Dataset Card and LICENSE. On an "
     "MCP-driven run the agent completes them; the human supplies only what the "
     "data cannot determine (license, source).\n"
+    "    Optional registration shape: sofer_file_set replaces the [[file]] array, so a "
+    "recursive folder entry, column_types, convert_to_parquet or include_in_schema can be "
+    "declared without leaving the tool surface.\n"
     "  Phase 1 Build: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all\n"
     "  Phase 2 Publish: sofer_publish(dry_run=True) -> STOP (human approval) -> sofer_publish_confirm\n"
     "    Posture (issue #338): sofer_auth_status reports the configured visibility and, with "
@@ -788,6 +792,88 @@ def _validate_doc_files(cfg: DatasetConfig) -> list[str]:
         if not resolved.is_relative_to(root_resolved):
             errors.append(_outside_root_message(f"[dataset] {field_name}", resolved, root_resolved))
     return errors
+
+
+def _validate_file_set_entries(
+    entries: Sequence[Mapping[str, Any]], *, base_dir: Path, root: Path
+) -> list[str]:
+    """Containment and uniqueness checks for ``sofer_file_set`` (issue #344).
+
+    The model validates shape (``file_edit.normalize_entries``); this layer
+    validates what only the server knows: the local path must exist and stay
+    inside the containment root, a ``recursive`` entry must point at a
+    directory and a file entry at a file, remotes must be safe, and no two
+    entries may register the same local or remote. A recursive entry's remote
+    folder also SHALL NOT contain another entry's remote, which is the
+    double-registration the template's folder shape makes easy to create.
+
+    Args:
+        entries: Normalized ``[[file]]`` mappings.
+        base_dir: Directory relative locals resolve against (the TOML's own).
+        root: The containment root.
+
+    Returns:
+        Human-readable violation messages (empty when every entry is valid).
+    """
+    root_resolved = root.resolve()
+    errors: list[str] = []
+    local_seen: dict[Path, int] = {}
+    remote_seen: dict[str, int] = {}
+    remotes: list[tuple[int, str, bool]] = []
+    for index, entry in enumerate(entries, start=1):
+        local = Path(entry["local"]).expanduser()
+        if not local.is_absolute():
+            local = base_dir / local
+        local = local.resolve()
+        recursive = bool(entry.get("recursive"))
+        if not local.is_relative_to(root_resolved):
+            errors.append(
+                _outside_root_message(f"[[file]] local (entry {index})", local, root_resolved)
+            )
+        elif not local.exists():
+            errors.append(f"[[file]] local (entry {index}) not found: {local}")
+        elif recursive and not local.is_dir():
+            errors.append(
+                f"[[file]] local (entry {index}) must be a directory when recursive = true: {local}"
+            )
+        elif not recursive and not local.is_file():
+            errors.append(
+                f"[[file]] local (entry {index}) must be a file when recursive is not set: {local}"
+            )
+        previous_local = local_seen.get(local)
+        if previous_local is not None:
+            errors.append(
+                f"[[file]] local (entry {index}) duplicates entry {previous_local}: {local}"
+            )
+        else:
+            local_seen[local] = index
+        if _remote_is_unsafe(entry["remote"]):
+            errors.append(
+                f"[[file]] remote (entry {index}) is unsafe (absolute or contains '..'): "
+                f"{entry['remote']!r}"
+            )
+        normalized_remote = entry["remote"].replace("\\", "/").strip("/")
+        previous_remote = remote_seen.get(normalized_remote)
+        if previous_remote is not None:
+            errors.append(
+                f"[[file]] remote (entry {index}) duplicates entry {previous_remote}: "
+                f"{entry['remote']!r}"
+            )
+        else:
+            remote_seen[normalized_remote] = index
+        remotes.append((index, normalized_remote, recursive))
+    for index, prefix, recursive in remotes:
+        if not recursive or not prefix:
+            continue
+        for other_index, other_remote, _other_recursive in remotes:
+            if other_index == index:
+                continue
+            if other_remote == prefix or other_remote.startswith(prefix + "/"):
+                errors.append(
+                    f"[[file]] remote (entry {index}) folder {prefix!r} would double-register "
+                    f"entry {other_index}'s remote {other_remote!r}; use one shape or the other"
+                )
+    return list(dict.fromkeys(errors))
 
 
 def _reload_tool_config(start: Path) -> None:
@@ -1478,6 +1564,106 @@ def sofer_meta_set(
             "warnings": warnings,
             "config_errors": [],
             "next": _workflow_next("sofer_meta_set", config),
+        }
+
+
+def sofer_file_set(
+    config: Annotated[
+        str,
+        Field(description="Path to the dataset TOML file whose [[file]] entries are written"),
+    ],
+    entries: Annotated[
+        list[dict[str, Any]],
+        Field(
+            description=(
+                "Complete replacement list of [[file]] tables. Each supports local "
+                "(required, existing path under the server root), remote (required, "
+                "safe relative path), recursive, convert_to_parquet, upload_as_csv, "
+                'include_in_schema (booleans) and column_types ({column = "string"}); '
+                "an unknown key is refused naming the accepted set. Folder and file "
+                "remotes that would double-register are refused."
+            )
+        ),
+    ],
+    dry_run: Annotated[
+        bool,
+        Field(
+            description="When true, compute and verify the edit and report what it would write; the dataset TOML is left untouched."
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Write the [[file]] entries of the dataset TOML, preserving everything else.
+
+    Side effects: rewrites the dataset TOML's [[file]] array only (atomic tmp+os.replace; other keys, comments and tables byte-preserved) unless dry_run. Network usage: none.
+
+    When to use: when the registration shape matters — a recursive folder entry, column_types for a zero-padded code, convert_to_parquet/include_in_schema — or to replace the flat entries scan_apply produces. It is the only way to write [[file]] entries over MCP.
+    Example: sofer_file_set(config="dataset.toml", entries=[{"local": "raw/Labels", "remote": "Labels/", "recursive": True}])
+    Requires: dataset TOML exists under server root; every local exists and stays under the root; the edited document must still parse. Next: sofer_validate, then sofer_prepare.
+
+    Args:
+        config: Path to the dataset TOML, contained under the server root.
+        entries: The complete replacement list — this tool REPLACES the array,
+            it does not append (``sofer_scan_apply`` appends). An empty list is
+            refused while the file still registers entries, so a careless call
+            cannot erase the registrations.
+        dry_run: When ``True``, nothing is written.
+
+    Returns:
+        The standard envelope plus ``dry_run``, ``changed``, ``entries`` (the
+        number written) and ``config_errors``. Re-running with the entries the
+        file already holds changes nothing, so the call is idempotent.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        try:
+            toml_path = _contained_path(
+                config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        except PathOutsideRootError:
+            raise
+        try:
+            current = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_file_set",
+                config_path=config,
+            )
+        if not entries and current.files:
+            return _refusal(
+                [
+                    f"refusing to erase the {len(current.files)} existing [[file]] "
+                    "entries; pass the complete replacement list"
+                ],
+                tool_name="sofer_file_set",
+                config_path=config,
+            )
+        try:
+            normalized = file_edit.normalize_entries(entries)
+        except file_edit.FileEditError as exc:
+            return _refusal([str(exc)], tool_name="sofer_file_set", config_path=config)
+        errors = _validate_file_set_entries(normalized, base_dir=toml_path.parent, root=_get_root())
+        if errors:
+            return _refusal(errors, tool_name="sofer_file_set", config_path=config)
+        try:
+            result = file_edit.set_files(toml_path, normalized, dry_run=dry_run)
+        except file_edit.FileEditError as exc:
+            return _refusal([str(exc)], tool_name="sofer_file_set", config_path=config)
+        count = len(result.entries)
+        if dry_run:
+            print(f"  DRY RUN  {toml_path.name}: would write {count} [[file]] entries")
+        elif result.changed:
+            print(f"  OK  {toml_path.name}: wrote {count} [[file]] entries")
+        else:
+            print(f"  OK  {toml_path.name}: already up to date")
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": _captured_text(out, err),
+            "dry_run": result.dry_run,
+            "changed": result.changed,
+            "entries": count,
+            "config_errors": [],
+            "next": _workflow_next("sofer_file_set", config),
         }
 
 
@@ -3447,6 +3633,30 @@ def _register_tools(server: _FastMCP) -> None:
                 "build_stale": {"type": "boolean"},
                 "placeholders": {"type": "integer"},
                 "warnings": {"type": "array"},
+                "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
+        sofer_file_set,
+        description=_workflow_description(sofer_file_set),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "dry_run": {"type": "boolean"},
+                "changed": {"type": "boolean"},
+                "entries": {"type": "integer"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },

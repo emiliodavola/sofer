@@ -665,8 +665,8 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 18 callables de herramientas (`sofer_validate`,
-`sofer_meta_check`, `sofer_meta_set`, `sofer_prepare`,
+El servidor expone 19 callables de herramientas (`sofer_validate`,
+`sofer_meta_check`, `sofer_meta_set`, `sofer_file_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
@@ -715,6 +715,7 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force`, `extensions` | Fase 0 preview/apply tras `init`. Ambos MUEVEN archivos sueltos a `raw/` de forma incondicional — la fase es obligatoria, sin flag de opt-in; `sofer_scan_dry_run` la previsualiza sin mutar nada. |
 | M | `sofer_meta_check` | `config` | Lee el estado de metadata sin correr el validador; `readOnlyHint:true`. Reporta el mismo warning que imprime `sofer_validate`. |
 | M | `sofer_meta_set` | `config`, `values`, `dry_run` | Escribe `[meta]` antes de la Fase 1 (la única vía por MCP): description/license/source/tags, más cualquier otra clave del card. Preserva cada otra clave y comentario; `build_stale` nombra un árbol `build/` anterior a la escritura. Llamada sin `values` no escribe nada y devuelve una continuación pidiéndolos. |
+| M | `sofer_file_set` | `config`, `entries`, `dry_run` | Reemplaza el array `[[file]]` desde la superficie de herramientas: la única vía por MCP para declarar una entrada de carpeta recursiva, `column_types`, `convert_to_parquet`/`upload_as_csv` o `include_in_schema`. Cada local debe existir bajo la raíz del servidor; un remoto de carpeta que duplicaría el registro de una entrada de archivo es rechazado; una lista vacía es rechazada mientras existan entradas. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | Tras validate; escribe Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | Tras prepare; codebooks en lote. |

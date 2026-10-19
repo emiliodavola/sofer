@@ -1,4 +1,4 @@
-"""Central TOML-parser selection (issue #192).
+"""Central TOML-parser selection and atomic document writes (issues #192, #344).
 
 Single home for the ``tomli``/``tomllib`` fallback previously duplicated in
 five modules (``cli.py``, ``config.py``, ``mcp_registration.py``,
@@ -10,10 +10,17 @@ Both arms stay reachable from tests on any interpreter -- the ``except``
 branch is exercised by blocking ``tomllib`` via ``sys.modules`` -- so this
 module measures 100% line+branch coverage wherever the suite runs, and the
 two imports never share one name (no ``no-redef``).
+
+:func:`atomic_write_text` is the single home for the same-directory
+temporary-file replacement shared by the surgical TOML editors
+(:mod:`sofer.meta_edit`, :mod:`sofer.file_edit`): a crash or failure mid-write
+can never leave a truncated document.
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, BinaryIO
 
 
@@ -53,3 +60,29 @@ def loads(text: str) -> dict[str, Any]:
     """
     data: dict[str, Any] = _parser().loads(text)
     return data
+
+
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Replace *path* with *text* through a same-directory temporary file.
+
+    No ``.bak`` is written: the replace is atomic and every refusal happens
+    before it. ``newline=""`` suppresses translation, so the bytes outside the
+    edited region are the bytes that were read (CRLF documents stay CRLF).
+
+    Args:
+        path: The destination file.
+        text: The complete new content.
+        encoding: Text encoding for the write.
+
+    Raises:
+        OSError: The write failed; the destination is left untouched and the
+            temporary file is removed.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding=encoding, newline="") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise

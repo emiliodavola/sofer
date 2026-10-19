@@ -467,6 +467,7 @@ class TestToolRoster:
             "sofer_validate",
             "sofer_meta_check",
             "sofer_meta_set",
+            "sofer_file_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -485,7 +486,7 @@ class TestToolRoster:
         }
     )
 
-    def test_exactly_eighteen_callables(self, server):
+    def test_exactly_nineteen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -726,7 +727,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 18, [t.name for t in tools]
+        assert len(tools) == 19, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -961,7 +962,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 18
+                    assert len(tools.tools) == 19
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -5005,9 +5006,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 18 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 19 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_eighteen(self, tmp_path):
+    def test_tool_roster_still_nineteen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -5016,7 +5017,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 18
+        assert len(names) == 19
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):
