@@ -10,6 +10,7 @@ files unless --force (PUB-05), and --keep-csv (PUB-07).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil as _shutil
 import tempfile
@@ -449,6 +450,12 @@ class TestAutoPrepare:
         toml = tmp_path / "dataset.toml"
         toml.write_text("[dataset]", encoding="utf-8")
         os.utime(out / "data.parquet", (_NEW, _NEW))
+        # A record older than the artifact it declares is stale (#349), so the
+        # record moves with the artifact: this test is about the auto-prepare
+        # signal, not about staleness.
+        from sofer.manifest import MANIFEST_NAME
+
+        os.utime(out / MANIFEST_NAME, (_NEW, _NEW))
         os.utime(toml, (_MID, _MID))
         os.utime(csv, (_OLD, _OLD))
 
@@ -2523,3 +2530,188 @@ class TestTargetPostureGate:
         assert rc == 1
         out = capsys.readouterr().out
         assert "configured: PUBLIC   observed: private" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUB-12 — publish rests on the durable manifest (#349)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDurableManifest:
+    """The object publish plans and enforces with is the file on disk (#349).
+
+    Before this change ``publish`` rebuilt its own manifest in memory and never
+    read the one ``prepare`` wrote, so PUB-12's "publish dry-run and confirm SHALL
+    read the SAME manifest" held for nothing outside the process. The staleness
+    rule is the backstop for a record some out-of-band write has outrun.
+    """
+
+    def _prepared(self, tmp_path: Path) -> tuple[DatasetConfig, Path]:
+        """A real prepared package: parquet + README + LICENSE + manifest.json."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        return cfg, out
+
+    def _rewrite(self, out: Path, mutate: Any) -> Path:
+        """Apply *mutate* to the durable document and write it back."""
+        from sofer.manifest import MANIFEST_NAME
+
+        path = out / MANIFEST_NAME
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        mutate(doc)
+        path.write_text(json.dumps(doc, sort_keys=True, indent=2), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _entry(
+        cfg: DatasetConfig,
+        artifact_type: str,
+        path: str,
+        status: str = "staged",
+        classification: str = "publishable",
+    ) -> dict[str, str]:
+        return {
+            "source": str(cfg._config_path),
+            "artifact_type": artifact_type,
+            "path": path,
+            "status": status,
+            "classification": classification,
+        }
+
+    def test_an_entry_only_the_file_declares_blocks_the_confirm(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """The enforced object is the durable file, never a fresh recount.
+
+        A ghost required entry exists only in the document: a recount derives its
+        set from the config and the tree, so only a reader of the file can see it.
+        """
+        from sofer.checks import ValidationReport
+
+        cfg, out = self._prepared(tmp_path)
+        self._rewrite(
+            out,
+            lambda doc: doc["artifacts"].append(
+                self._entry(cfg, "parquet", "ghost.parquet", status="missing")
+            ),
+        )
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "ghost.parquet" in captured.out
+        assert "missing required artifacts" in captured.out
+
+    def test_a_stale_manifest_blocks_the_upload_without_staging(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A record older than what it declares refuses the delivery (#349)."""
+        from sofer.checks import ValidationReport
+
+        cfg, out = self._prepared(tmp_path)
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        def _raise_staging(*_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("staging attempted for a stale manifest")
+
+        monkeypatch.setattr(tempfile, "mkdtemp", _raise_staging)
+        os.utime(out / "data.parquet", (_NEW, _NEW))  # outruns manifest.json
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "STALE_MANIFEST" in captured.out
+        assert "data.parquet" in captured.out
+        assert "Recovery:" in captured.out
+
+    def test_a_stale_manifest_warns_and_still_plans_a_dry_run(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A preview that refuses to show anything is useless: warn, then plan."""
+        cfg, out = self._prepared(tmp_path)
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+        os.utime(out / "data.parquet", (_NEW, _NEW))
+
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "STALE_MANIFEST" in captured.out
+        assert "Dry-run complete" in captured.out
+
+    def test_a_package_without_a_durable_manifest_recomputes_with_a_notice(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A tree prepared before this change still publishes, and says why."""
+        from sofer.manifest import MANIFEST_NAME
+
+        cfg, out = self._prepared(tmp_path)
+        (out / MANIFEST_NAME).unlink()
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "No durable package manifest" in captured.out
+
+    def test_staleness_resolves_both_roots_and_skips_what_is_not_there(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A staged layer under the dataset root counts; unresolved and directory
+        entries never do (#349)."""
+        cfg, out = self._prepared(tmp_path)
+        layer = tmp_path / "cache" / "profiles" / "data.metadata.yaml"
+        layer.parent.mkdir(parents=True)
+        layer.write_text("x: 1\n", encoding="utf-8")
+
+        def _add_layers(doc: dict[str, Any]) -> None:
+            doc["artifacts"].extend(
+                [
+                    self._entry(
+                        cfg,
+                        "profile",
+                        "cache/profiles/data.metadata.yaml",
+                        classification="intermediate",
+                    ),
+                    self._entry(cfg, "parquet", "nowhere/gone.parquet"),
+                    self._entry(cfg, "data", "assets/"),
+                ]
+            )
+
+        self._rewrite(out, _add_layers)
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        assert publish(cfg, dry_run=True) == 0
+        assert "STALE_MANIFEST" not in capsys.readouterr().out
+
+        os.utime(layer, (_NEW, _NEW))  # the layer outruns the record
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "STALE_MANIFEST" in captured.out
+        assert "data.metadata.yaml" in captured.out
+
+    def test_a_record_whose_declared_files_are_all_gone_is_not_stale(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Nothing to outrun the record: absence is required_missing()'s job."""
+        cfg, out = self._prepared(tmp_path)
+        for name in ("data.parquet", "README.md", "LICENSE"):
+            (out / name).unlink()
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True)
+
+        assert rc == 0
+        assert "STALE_MANIFEST" not in capsys.readouterr().out

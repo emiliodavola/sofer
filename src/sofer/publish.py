@@ -589,6 +589,42 @@ def _print_split_mapping_validation(
             print(f"    [!] {w}")
 
 
+def _newest_declared_artifact(
+    cfg: DatasetConfig, source: Path, manifest: PackageManifest
+) -> Path | None:
+    """The newest file *manifest* declares as present, or ``None``.
+
+    The staleness backstop (#349) compares the durable record's mtime against the
+    newest thing it declares. Entry paths are package-relative for a package
+    artifact and dataset-root-relative (or absolute) for an intermediate layer, so
+    both roots are tried. A directory entry denotes a tree the copy path
+    enumerates, and an entry that resolves to nothing is a *missing* artifact --
+    :meth:`PackageManifest.required_missing`'s business, never a staleness signal.
+
+    Args:
+        cfg: Dataset configuration (its ``_base_dir`` is the dataset root).
+        source: The package directory the manifest describes.
+        manifest: The durable manifest read from *source*.
+
+    Returns:
+        The newest declared file, or ``None`` when the record declares none.
+    """
+    from .manifest import ArtifactStatus
+
+    base = cfg._base_dir if cfg._base_dir else Path.cwd()
+    newest: tuple[float, Path] | None = None
+    for entry in manifest.entries:
+        if entry.status is not ArtifactStatus.STAGED or entry.is_directory:
+            continue
+        for candidate in (source / entry.path, base / entry.path):
+            if candidate.is_file():
+                mtime = candidate.stat().st_mtime
+                if newest is None or mtime > newest[0]:
+                    newest = (mtime, candidate)
+                break
+    return newest[1] if newest is not None else None
+
+
 def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
     """Return ``True`` when the package in *output_dir* is stale or missing.
 
@@ -849,15 +885,50 @@ def publish(
         if rc != 0:
             return rc
 
-    # Package artifact manifest (PUB-12/#122): el MISMO objeto maneja el
-    # diff del dry-run y el enforcement del confirm -> nunca divergen.
-    from .manifest import build_package_manifest
+    # Package artifact manifest (PUB-12/#122, #349): the DURABLE document on disk --
+    # written by prepare and refreshed by every phase that adds package artifacts --
+    # is the object of record, so el MISMO objeto maneja el diff del dry-run y el
+    # enforcement del confirm. Recomputing it here would plan and enforce against an
+    # object no reader can inspect, which is exactly what PUB-12 forbids.
+    from .manifest import MANIFEST_NAME, PackageManifest, build_package_manifest
 
-    manifest = (
-        build_package_manifest(cfg, source, keep_csv=False, codebooks_required=codebooks_required)
-        if source.is_dir()
-        else None
-    )
+    manifest: PackageManifest | None = None
+    manifest_path = source / MANIFEST_NAME if source.is_dir() else None
+    if source.is_dir():
+        manifest = PackageManifest.from_dir(source)
+        if manifest is None:
+            # A package prepared before #349 shipped no durable record: recompute
+            # it (never invent silent behavior) and say so.
+            print(
+                f"  [!] No durable package manifest in {source} - recomputed from the "
+                "tree (a package prepared before #349)."
+            )
+            manifest = build_package_manifest(
+                cfg, source, keep_csv=False, codebooks_required=codebooks_required
+            )
+
+    # ── PUB-12 staleness backstop (#349) ─────────────────────────────────
+    # The durable record is authoritative only while it is the newest word on the
+    # package. A phase that outran it, or any out-of-band write, invalidates it:
+    # delivering against a stale record is precisely what #349 forbids. The plan
+    # still shows for a preview; the upload refuses.
+    if manifest is not None and manifest_path is not None and manifest_path.is_file():
+        newest_artifact = _newest_declared_artifact(cfg, source, manifest)
+        if (
+            newest_artifact is not None
+            and manifest_path.stat().st_mtime < newest_artifact.stat().st_mtime
+        ):
+            refuses = target == "hf" and not dry_run
+            print(
+                f"  {'X ' if refuses else '[!]'} STALE_MANIFEST - the durable package "
+                "manifest is older than what it declares (PUB-12):\n"
+                f"     manifest:  {manifest_path}\n"
+                f"     newest:    {newest_artifact}\n"
+                "     Recovery: re-run the build chain (`sofer prepare --force --all-files`) "
+                "and retry."
+            )
+            if refuses:
+                return 1
 
     if source.is_dir():
         planned = expanded_planned_remotes(cfg, keep_csv, source)

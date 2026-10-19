@@ -346,6 +346,54 @@ def test_codebook_all_refreshes_the_durable_manifest(tmp_path: Path) -> None:
     assert all(page.status is ArtifactStatus.STAGED for page in pages)
 
 
+def test_profile_and_render_all_refresh_the_durable_manifest(tmp_path: Path) -> None:
+    """Every phase that adds package artifacts leaves the file current (#349).
+
+    The record is doctored first, so a phase that failed to refresh would leave the
+    ghost entry behind: content equality with a recount is the observable.
+    """
+    from sofer.prepare import prepare
+    from sofer.profile import generate_all_profiles
+    from sofer.render import generate_all_renders
+
+    cfg, root = _dataset(tmp_path)
+    out = root / "build"
+    assert prepare(cfg, out) == 0
+    path = out / MANIFEST_NAME
+    ghost = {
+        "source": str(cfg._config_path),
+        "artifact_type": "parquet",
+        "path": "ghost.parquet",
+        "status": "staged",
+        "classification": "publishable",
+    }
+
+    for phase in (generate_all_profiles, generate_all_renders):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["artifacts"].append(ghost)
+        path.write_text(json.dumps(doc, sort_keys=True, indent=2), encoding="utf-8")
+
+        phase(cfg, output_dir=out)
+
+        durable = PackageManifest.from_dir(out)
+        assert durable is not None
+        assert "ghost.parquet" not in {e.path for e in durable.entries}, (
+            f"{phase.__name__} must rewrite the durable record"
+        )
+        assert durable == build_package_manifest(cfg, out)
+
+
+def test_a_cache_mode_phase_never_invents_a_package_record(tmp_path: Path) -> None:
+    """``only_if_present``: nothing is created where no manifest exists (#349)."""
+    from sofer.profile import generate_all_profiles
+
+    cfg, root = _dataset(tmp_path)
+
+    generate_all_profiles(cfg, output_dir=None)  # writes to the shared cache/
+
+    assert not (root / "build" / MANIFEST_NAME).exists()
+
+
 def test_manifest_without_classification_reads_as_publishable(tmp_path: Path) -> None:
     """A manifest written before the field existed still loads (#346 compat)."""
     legacy = {
