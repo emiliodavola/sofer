@@ -385,7 +385,10 @@ tree holds — a file it omits, or one it promises and the tree no longer has �
 therefore refused before any network call, and so is a record that cannot be read
 (`UNREADABLE_MANIFEST`). The recovery is the same — re-run the build chain
 (`sofer prepare --force --all-files`) and retry — while `--dry-run` only warns and
-still prints the plan.
+still prints the plan. Per-file codebooks are required exactly when the package
+carries the root `codebook.md` index: an index with no page under `codebooks/`
+blocks the confirm, while a package that never generated codebooks keeps them
+optional and ships without a warning.
 
 If a publish reports `0 uploaded, N failed` with an `I/O error`, re-run it with
 the xet transfer backend disabled **before** assuming the package or the token
