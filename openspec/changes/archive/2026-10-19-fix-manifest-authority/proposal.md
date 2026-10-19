@@ -34,9 +34,9 @@ contradicts itself.
 ## 2. Scope
 
 **In:** the durable manifest as the single object of record — refreshed at the end of
-every phase that adds package artifacts, read by `publish`, with a staleness
-backstop that refuses the upload instead of delivering against a record some
-out-of-band write has outrun; the PUB-12 reconciliation; the exact recovery text.
+every phase that adds package artifacts, read by `publish`, with a divergence
+backstop that refuses the upload instead of approving a record that does not describe
+the delivery; the PUB-12 reconciliation; the exact recovery text.
 
 **Out (recorded, not implemented here):** the `! MISSING` rows of the dry-run plan
 are unreachable (they are nested under `if modified:` while the dry-run path passes
@@ -64,8 +64,9 @@ The maintainer chose **B** (verbatim, 2026-10-19): "opcion B".
 2. `prepare` creates the file through the same writer it always used; `codebook_all`,
    `profile_all` and `render_all` refresh it at the end of a successful run.
 3. `publish` reads `from_dir(source)`; a package with no durable record is recomputed
-   with an explicit notice, and a record older than what it declares refuses the `hf`
-   upload before the network prologue and before staging.
+   with an explicit notice; a record that omits a delivered file, or promises one the
+   delivery no longer holds, refuses the `hf` upload before the network prologue and
+   before staging; and an unreadable record is refused with its own marker.
 
 Risk: item 3 — the manifest JSON and *which object the delivery rests on* are
 contracts a human and an agent already consume.

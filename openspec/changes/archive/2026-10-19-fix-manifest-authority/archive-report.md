@@ -19,6 +19,7 @@
 | T5 | PUB-12 reconciliation and the PRP-11 creator/refresher clause, in the delta and both canonical specs | done | this folder's `specs/`; `check_test_mapping.py` exit 0 |
 | T6 | `publish` CLI description + `README.md` + `README_ES.md` | done | `57dd0a7` |
 | T7 | Gates and the differential check against the base commit | done | §2 below |
+| T8 | The independent verification's findings, fixed rather than documented away: an unreadable record is refused with `UNREADABLE_MANIFEST` instead of crashing, and the rule became a path-set comparison instead of an mtime proxy, which deleted the `stat` scan | done | the follow-up commits on this branch |
 
 **The change in one line:** the manifest on disk stopped being a prepare-time
 snapshot nobody read, and became the object `publish` plans and enforces with —
@@ -31,8 +32,8 @@ All commands run from the repository root on the frozen tree.
 
 ```
 $ uv run coverage run -m pytest tests/ -q
-2504 passed, 9 skipped, 6 warnings in 118.45s (0:01:58)
-# base dev@47bf12c: 2495 passed, 9 skipped  ->  +9: 6 in tests/test_publish.py,
+2506 passed, 9 skipped, 6 warnings in 136.24s (0:02:16)
+# base dev@47bf12c: 2495 passed, 9 skipped  ->  +11: 8 in tests/test_publish.py,
 # 3 in tests/test_manifest.py
 
 $ for f in cli scanner prepare publish; do
@@ -43,10 +44,10 @@ prepare exit=0    # 342 stmts, 100%
 publish exit=0    # 413 stmts, 100%
 
 $ uv run coverage report -m | tail -1
-TOTAL                             7731    387   2910    176    94%   # floor 90
+TOTAL                             7740    387   2908    176    94%   # floor 90
 
 $ uv run python scripts/check_test_mapping.py
-INFO: publish: 65 scenario(s), unmapped     # was 60
+INFO: publish: 66 scenario(s), unmapped     # was 60
 INFO: prepare: 46 scenario(s), unmapped     # was 45
 OK: test-mapping contract holds             # exit 0
 
@@ -57,7 +58,7 @@ $ uv run ruff format --check src/ tests/
 ```
 
 **Differential check** against the base commit, for every command that shares the
-code this change touches. Both sides ran in the **same** fixture directory, wiped
+code this change touches, **re-run after the rule changed**: Both sides ran in the **same** fixture directory, wiped
 and recreated between the two passes, so the absolute paths inside the output are
 identical by construction and a diff can only come from behaviour:
 
@@ -131,6 +132,21 @@ document unable to answer the only question a reader brings to it.
    always has. The implementation and both spec texts say **marker**:
    `STALE_MANIFEST`, printed in the block and carried to an agent inside the
    envelope's `output`.
+
+**The rule changed after the verification passed, and that is why this record keeps the
+rejected version.** The verifier falsified the mtime proxy's false-refusal surface over
+every *in-repo* writer and found none; the full suite then found the case that enumeration
+cannot see — an in-place edit of a file the record already declares
+(`test_root_index_uploaded_as_codebook_md` rewrites `codebook.md` to prove the package's
+own file ships). The record and the tree declared exactly the same paths, so nothing had
+diverged, yet the proxy refused the delivery and its printed recovery would have
+regenerated that file and destroyed the edit. The rule is now a path-set comparison
+(design D3b): the record must declare, path for path, the deliverable set a recount
+produces, naming `undeclared` and `withdrawn`. `intermediate` entries are never compared.
+The change deleted `_newest_declared_artifact` and its whole `stat` scan, so the verifier's
+second finding is structurally impossible rather than patched, and two existing fixtures
+moved to the supported flow (a hand-added codebook page now needs the chain re-run — which
+is exactly what the printed recovery says).
 
 **Found while verifying #349, recorded as out of scope (separate issues):**
 

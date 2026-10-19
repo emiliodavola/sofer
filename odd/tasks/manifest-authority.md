@@ -209,3 +209,87 @@ Commits on `fix/349-manifest-authority` from `dev@47bf12c`: `d05acd4` (the refre
 unit), `3ed11cf` (`publish` plans and enforces against the durable record), `57dd0a7`
 (the specs, the CLI help and both READMEs) and the closeout commit carrying the move
 and this entry. Push and the pull request are the maintainer's decision.
+
+**L14** — independent verification (required by the ASSESS plan: `risk: high`,
+`nativeRisk: unassessable` because the package-local `gentle-ai` binary is missing,
+`agentEscalation` item 3 applied, `plan.independentVerifier: true`). Verdict:
+**PASS on S1-S8**, with falsifications that carried weight:
+
+- the invariant is **not vacuous**: with the `refresh_manifest` call replaced by
+  `pass` in a COPY of `0ece5ea`, `test_profile_and_render_all_refresh_the_durable_manifest`
+  fails exactly as designed (`generate_all_profiles must rewrite the durable record`);
+- **no false-refusal surface reproduced**: every in-repo writer after `prepare` —
+  `prepare` itself, `codebook_all`, `profile_all` and `render_all` in both package-dir
+  and cache mode, `_clean.prune_orphans` (deletes only), `publish._copy_package` (writes
+  to `dest` only) and the auto-prepare path — leaves the record newer than what it wrote;
+- the legacy path works: `No durable package manifest in ... - recomputed from the tree`
+  with exit 0 for both `--dry-run` and the local target;
+- the quoted literals match the spec byte for byte (the spec's escaped backticks render
+  to the printed recovery; the marker and the `X`/`[!]` forms are the ones implemented).
+
+It reported as unverifiable: the maintainer decision text (a record, not
+authenticatable from the repository), the L11 full-suite and gate numbers (it re-ran only
+`tests/test_manifest.py` + `tests/test_publish.py`: 153 passed), the MCP envelope path,
+and a genuine broken symlink (the host refuses `os.symlink`). It also noted, correctly,
+that profiles/renders written into the **package** dir via
+`profile --all-files --output build` are not declared at all — the probe reads
+`cache/<dir>` and `<root>/<dir>` — and that they are `intermediate` and never delivered,
+so they cannot trigger staleness. That is #346 probe territory, recorded as an
+observation rather than folded in.
+
+**L15** — two defects the verifier found in MY code, both introduced by making `from_dir`
+live, both fixed rather than documented away:
+
+1. a corrupt `build/manifest.json` crashed `publish` with an unhandled
+   `json.decoder.JSONDecodeError` — exit 1 through the failure reporter, no marker and no
+   recovery;
+2. `_newest_declared_artifact` propagated `PermissionError` when a declared entry could
+   not be statted, contradicting its own docstring ("an entry that resolves to nothing is
+   skipped").
+
+The durable read now catches `OSError`, `ValueError`, `KeyError` and `TypeError`, prints
+an `UNREADABLE_MANIFEST` block in the same five-line shape as `STALE_MANIFEST`, refuses
+the `hf` confirm before any network call, and lets a dry-run or a local delivery recount
+for the preview after saying what happened. The scan catches `OSError` per candidate and
+skips the entry exactly like a missing one: deciding what an unreadable entry means is not
+the scan's call. Three tests pin both, written after the finding and green on the fixed
+tree. PUB-12 gains the clause because "read the SAME manifest" has to say what happens
+when the same manifest cannot be read.
+
+**L16** — the full suite then caught what the verifier's enumeration could not: with the
+mtime rule, `TestCodebookUpload::test_root_index_uploaded_as_codebook_md` failed. That
+test **overwrites** a file the record already declares (`codebook.md`) to prove the
+package's own file is what ships. The record and the tree declared exactly the same
+paths — only the bytes changed, which the record cannot express — so the mtime proxy
+refused a delivery nobody asked to refuse, and the recovery it printed (`prepare
+--force --all-files`) would have *regenerated* that file and destroyed the edit. The
+proxy was wrong, not the test.
+
+The rule is now material: **the record must declare, path for path, the deliverable set
+a recount of the same tree produces** (`publishable` ∧ `staged` ∧ file path). A record
+that omits a delivered file, or promises one the delivery no longer has, refuses the
+`hf` confirm with the same `STALE_MANIFEST` marker, now naming the `undeclared` and the
+`withdrawn` paths — bounded by `config.REPORT_MAX_ITEMS` — before any network call;
+a dry-run and the local target warn and keep planning. `intermediate` entries are never
+compared: a local-only layer is regenerable churn, not a delivery fact. An in-place
+edit of a declared file is therefore not a divergence.
+
+Two consequences worth recording. `_newest_declared_artifact` is gone with its whole
+`stat` scan, so the verifier's second finding (a raising `Path.is_file`) is structurally
+impossible now rather than patched, and the rule no longer needs root resolution,
+directory-entry or unreadable-entry special cases. And one more existing fixture moved
+to the supported flow: `test_codebook_uploaded_to_codebook_subpath` hand-adds
+`codebooks/PROV.md` after `prepare`, which **is** a real divergence (the page ships and
+the record omits it) — it now re-runs the chain, which rewrites the record including
+that page, exactly as the printed recovery tells a user to do.
+
+**L17** — the arc's final evidence, on the tree that carries the fix: suite
+`2506 passed, 9 skipped` under coverage (base `dev@47bf12c` 2495/9 → +11), the four
+rule-14 gates exit 0 each with TOTAL **94%** (7740 stmts), `check_test_mapping.py` OK with
+`publish` at 66 scenarios (+6) and `prepare` at 46 (+1), ruff check and format clean, and
+the differential **re-run after the rule change**: 6/6 IDENTICAL in stdout, stderr and
+exit code against `47bf12c` for `prepare`, `codebook --all-files --config`,
+`profile --all-files`, `render --all-files`, `publish --dry-run` and
+`publish --target local`. The arc lands as the `publish` fix and the record/spec commit.
+Re-verification of the changed rule follows the independent verifier that passed the
+rejected version; its verdict closes this document.

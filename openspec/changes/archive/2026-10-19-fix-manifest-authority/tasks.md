@@ -23,3 +23,12 @@
 - T4's publish-side tests were written before the implementation in `publish.py`
   (RED observed: five real assertion failures, including the ghost-entry discriminator),
   so test-first holds for that unit.
+- **The staleness rule was replaced after the independent verification passed.** The
+  verifier's falsification #1 enumerated every in-repo writer and found no false refusal,
+  but the full suite found one the enumeration could not see: an *in-place edit* of a file
+  the record already declares. The mtime proxy refused a delivery whose declared path set
+  was identical, and its printed recovery would have regenerated the edited file. The rule
+  is now a path-set comparison (design D3b), which deletes the `stat` scan altogether —
+  the verifier's second finding is structurally impossible rather than patched — and two
+  existing fixtures moved to the supported flow (a hand-added codebook page now needs the
+  chain re-run, which is what the printed recovery says).

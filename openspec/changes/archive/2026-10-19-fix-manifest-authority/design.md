@@ -30,7 +30,7 @@ untouched dataset does not create a `build/manifest.json` that would then declar
 parquet `missing`. One shared function, four call sites, no copy of the classification
 logic.
 
-## D3 — Staleness is a backstop with an exact definition
+## D3 — Staleness is a backstop with an exact definition (superseded in this change by D3b)
 
 The rule: **the durable manifest is stale when it is older than the newest file it
 declares as `staged`**. Implementation notes that matter:
@@ -51,6 +51,37 @@ Because every writer refreshes at the end of its run, the rule fires only for an
 out-of-band write or a phase that forgot to refresh. That is what makes it a backstop:
 the mechanism is D2, and the rule exists so a forgotten refresh cannot pass as a
 current record.
+
+## D3b — The rule is material: the record must declare the delivery
+
+The mtime proxy was wrong, and the full suite said so:
+`TestCodebookUpload::test_root_index_uploaded_as_codebook_md` rewrites a *declared* file
+(`codebook.md`) to prove the package's own file is what ships. The record and the tree
+declared exactly the same paths, so nothing had diverged — yet the proxy refused the
+delivery, and the recovery it printed (`prepare --force --all-files`) would have
+regenerated that file and destroyed the edit.
+
+The rule is now material: **the record must declare, path for path, the deliverable set a
+recount of the same tree produces** (`publishable` ∧ `staged` ∧ file path). A record that
+omits a delivered file, or promises one the delivery no longer holds, refuses the `hf`
+confirm with the same `STALE_MANIFEST` marker, now naming `undeclared` and `withdrawn`
+paths; a dry-run and the local target warn and continue. Why a set of paths:
+
+- **It is the strongest comparison the record supports.** It carries no hashes, so
+  content is not comparable at all; a path set is the only delivery fact it expresses.
+- **It knows its scope.** `intermediate` entries are never delivered and never compared —
+  a local-only layer is regenerable churn (`cache/profiles` after any profile run), not a
+  delivery fact.
+- **It deletes machinery instead of adding it.** Root resolution, directory-entry
+  handling, the missing-entry carve-out and the whole `stat` scan disappear, so the case
+  the independent verifier flagged (a raising `Path.is_file`) is structurally impossible
+  rather than patched.
+- **The refusal is precise.** Naming the paths that diverged is what makes the printed
+  recovery actionable; "older than the newest artifact" could not say what changed.
+
+The cost is one extra recount per publish — filesystem-only and cheap — and that the
+record is now a statement about the *set* it approves, which is exactly what PUB-12
+promises.
 
 ## D4 — Fail closed, but only where it protects delivery
 

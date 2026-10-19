@@ -398,7 +398,7 @@ The publish flow SHALL operate on one machine-readable package manifest listing 
 
 Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
 
-The durable manifest's **own** staleness is a backstop, distinct from the config-path staleness above: the record is stale when it is older than the newest file it declares as `staged`. Staleness SHALL be evaluated over both roots an entry path can be relative to (the package directory, and the dataset root — or an absolute path — for an intermediate layer), SHALL skip directory entries, and SHALL NOT count an entry that resolves to nothing (absence is `required_missing()`'s business). A stale record SHALL refuse the `hf` confirm with the stable marker `STALE_MANIFEST` — the block naming the record, the newest artifact and the recovery — BEFORE any network call and before staging; a dry-run and the local target SHALL print the same block as a warning and continue to plan. The recovery SHALL read `re-run the build chain (\`sofer prepare --force --all-files\`) and retry.`
+**Divergence from the tree** is the backstop, distinct from the config-path staleness above: the record SHALL declare, path for path, the deliverable set a recount of the same tree produces — the `publishable` entries whose `status` is `staged` and whose `path` is a file path. A record that omits a delivered file, or promises one the delivery no longer holds, SHALL refuse the `hf` confirm with the stable marker `STALE_MANIFEST` — the block naming the record, the undeclared paths, the withdrawn paths and the recovery — BEFORE any network call and before staging; a dry-run and the local target SHALL print the same block as a warning and continue to plan. The comparison SHALL be over paths, never content: the record carries no hashes, so an in-place edit of a declared file is NOT a divergence and SHALL NOT refuse a delivery. `intermediate` entries SHALL NOT be compared — a local-only layer is regenerable churn, not a delivery fact. The recovery SHALL read `re-run the build chain (\`sofer prepare --force --all-files\`) and retry.`
 
 `classification` SHALL be the serialized delivery axis, independent of `status`: every entry SHALL carry `publishable` or `intermediate`, a manifest written before the field existed SHALL load with `publishable` as the default (the field is additive), and no `intermediate` entry SHALL ever be part of the delivery set or be `missing` — the absence of a local-only layer is never a publication blocker. `profiles` and `renders` SHALL be `intermediate` and SHALL be probed where `profile_all`/`render_all` actually write them (the artifact cache, `<root>/<output_dir>/<dir>`), with the dataset root accepted as the explicit-location fallback, and the recorded `path` SHALL be relative to the root.
 
@@ -490,26 +490,31 @@ The delivered set SHALL be the `publishable` entries whose `status` is `staged` 
 - WHEN the confirm runs
 - THEN the enforcement SHALL see that entry, proving the file is the object of record rather than a fresh recomputation
 
-#### Scenario: A stale record refuses the upload before the network (#349)
+#### Scenario: A record that omits a delivered file refuses the upload before the network (#349)
 
-- GIVEN a durable manifest older than the newest file it declares as `staged`
+- GIVEN a package whose tree delivers a file the durable manifest does not declare
 - WHEN `publish --target hf` confirms
-- THEN it SHALL print the `STALE_MANIFEST` block naming the record, the newest artifact and the recovery
+- THEN it SHALL print the `STALE_MANIFEST` block naming the undeclared paths and the recovery
 - AND it SHALL return 1 without staging and without any network call
 
-#### Scenario: A stale record warns but still plans a dry-run (#349)
+#### Scenario: A withdrawn declared file refuses the upload (#349)
 
-- GIVEN the same stale record
+- GIVEN a record that declares a file the delivery no longer holds
+- WHEN the confirm runs
+- THEN the block SHALL name it under `withdrawn` and the upload SHALL be refused
+
+#### Scenario: An undeclared delivered file warns but still plans a dry-run (#349)
+
+- GIVEN the same divergence
 - WHEN `publish --dry-run` runs
 - THEN the `STALE_MANIFEST` block SHALL print as a warning
 - AND the dry-run SHALL still print its plan and exit 0
 
-#### Scenario: Staleness reads both roots and ignores what is not there (#349)
+#### Scenario: An in-place edit of a declared file is not a divergence (#349)
 
-- GIVEN a record whose staged entries include a layer under the dataset root, an entry that resolves to nothing, and a directory entry
-- WHEN staleness is evaluated
-- THEN the dataset-root layer SHALL be compared, and the unresolved and directory entries SHALL be skipped
-- AND a record whose declared files are all gone SHALL NOT be stale
+- GIVEN a record and a tree that declare the same deliverable paths
+- WHEN a declared file is rewritten with different content
+- THEN the confirm SHALL proceed: the record describes the set, not the bytes
 
 ### Requirement: The target posture is declared, observed and enforced (PUB-13) — Added 2026-10-17, feat-visibility-enforcement
 
