@@ -35,8 +35,8 @@ S8 — maintainer instruction (verbatim): "usando el nivel de ODD necesario impl
 | T4 | `publish.py`: delete the parameter from `publish` and `_delivery_divergence` and the two call sites | S1, S4 | done | `rg codebooks_required src/ tests/ scripts/` → no match |
 | T5 | PUB-12 delta + canonical spec + docstrings name the tree-derived promise | S1, S2, S3 | done | `openspec/specs/publish/spec.md` (PUB-12 + 3 scenarios), `openspec/changes/2026-10-19-fix-codebook-promise/`, both READMEs |
 | T6 | Gates: full suite under coverage, the four 100.00% modules, ruff, mypy, pyright, `check_test_mapping.py`, differential check against `dev@150ead1` | S5 | done | 2513 passed / 9 skipped; four gated modules 100.00%, TOTAL 94% (gate 90); ruff clean; mypy clean; pyright 0 errors; test-mapping OK; differential identical; see L5 |
-| T7 | Independent verifier over the diff, then the native review assessment | — | in progress | verifier: PASS WITH ADVISORIES, no code blocker (L7); native review requested on `dev..HEAD` after the record commit |
-| T8 | Archive the SDD change inside this branch, push, PR assigned to `emiliodavola` | S8 | pending | |
+| T7 | Independent verifier over the diff, then the native review assessment | — | done | verifier: PASS WITH ADVISORIES, no code blocker (L7); native review on `dev..HEAD` after the record commit: approved and acknowledged, findings non-blocking |
+| T8 | Archive the SDD change inside this branch, push, PR assigned to `emiliodavola` | S8 | done | `openspec/changes/archive/2026-10-19-fix-codebook-promise/` (L8); PR #355 |
 
 ## Log
 
@@ -53,3 +53,5 @@ L5 — gates (2026-10-19): `uv run pytest tests/ -q` → 2513 passed, 9 skipped;
 L6 — Risk: item 3, because the deleted keyword parameters are importable API and the codebook rule is a delivery gate.
 
 L7 — independent verifier (2026-10-19): PASS WITH ADVISORIES, no code blocker; S1–S7 reproduced independently (28 probe assertions plus a real-path `prepare --all-files` probe), S8 blocked at the time because nothing was committed yet. The verifier's three non-duplicative probes landed as `tests/test_codebook_promise.py`: the real writer state, the absence of the keyword in every signature, and the no-path-divergence claim. Two record corrections were applied: the premature T8 "done" and this Log's earlier 98% figure, which was a six-file scoped report, not the TOTAL.
+
+L8 — close (2026-10-19): native review approved and its authority acknowledged; the change dir moved to `openspec/changes/archive/2026-10-19-fix-codebook-promise/` inside this branch with `archive-report.md` (gates, differential, decisions, advisories), and the branch pushed as PR #355 against `dev`, assigned to `emiliodavola`. Final gate run: 2514 passed / 8 skipped (an earlier run reported 2513 / 9 — same 2522 collected, one host-capability skip flipped). The archive report's advisories are follow-ups, not debt on this candidate: the hardcoded index filename, the declared migration for old `optional` records, the sticky-refresh test not calling the phase functions end-to-end, and the pre-existing `prepare` silent success for an unreadable source that `publish` then refuses.
