@@ -686,6 +686,12 @@ llega con una `/` inicial y debe resolverse igualmente dentro de la raíz.
 instantánea de postura del servidor (`approval_configured`, `phrase_source`,
 `root`, `version`, `started_at`, `tool_count`) y nunca lee un archivo de dataset.
 
+`sofer_auth_status` reporta esa misma raíz como `server_root` junto al resto de
+los campos de postura, para que un agente pueda verificar la alcanzabilidad
+antes de intentar una escritura. Un rechazo de contención conserva su prefijo
+`<what> resolves outside the server root` y agrega la raíz resuelta más el
+remedio (`set SOFER_MCP_ROOT or --root at server start, then restart the host`).
+
 ### Cadena de construcción canónica — Por fases (tools/list es autosuficiente)
 
 ```

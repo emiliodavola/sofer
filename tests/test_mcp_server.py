@@ -650,11 +650,13 @@ class TestAuthStatusValidity:
 
 
 class TestAuthStatusPosture:
-    """Issue #145: the four additive posture fields on ``sofer_auth_status``.
+    """Issues #145 and #343: the additive posture fields on ``sofer_auth_status``.
 
     ``phrase_source``, ``server_process_id``, ``server_started_at`` and
     ``server_version`` are non-secret process-lifecycle metadata captured at
-    ``build_server`` and never re-derived. The phrase value (or any derived
+    ``build_server`` and never re-derived. ``server_root`` (#343) is the
+    resolved containment root the agent is allowed to touch — a filesystem path
+    the operator already chose, never a secret. The phrase value (or any derived
     form) never appears in any posture field; ``phrase_source`` only names the
     configuration path. ``server_started_at`` is restart-proof (microsecond
     stamps strictly increase across builds); ``server_process_id`` is
@@ -664,7 +666,13 @@ class TestAuthStatusPosture:
     """
 
     _POSTURE_KEYS = frozenset(
-        {"phrase_source", "server_process_id", "server_started_at", "server_version"}
+        {
+            "phrase_source",
+            "server_process_id",
+            "server_started_at",
+            "server_version",
+            "server_root",
+        }
     )
 
     @staticmethod
@@ -679,14 +687,16 @@ class TestAuthStatusPosture:
         return _call(server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}).data
 
     def test_posture_fields_present_and_typed(self, tmp_path, monkeypatch) -> None:
-        """approval_phrase="phrase123" — the envelope carries all four posture
-        fields with the documented types/domains (additive, never required)."""
+        """approval_phrase="phrase123" — the envelope carries every posture
+        field with the documented types/domains (additive, never required)."""
         self._clean_hf(monkeypatch)
         _make_dataset(tmp_path)
         server = build_server(root=tmp_path, approval_phrase="phrase123")
         envelope = self._envelope(server, tmp_path)
         assert envelope["phrase_source"] == "explicit"
         assert envelope["phrase_source"] in ("env", "explicit", "none")
+        assert envelope["server_root"] == str(tmp_path.resolve())
+        assert isinstance(envelope["server_root"], str)
         assert isinstance(envelope["server_process_id"], int)
         assert re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00",
@@ -856,7 +866,55 @@ class TestAuthStatusPosture:
 
 
 # ---------------------------------------------------------------------------
-#  7.3 — No silent default config name (MSP-R10)
+#  7.2b — Containment refusals are actionable (issue #343)
+# ---------------------------------------------------------------------------
+
+
+class TestContainmentRefusalActionable:
+    """A containment refusal names the root it compared against and the remedy.
+
+    The prefix ``"<what> resolves outside the server root"`` is substring-
+    asserted by existing tests and SHALL stay intact; the root and the remedy
+    are appended, never reworded in.
+    """
+
+    def test_refusal_names_root_and_remedy(self, tmp_path, monkeypatch) -> None:
+        """``sofer_init(cwd=<outside>)`` names the server root and the levers."""
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        build_server(root=root)
+
+        with pytest.raises(ms.PathOutsideRootError) as excinfo:
+            ms.sofer_init(name="probe", user="user", cwd=str(outside), dry_run=True)
+
+        message = str(excinfo.value)
+        assert f"cwd resolves outside the server root ({root.resolve()})" in message
+        assert str(outside.resolve()) in message
+        assert "SOFER_MCP_ROOT" in message
+        assert "--root" in message
+        assert "restart the host" in message
+
+    def test_contained_path_refusal_is_actionable(self, tmp_path) -> None:
+        """The shared gate (``_contained_path``) carries the same contract."""
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside.csv"
+        outside.write_text("a\n", encoding="utf-8")
+
+        with pytest.raises(ms.PathOutsideRootError) as excinfo:
+            ms._contained_path(outside, root=root, what="config")
+
+        message = str(excinfo.value)
+        assert f"config resolves outside the server root ({root.resolve()})" in message
+        assert "SOFER_MCP_ROOT" in message
+        assert "restart the host" in message
+
+
+# ---------------------------------------------------------------------------
+#  7.3 �?" No silent default config name (MSP-R10)
 # ---------------------------------------------------------------------------
 
 

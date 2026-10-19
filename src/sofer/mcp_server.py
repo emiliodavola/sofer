@@ -546,6 +546,30 @@ def _dialect_envelope(delimiter: str | None, encoding: str | None) -> dict[str, 
 
 _WIN_DRIVE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z]:[/\\]")
 
+# Remedy appended to every containment refusal (issue #343): the caller of a
+# tool cannot read sofer's source, so the message itself must name the lever
+# that moves the root and the fact that changing it needs a host restart.
+_ROOT_REMEDY = "set SOFER_MCP_ROOT or --root at server start, then restart the host"
+
+
+def _outside_root_message(what: str, raw: str | Path, root: Path) -> str:
+    """Build an actionable containment refusal (issue #343).
+
+    The prefix ``"<what> resolves outside the server root"`` is substring-
+    asserted by existing tests and SHALL stay intact; the resolved root and the
+    remedy are appended, never reworded in.
+
+    Args:
+        what: Human-readable label for the offending argument (e.g. "config").
+        raw:  The raw user-supplied path (never re-resolved here).
+        root: The containment root the path was compared against.
+
+    Returns:
+        The refusal message naming the label, the root, the rejected path and
+        the remedy.
+    """
+    return f"{what} resolves outside the server root ({root.resolve()}): {raw} — {_ROOT_REMEDY}"
+
 
 def _is_absolute_or_drive(raw: str | Path) -> bool:
     """Return True when *raw* is absolute on POSIX or is a Windows drive/UNC path.
@@ -607,17 +631,17 @@ def _contained_path(
     """
     raw_str = str(raw)
     if not Path(raw_str).is_absolute() and _is_absolute_or_drive(raw_str):
-        raise PathOutsideRootError(f"{what} resolves outside the server root: {raw}")
+        raise PathOutsideRootError(_outside_root_message(what, raw, root))
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         expanded_str = str(candidate)
         if not candidate.is_absolute() and _is_absolute_or_drive(expanded_str):
-            raise PathOutsideRootError(f"{what} resolves outside the server root: {raw}")
+            raise PathOutsideRootError(_outside_root_message(what, raw, root))
         candidate = root / candidate
     resolved = candidate.resolve()
     root_resolved = root.resolve()
     if not resolved.is_relative_to(root_resolved):
-        raise PathOutsideRootError(f"{what} resolves outside the server root: {raw}")
+        raise PathOutsideRootError(_outside_root_message(what, raw, root))
     if extensions is not None and resolved.suffix.lower() not in extensions:
         allowed = ", ".join(extensions)
         raise MCPToolError(
@@ -672,7 +696,7 @@ def _validate_file_entries(cfg: DatasetConfig) -> list[str]:
     for entry in cfg.files:
         local = entry.resolve(base_dir)
         if not local.resolve().is_relative_to(root_resolved):
-            errors.append(f"[[file]] local resolves outside the server root: {local}")
+            errors.append(_outside_root_message("[[file]] local", local, root_resolved))
         if _remote_is_unsafe(entry.remote):
             errors.append(
                 f"[[file]] remote is unsafe (absolute or contains '..'): {entry.remote!r}"
@@ -728,7 +752,7 @@ def _validate_output_targets(
     for label, candidate in targets:
         resolved = Path(candidate).resolve()
         if not resolved.is_relative_to(root_resolved):
-            errors.append(f"{label} resolves outside the server root: {resolved}")
+            errors.append(_outside_root_message(label, resolved, root_resolved))
     return errors
 
 
@@ -762,7 +786,7 @@ def _validate_doc_files(cfg: DatasetConfig) -> list[str]:
             continue
         resolved = resolved.resolve()
         if not resolved.is_relative_to(root_resolved):
-            errors.append(f"[dataset] {field_name} resolves outside the server root: {resolved}")
+            errors.append(_outside_root_message(f"[dataset] {field_name}", resolved, root_resolved))
     return errors
 
 
@@ -2424,16 +2448,18 @@ def sofer_auth_status(
     ``{"approval_phrase": "<from human>"}`` and no ``approval_phrase_*``
     key
 
-    The envelope carries four posture fields — non-secret
+    The envelope carries five posture fields — non-secret
     process-lifecycle metadata captured once at ``build_server`` and never
     re-derived: ``phrase_source`` (``"env" | "explicit" | "none"``; explicit
     argument > ``SOFER_MCP_APPROVAL_PHRASE`` > none; blank maps to
     ``"none"``, and a blank explicit argument never falls back to the
     environment), ``server_process_id`` (the hosting process id),
     ``server_started_at`` (an ISO-8601 UTC microsecond stamp that strictly
-    increases across builds — the restart-proof signal), and
+    increases across builds — the restart-proof signal),
     ``server_version`` (the package version from installed metadata,
-    non-empty, never raises). The phrase, any phrase-derived value, and the
+    non-empty, never raises), and ``server_root`` (issue #343: the resolved
+    containment root every path argument must stay inside; a non-secret path
+    the operator already chose). The phrase, any phrase-derived value, and the
     configured env value never appear in any posture field —
     ``phrase_source`` describes the configuration path only, and the
     unconfigured guidance keeps the variable NAME and the read-once/restart
@@ -2520,6 +2546,7 @@ def sofer_auth_status(
             "server_process_id": _SERVER_PROCESS_ID,
             "server_started_at": _SERVER_STARTED_AT,
             "server_version": _SERVER_VERSION,
+            "server_root": str(_get_root()),
             "next": _workflow_next("sofer_auth_status", config),
             "hints": next_hint,
             "config_errors": config_errors,
@@ -3125,7 +3152,7 @@ def sofer_init(
                 "exit_code": 1,
                 "output": _captured_text(out, err),
                 "config_errors": [
-                    f"[tool.sofer] raw_dir resolves outside the server root: {raw_dir.resolve()}"
+                    _outside_root_message("[tool.sofer] raw_dir", raw_dir.resolve(), base_dir)
                 ],
                 "error_code": "CONFIG_ERROR",
                 "message": "raw_dir outside root",
@@ -3761,6 +3788,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "server_version": {
                     "type": "string",
                     "description": "Package version from installed metadata (_version.get_version()), non-empty, never raises.",
+                },
+                "server_root": {
+                    "type": "string",
+                    "description": "Resolved containment root this call may touch, captured at build_server (--root > SOFER_MCP_ROOT > process cwd). A non-secret path the operator already chose; every path argument resolves inside it (issue #343).",
                 },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,

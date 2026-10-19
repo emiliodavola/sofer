@@ -645,6 +645,12 @@ arrives with a leading `/` and must still resolve inside the root.
 server posture snapshot (`approval_configured`, `phrase_source`, `root`,
 `version`, `started_at`, `tool_count`) and never reads a dataset file.
 
+`sofer_auth_status` reports that same root as `server_root` alongside its other
+posture fields, so an agent can preflight reachability before a write attempt.
+A containment refusal keeps its `<what> resolves outside the server root`
+prefix and appends the resolved root plus the remedy (`set SOFER_MCP_ROOT or
+--root at server start, then restart the host`).
+
 ### Canonical build chain — Phased (tools/list is self-sufficient)
 
 ```
