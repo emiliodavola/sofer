@@ -1646,7 +1646,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "prepare first.  The package manifest on disk is the object of "
             "record for both the plan and the enforcement: a manifest that "
             "does not declare the delivery the tree holds, or one that cannot "
-            "be read, is refused before "
+            "be read (UNREADABLE_MANIFEST), is refused before "
             "any network call, while --dry-run only warns.  --dry-run prints "
             "the diff and split report without preparing, copying, or "
             "touching the network."

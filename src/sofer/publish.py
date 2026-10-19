@@ -632,7 +632,7 @@ def _delivery_divergence(
 ) -> tuple[list[str], list[str]]:
     """What the tree delivers but the record does not, and the reverse (#349).
 
-    Both sides are the promissed set -- publishable, staged entries -- built the same
+    Both sides are the promised set -- publishable, staged entries -- built the same
     way, so only a record that disagrees with a recount of the same tree is a
     divergence. An intermediate layer is never delivered and never compared: a
     local-only layer is regenerable churn, not a delivery fact.

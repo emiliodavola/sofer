@@ -319,3 +319,17 @@ The verifier could not reach a genuine pre-#346 manifest, so the legacy-default 
 staged `profile`/`render` entry in a record without `classification`, which reads back as
 `publishable` and would be reported `withdrawn`) stays a flagged risk, unproven in either
 direction.
+
+**L19** — the closing round confirmed the two behaviour claims (`1a`–`1d`, `3a`–`3b`:
+removing a recursive tree refuses with `withdrawn: assets/` and no upload; the tree present
+publishes; a `codebooks/` placeholder that gains pages after the chain publishes; an
+in-place edit publishes; both `keep_csv` forms publish) and confirmed all three scope
+claims — and then refuted part of my record **in the same class as L18**. `56c581b`'s
+message, L18 and the archive report said the `UNREADABLE_MANIFEST` clause reached design
+D3b and the CLI help: the design had zero mentions, the CLI had the prose but not the
+marker, and the archived delta carried the clause without the scenario the canonical spec
+had gained. All four are fixed in the follow-up commit. Twice in one change the claim came
+from what I meant to have written rather than from what the artifact contained; the durable
+lesson is that a record asserting an artifact state has to be **diffed against the
+artifact**, per file, before it is written — the same discipline this change applies to the
+manifest itself.

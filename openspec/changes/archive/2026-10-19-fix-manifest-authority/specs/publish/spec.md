@@ -60,6 +60,14 @@ The delivered set SHALL be the `publishable` entries whose `status` is `staged` 
 - WHEN a declared file is rewritten with different content
 - THEN the confirm SHALL proceed: the record describes the set, not the bytes
 
+#### Scenario: An unreadable record is refused, never replaced by a recount (#349) — Added
+
+- GIVEN a durable record that cannot be decoded, or that is structurally not a manifest
+- WHEN `publish --target hf` confirms
+- THEN it SHALL print the `UNREADABLE_MANIFEST` block naming the record and the error
+- AND it SHALL return 1 without staging and without any network call
+- AND a `--dry-run` SHALL warn, recount for the preview and still print its plan
+
 #### Scenario: A manifest written before the field existed still loads (#346) — Modified 2026-10-19
 
 - GIVEN a `manifest.json` whose entries carry no `classification`

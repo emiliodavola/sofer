@@ -85,6 +85,12 @@ The cost is one extra recount per publish — filesystem-only and cheap — and 
 record is now a statement about the *set* it approves, which is exactly what PUB-12
 promises.
 
+A record that cannot be read is refused the same way -- before any network call and before
+staging, with its own marker (`UNREADABLE_MANIFEST`) — because replacing an unreadable
+record with a recount would hide exactly the corruption a record exists to expose. A
+`--dry-run` or a local delivery prints the same block, recounts for the preview and
+continues to plan.
+
 ## D4 — Fail closed, but only where it protects delivery
 
 Placement is load-bearing: the check runs after the auto-prepare block (`_needs_prepare`
