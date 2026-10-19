@@ -67,13 +67,13 @@ rules 7 and 13).
 
 | # | Task | Spec | Commit |
 | --- | --- | --- | --- |
-| T1 | RED first: after `codebook_all` on a prepared tree, the durable manifest must equal the rebuild. Then `write_manifest()` in `manifest.py`, and `prepare` writes through it | S4, S5 | |
-| T2 | Refresh at the post-prepare phase boundaries: `codebook_all` (CLI + MCP), `profile_all`, `render_all` | S5, S6 | |
-| T3 | `publish` reads `from_dir`; staleness fails closed with a stable code and the truthful recovery; legacy tree recomputes with a notice | S3, S7 | |
-| T4 | Tests: per-phase invariant, legacy tree without the file, stale manifest blocks, plus one regression test per existing command the change touches | S5-S7 | |
-| T5 | Specs: reconcile PUB-12, update PRP-11, add the scenarios and the change folder archived inside the PR | S8 | |
-| T6 | Docs: recovery text and CLI help name the real recovery; `README.md` + `README_ES.md` in the same commit | S8 | |
-| T7 | Gates: suite, the four 100.00% core modules with zero pragmas, ruff, mypy 3.13, pyright, `check_test_mapping.py`, and the differential check of every command sharing the changed code against the base commit | — | |
+| T1 | RED first: after `codebook_all` on a prepared tree, the durable manifest must equal the rebuild. Then `write_manifest()` in `manifest.py`, and `prepare` writes through it | S4, S5 | `d05acd4` |
+| T2 | Refresh at the post-prepare phase boundaries: `codebook_all` (CLI + MCP), `profile_all`, `render_all` | S5, S6 | `d05acd4` |
+| T3 | `publish` reads `from_dir`; staleness fails closed with a stable code and the truthful recovery; legacy tree recomputes with a notice | S3, S7 | `3ed11cf` |
+| T4 | Tests: per-phase invariant, legacy tree without the file, stale manifest blocks, plus one regression test per existing command the change touches | S5-S7 | `3ed11cf` |
+| T5 | Specs: reconcile PUB-12, update PRP-11, add the scenarios and the change folder archived inside the PR | S8 | pending |
+| T6 | Docs: recovery text and CLI help name the real recovery; `README.md` + `README_ES.md` in the same commit | S8 | pending |
+| T7 | Gates: suite, the four 100.00% core modules with zero pragmas, ruff, mypy 3.13, pyright, `check_test_mapping.py`, and the differential check of every command sharing the changed code against the base commit | — | pending |
 
 ## Out of scope (found while verifying #349 — recorded, not implemented here)
 
@@ -87,6 +87,12 @@ rules 7 and 13).
 - **`codebooks_required` is dead in production.** `publish.py:768` defaults it to
   `False` and no caller passes `True` (`cli.py:194-204`, `mcp_server.py:1606`,
   `:1845`), so a missing `codebook_page` can never block. Separate issue.
+- **PUB-12's "stable `error_code`" clause is already drift.** `sofer_publish_confirm`
+  returns `{"ok": rc == 0, "exit_code": rc, "output": ...}` with no `error_code`
+  field (`mcp_server.py:1860-1868`), so the pre-existing required-missing block has
+  never carried one either. This change does not invent the field and does not claim
+  it: the stale refusal's stable token is the printed marker inside `output`.
+  Reconciling the clause itself is a separate issue.
 
 ## Log
 
@@ -118,3 +124,79 @@ file is always older than the pages — it collapses into B plus a failure mode.
 auditable document unable to answer "what will be published". B makes the document
 true and turns S5 into an executable invariant: one test fails when a future phase
 forgets to refresh.
+
+**L5** — T1+T2 landed as `d05acd4`: `write_manifest()` and `refresh_manifest()` in
+`manifest.py`, `prepare` writing through the writer, and the refresh call at the end of
+`codebook_all`, `profile_all` and `render_all`. RED was observed before the helper
+existed: `assert durable == build_package_manifest(cfg, out)` failed on the
+`codebook_page` entry that stayed `optional` while the pages were on disk. GREEN is 15
+passed, with ruff/mypy/pyright green in the pre-commit hooks.
+
+**L6** — the writer delegation for T3 was refused three times by the harness
+(`Writer session Git authority changed before admission`), repeated after verifying
+clean Git state (single worktree, HEAD `d05acd4`, no index or hook locks) and after
+changing the task label to force a fresh writer session. Delegation is unavailable for
+this session, so T3 was implemented inline by the parent; a refused delegation is
+reported, never retried into ceremony.
+
+**L7** — T3 held test-first: the six `TestDurableManifest` tests were written before the
+implementation and observed RED as real assertion failures, never as a collection
+error. The strongest is the discriminator
+`test_an_entry_only_the_file_declares_blocks_the_confirm`: a ghost `missing` entry
+exists only in the durable document, so a recount cannot see it, and before the change
+the run proceeded all the way to the upload (the offline `upload_folder` spy raised
+`AssertionError: network call attempted`) instead of blocking with the manifest
+message.
+
+**L8** — one existing test needed a fixture adjustment, not a code change:
+`TestAutoPrepare::test_up_to_date_skips_prepare` moves `data.parquet` to a future mtime
+to prove the auto-prepare signal, which after this change is *also* a genuinely stale
+record. The record's mtime moves with the artifact, so the fixture keeps describing the
+up-to-date package it was written about while still testing that signal. The staleness
+check's placement is what makes the refusal safe: it runs after the auto-prepare block
+and before the quality gate, the `HfApi` construction, the remote prologue and staging.
+
+**L9** — a test-authoring defect of mine, caught by the first GREEN attempt: the entry
+helper's fifth positional parameter is `status`, and one case passed `"intermediate"`
+there, so the manifest failed to decode (`ValueError: 'intermediate' is not a valid
+ArtifactStatus`) before any assertion ran. Fixed by naming the parameter
+(`classification="intermediate"`).
+
+**L10** — S7 inherited "a stable `error_code`" from #349's own expected behaviour, and
+the transport does not have one: `sofer_publish_confirm` returns `ok`, `exit_code` and
+`output` only (`mcp_server.py:1860-1868`), exactly as the pre-existing required-missing
+block has always done. Rather than adopt a word that promises a field nothing emits,
+the implementation and both spec texts say **marker**: `STALE_MANIFEST` printed in the
+block, carried to an agent inside the envelope's `output`. The drift in PUB-12's own
+`error_code` clause is recorded as out of scope, not silently rewritten.
+
+**L11** — final evidence on the frozen tree, from the repo root:
+
+- `uv run coverage run -m pytest tests/ -q` → `2504 passed, 9 skipped, 6 warnings in
+  118.45s` (base `dev@47bf12c`: 2495/9 → +9: six cases in `tests/test_publish.py`,
+  three in `tests/test_manifest.py`).
+- the four rule-14 gates, each at `--fail-under=100` → **exit 0**: `cli` 741 stmts,
+  `scanner` 196, `prepare` 342, `publish` 413; `coverage report -m` TOTAL **94%**
+  (7731 stmts) against the config-owned floor of 90.
+- `uv run python scripts/check_test_mapping.py` → `OK: test-mapping contract holds`,
+  exit 0, with `publish` at 65 scenarios (was 60) and `prepare` at 46 (was 45), both
+  remaining in the permanent declared backlog because neither carries a
+  `## Test Mapping` table.
+- `uv run ruff check src/ tests/ scripts/` → All checks passed;
+  `ruff format --check src/ tests/` → 79 files already formatted.
+- **Differential check** against base `47bf12c`, both sides run in the SAME fixture
+  directory wiped and recreated between passes: **6/6 IDENTICAL** in stdout+stderr and
+  exit code — `prepare`, `codebook --all-files --config`, `profile --all-files`,
+  `render --all-files`, `publish --dry-run`, `publish --target local --output ./out`.
+  No difference nobody asked for.
+
+**L12** — two harness defects of mine, caught because the first differential result was
+not trusted: (1) the first pass ran each side in its own directory, so five commands
+"DIFFERED" only by the side's absolute path — a false positive, never a regression;
+(2) `codebook dataset.toml --all-files` exited 1 on BOTH sides
+(`--all-files cannot be used with a positional file argument`), so that row proved
+nothing about the codebook refresh path. Fixed by running both sides in one reset
+directory and invocating the batch form as `codebook --all-files --config dataset.toml`.
+The `sed`-based path normalization I tried first did not substitute on file input in
+this environment; it was abandoned in favour of removing the path difference at the
+source, rather than debugged into the evidence.

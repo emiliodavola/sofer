@@ -1643,8 +1643,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "single upload_folder call.  The 'local' target copies the "
             "package to --output with no network access (default: the "
             "package stays in place).  Missing or stale artifacts trigger "
-            "prepare first; --dry-run prints the diff and split report "
-            "without preparing, copying, or touching the network."
+            "prepare first.  The package manifest on disk is the object of "
+            "record for both the plan and the enforcement: a manifest older "
+            "than what it declares is refused before any network call, while "
+            "--dry-run only warns.  --dry-run prints the diff and split "
+            "report without preparing, copying, or touching the network."
         ),
     )
     pb.add_argument("config", help="Path to the .toml configuration file.")
