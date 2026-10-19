@@ -1286,6 +1286,9 @@ class TestCodebookUpload:
         out = tmp_path / "build"
         prepare(cfg, out, all_files=True)  # generates codebooks/DPTO.md + codebook.md
         (out / "codebooks" / "PROV.md").write_text("# PROV codebook", encoding="utf-8")
+        # A hand-added page is not declared by the record until the chain runs again:
+        # the record has to describe the delivery it approves (#349).
+        prepare(cfg, out, all_files=True, force=True)
 
         _mock_hf_api(monkeypatch)
         td = _fixed_staging(tmp_path, monkeypatch)
@@ -2609,43 +2612,46 @@ class TestDurableManifest:
         assert "ghost.parquet" in captured.out
         assert "missing required artifacts" in captured.out
 
-    def test_a_stale_manifest_blocks_the_upload_without_staging(
+    def test_a_record_that_omits_a_delivered_file_refuses_the_upload(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        """A record older than what it declares refuses the delivery (#349)."""
+        """A record that does not declare the delivery refuses it (#349)."""
         from sofer.checks import ValidationReport
 
         cfg, out = self._prepared(tmp_path)
+        (out / "codebooks").mkdir(exist_ok=True)
+        (out / "codebooks" / "PROV.md").write_text("# manual page", encoding="utf-8")
         _mock_hf_api(monkeypatch)
         monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
 
         def _raise_staging(*_args: Any, **_kwargs: Any) -> str:
-            raise AssertionError("staging attempted for a stale manifest")
+            raise AssertionError("staging attempted for a divergent record")
 
         monkeypatch.setattr(tempfile, "mkdtemp", _raise_staging)
-        os.utime(out / "data.parquet", (_NEW, _NEW))  # outruns manifest.json
 
         rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
         captured = capsys.readouterr()
 
         assert rc == 1
         assert "STALE_MANIFEST" in captured.out
-        assert "data.parquet" in captured.out
+        assert "codebooks/PROV.md" in captured.out
         assert "Recovery:" in captured.out
 
-    def test_a_stale_manifest_warns_and_still_plans_a_dry_run(
+    def test_an_undeclared_delivered_file_warns_and_still_plans_a_dry_run(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
         """A preview that refuses to show anything is useless: warn, then plan."""
         cfg, out = self._prepared(tmp_path)
+        (out / "codebooks").mkdir(exist_ok=True)
+        (out / "codebooks" / "PROV.md").write_text("# manual page", encoding="utf-8")
         monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
-        os.utime(out / "data.parquet", (_NEW, _NEW))
 
         rc = publish(cfg, dry_run=True)
         captured = capsys.readouterr()
 
         assert rc == 0
         assert "STALE_MANIFEST" in captured.out
+        assert "codebooks/PROV.md" in captured.out
         assert "Dry-run complete" in captured.out
 
     def test_a_package_without_a_durable_manifest_recomputes_with_a_notice(
@@ -2664,54 +2670,79 @@ class TestDurableManifest:
         assert rc == 0
         assert "No durable package manifest" in captured.out
 
-    def test_staleness_resolves_both_roots_and_skips_what_is_not_there(
+    def test_a_withdrawn_declared_file_refuses_the_upload(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        """A staged layer under the dataset root counts; unresolved and directory
-        entries never do (#349)."""
+        """The record promises a file the delivery no longer has: refuse (#349)."""
+        from sofer.checks import ValidationReport
+
         cfg, out = self._prepared(tmp_path)
-        layer = tmp_path / "cache" / "profiles" / "data.metadata.yaml"
-        layer.parent.mkdir(parents=True)
-        layer.write_text("x: 1\n", encoding="utf-8")
+        (out / "README.md").unlink()
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
 
-        def _add_layers(doc: dict[str, Any]) -> None:
-            doc["artifacts"].extend(
-                [
-                    self._entry(
-                        cfg,
-                        "profile",
-                        "cache/profiles/data.metadata.yaml",
-                        classification="intermediate",
-                    ),
-                    self._entry(cfg, "parquet", "nowhere/gone.parquet"),
-                    self._entry(cfg, "data", "assets/"),
-                ]
-            )
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
 
-        self._rewrite(out, _add_layers)
+        assert rc == 1
+        assert "STALE_MANIFEST" in captured.out
+        assert "withdrawn:  README.md" in captured.out
+
+    def test_an_unreadable_record_refuses_the_upload_without_network(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A corrupt record is refused, never silently replaced by a recount."""
+        from sofer.checks import ValidationReport
+        from sofer.manifest import MANIFEST_NAME
+
+        cfg, out = self._prepared(tmp_path)
+        (out / MANIFEST_NAME).write_text("not json at all", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        def _raise_staging(*_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("staging attempted for an unreadable manifest")
+
+        monkeypatch.setattr(tempfile, "mkdtemp", _raise_staging)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "UNREADABLE_MANIFEST" in captured.out
+        assert "JSONDecodeError" in captured.out
+        assert "Recovery:" in captured.out
+
+    def test_an_unreadable_record_warns_and_still_plans_a_dry_run(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        from sofer.manifest import MANIFEST_NAME
+
+        cfg, out = self._prepared(tmp_path)
+        (out / MANIFEST_NAME).write_bytes(b"not json at all")
         monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
 
-        assert publish(cfg, dry_run=True) == 0
-        assert "STALE_MANIFEST" not in capsys.readouterr().out
-
-        os.utime(layer, (_NEW, _NEW))  # the layer outruns the record
         rc = publish(cfg, dry_run=True)
         captured = capsys.readouterr()
 
         assert rc == 0
-        assert "STALE_MANIFEST" in captured.out
-        assert "data.metadata.yaml" in captured.out
+        assert "UNREADABLE_MANIFEST" in captured.out
+        assert "Dry-run complete" in captured.out
 
-    def test_a_record_whose_declared_files_are_all_gone_is_not_stale(
+    def test_an_in_place_edit_of_a_declared_file_is_not_a_divergence(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        """Nothing to outrun the record: absence is required_missing()'s job."""
-        cfg, out = self._prepared(tmp_path)
-        for name in ("data.parquet", "README.md", "LICENSE"):
-            (out / name).unlink()
-        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+        """The record carries no bytes: rewriting a declared file keeps it current.
 
-        rc = publish(cfg, dry_run=True)
+        A delivery must not be refused because someone rewrote a file the record
+        already declares -- the record describes the set, not the content.
+        """
+        cfg, out = self._prepared(tmp_path)
+        (out / "README.md").write_text("# rewritten card\n", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
 
         assert rc == 0
         assert "STALE_MANIFEST" not in capsys.readouterr().out

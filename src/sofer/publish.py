@@ -589,40 +589,48 @@ def _print_split_mapping_validation(
             print(f"    [!] {w}")
 
 
-def _newest_declared_artifact(
-    cfg: DatasetConfig, source: Path, manifest: PackageManifest
-) -> Path | None:
-    """The newest file *manifest* declares as present, or ``None``.
+def _path_listing(paths: list[str]) -> str:
+    """``a.md, b.md … and N more``, bounded by the shared report limit."""
+    if not paths:
+        return "(none)"
+    shown = paths[: config.REPORT_MAX_ITEMS]
+    rest = len(paths) - len(shown)
+    listed = ", ".join(shown)
+    return f"{listed} … and {rest} more" if rest else listed
 
-    The staleness backstop (#349) compares the durable record's mtime against the
-    newest thing it declares. Entry paths are package-relative for a package
-    artifact and dataset-root-relative (or absolute) for an intermediate layer, so
-    both roots are tried. A directory entry denotes a tree the copy path
-    enumerates, and an entry that resolves to nothing is a *missing* artifact --
-    :meth:`PackageManifest.required_missing`'s business, never a staleness signal.
+
+def _delivery_divergence(
+    cfg: DatasetConfig,
+    source: Path,
+    manifest: PackageManifest,
+    *,
+    codebooks_required: bool = False,
+) -> tuple[list[str], list[str]]:
+    """What the tree delivers but the record does not, and the reverse (#349).
+
+    Both sides are the deliverable set -- publishable, staged, file entries -- built
+    the same way, so only a record that disagrees with a recount of the same tree is
+    a divergence. An intermediate layer is never delivered and never compared: a
+    local-only layer is regenerable churn, not a delivery fact.
 
     Args:
-        cfg: Dataset configuration (its ``_base_dir`` is the dataset root).
-        source: The package directory the manifest describes.
-        manifest: The durable manifest read from *source*.
+        cfg: Dataset configuration.
+        source: The package directory the record describes.
+        manifest: The durable record read from *source*.
+        codebooks_required: Whether the surrounding flow promised per-file codebooks.
 
     Returns:
-        The newest declared file, or ``None`` when the record declares none.
+        ``(undeclared, withdrawn)`` -- sorted paths the delivery holds that the
+        record omits, and paths the record promises that the delivery no longer has.
     """
-    from .manifest import ArtifactStatus
+    from .manifest import build_package_manifest
 
-    base = cfg._base_dir if cfg._base_dir else Path.cwd()
-    newest: tuple[float, Path] | None = None
-    for entry in manifest.entries:
-        if entry.status is not ArtifactStatus.STAGED or entry.is_directory:
-            continue
-        for candidate in (source / entry.path, base / entry.path):
-            if candidate.is_file():
-                mtime = candidate.stat().st_mtime
-                if newest is None or mtime > newest[0]:
-                    newest = (mtime, candidate)
-                break
-    return newest[1] if newest is not None else None
+    recount = build_package_manifest(
+        cfg, source, keep_csv=False, codebooks_required=codebooks_required
+    )
+    recorded = {entry.path for entry in manifest.delivered()}
+    delivered = {entry.path for entry in recount.delivered()}
+    return sorted(delivered - recorded), sorted(recorded - delivered)
 
 
 def _needs_prepare(cfg: DatasetConfig, output_dir: Path) -> bool:
@@ -895,35 +903,58 @@ def publish(
     manifest: PackageManifest | None = None
     manifest_path = source / MANIFEST_NAME if source.is_dir() else None
     if source.is_dir():
-        manifest = PackageManifest.from_dir(source)
-        if manifest is None:
-            # A package prepared before #349 shipped no durable record: recompute
-            # it (never invent silent behavior) and say so.
+        unreadable: str | None = None
+        try:
+            manifest = PackageManifest.from_dir(source)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            # The durable record is the object of record: a corrupt or unreadable one
+            # is refused, never silently replaced by a recount that would hide the
+            # damage. `from_dir` returns None when the file is simply absent.
+            unreadable = f"{type(exc).__name__}: {exc}"
+        refuses = target == "hf" and not dry_run
+        if unreadable is not None:
             print(
-                f"  [!] No durable package manifest in {source} - recomputed from the "
-                "tree (a package prepared before #349)."
+                f"  {'X ' if refuses else '[!]'} UNREADABLE_MANIFEST - the durable "
+                "package manifest could not be read (PUB-12):\n"
+                f"     manifest:  {manifest_path}\n"
+                f"     error:     {unreadable}\n"
+                "     Recovery: re-run the build chain (`sofer prepare --force --all-files`) "
+                "and retry."
             )
+            if refuses:
+                return 1
+        if manifest is None:
+            if unreadable is None:
+                # A package prepared before #349 shipped no durable record: recompute
+                # it (never invent silent behavior) and say so.
+                print(
+                    f"  [!] No durable package manifest in {source} - recomputed from the "
+                    "tree (a package prepared before #349)."
+                )
+            # A preview or a local delivery still needs a plan: recount for it only,
+            # after naming what happened to the record.
             manifest = build_package_manifest(
                 cfg, source, keep_csv=False, codebooks_required=codebooks_required
             )
 
-    # ── PUB-12 staleness backstop (#349) ─────────────────────────────────
-    # The durable record is authoritative only while it is the newest word on the
-    # package. A phase that outran it, or any out-of-band write, invalidates it:
-    # delivering against a stale record is precisely what #349 forbids. The plan
-    # still shows for a preview; the upload refuses.
+    # ── PUB-12 divergence backstop (#349) ────────────────────────────
+    # The durable record is authoritative only while it declares the delivery the
+    # tree actually holds: a record that disagrees with a recount would be an
+    # approval of a different package. Content is not comparable (the record
+    # carries no hashes), so the comparison is path for path over the deliverable
+    # set -- an in-place edit of a declared file is NOT a divergence.
     if manifest is not None and manifest_path is not None and manifest_path.is_file():
-        newest_artifact = _newest_declared_artifact(cfg, source, manifest)
-        if (
-            newest_artifact is not None
-            and manifest_path.stat().st_mtime < newest_artifact.stat().st_mtime
-        ):
+        undeclared, withdrawn = _delivery_divergence(
+            cfg, source, manifest, codebooks_required=codebooks_required
+        )
+        if undeclared or withdrawn:
             refuses = target == "hf" and not dry_run
             print(
                 f"  {'X ' if refuses else '[!]'} STALE_MANIFEST - the durable package "
-                "manifest is older than what it declares (PUB-12):\n"
-                f"     manifest:  {manifest_path}\n"
-                f"     newest:    {newest_artifact}\n"
+                "manifest does not declare the delivery this tree holds (PUB-12):\n"
+                f"     manifest:   {manifest_path}\n"
+                f"     undeclared: {_path_listing(undeclared)}\n"
+                f"     withdrawn:  {_path_listing(withdrawn)}\n"
                 "     Recovery: re-run the build chain (`sofer prepare --force --all-files`) "
                 "and retry."
             )
