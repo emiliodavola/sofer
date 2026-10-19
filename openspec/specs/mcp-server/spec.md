@@ -92,9 +92,9 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ### Requirement: Tool roster and schema contract (MSP-R03) — Modified 2026-10-16, feat-meta-tools
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires. Modified by `2026-10-17-feat-visibility-enforcement` (issue #338) — 18 callables (+ `sofer_repo_settings`), `sofer_auth_status` gains the opt-in `check_remote` read, and MSP-R15 is **corrected**: the Phase-1 move has been mandatory since #339, so the `move_loose` opt-in this clause described no longer exists. Modified 2026-10-19 under the ODD-only work unit `odd/tasks/file-entry-tool.md` (issue #344) — 19 callables (+ `sofer_file_set`), the writable `[[file]]` surface.
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires. Modified by `2026-10-17-feat-visibility-enforcement` (issue #338) — 18 callables (+ `sofer_repo_settings`), `sofer_auth_status` gains the opt-in `check_remote` read, and MSP-R15 is **corrected**: the Phase-1 move has been mandatory since #339, so the `move_loose` opt-in this clause described no longer exists. Modified 2026-10-19 under the ODD-only work unit `odd/tasks/file-entry-tool.md` (issue #344) — 19 callables (+ `sofer_file_set`), the writable `[[file]]` surface. Modified 2026-10-19 under `odd/tasks/per-call-root.md` (issue #347) — every path-bearing tool grows an optional `root` (MSP-R21) and every envelope echoes `effective_root`.
 
-Server SHALL expose 19 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_file_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`.
+Server SHALL expose 19 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_file_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`. Every path-bearing tool except `sofer_report_failure` SHALL additionally expose `root: str | None = None` as its last parameter (MSP-R21).
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -905,7 +905,9 @@ The MCP server SHALL expose one authoritative workflow registry: every registere
 
 A `next` continuation SHALL be executable only when its tool exists and every required argument resolves (a `<config_path>` binding with no config SHALL degrade to `input_required`). A human approval stop SHALL be a typed `human_gate` envelope (`{kind: "human_gate", name, reason}`), never a fake tool call. When a required human value is unknowable, the envelope SHALL name the missing input instead of emitting a guaranteed-failing call.
 
-Canonical branches: greenfield `sofer_init -> sofer_scan_dry_run -> sofer_scan_apply -> sofer_validate`; existing-config `sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all`; single-file triage `sofer_codebook` / `sofer_profile` / `sofer_render`; delivery `sofer_auth_status -> sofer_publish(dry_run=true) -> HUMAN APPROVAL STOP -> sofer_publish_confirm`.
+Canonical branches: greenfield `sofer_init -> sofer_scan_dry_run -> sofer_scan_apply -> sofer_meta_set -> sofer_validate`; existing-config `sofer_validate -> sofer_file_set -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all`; single-file triage `sofer_codebook` / `sofer_profile` / `sofer_render`; delivery `sofer_auth_status -> sofer_publish(dry_run=true) -> HUMAN APPROVAL STOP -> sofer_publish_confirm`.
+
+A bound continuation SHALL additionally carry `arguments.root` when the call's effective per-call root differs from the registration root (MSP-R21); today's payloads stay byte-identical otherwise.
 
 (Previously: workflows were described by `_PHASED_INSTRUCTIONS`, docstrings, prompts, and per-envelope `next` hints with no single source of truth.)
 
@@ -1424,3 +1426,101 @@ successful write the tool SHALL re-read and report `changed` plus `diverges_from
 - THEN the envelope SHALL report `diverges_from_config: true`
 - AND the next `sofer_publish_confirm` SHALL refuse that divergence (PUB-13)
 
+
+---
+
+### Requirement: Per-call containment root (MSP-R21) — Added 2026-10-19, issue #347
+
+The containment root was bound once at `build_server`, so an agent could not operate on a dataset
+outside it without editing the host registration and restarting. Every path-bearing tool — 18 of the 19
+callables; `sofer_report_failure` is excluded — SHALL accept `root: str | None = None` as its LAST
+parameter, with a non-empty description. Omitted, empty or whitespace-only `root` SHALL mean unset and
+keep the registration root's behavior byte-identical.
+
+For a given `root` the server SHALL `expanduser`, anchor a relative value on the registration root
+(never the ambient cwd), `resolve()` it, require an existing directory, and then apply
+`SOFER_MCP_ROOT_ALLOWLIST` when configured. A missing path, a file, or a root outside every allowlist
+entry SHALL raise `RootUnavailableError` (an `MCPToolError`), naming the resolved path — it SHALL NOT
+travel through the 10.3 error envelope, whose `error_code` enum stays unchanged. Legal `..` roots are
+admitted when they resolve to an existing directory: `root` IS the boundary, not a path contained in
+one. A relative root SHALL NOT be interpreted against the process cwd.
+
+`SOFER_MCP_ROOT_ALLOWLIST` SHALL be read exactly once in `build_server`, split on `os.pathsep` (never
+commas, which are legal path characters), with blank segments dropped and entries resolved; an entry
+admits itself and its descendants. The registration root and every omitted-`root` call SHALL NEVER be
+gated. The per-call root SHALL be the containment boundary for every resolution anchor of that call
+(`_contained_path`, `[tool.sofer]` discovery, `[[file]]`/doc/output-target checks, `sofer_init.cwd`)
+and SHALL be unbound when the call ends — a failure SHALL leave no bound root.
+
+Every dict envelope (success, refusal, error) SHALL echo `effective_root` as the resolved absolute path;
+`output_schema` SHALL declare it as an optional string through `_ERROR_ENVELOPE_SCHEMA_FIELDS`, with
+`required` unchanged. A bound continuation SHALL carry `next.arguments.root` only when the effective
+root differs from the registration root, so today's chain payloads stay byte-identical. Resources,
+prompts, `workflow.py`, `execution_context.py`, the 10.3 enum, the publish ladder and
+`sofer_report_failure` SHALL stay outside this mechanism; reading another dataset tree is done through
+the tool with `root`, not through a `sofer://` URI.
+
+#### Scenario: Omitted root is byte-identical to the previous behavior
+
+- GIVEN a server built with root R and a dataset there
+- WHEN a path-bearing tool runs without `root` (or with `""` / whitespace)
+- THEN it SHALL resolve against R and the envelope SHALL report `effective_root == R`
+- AND `next.arguments` SHALL NOT gain a `root` key
+
+**Evidence:** `test: tests/test_per_call_root.py::TestResolution::test_omitted_root_keeps_the_registration_root`, `test: tests/test_per_call_root.py::TestResolution::test_blank_root_is_unset`
+
+#### Scenario: A foreign root runs the call in that tree and roots the continuation
+
+- GIVEN a valid dataset outside the registration root
+- WHEN `sofer_validate(config, root=<foreign>)` runs
+- THEN it SHALL validate against the foreign tree and echo `effective_root`
+- AND replaying `next.arguments` verbatim SHALL run `sofer_prepare` successfully in that tree
+
+**Evidence:** `test: tests/test_per_call_root.py::TestResolution::test_foreign_root_runs_there_and_is_echoed`, `test: tests/test_per_call_root.py::TestEnvelopeAndChain::test_the_validate_chain_replays_in_the_foreign_directory`
+
+#### Scenario: Relative roots anchor on the registration root
+
+- GIVEN the process cwd is a third directory and `root="sibling"` exists under the registration root
+- WHEN the tool runs
+- THEN the effective root SHALL be the resolved `registration_root/sibling`, never a cwd-relative path
+
+**Evidence:** `test: tests/test_per_call_root.py::TestResolution::test_relative_root_anchors_on_the_registration_root`
+
+#### Scenario: Unusable roots are typed failures with no leak
+
+- GIVEN a missing path or a regular file passed as `root`
+- WHEN the tool runs
+- THEN `RootUnavailableError` SHALL be raised naming the resolved path
+- AND the next call without `root` SHALL resolve against the registration root
+
+**Evidence:** `test: tests/test_per_call_root.py::TestResolution::test_missing_root_raises_a_typed_error`, `test: tests/test_per_call_root.py::TestResolution::test_file_root_raises_a_typed_error`, `test: tests/test_per_call_root.py::TestResolution::test_a_failure_leaves_no_bound_root`
+
+#### Scenario: The allowlist admits its entries and never gates the default
+
+- GIVEN `SOFER_MCP_ROOT_ALLOWLIST` names one directory
+- WHEN a call asks for that directory or a descendant
+- THEN it SHALL be admitted
+- AND a root outside every entry SHALL raise `RootUnavailableError` naming the variable
+- AND an omitted-`root` call SHALL be admitted even when the registration root is excluded
+- AND an entry containing a comma SHALL survive intact
+
+**Evidence:** `test: tests/test_per_call_root.py::TestAllowlist`
+
+#### Scenario: The schema surface comes from the signature and one schema home
+
+- GIVEN `tools/list`
+- WHEN the 18 path-bearing tools are inspected
+- THEN each SHALL declare an optional `root` string with a non-empty description
+- AND `sofer_report_failure` SHALL NOT
+- AND every tool's `output_schema` SHALL declare `effective_root`, never required
+
+**Evidence:** `test: tests/test_per_call_root.py::TestSchemaSurface`
+
+#### Scenario: Concurrent calls keep their own root
+
+- GIVEN two datasets, each outside the registration root
+- WHEN two tool calls with distinct roots run concurrently
+- THEN each envelope SHALL name its own `effective_root`
+- AND no root SHALL remain bound afterwards
+
+**Evidence:** `test: tests/test_per_call_root.py::TestResolution::test_concurrent_calls_do_not_leak_roots`
