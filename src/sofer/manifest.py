@@ -5,8 +5,11 @@ profile is classified as **publishable** (parquet incl. multi-sheet
 expansion, csv when keep_csv, README.md, LICENSE, codebook.md,
 codebooks/**) or **intermediate** (profiles, renders, per-sheet
 intermediates, schema/card inputs). ``prepare`` writes the manifest into
-the output directory; publish dry-run and confirm consume the SAME manifest
-so their decisions never diverge.
+the output directory, and every later phase that adds package artifacts
+refreshes it through :func:`write_manifest`, so the durable document on
+disk is always the one a recount would produce (issue #349); publish
+dry-run and confirm consume the SAME manifest so their decisions never
+diverge.
 
 Status vocabulary is the single source of truth for the "no false warning"
 fix: an optional artifact absent is ``optional`` (never a missing-artifact
@@ -364,3 +367,93 @@ def build_package_manifest(
     }
     entries.sort(key=lambda e: (order.get(e.artifact_type, 9), e.path))
     return PackageManifest(source, tuple(entries))
+
+
+def write_manifest(
+    cfg: DatasetConfig,
+    output_dir: Path,
+    *,
+    keep_csv: bool = False,
+    codebooks_required: bool = False,
+    only_if_present: bool = False,
+) -> Path | None:
+    """Write (or refresh) the durable ``manifest.json`` in *output_dir*.
+
+    The single writer of the package's durable record (PRP-11, issue #349):
+    ``prepare`` creates it, and every later phase that adds package artifacts
+    calls this again, so the file on disk is never a stale prepare-time snapshot
+    while the delivery has moved on.
+
+    A phase that wrote outside a package directory asks with
+    ``only_if_present=True``: it then gets ``None`` back instead of inventing a
+    package record for a tree ``prepare`` never prepared.
+
+    Args:
+        cfg: Dataset configuration (source identity for the manifest).
+        output_dir: The package directory the manifest describes.
+        keep_csv: Whether original CSVs belong to the delivery (PUB-07).
+        codebooks_required: Whether the surrounding flow promised per-file
+            codebooks, which makes an absent ``codebooks/`` block instead of warn.
+        only_if_present: Refresh only when a manifest already exists here.
+
+    Returns:
+        The path written, or ``None`` when *only_if_present* held and there was
+        nothing to refresh.
+    """
+    path = output_dir / MANIFEST_NAME
+    if only_if_present and not path.is_file():
+        return None
+    path.write_bytes(
+        build_package_manifest(
+            cfg,
+            output_dir,
+            keep_csv=keep_csv,
+            codebooks_required=codebooks_required,
+        ).json_bytes()
+    )
+    return path
+
+
+def _package_output_dir(cfg: DatasetConfig) -> Path:
+    """The resolved package directory for *cfg* (``[dataset] build_dir``)."""
+    from .prepare import resolve_output_dir
+
+    return resolve_output_dir(cfg, None)
+
+
+def refresh_manifest(
+    cfg: DatasetConfig,
+    written_to: Path | None = None,
+    *,
+    keep_csv: bool = False,
+    codebooks_required: bool = False,
+) -> Path | None:
+    """Refresh the durable manifest of the package a phase just wrote into.
+
+    Every phase that adds package artifacts calls this at the end of its run
+    (issue #349), so the file on disk is never a prepare-time snapshot while the
+    delivery has moved on. Nothing is created: a manifest is refreshed only where
+    one already exists, so a phase can never invent a package record for a tree
+    ``prepare`` never prepared.
+
+    Args:
+        cfg: Dataset configuration (source identity for the manifest).
+        written_to: The resolved directory the phase wrote into. ``None`` means it
+            wrote to the shared artifact cache, which owns no manifest: the
+            refresh then targets the resolved package directory, because that is
+            the record whose entries (``cache/<layer>/...``) the write changes.
+        keep_csv: Whether original CSVs belong to the delivery (PUB-07).
+        codebooks_required: Whether the surrounding flow promised per-file
+            codebooks, which makes an absent ``codebooks/`` block instead of warn.
+
+    Returns:
+        The path rewritten, or ``None`` when no manifest owns that directory.
+    """
+    target = written_to if written_to is not None else _package_output_dir(cfg)
+    return write_manifest(
+        cfg,
+        target,
+        keep_csv=keep_csv,
+        codebooks_required=codebooks_required,
+        only_if_present=True,
+    )

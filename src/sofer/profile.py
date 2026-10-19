@@ -492,6 +492,12 @@ def generate_all_profiles(
             f"share the same path(s). No profile written for colliding outputs."
         )
 
+    # The durable manifest follows the delivery (#349): these layers were added
+    # AFTER prepare wrote it.
+    from .manifest import refresh_manifest
+
+    refresh_manifest(cfg, write_root if output_dir is not None else None)
+
     return generated
 
 

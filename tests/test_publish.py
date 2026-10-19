@@ -10,6 +10,7 @@ files unless --force (PUB-05), and --keep-csv (PUB-07).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil as _shutil
 import tempfile
@@ -449,6 +450,12 @@ class TestAutoPrepare:
         toml = tmp_path / "dataset.toml"
         toml.write_text("[dataset]", encoding="utf-8")
         os.utime(out / "data.parquet", (_NEW, _NEW))
+        # A record older than the artifact it declares is stale (#349), so the
+        # record moves with the artifact: this test is about the auto-prepare
+        # signal, not about staleness.
+        from sofer.manifest import MANIFEST_NAME
+
+        os.utime(out / MANIFEST_NAME, (_NEW, _NEW))
         os.utime(toml, (_MID, _MID))
         os.utime(csv, (_OLD, _OLD))
 
@@ -1279,6 +1286,9 @@ class TestCodebookUpload:
         out = tmp_path / "build"
         prepare(cfg, out, all_files=True)  # generates codebooks/DPTO.md + codebook.md
         (out / "codebooks" / "PROV.md").write_text("# PROV codebook", encoding="utf-8")
+        # A hand-added page is not declared by the record until the chain runs again:
+        # the record has to describe the delivery it approves (#349).
+        prepare(cfg, out, all_files=True, force=True)
 
         _mock_hf_api(monkeypatch)
         td = _fixed_staging(tmp_path, monkeypatch)
@@ -2523,3 +2533,253 @@ class TestTargetPostureGate:
         assert rc == 1
         out = capsys.readouterr().out
         assert "configured: PUBLIC   observed: private" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUB-12 — publish rests on the durable manifest (#349)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDurableManifest:
+    """The object publish plans and enforces with is the file on disk (#349).
+
+    Before this change ``publish`` rebuilt its own manifest in memory and never
+    read the one ``prepare`` wrote, so PUB-12's "publish dry-run and confirm SHALL
+    read the SAME manifest" held for nothing outside the process. The staleness
+    rule is the backstop for a record some out-of-band write has outrun.
+    """
+
+    def _prepared(self, tmp_path: Path) -> tuple[DatasetConfig, Path]:
+        """A real prepared package: parquet + README + LICENSE + manifest.json."""
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="data.csv")])
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        return cfg, out
+
+    def _rewrite(self, out: Path, mutate: Any) -> Path:
+        """Apply *mutate* to the durable document and write it back."""
+        from sofer.manifest import MANIFEST_NAME
+
+        path = out / MANIFEST_NAME
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        mutate(doc)
+        path.write_text(json.dumps(doc, sort_keys=True, indent=2), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _entry(
+        cfg: DatasetConfig,
+        artifact_type: str,
+        path: str,
+        status: str = "staged",
+        classification: str = "publishable",
+    ) -> dict[str, str]:
+        return {
+            "source": str(cfg._config_path),
+            "artifact_type": artifact_type,
+            "path": path,
+            "status": status,
+            "classification": classification,
+        }
+
+    def test_an_entry_only_the_file_declares_blocks_the_confirm(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """The enforced object is the durable file, never a fresh recount.
+
+        A ghost required entry exists only in the document: a recount derives its
+        set from the config and the tree, so only a reader of the file can see it.
+        """
+        from sofer.checks import ValidationReport
+
+        cfg, out = self._prepared(tmp_path)
+        self._rewrite(
+            out,
+            lambda doc: doc["artifacts"].append(
+                self._entry(cfg, "parquet", "ghost.parquet", status="missing")
+            ),
+        )
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "ghost.parquet" in captured.out
+        assert "missing required artifacts" in captured.out
+
+    def test_a_record_that_omits_a_delivered_file_refuses_the_upload(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A record that does not declare the delivery refuses it (#349)."""
+        from sofer.checks import ValidationReport
+
+        cfg, out = self._prepared(tmp_path)
+        (out / "codebooks").mkdir(exist_ok=True)
+        (out / "codebooks" / "PROV.md").write_text("# manual page", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        def _raise_staging(*_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("staging attempted for a divergent record")
+
+        monkeypatch.setattr(tempfile, "mkdtemp", _raise_staging)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "STALE_MANIFEST" in captured.out
+        assert "codebooks/PROV.md" in captured.out
+        assert "Recovery:" in captured.out
+
+    def test_an_undeclared_delivered_file_warns_and_still_plans_a_dry_run(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A preview that refuses to show anything is useless: warn, then plan."""
+        cfg, out = self._prepared(tmp_path)
+        (out / "codebooks").mkdir(exist_ok=True)
+        (out / "codebooks" / "PROV.md").write_text("# manual page", encoding="utf-8")
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "STALE_MANIFEST" in captured.out
+        assert "codebooks/PROV.md" in captured.out
+        assert "Dry-run complete" in captured.out
+
+    def test_a_package_without_a_durable_manifest_recomputes_with_a_notice(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A tree prepared before this change still publishes, and says why."""
+        from sofer.manifest import MANIFEST_NAME
+
+        cfg, out = self._prepared(tmp_path)
+        (out / MANIFEST_NAME).unlink()
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "No durable package manifest" in captured.out
+
+    def test_a_withdrawn_declared_file_refuses_the_upload(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """The record promises a file the delivery no longer has: refuse (#349)."""
+        from sofer.checks import ValidationReport
+
+        cfg, out = self._prepared(tmp_path)
+        (out / "README.md").unlink()
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "STALE_MANIFEST" in captured.out
+        assert "withdrawn:  README.md" in captured.out
+
+    def test_a_withdrawn_recursive_tree_refuses_the_upload(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A promised tree that vanished is a delivery fact, not only its files.
+
+        The record keeps the tree entry ``staged``, so ``required_missing()`` stays
+        empty and nothing else would notice that the upload silently drops it.
+        """
+        from sofer.checks import ValidationReport
+
+        tree = tmp_path / "raw" / "assets"
+        tree.mkdir(parents=True)
+        (tree / "a.txt").write_text("a\n", encoding="utf-8")
+        csv = tmp_path / "data.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8-sig")
+        cfg = _cfg(
+            tmp_path,
+            [
+                FileEntry(local=csv, remote="data.csv"),
+                FileEntry(local=tree, remote="assets/", recursive=True),
+            ],
+        )
+        out = tmp_path / "build"
+        assert prepare(cfg, out) == 0
+        assert (out / "assets" / "a.txt").is_file()
+
+        _shutil.rmtree(out / "assets")
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "STALE_MANIFEST" in captured.out
+        assert "withdrawn:  assets/" in captured.out
+
+    def test_an_unreadable_record_refuses_the_upload_without_network(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A corrupt record is refused, never silently replaced by a recount."""
+        from sofer.checks import ValidationReport
+        from sofer.manifest import MANIFEST_NAME
+
+        cfg, out = self._prepared(tmp_path)
+        (out / MANIFEST_NAME).write_text("not json at all", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        monkeypatch.setattr(publish_mod._api, "upload_folder", _raise_network)
+
+        def _raise_staging(*_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("staging attempted for an unreadable manifest")
+
+        monkeypatch.setattr(tempfile, "mkdtemp", _raise_staging)
+
+        rc = publish(cfg, target="hf", quality_report=ValidationReport("test"))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "UNREADABLE_MANIFEST" in captured.out
+        assert "JSONDecodeError" in captured.out
+        assert "Recovery:" in captured.out
+
+    def test_an_unreadable_record_warns_and_still_plans_a_dry_run(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        from sofer.manifest import MANIFEST_NAME
+
+        cfg, out = self._prepared(tmp_path)
+        (out / MANIFEST_NAME).write_bytes(b"not json at all")
+        monkeypatch.setattr(publish_mod._api, "create_repo", _raise_network)
+
+        rc = publish(cfg, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "UNREADABLE_MANIFEST" in captured.out
+        assert "Dry-run complete" in captured.out
+
+    def test_an_in_place_edit_of_a_declared_file_is_not_a_divergence(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """The record carries no bytes: rewriting a declared file keeps it current.
+
+        A delivery must not be refused because someone rewrote a file the record
+        already declares -- the record describes the set, not the content.
+        """
+        cfg, out = self._prepared(tmp_path)
+        (out / "README.md").write_text("# rewritten card\n", encoding="utf-8")
+        _mock_hf_api(monkeypatch)
+        _fixed_staging(tmp_path, monkeypatch)
+
+        rc = publish(cfg, target="hf")
+
+        assert rc == 0
+        assert "STALE_MANIFEST" not in capsys.readouterr().out
