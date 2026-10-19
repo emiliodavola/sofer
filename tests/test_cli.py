@@ -3661,7 +3661,7 @@ class TestMetaCommand:
     def test_set_reports_a_failed_write_and_leaves_the_file(
         self, tmp_path: Path, capsys, monkeypatch
     ) -> None:
-        from sofer import meta_edit
+        from sofer import _toml
 
         path = self._dataset(tmp_path)
         before = path.read_bytes()
@@ -3669,7 +3669,7 @@ class TestMetaCommand:
         def _boom(*args: object, **kwargs: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(meta_edit.os, "replace", _boom)
+        monkeypatch.setattr(_toml.os, "replace", _boom)
         rc = cli._cmd_meta_set(self._set(path, ["description=Real"]))
         assert rc == 1
         assert "cannot write" in capsys.readouterr().err

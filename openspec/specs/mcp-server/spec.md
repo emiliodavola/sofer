@@ -92,9 +92,9 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 ### Requirement: Tool roster and schema contract (MSP-R03) — Modified 2026-10-16, feat-meta-tools
 
-> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires. Modified by `2026-10-17-feat-visibility-enforcement` (issue #338) — 18 callables (+ `sofer_repo_settings`), `sofer_auth_status` gains the opt-in `check_remote` read, and MSP-R15 is **corrected**: the Phase-1 move has been mandatory since #339, so the `move_loose` opt-in this clause described no longer exists.
+> Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires. Modified by `2026-10-17-feat-visibility-enforcement` (issue #338) — 18 callables (+ `sofer_repo_settings`), `sofer_auth_status` gains the opt-in `check_remote` read, and MSP-R15 is **corrected**: the Phase-1 move has been mandatory since #339, so the `move_loose` opt-in this clause described no longer exists. Modified 2026-10-19 under the ODD-only work unit `odd/tasks/file-entry-tool.md` (issue #344) — 19 callables (+ `sofer_file_set`), the writable `[[file]]` surface.
 
-Server SHALL expose 18 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`.
+Server SHALL expose 19 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_file_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`.
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -102,7 +102,7 @@ Server SHALL expose 18 callables: `sofer_validate, sofer_meta_check, sofer_meta_
 
 - GIVEN `tools/list`
 - WHEN inspected
-- THEN count SHALL be 18, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
+- THEN count SHALL be 19, `target` SHALL have `const` or `enum` single value, no tool SHALL expose `all_files`/`no_checks`/`output` (only `output_file`/`output_dir`/`run_checks`), and every `properties[*].description` SHALL be non-empty
 
 #### Scenario: Annotations and output_schema typed
 
@@ -1325,6 +1325,54 @@ continuation SHALL be `sofer_meta_set`, `sofer_meta_set`’s SHALL be `sofer_val
 - THEN it SHALL use the configured values, not a literal
 
 **Evidence:** `test: tests/test_checks.py::TestMetaPlaceholderGate::test_prefixes_are_config_owned`
+
+---
+
+### Requirement: The [[file]] registration surface is writable over MCP (MSP-R22) — Added 2026-10-19, issue #344
+
+`sofer_init`'s template advertises a recursive folder entry, and `FileEntry` implements `recursive`,
+`convert_to_parquet`/`upload_as_csv`, `include_in_schema` and `column_types` downstream, but the only
+writer of `[[file]]` blocks (`scanner.merge_entries`) emits one flat entry per discovered file. An
+MCP-driven run could therefore reach the template's own folder shape only by leaving the tool surface.
+
+`sofer_file_set(config, entries, dry_run=False)` SHALL replace the dataset TOML's `[[file]]` array with
+`entries`, preserving every other key, table and comment in the document. Each entry SHALL accept
+`local` (required), `remote` (required), `recursive`, `convert_to_parquet`, `upload_as_csv`,
+`include_in_schema` (booleans) and `column_types` (a table of `column = "type"` whose values belong to
+`config.COLUMN_TYPES_SUPPORTED`); an unknown key or a wrong value kind SHALL be refused with
+`CONFIG_ERROR` and nothing written, naming the accepted set. Every `local` SHALL resolve under the
+containment root and exist, a `recursive` entry SHALL point at a directory and a non-recursive entry at a
+file; every `remote` SHALL be safe (`_remote_is_unsafe`) and unique; a recursive entry's remote folder
+SHALL NOT contain another entry's remote (the double-registration a folder entry makes easy). An empty
+`entries` list SHALL be refused while the file still registers entries, so a careless call cannot erase
+the registrations. The edit SHALL be atomic, SHALL parse and round-trip before it is committed, SHALL be
+idempotent, and SHALL write nothing under `dry_run`. Its continuation SHALL be `sofer_validate`.
+
+#### Scenario: A recursive folder entry and column_types are writable over MCP — issue #344
+
+- GIVEN a dataset TOML with flat `[[file]]` entries and a `Labels/` folder of CSVs
+- WHEN `sofer_file_set` runs with one file entry carrying `column_types` and one `recursive` folder entry
+- THEN the TOML SHALL carry both shapes, the model SHALL load them, and `changed` SHALL be `true`
+- AND every comment and unrelated table SHALL be byte-identical
+
+**Evidence:** `test: tests/test_file_edit.py::TestSoferFileSet::test_writes_recursive_folder_and_column_types`, `test: tests/test_file_edit.py::TestApplyFileEdit::test_replaces_entries_and_preserves_every_other_byte`
+
+#### Scenario: Unsafe entries are refused with nothing written — issue #344
+
+- GIVEN a dataset TOML
+- WHEN `sofer_file_set` receives an unknown key, a `local` outside the root, or a folder remote that
+  would double-register a file entry
+- THEN it SHALL refuse with `CONFIG_ERROR` and the TOML SHALL be byte-identical
+
+**Evidence:** `test: tests/test_file_edit.py::TestSoferFileSet::test_unknown_key_is_refused`, `test: tests/test_file_edit.py::TestSoferFileSet::test_local_outside_root_is_refused`, `test: tests/test_file_edit.py::TestSoferFileSet::test_folder_and_file_remote_collision_is_refused`
+
+#### Scenario: Empty entries cannot erase registrations — issue #344
+
+- GIVEN a dataset TOML that already registers entries
+- WHEN `sofer_file_set` runs with `entries=[]`
+- THEN it SHALL refuse and write nothing
+
+**Evidence:** `test: tests/test_file_edit.py::TestSoferFileSet::test_empty_entries_refuse_to_erase_registrations`
 
 ---
 

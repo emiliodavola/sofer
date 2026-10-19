@@ -345,6 +345,16 @@ _WORKFLOW_METADATA = {
         "existing_config",
         WorkflowTemplate("sofer_validate", {"config": "<config_path>"}),
     ),
+    # Issue #344: the [[file]] write half. Optional in the chain (scan_apply's
+    # flat entries are valid), so it is discoverable from tools/list and from
+    # the existing-config branch without replacing the canonical route.
+    "sofer_file_set": WorkflowMetadata(
+        "sofer_file_set",
+        PHASE_BUILD,
+        ("canonical config_path",),
+        "existing_config",
+        WorkflowTemplate("sofer_validate", {"config": "<config_path>"}),
+    ),
     "sofer_codebook": WorkflowMetadata(
         "sofer_codebook", PHASE_TRIAGE, ("explicit data path",), "triage"
     ),
@@ -437,6 +447,7 @@ WORKFLOW_BRANCHES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         ),
         "existing_config": (
             "sofer_validate",
+            "sofer_file_set",
             "sofer_prepare",
             "sofer_codebook_all",
             "sofer_profile_all",

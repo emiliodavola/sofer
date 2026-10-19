@@ -82,13 +82,14 @@ def _schema_description(schema: Any) -> str:
 
 
 class TestToolCount:
-    def test_eighteen_tools(self, tmp_path: Path):
+    def test_nineteen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 18, sorted(tools.keys())
+        assert len(tools) == 19, sorted(tools.keys())
         expected = {
             "sofer_validate",
             "sofer_meta_check",
             "sofer_meta_set",
+            "sofer_file_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -268,6 +269,7 @@ class TestAnnotations:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_meta_set",
+            "sofer_file_set",
             "sofer_repo_settings",
             "sofer_report_failure",
         }
