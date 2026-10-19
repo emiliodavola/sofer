@@ -32,10 +32,13 @@ All commands run from the repository root on the frozen tree.
 
 ```
 $ uv run pytest tests/ -q
-2513 passed, 9 skipped
+2514 passed, 8 skipped
 # base dev@150ead1: 2509 passed, 9 skipped  ->  +4 in tests/test_manifest.py
 # and tests/test_publish.py, then +3 verifier-derived regression tests in
 # tests/test_codebook_promise.py, written after the verifier ran.
+# An earlier run on the implementation commit reported 2513 passed, 9 skipped:
+# the same 2522 collected tests, with one host-capability skip condition
+# flipping between runs. No test left the suite.
 
 $ uv run coverage run -m pytest tests/ -q ; uv run coverage report -m | tail -1
 TOTAL                                                           94%   # floor 90
