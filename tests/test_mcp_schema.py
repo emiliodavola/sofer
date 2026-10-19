@@ -307,7 +307,7 @@ class TestOutputSchema:
             assert "ok" in props, f"{name} output_schema missing ok"
             assert "exit_code" in props, f"{name} output_schema missing exit_code"
             assert "output" in props, f"{name} output_schema missing output"
-            # ADD (issue #145): sofer_auth_status alone declares the four
+            # ADD (issues #145, #343): sofer_auth_status alone declares the
             # additive posture properties (typed; NEVER required, NEVER enum).
             if name == "sofer_auth_status":
                 expected_posture = {
@@ -315,6 +315,7 @@ class TestOutputSchema:
                     "server_process_id": "integer",
                     "server_started_at": "string",
                     "server_version": "string",
+                    "server_root": "string",
                 }
                 for prop_name, prop_type in expected_posture.items():
                     assert prop_name in props, f"{name} output_schema missing {prop_name}"
