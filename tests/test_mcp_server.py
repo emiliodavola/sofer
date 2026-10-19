@@ -467,6 +467,7 @@ class TestToolRoster:
             "sofer_validate",
             "sofer_meta_check",
             "sofer_meta_set",
+            "sofer_file_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -485,7 +486,7 @@ class TestToolRoster:
         }
     )
 
-    def test_exactly_eighteen_callables(self, server):
+    def test_exactly_nineteen_callables(self, server):
         async def _go():
             async with Client(server) as client:
                 tools = await client.list_tools()
@@ -650,11 +651,13 @@ class TestAuthStatusValidity:
 
 
 class TestAuthStatusPosture:
-    """Issue #145: the four additive posture fields on ``sofer_auth_status``.
+    """Issues #145 and #343: the additive posture fields on ``sofer_auth_status``.
 
     ``phrase_source``, ``server_process_id``, ``server_started_at`` and
     ``server_version`` are non-secret process-lifecycle metadata captured at
-    ``build_server`` and never re-derived. The phrase value (or any derived
+    ``build_server`` and never re-derived. ``server_root`` (#343) is the
+    resolved containment root the agent is allowed to touch — a filesystem path
+    the operator already chose, never a secret. The phrase value (or any derived
     form) never appears in any posture field; ``phrase_source`` only names the
     configuration path. ``server_started_at`` is restart-proof (microsecond
     stamps strictly increase across builds); ``server_process_id`` is
@@ -664,7 +667,13 @@ class TestAuthStatusPosture:
     """
 
     _POSTURE_KEYS = frozenset(
-        {"phrase_source", "server_process_id", "server_started_at", "server_version"}
+        {
+            "phrase_source",
+            "server_process_id",
+            "server_started_at",
+            "server_version",
+            "server_root",
+        }
     )
 
     @staticmethod
@@ -679,14 +688,16 @@ class TestAuthStatusPosture:
         return _call(server, "sofer_auth_status", {"config": str(tmp_path / "dataset.toml")}).data
 
     def test_posture_fields_present_and_typed(self, tmp_path, monkeypatch) -> None:
-        """approval_phrase="phrase123" — the envelope carries all four posture
-        fields with the documented types/domains (additive, never required)."""
+        """approval_phrase="phrase123" — the envelope carries every posture
+        field with the documented types/domains (additive, never required)."""
         self._clean_hf(monkeypatch)
         _make_dataset(tmp_path)
         server = build_server(root=tmp_path, approval_phrase="phrase123")
         envelope = self._envelope(server, tmp_path)
         assert envelope["phrase_source"] == "explicit"
         assert envelope["phrase_source"] in ("env", "explicit", "none")
+        assert envelope["server_root"] == str(tmp_path.resolve())
+        assert isinstance(envelope["server_root"], str)
         assert isinstance(envelope["server_process_id"], int)
         assert re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00",
@@ -716,7 +727,7 @@ class TestAuthStatusPosture:
                 return await client.list_tools()
 
         tools = _run(_scan())
-        assert len(tools) == 18, [t.name for t in tools]
+        assert len(tools) == 19, [t.name for t in tools]
         for tool in tools:
             schema = tool.outputSchema  # type: ignore[attr-defined]
             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -856,7 +867,55 @@ class TestAuthStatusPosture:
 
 
 # ---------------------------------------------------------------------------
-#  7.3 — No silent default config name (MSP-R10)
+#  7.2b — Containment refusals are actionable (issue #343)
+# ---------------------------------------------------------------------------
+
+
+class TestContainmentRefusalActionable:
+    """A containment refusal names the root it compared against and the remedy.
+
+    The prefix ``"<what> resolves outside the server root"`` is substring-
+    asserted by existing tests and SHALL stay intact; the root and the remedy
+    are appended, never reworded in.
+    """
+
+    def test_refusal_names_root_and_remedy(self, tmp_path, monkeypatch) -> None:
+        """``sofer_init(cwd=<outside>)`` names the server root and the levers."""
+        monkeypatch.delenv("SOFER_MCP_APPROVAL_PHRASE", raising=False)
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        build_server(root=root)
+
+        with pytest.raises(ms.PathOutsideRootError) as excinfo:
+            ms.sofer_init(name="probe", user="user", cwd=str(outside), dry_run=True)
+
+        message = str(excinfo.value)
+        assert f"cwd resolves outside the server root ({root.resolve()})" in message
+        assert str(outside.resolve()) in message
+        assert "SOFER_MCP_ROOT" in message
+        assert "--root" in message
+        assert "restart the host" in message
+
+    def test_contained_path_refusal_is_actionable(self, tmp_path) -> None:
+        """The shared gate (``_contained_path``) carries the same contract."""
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside.csv"
+        outside.write_text("a\n", encoding="utf-8")
+
+        with pytest.raises(ms.PathOutsideRootError) as excinfo:
+            ms._contained_path(outside, root=root, what="config")
+
+        message = str(excinfo.value)
+        assert f"config resolves outside the server root ({root.resolve()})" in message
+        assert "SOFER_MCP_ROOT" in message
+        assert "restart the host" in message
+
+
+# ---------------------------------------------------------------------------
+#  7.3 �?" No silent default config name (MSP-R10)
 # ---------------------------------------------------------------------------
 
 
@@ -903,7 +962,7 @@ class TestStdioSmoke:
                     init = await session.initialize()
                     assert init is not None
                     tools = await session.list_tools()
-                    assert len(tools.tools) == 18
+                    assert len(tools.tools) == 19
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -2642,6 +2701,68 @@ class TestScanApplyTruthfulReport:
         assert envelope["exit_code"] == 1
         assert envelope["registered"] == 0, envelope
         assert "Failed to write TOML" in envelope["message"]
+
+
+class TestScanRegisteredCount:
+    """#345: ``registered`` counts the entries the merge appended.
+
+    ``sofer_init`` scaffolds two ``raw/example*`` placeholders that the same
+    merge strips, so a before/after difference of entry counts subtracted two
+    entries that were never appended: every greenfield scan reported ``N - 2``
+    while the TOML it wrote carried ``N``. The contract these tests pin is the
+    one the envelope field is read for — ``registered`` is what this call added,
+    so a greenfield scan reports every file and a re-scan reports zero.
+    """
+
+    def _init_tree(self, root: Path, files: int) -> tuple[Any, Path]:
+        """Scaffold a greenfield ``sofer_init`` tree with *files* loose CSVs."""
+        server = build_server(root=root)
+        init = _call(
+            server,
+            "sofer_init",
+            {"name": "count-ds", "user": "myuser", "cwd": str(root)},
+        ).data
+        assert init["ok"] is True, init
+        for index in range(files):
+            (root / f"t{index}.csv").write_text("x;y\n1;2\n", encoding="utf-8-sig")
+        return server, root / "count-ds.toml"
+
+    def test_apply_counts_every_newly_registered_file(self, tmp_path, restore_tool_config):
+        """A greenfield scan of 5 files reports 5 — the init placeholders are
+        stripped, never subtracted."""
+        server, config_path = self._init_tree(tmp_path, 5)
+
+        envelope = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["discovered"] == 5, envelope
+        assert envelope["registered"] == 5, envelope
+        written = config_path.read_text(encoding="utf-8")
+        assert "raw/example" not in written, "the init placeholders must be stripped"
+        assert written.count('local = "cache/t') == 5
+
+    def test_dry_run_reports_the_count_the_apply_then_reports(self, tmp_path, restore_tool_config):
+        """The preview and the apply agree: both report the merge's own count."""
+        server, config_path = self._init_tree(tmp_path, 5)
+
+        dry = _call(server, "sofer_scan_dry_run", {"config": str(config_path)}).data
+        assert dry["ok"] is True, dry
+        assert dry["registered"] == 5, dry
+
+        applied = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+        assert applied["registered"] == dry["registered"], (dry, applied)
+
+    def test_rescan_registers_nothing(self, tmp_path, restore_tool_config):
+        """A re-scan over an already-registered tree appends nothing."""
+        server, config_path = self._init_tree(tmp_path, 5)
+        first = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+        assert first["registered"] == 5, first
+
+        second = _call(server, "sofer_scan_apply", {"config": str(config_path)}).data
+
+        assert second["ok"] is True, second
+        assert second["discovered"] == 5, second
+        assert second["registered"] == 0, second
 
 
 # ---------------------------------------------------------------------------
@@ -4885,9 +5006,9 @@ class TestInitXlsxIntegration:
 
 
 class TestInitCwdSchema:
-    """MSP-R03: 18 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
+    """MSP-R03: 19 tools, sofer_init cwd optional str->None, C:/Windows rejected."""
 
-    def test_tool_roster_still_eighteen(self, tmp_path):
+    def test_tool_roster_still_nineteen(self, tmp_path):
         server = build_server(root=tmp_path)
 
         async def _go():
@@ -4896,7 +5017,7 @@ class TestInitCwdSchema:
                 return {t.name for t in tools}
 
         names = _run(_go())
-        assert len(names) == 18
+        assert len(names) == 19
         assert "sofer_init" in names
 
     def test_sofer_init_cwd_schema(self, tmp_path):

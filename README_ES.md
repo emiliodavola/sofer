@@ -148,6 +148,7 @@ reciente que el Parquet más nuevo).
 | ------ | ----------- | ------------------ |
 | **CWD en CLI** | Ejecuta siempre `sofer init` desde el directorio del dataset (p. ej. `C:\Users\...\test`). La CLI usa `Path.cwd()` en vivo — `test.toml` y `raw/` se crean exactamente donde la ejecutes. | Ejecutarlo desde el padre crea `test.toml`/`raw/` en el lugar equivocado. Haz `cd` al directorio del dataset primero. |
 | **Parámetro `cwd` en MCP** | La raíz del servidor se elige al arrancar con `--root PATH` o la variable de entorno `SOFER_MCP_ROOT` (el argumento gana; con ninguno, el cwd del proceso, resuelto). `sofer_init` tiene un `cwd` opcional. Cuando `cwd` es `None` usa el `Path.cwd()` en vivo solo si es un **descendiente estricto** de la raíz del servidor; en caso contrario la llamada es RECHAZADA (fails closed) indicando el argumento requerido `cwd="<directorio del dataset>"` — **no** vuelve a la raíz del servidor. Un `cwd="C:/Users/.../Desktop/test"` explícito sigue soportado como `effective_root` por llamada vía `_contained_path` y nunca muta la raíz global. | Rechaza con `PathOutsideRootError` para `cwd` explícito fuera de la raíz (sin `../` por encima, sin `C:/evil`, sin escape por symlink). El caso auto con `cwd=None` está contenido por una verificación de descendiente estricto `is_relative_to` — nunca escapa ni muta `_SERVER_ROOT`, y rechaza (indicando `cwd`) en vez de volver a la raíz cuando el `cwd` en vivo no es un descendiente estricto. |
+| **`root` por llamada en MCP** | Cada herramienta con rutas (18 de 19; `sofer_report_failure` exceptuada) acepta `root="<directorio existente>"` y ejecuta **esa llamada** contra él. El envelope devuelve `effective_root`, y una continuación vinculada lleva `root` cuando difiere de la raíz de registro. Omitido o en blanco mantiene la raíz de registro, idéntico a antes. `SOFER_MCP_ROOT_ALLOWLIST` (se lee una vez al arrancar, separada por `os.pathsep` — `;` en Windows, `:` en POSIX) solo admite raíces iguales o descendientes de una entrada; la raíz de registro y las llamadas sin `root` nunca se filtran. | Los valores relativos de `root` se anclan en la raíz de registro, nunca en el cwd; una ruta inexistente, un archivo o una raíz fuera del allowlist lanzan `RootUnavailableError`. Los recursos (`sofer://…`) siguen leyendo la raíz del servidor — usá la herramienta con `root` para leer otro árbol. Multiplataforma por construcción: ambos lados se resuelven con `resolve()` y el único dato de plataforma es `os.pathsep`. |
 | **Placeholder** | La plantilla usa `local = "raw/example.csv"` — válido en NTFS (`:` está reservado para unidad/ADS). El antiguo `TODO: raw/...` era inválido y hacía fallar `sofer_validate`. Tras `init`, ejecuta `sofer_scan_apply` para reemplazar el placeholder por entradas reales (p. ej. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` es un stub inocuo; `scan` sobrescribe la lista `[[file]]` con los archivos descubiertos vía `registration_path` (clave relativa a `raw/`). |
 | **Separadores de ruta** | Escribe siempre `raw/` y `cache/` con barras `/` en el TOML (`raw/example.csv`, `cache/file.csv`). CLI y MCP normalizan internamente a POSIX. | Funciona en Windows y POSIX; `ntpath.splitdrive` trataría `C:/...` como absoluto, pero `raw/...` permanece relativo y contenido. |
 | **Codificación de consola** | Nada que hacer: la CLI nunca aborta por un carácter que la codificación activa de la consola no puede representar — el carácter se sustituye en el texto emitido y el comando conserva su código de salida documentado (CLI-R11). Las terminales con Unicode (Windows Terminal, VS Code, macOS, Linux) no se ven afectadas y mantienen los marcadores `⚠`/`✓`/`✗`/`→` de sofer. | Afecta a los flujos que no son una consola con Unicode: salida redirigida a un archivo o tubería, captura de IDE/CI, o una página de códigos antigua forzada con `PYTHONIOENCODING=cp1252`. El carácter no representable se escribe como marcador de posición (o secuencia de escape) en lugar de lanzar `UnicodeEncodeError`. Para conservar todos los marcadores, define `PYTHONIOENCODING=utf-8`. |
@@ -388,6 +389,20 @@ canalización.
 la excepción subyacente junto con el backend de transferencia activo, y
 reintenta una vez. Un fallo total reporta `Result: 0 uploaded, N failed` y,
 cuando el repositorio queda vacío, lo indica explícitamente.
+
+El manifest en disco es el objeto de registro tanto para el plan como para el
+control: `prepare` escribe `build/manifest.json`, cada fase posterior del build
+(`codebook_all`, `profile_all`, `render_all`) lo refresca, y `publish` lo lee en
+lugar de derivar el suyo. Por eso un manifest que no declara la entrega que el árbol
+tiene — un archivo que omite, o uno que promete y el árbol ya no tiene — se rechaza
+antes de cualquier llamada de red, y lo mismo pasa con un record que no se puede
+leer (`UNREADABLE_MANIFEST`). El recovery es el mismo — volvé a correr
+la cadena (`sofer prepare --force --all-files`) y reintentá — mientras que
+`--dry-run` solo avisa y sigue imprimiendo el plan. Los codebooks por archivo son
+obligatorios exactamente cuando el paquete tiene el índice raíz `codebook.md`: un
+índice sin ninguna página bajo `codebooks/` bloquea el confirm, mientras que un
+paquete que nunca generó codebooks los mantiene opcionales y se entrega sin
+advertencia.
 
 Si un publish reporta `0 uploaded, N failed` con un `I/O error`, vuelve a
 ejecutarlo con el backend de transferencia xet deshabilitado **antes** de asumir
@@ -651,8 +666,8 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-El servidor expone 18 callables de herramientas (`sofer_validate`,
-`sofer_meta_check`, `sofer_meta_set`, `sofer_prepare`,
+El servidor expone 19 callables de herramientas (`sofer_validate`,
+`sofer_meta_check`, `sofer_meta_set`, `sofer_file_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
@@ -671,6 +686,12 @@ llega con una `/` inicial y debe resolverse igualmente dentro de la raíz.
 `sofer://status` es un recurso estático sin variables de ruta. Devuelve la
 instantánea de postura del servidor (`approval_configured`, `phrase_source`,
 `root`, `version`, `started_at`, `tool_count`) y nunca lee un archivo de dataset.
+
+`sofer_auth_status` reporta esa misma raíz como `server_root` junto al resto de
+los campos de postura, para que un agente pueda verificar la alcanzabilidad
+antes de intentar una escritura. Un rechazo de contención conserva su prefijo
+`<what> resolves outside the server root` y agrega la raíz resuelta más el
+remedio (`set SOFER_MCP_ROOT or --root at server start, then restart the host`).
 
 ### Cadena de construcción canónica — Por fases (tools/list es autosuficiente)
 
@@ -695,6 +716,7 @@ Fase 2 Publish: sofer_publish(dry_run=True) → STOP (aprobación humana) → so
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force`, `extensions` | Fase 0 preview/apply tras `init`. Ambos MUEVEN archivos sueltos a `raw/` de forma incondicional — la fase es obligatoria, sin flag de opt-in; `sofer_scan_dry_run` la previsualiza sin mutar nada. |
 | M | `sofer_meta_check` | `config` | Lee el estado de metadata sin correr el validador; `readOnlyHint:true`. Reporta el mismo warning que imprime `sofer_validate`. |
 | M | `sofer_meta_set` | `config`, `values`, `dry_run` | Escribe `[meta]` antes de la Fase 1 (la única vía por MCP): description/license/source/tags, más cualquier otra clave del card. Preserva cada otra clave y comentario; `build_stale` nombra un árbol `build/` anterior a la escritura. Llamada sin `values` no escribe nada y devuelve una continuación pidiéndolos. |
+| M | `sofer_file_set` | `config`, `entries`, `dry_run` | Reemplaza el array `[[file]]` desde la superficie de herramientas: la única vía por MCP para declarar una entrada de carpeta recursiva, `column_types`, `convert_to_parquet`/`upload_as_csv` o `include_in_schema`. Cada local debe existir bajo la raíz del servidor; un remoto de carpeta que duplicaría el registro de una entrada de archivo es rechazado; una lista vacía es rechazada mientras existan entradas. |
 | 1 | `sofer_validate` | `config` | Comprobación rápida; siempre primero para datasets existentes. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | Tras validate; escribe Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | Tras prepare; codebooks en lote. |

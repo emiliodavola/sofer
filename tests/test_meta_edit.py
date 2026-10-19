@@ -291,7 +291,7 @@ class TestSetMeta:
         def _boom(*args: object, **kwargs: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(meta_edit.os, "replace", _boom)
+        monkeypatch.setattr(_toml.os, "replace", _boom)
         with pytest.raises(MetaEditError, match="cannot write"):
             meta_edit.set_meta(path, {"description": "Real"})
         assert path.read_bytes() == before

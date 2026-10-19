@@ -31,6 +31,7 @@ CANONICAL_TOOLS = (
     "sofer_scan_apply",
     "sofer_meta_check",
     "sofer_meta_set",
+    "sofer_file_set",
     "sofer_validate",
     "sofer_prepare",
     "sofer_codebook_all",
@@ -97,6 +98,7 @@ def test_greenfield_branch_chain():
 def test_existing_config_branch_routes_render_all_to_auth_status():
     assert workflow.WORKFLOW_BRANCHES["existing_config"] == (
         "sofer_validate",
+        "sofer_file_set",
         "sofer_prepare",
         "sofer_codebook_all",
         "sofer_profile_all",

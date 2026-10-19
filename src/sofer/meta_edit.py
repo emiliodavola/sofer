@@ -38,7 +38,6 @@ stays small; TOML basic-string escapes are a superset of JSON's, so
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -833,9 +832,7 @@ def _atomic_replace(path: Path, text: str) -> None:
     try:
         # ``newline=""`` mirrors _read_text: no translation on write either, so
         # the bytes outside the edited table are the bytes that were read.
-        with open(tmp, "w", encoding=config.OUTPUT_ENCODING, newline="") as handle:
-            handle.write(text)
-        os.replace(tmp, path)
+        _toml.atomic_write_text(path, text, encoding=config.OUTPUT_ENCODING)
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         raise MetaEditError(f"cannot write {path}: {exc}") from exc

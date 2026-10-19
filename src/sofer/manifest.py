@@ -5,12 +5,23 @@ profile is classified as **publishable** (parquet incl. multi-sheet
 expansion, csv when keep_csv, README.md, LICENSE, codebook.md,
 codebooks/**) or **intermediate** (profiles, renders, per-sheet
 intermediates, schema/card inputs). ``prepare`` writes the manifest into
-the output directory; publish dry-run and confirm consume the SAME manifest
-so their decisions never diverge.
+the output directory, and every later phase that adds package artifacts
+refreshes it through :func:`write_manifest`, so the durable document on
+disk is always the one a recount would produce (issue #349); publish
+dry-run and confirm consume the SAME manifest so their decisions never
+diverge.
 
 Status vocabulary is the single source of truth for the "no false warning"
 fix: an optional artifact absent is ``optional`` (never a missing-artifact
 warning); a required artifact absent is ``missing`` and blocks publication.
+
+Two independent axes, and they answer different questions. ``classification``
+says whether an artifact belongs to the delivery at all; ``status`` says whether
+it is present and whether its absence blocks. Before #346 only ``status``
+existed, so a present-but-local-only layer (``profile``/``render``) was
+indistinguishable from a deliverable one in the JSON, and every reader had to
+know from memory which ``artifact_type`` values are never uploaded. The manifest
+declared 135 artifacts on a corpus whose delivery was 133.
 """
 
 from __future__ import annotations
@@ -46,14 +57,27 @@ class ArtifactStatus(str, Enum):
     MISSING = "missing"  # required and absent -- blocks publication
 
 
+class ArtifactClass(str, Enum):
+    """Delivery class of one package artifact (PUB-12, GitHub #346).
+
+    ``classification`` answers *does this belong to the delivery*; ``status``
+    answers *is it here, and does its absence block*. They are independent: an
+    intermediate layer that is present is ``staged`` and still never uploaded.
+    """
+
+    PUBLISHABLE = "publishable"  # part of the delivery set
+    INTERMEDIATE = "intermediate"  # local-only layer, regenerable, never uploaded
+
+
 @dataclass(frozen=True)
 class ManifestEntry:
-    """One classified artifact: source config, type, relative path, status."""
+    """One classified artifact: source config, type, relative path, status, class."""
 
     source: str
     artifact_type: str
     path: str
     status: ArtifactStatus
+    classification: ArtifactClass = ArtifactClass.PUBLISHABLE
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -61,16 +85,34 @@ class ManifestEntry:
             "artifact_type": self.artifact_type,
             "path": self.path,
             "status": self.status.value,
+            "classification": self.classification.value,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ManifestEntry:
+        """Read one entry, defaulting ``classification`` for pre-#346 manifests."""
         return cls(
             source=str(data["source"]),
             artifact_type=str(data["artifact_type"]),
             path=str(data["path"]),
             status=ArtifactStatus(str(data["status"])),
+            classification=ArtifactClass(
+                str(data.get("classification", ArtifactClass.PUBLISHABLE.value))
+            ),
         )
+
+    @property
+    def is_directory(self) -> bool:
+        """Whether this entry denotes a tree rather than one file.
+
+        A recursive remote is recorded as ONE directory entry (path with a
+        trailing slash, the same marker the ``codebooks/``/``profiles/``
+        placeholders use) because its files are enumerated at copy time, not by
+        the manifest. Reading such an entry as a single delivered file would
+        overstate the upload — and a tree that stages zero files would count as
+        one (#346).
+        """
+        return self.path.endswith("/")
 
 
 @dataclass(frozen=True)
@@ -111,6 +153,44 @@ class PackageManifest:
     def required_missing(self) -> list[ManifestEntry]:
         return [e for e in self.entries if e.status is ArtifactStatus.MISSING]
 
+    def publishable(self) -> list[ManifestEntry]:
+        """Entries that belong to the delivery set (``publishable``).
+
+        This is the set the upload is measured against: the copy path stages
+        exactly these plus nothing, so a reader counting them is counting what
+        arrives (#346).
+        """
+        return [e for e in self.entries if e.classification is ArtifactClass.PUBLISHABLE]
+
+    def intermediate(self) -> list[ManifestEntry]:
+        """Local-only layers (``intermediate``): present or not, never uploaded."""
+        return [e for e in self.entries if e.classification is ArtifactClass.INTERMEDIATE]
+
+    def delivered(self) -> list[ManifestEntry]:
+        """Publishable **file** entries that are present: what the upload stages.
+
+        Derived, never a third classification: ``publishable`` answers *does this
+        belong to the delivery*, ``status`` answers *is it here*, and this is the
+        conjunction restricted to file entries. For them it equals the files
+        ``_copy_package`` stages for the same tree, so counting it is counting what
+        arrives (#346). An absent optional artifact — ``codebook.md`` before an
+        ``--all-files`` prepare, a codebook page no flow promised — is publishable
+        in principle and still not delivered, which is why ``publishable()`` alone
+        must not be read as the delivery set.
+
+        Directory entries (:attr:`ManifestEntry.is_directory`) are excluded: a
+        recursive remote is a tree whose files the copy path enumerates, so it is
+        never one delivered file, and a tree that stages nothing (an empty
+        directory) contributes nothing here.
+        """
+        return [
+            e
+            for e in self.entries
+            if e.classification is ArtifactClass.PUBLISHABLE
+            and e.status is ArtifactStatus.STAGED
+            and not e.is_directory
+        ]
+
     def of_type(self, artifact_type: str) -> list[ManifestEntry]:
         return [e for e in self.entries if e.artifact_type == artifact_type]
 
@@ -132,15 +212,24 @@ def build_package_manifest(
     output_dir: Path,
     *,
     keep_csv: bool = False,
-    codebooks_required: bool = False,
 ) -> PackageManifest:
     """Classify every artifact of the selected build profile under *output_dir*.
 
     Publishable set = ground-truth expanded remotes (PUB-10, multi-sheet
     ``stem__sheet.parquet`` included) + root files + per-file codebooks when
-    present. Profiles and renders live under the dataset root and are always
-    intermediate (staged when present, optional when the directory does not
-    exist).
+    present. Profiles and renders are always ``intermediate`` and never
+    publishable: they are probed where the pipeline actually writes them (the
+    artifact cache, ``<root>/<output_dir>/<dir>``) and under the dataset root for
+    an explicit location, so the entry reports the tree instead of a path nobody
+    writes to (#346).
+
+    The codebook promise is derived from the tree, never from the caller:
+    ``generate_all`` always writes the root ``codebook.md`` index but creates
+    ``codebooks/`` only when it writes a page, so an index without pages is
+    exactly "the flow promised codebooks and produced none" (#354). An absent
+    set is therefore ``MISSING`` (and blocks confirm) only when the index is
+    present; without it the set was never promised and stays ``OPTIONAL``
+    (PUB-08).
 
     Args:
         cfg: Dataset configuration (source identity for the manifest).
@@ -148,15 +237,21 @@ def build_package_manifest(
         keep_csv: Whether original CSVs upload alongside Parquet.
 
     Returns:
-        A :class:`PackageManifest` with one entry per classified artifact.
+        A :class:`PackageManifest` with one entry per artifact, each carrying an
+        explicit :class:`ArtifactClass`.
     """
     from ._mirror import expanded_planned_remotes
 
     source = str(_real_config_path(cfg))
     entries: list[ManifestEntry] = []
 
-    def _add(artifact_type: str, path: str, status: ArtifactStatus) -> None:
-        entries.append(ManifestEntry(source, artifact_type, path, status))
+    def _add(
+        artifact_type: str,
+        path: str,
+        status: ArtifactStatus,
+        classification: ArtifactClass = ArtifactClass.PUBLISHABLE,
+    ) -> None:
+        entries.append(ManifestEntry(source, artifact_type, path, status, classification))
 
     # Root publishable files
     for name, artifact_type, required in _ROOT_PUBLISHABLE:
@@ -188,24 +283,31 @@ def build_package_manifest(
             artifact_type = "csv"
         else:
             artifact_type = "data"
+        # A recursive remote is a TREE, not a file: its files are enumerated at
+        # copy time, so the recorded path keeps the directory marker (#346) and
+        # never counts as one delivered file.
+        recorded = f"{remote.rstrip('/')}/" if is_recursive else remote
         _add(
             artifact_type,
-            remote,
+            recorded,
             ArtifactStatus.STAGED if present else ArtifactStatus.MISSING,
         )
 
-    # Per-file codebooks (RC-C01): uploaded when present; optional when absent.
-    # When the surrounding flow promised them (codebooks_required, e.g. the MCP
-    # canonical chain after codebook_all), their absence is MISSING and blocks.
+    # Per-file codebooks (RC-C01): the package's root ``codebook.md`` index is
+    # the durable record of the promise (#354) -- ``generate_all`` always writes
+    # it, but creates ``codebooks/`` only when it writes a page. An existing but
+    # empty directory is therefore an absence, not a silent no-op: promised and
+    # page-less is MISSING and blocks; never promised and absent is OPTIONAL.
     codebooks_dir = output_dir / config.CODEBOOKS_DIR
-    if codebooks_dir.is_dir():
-        for cb_path in sorted(codebooks_dir.rglob("*.md")):
+    pages = sorted(codebooks_dir.rglob("*.md")) if codebooks_dir.is_dir() else []
+    if pages:
+        for cb_path in pages:
             _add(
                 "codebook_page",
                 cb_path.relative_to(output_dir).as_posix(),
                 ArtifactStatus.STAGED,
             )
-    elif codebooks_required:
+    elif (output_dir / "codebook.md").is_file():
         _add(
             "codebook_page",
             f"{config.CODEBOOKS_DIR}/",
@@ -218,23 +320,45 @@ def build_package_manifest(
             ArtifactStatus.OPTIONAL,
         )
 
-    # Intermediate layers under the dataset root (never publishable)
+    # Intermediate layers (never publishable, PUB-12/#346). profile_all and
+    # render_all write them under the artifact cache, and an explicit run may
+    # place them under the dataset root, so both locations are probed: reporting
+    # a layer at a root nobody writes to is what made every entry read
+    # ``optional`` while the layers were sitting in ``cache/``.
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
     for dir_name, artifact_type in (
         (config.PROFILE_DIR, "profile"),
         (config.RENDER_DIR, "render"),
     ):
-        layer_dir = base / dir_name
-        if layer_dir.is_dir():
-            for layer_path in sorted(layer_dir.rglob("*")):
-                if layer_path.is_file():
-                    _add(
-                        artifact_type,
-                        layer_path.relative_to(base).as_posix(),
-                        ArtifactStatus.STAGED,
-                    )
-        else:
-            _add(artifact_type, f"{dir_name}/", ArtifactStatus.OPTIONAL)
+        layer_dir = next(
+            (
+                candidate
+                for candidate in (base / config.OUTPUT_DIR / dir_name, base / dir_name)
+                if candidate.is_dir()
+            ),
+            None,
+        )
+        if layer_dir is None:
+            _add(
+                artifact_type,
+                f"{dir_name}/",
+                ArtifactStatus.OPTIONAL,
+                ArtifactClass.INTERMEDIATE,
+            )
+            continue
+        for layer_path in sorted(layer_dir.rglob("*")):
+            if not layer_path.is_file():
+                continue
+            try:
+                rel_path = layer_path.relative_to(base).as_posix()
+            except ValueError:  # layer dir outside base (absolute output_dir)
+                rel_path = layer_path.as_posix()
+            _add(
+                artifact_type,
+                rel_path,
+                ArtifactStatus.STAGED,
+                ArtifactClass.INTERMEDIATE,
+            )
 
     # Deterministic ordering: publishable set first (root, data), then
     # codebooks, then optional/intermediate layers -- stable JSON output.
@@ -251,3 +375,89 @@ def build_package_manifest(
     }
     entries.sort(key=lambda e: (order.get(e.artifact_type, 9), e.path))
     return PackageManifest(source, tuple(entries))
+
+
+def write_manifest(
+    cfg: DatasetConfig,
+    output_dir: Path,
+    *,
+    keep_csv: bool = False,
+    only_if_present: bool = False,
+) -> Path | None:
+    """Write (or refresh) the durable ``manifest.json`` in *output_dir*.
+
+    The single writer of the package's durable record (PRP-11, issue #349):
+    ``prepare`` creates it, and every later phase that adds package artifacts
+    calls this again, so the file on disk is never a stale prepare-time snapshot
+    while the delivery has moved on.
+
+    A phase that wrote outside a package directory asks with
+    ``only_if_present=True``: it then gets ``None`` back instead of inventing a
+    package record for a tree ``prepare`` never prepared.
+
+    The codebook promise is read from the tree (:func:`build_package_manifest`),
+    so no caller carries it: a refresh can never downgrade what the package
+    itself records (#354).
+
+    Args:
+        cfg: Dataset configuration (source identity for the manifest).
+        output_dir: The package directory the manifest describes.
+        keep_csv: Whether original CSVs belong to the delivery (PUB-07).
+        only_if_present: Refresh only when a manifest already exists here.
+
+    Returns:
+        The path written, or ``None`` when *only_if_present* held and there was
+        nothing to refresh.
+    """
+    path = output_dir / MANIFEST_NAME
+    if only_if_present and not path.is_file():
+        return None
+    path.write_bytes(
+        build_package_manifest(
+            cfg,
+            output_dir,
+            keep_csv=keep_csv,
+        ).json_bytes()
+    )
+    return path
+
+
+def _package_output_dir(cfg: DatasetConfig) -> Path:
+    """The resolved package directory for *cfg* (``[dataset] build_dir``)."""
+    from .prepare import resolve_output_dir
+
+    return resolve_output_dir(cfg, None)
+
+
+def refresh_manifest(
+    cfg: DatasetConfig,
+    written_to: Path | None = None,
+    *,
+    keep_csv: bool = False,
+) -> Path | None:
+    """Refresh the durable manifest of the package a phase just wrote into.
+
+    Every phase that adds package artifacts calls this at the end of its run
+    (issue #349), so the file on disk is never a prepare-time snapshot while the
+    delivery has moved on. Nothing is created: a manifest is refreshed only where
+    one already exists, so a phase can never invent a package record for a tree
+    ``prepare`` never prepared.
+
+    Args:
+        cfg: Dataset configuration (source identity for the manifest).
+        written_to: The resolved directory the phase wrote into. ``None`` means it
+            wrote to the shared artifact cache, which owns no manifest: the
+            refresh then targets the resolved package directory, because that is
+            the record whose entries (``cache/<layer>/...``) the write changes.
+        keep_csv: Whether original CSVs belong to the delivery (PUB-07).
+
+    Returns:
+        The path rewritten, or ``None`` when no manifest owns that directory.
+    """
+    target = written_to if written_to is not None else _package_output_dir(cfg)
+    return write_manifest(
+        cfg,
+        target,
+        keep_csv=keep_csv,
+        only_if_present=True,
+    )

@@ -82,13 +82,14 @@ def _schema_description(schema: Any) -> str:
 
 
 class TestToolCount:
-    def test_eighteen_tools(self, tmp_path: Path):
+    def test_nineteen_tools(self, tmp_path: Path):
         tools = _tools_dict(tmp_path)
-        assert len(tools) == 18, sorted(tools.keys())
+        assert len(tools) == 19, sorted(tools.keys())
         expected = {
             "sofer_validate",
             "sofer_meta_check",
             "sofer_meta_set",
+            "sofer_file_set",
             "sofer_prepare",
             "sofer_publish",
             "sofer_publish_confirm",
@@ -268,6 +269,7 @@ class TestAnnotations:
             "sofer_scan_apply",
             "sofer_init",
             "sofer_meta_set",
+            "sofer_file_set",
             "sofer_repo_settings",
             "sofer_report_failure",
         }
@@ -307,7 +309,7 @@ class TestOutputSchema:
             assert "ok" in props, f"{name} output_schema missing ok"
             assert "exit_code" in props, f"{name} output_schema missing exit_code"
             assert "output" in props, f"{name} output_schema missing output"
-            # ADD (issue #145): sofer_auth_status alone declares the four
+            # ADD (issues #145, #343): sofer_auth_status alone declares the
             # additive posture properties (typed; NEVER required, NEVER enum).
             if name == "sofer_auth_status":
                 expected_posture = {
@@ -315,6 +317,7 @@ class TestOutputSchema:
                     "server_process_id": "integer",
                     "server_started_at": "string",
                     "server_version": "string",
+                    "server_root": "string",
                 }
                 for prop_name, prop_type in expected_posture.items():
                     assert prop_name in props, f"{name} output_schema missing {prop_name}"

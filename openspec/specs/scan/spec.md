@@ -122,6 +122,14 @@ Default config SHALL be `dataset.toml` in the current directory. `--dry-run`
 MUST report without filesystem changes. `--force` MUST skip the confirmation
 prompt. Exit code 0 on success, 1 on error.
 
+The reported registration count SHALL be the number of `[[file]]` entries the
+merge of that same run appended — measured by the merge itself, never as a
+before/after difference of entry counts: `[[file]]` placeholders that the merge
+strips (`TODO:`, `raw/example*`) SHALL NOT be subtracted from the count, because
+they were never part of the merged list (#345). `Registered N new [[file]]
+entry(s).` SHALL therefore agree with the TOML the same run writes, and an
+idempotent re-scan over unchanged inputs SHALL report `0`.
+
 #### Scenario: Default config and interactive confirm
 
 - GIVEN `dataset.toml` in the working directory
@@ -140,6 +148,20 @@ prompt. Exit code 0 on success, 1 on error.
 - GIVEN `my-project/config.toml` exists
 - WHEN `sofer scan my-project/config.toml` is called
 - THEN that file SHALL be used as the TOML source
+
+#### Scenario: The count matches the TOML on an init-scaffolded tree (#345)
+
+- GIVEN a TOML carrying the two `sofer init` placeholders (`local = "raw/example.csv"`, `local = "raw/example/"`) and N loose supported files
+- WHEN `sofer scan --force` runs
+- THEN it SHALL print `Registered N new [[file]] entry(s).`
+- AND the written TOML SHALL hold N `[[file]]` entries, with no placeholder left
+
+#### Scenario: A dry-run preview reports the same count (#345)
+
+- GIVEN the init placeholders and N sources already under `raw/`
+- WHEN `sofer scan --dry-run` runs
+- THEN it SHALL print `DRY RUN  Would register N new [[file]] entry(s).`
+- AND no file SHALL be copied and the TOML SHALL stay unchanged
 
 ---
 

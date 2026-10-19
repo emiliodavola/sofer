@@ -392,13 +392,19 @@ entries.)
 - THEN `./staging/` SHALL be removed and `cfg._base_dir / "cache"` SHALL remain unless `--clean-cache` given
 
 
-### Requirement: Package artifact manifest with explicit publishable/intermediate boundary (PUB-12)
+### Requirement: Package artifact manifest with explicit publishable/intermediate boundary (PUB-12) — Modified 2026-10-19, fix-manifest-authority; codebook promise 2026-10-19, fix-codebook-promise
 
-The publish flow SHALL operate on one machine-readable package manifest listing every artifact of the selected build profile — `source` (the real config path), `artifact_type`, `path`, and `status` — with artifacts classified as **publishable** (parquet incl. multi-sheet expansion, csv when keep_csv, README, LICENSE, codebook.md, codebooks/**) or **intermediate** (profiles, renders, per-sheet intermediates, schema/card inputs). `prepare` writes the manifest into the output dir; publish dry-run and confirm SHALL read the SAME manifest to plan and to enforce contents (no divergence).
+The publish flow SHALL operate on one machine-readable package manifest listing every artifact of the selected build profile — `source` (the real config path), `artifact_type`, `path`, `status`, and `classification` — with artifacts classified as **publishable** (parquet incl. multi-sheet expansion, csv when keep_csv, README, LICENSE, codebook.md, codebooks/**) or **intermediate** (profiles, renders, per-sheet intermediates, schema/card inputs). `prepare` SHALL write the manifest into the output dir, and every later phase that adds a package artifact (`codebook_all`, `profile_all`, `render_all`) SHALL refresh it at the end of a successful run, so the durable file on disk is always the one a recount of the same tree would produce. A phase SHALL refresh only a directory that already owns a manifest: no phase SHALL create a package record for a tree `prepare` never prepared. publish dry-run and confirm SHALL read the SAME manifest — the durable file — to plan and to enforce contents (no divergence); `publish` SHALL NOT recompute it while the durable file exists, and a package that carries none (a tree prepared before this change) SHALL be recomputed and announced verbatim: `[!] No durable package manifest in <dir> - recomputed from the tree (a package prepared before #349).`
 
-Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
+Missing **required** artifacts SHALL block confirm with a stable `error_code` and a concrete recovery (re-run prepare); optional artifacts absent SHALL be marked `optional` and SHALL NOT emit the "missing artifact" warning (no silent omission, no false warning). **The per-file codebook set SHALL be required exactly when the package carries its root `codebook.md` index**: `codebook_all` and `prepare --all-files` always write that index and create `codebooks/` only when they write a page, so an index with no page under `codebooks/` — including an existing but empty directory — SHALL be recorded `missing` and SHALL block confirm, while a package with neither SHALL record `codebooks/` `optional` and SHALL NOT warn. No caller-supplied flag SHALL record the promise, and a later-phase refresh SHALL NOT downgrade a promised absence back to `optional` (`2026-10-19-fix-codebook-promise`, issue #354). Staleness SHALL key on the real config path (custom TOML names and multi-sheet Excel outputs included). Local delivery SHALL honor `force`. Remote inspection failures SHALL fail closed (unchanged PUB-05).
 
-(Previously: the package boundary was implicit — plan_remote_files derived the dry-run set and codebook_remotes were collected from the output dir, with a warning when codebooks were absent that could be a false positive for optional artifacts.)
+**Divergence from the tree** is the backstop, distinct from the config-path staleness above: the record SHALL declare, path for path, the deliverable set a recount of the same tree produces — the `publishable` entries whose `status` is `staged` and whose `path` is a file path. A record that omits a delivered file, or promises one the delivery no longer holds, SHALL refuse the `hf` confirm with the stable marker `STALE_MANIFEST` — the block naming the record, the undeclared paths, the withdrawn paths and the recovery — BEFORE any network call and before staging; a dry-run and the local target SHALL print the same block as a warning and continue to plan. The comparison SHALL be over paths, never content: the record carries no hashes, so an in-place edit of a declared file is NOT a divergence and SHALL NOT refuse a delivery. `intermediate` entries SHALL NOT be compared — a local-only layer is regenerable churn, not a delivery fact. A record SHALL promise the **presence** of a recursive remote's tree as well as of its files: a tree the delivery no longer holds SHALL be reported under `withdrawn` even though the tree itself is never a delivered file. A record that cannot be read SHALL be refused the same way — before any network call and before staging, with the stable marker `UNREADABLE_MANIFEST` naming the record and the error; a dry-run and the local target SHALL print that block as a warning, recount for the preview and continue to plan. A record SHALL NOT be refused for a `keep_csv` delivery: the record describes the package tree, and the original CSVs such a delivery adds are read from the configuration, never declared by it. The recovery SHALL read `re-run the build chain (\`sofer prepare --force --all-files\`) and retry.`
+
+`classification` SHALL be the serialized delivery axis, independent of `status`: every entry SHALL carry `publishable` or `intermediate`, a manifest written before the field existed SHALL load with `publishable` as the default (the field is additive), and no `intermediate` entry SHALL ever be part of the delivery set or be `missing` — the absence of a local-only layer is never a publication blocker. `profiles` and `renders` SHALL be `intermediate` and SHALL be probed where `profile_all`/`render_all` actually write them (the artifact cache, `<root>/<output_dir>/<dir>`), with the dataset root accepted as the explicit-location fallback, and the recorded `path` SHALL be relative to the root.
+
+The delivered set SHALL be the `publishable` entries whose `status` is `staged` **and whose `path` is a file path** (no trailing slash). For those it SHALL equal the files the copy path stages for the same tree. A recursive remote SHALL be recorded as ONE directory entry whose `path` ends with `/`, because its files are enumerated at copy time: it SHALL NOT be counted as a delivered file, and a tree that stages zero files SHALL contribute nothing to the delivered set. The manifest SHALL NOT count a local-only layer as part of the upload, and SHALL NOT present a directory entry as an uploaded file (`2026-10-18-fix-manifest-publishable-intermediate`, issue #346).
+
+(Previously: the package boundary was implicit — plan_remote_files derived the dry-run set and codebook_remotes were collected from the output dir, with a warning when codebooks were absent that could be a false positive for optional artifacts. Then: the boundary was demanded but only `.status` was serialized, so `profile`/`render` entries were indistinguishable from deliverable artifacts in the JSON and were probed at a root nothing writes to.)
 
 #### Scenario: Manifest lists exact publishable set for single-sheet source
 
@@ -416,6 +422,27 @@ Missing **required** artifacts SHALL block confirm with a stable `error_code` an
 - GIVEN a manifest missing a required codebook that the profile promises
 - WHEN confirm runs
 - THEN it SHALL fail with a stable `error_code` and a `recovery` naming re-run prepare
+
+#### Scenario: A promised codebook set that is absent blocks confirm (#354) — Added 2026-10-19
+
+- GIVEN a package that carries the root `codebook.md` index and no page under `codebooks/`
+- WHEN the durable manifest is built or refreshed, and confirm runs
+- THEN the `codebook_page` entry SHALL read `missing`
+- AND the confirm SHALL refuse before staging with the existing recovery naming the build chain
+- AND a later `profile_all`/`render_all` refresh SHALL NOT turn that entry back into `optional`
+
+#### Scenario: A package that never promised codebooks keeps them optional (#354) — Added 2026-10-19
+
+- GIVEN a package with neither `codebook.md` nor any page under `codebooks/`
+- WHEN the manifest is built and confirm runs
+- THEN the `codebook_page` entry SHALL read `optional`
+- AND no codebook-missing warning SHALL be emitted
+
+#### Scenario: An empty codebooks directory is an absence, not a silent no-op (#354) — Added 2026-10-19
+
+- GIVEN a package whose `codebooks/` directory exists but holds no page
+- WHEN the manifest is built
+- THEN the entry SHALL be `missing` when the root index is present and `optional` when it is not — never absent from the record
 
 #### Scenario: Optional absent artifact does not warn
 
@@ -441,6 +468,82 @@ Missing **required** artifacts SHALL block confirm with a stable `error_code` an
 - WHEN `force=false`
 - THEN the delivery SHALL refuse to overwrite
 - AND with `force=true` it SHALL overwrite
+
+#### Scenario: Local-only layers are never publishable (#346)
+
+- GIVEN a prepared package whose `cache/profiles` and `cache/renders` hold the layers `profile_all`/`render_all` wrote
+- WHEN the manifest is built
+- THEN the `profile` and `render` entries SHALL read `classification: intermediate` with paths under `cache/`
+- AND the `publishable` **staged file** entries SHALL equal, path for path, the files the copy path stages for that tree
+
+#### Scenario: A recursive tree is a directory entry, never a delivered file (#346)
+
+- GIVEN a recursive remote whose tree holds files, and an empty recursive remote
+- WHEN the manifest is built and the package is staged
+- THEN both SHALL be recorded as ONE entry each whose `path` ends with `/`
+- AND neither SHALL appear in the delivered set, so the empty tree contributes zero delivered files while its sibling's files land in the upload
+
+#### Scenario: An absent optional artifact is publishable but not delivered (#346)
+
+- GIVEN a package with no `codebook.md` (no `--all-files` prepare ran)
+- WHEN the manifest is built
+- THEN that entry SHALL be `classification: publishable` with `status: optional`
+- AND it SHALL NOT appear in the delivered set (`publishable`, `staged`, file path), so the delivery count never overstates the upload
+
+#### Scenario: An unreadable record is refused, never replaced by a recount (#349)
+
+- GIVEN a durable record that cannot be decoded, or that is structurally not a manifest
+- WHEN `publish --target hf` confirms
+- THEN it SHALL print the `UNREADABLE_MANIFEST` block naming the record and the error
+- AND it SHALL return 1 without staging and without any network call
+- AND a `--dry-run` SHALL warn, recount for the preview and still print its plan
+
+#### Scenario: A manifest written before the field existed still loads (#346)
+
+- GIVEN a `manifest.json` whose entries carry no `classification`
+- WHEN it is read
+- THEN every entry SHALL read `publishable` — including a legacy `profile`/`render` entry, which a consumer needing the true class SHALL re-derive by rebuilding the manifest
+- AND `publish` SHALL rebuild it only for a package that carries **no** durable manifest (the pre-#349 tree), never while the durable file exists
+- AND re-reading and re-writing the result SHALL be byte-identical (the new form is a fixed point); a legacy input is not preserved byte-for-byte, because reading it records the classification
+
+#### Scenario: The durable manifest follows every phase that adds artifacts (#349)
+
+- GIVEN a package `prepare` wrote, with its `manifest.json`
+- WHEN `codebook_all`, `profile_all` or `render_all` completes
+- THEN the file on disk SHALL equal a recount of the same tree (`from_dir(output_dir)` == `build_package_manifest(cfg, output_dir)`)
+- AND a phase that wrote to the shared artifact cache SHALL NOT create a manifest in a directory that does not already own one
+
+#### Scenario: Publish plans and enforces with the durable file (#349)
+
+- GIVEN a durable manifest that declares a required artifact a recount would not declare
+- WHEN the confirm runs
+- THEN the enforcement SHALL see that entry, proving the file is the object of record rather than a fresh recomputation
+
+#### Scenario: A record that omits a delivered file refuses the upload before the network (#349)
+
+- GIVEN a package whose tree delivers a file the durable manifest does not declare
+- WHEN `publish --target hf` confirms
+- THEN it SHALL print the `STALE_MANIFEST` block naming the undeclared paths and the recovery
+- AND it SHALL return 1 without staging and without any network call
+
+#### Scenario: A withdrawn declared file refuses the upload (#349)
+
+- GIVEN a record that declares a file the delivery no longer holds
+- WHEN the confirm runs
+- THEN the block SHALL name it under `withdrawn` and the upload SHALL be refused
+
+#### Scenario: An undeclared delivered file warns but still plans a dry-run (#349)
+
+- GIVEN the same divergence
+- WHEN `publish --dry-run` runs
+- THEN the `STALE_MANIFEST` block SHALL print as a warning
+- AND the dry-run SHALL still print its plan and exit 0
+
+#### Scenario: An in-place edit of a declared file is not a divergence (#349)
+
+- GIVEN a record and a tree that declare the same deliverable paths
+- WHEN a declared file is rewritten with different content
+- THEN the confirm SHALL proceed: the record describes the set, not the bytes
 
 ### Requirement: The target posture is declared, observed and enforced (PUB-13) — Added 2026-10-17, feat-visibility-enforcement
 

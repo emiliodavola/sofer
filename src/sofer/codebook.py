@@ -792,4 +792,10 @@ def generate_all(
     root_path.write_text("\n".join(index_lines), encoding=config.OUTPUT_ENCODING)
     generated.append(str(root_path))
 
+    # The durable manifest follows the delivery (#349): these pages are package
+    # artifacts added AFTER prepare wrote it.
+    from .manifest import refresh_manifest
+
+    refresh_manifest(cfg, write_root if output_dir is not None else None)
+
     return generated

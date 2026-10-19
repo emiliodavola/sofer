@@ -1329,6 +1329,7 @@ The system MUST render the Dataset Card's Data Fields as per-sheet collapsible t
 - `dataset_info.features` SHALL stay flat (no collapse); collapse affects only the body Data Fields section.
 - Section titles MUST match staged artifact stems `__<sanitized>` (post-sanitize, using same `sanitize_sheet_name` contract as codebook/prepare), and both sheets MUST appear when multisheet data is present.
 - Grouping for display SHALL be by `origin` (one block per table), NEVER by config group: two origins that share one column signature still render one independent block each, so every table's own columns stay visible (`2026-10-15-fix-schema-relation-map`, issue #304).
+- Every data-derived string cell of those tables (the column name, the File cell and the Example cell, in both the flat and the per-sheet branches) SHALL be rendered as printable text (`2026-10-18-fix-card-control-char-escape`, issue #348): a character in the Unicode `Cc` category SHALL be rendered as its `\xNN` escape, `|` SHALL be escaped as `\|` so it cannot split the row, and the code-span fence SHALL be one backtick, or two when the value itself contains a backtick. The File cell stays unfenced (its value is a file name and the card has always printed it bare). The generated card SHALL therefore contain no raw control byte other than the line breaks the generator itself writes, and the sampled value in the Parquet SHALL stay untouched.
 
 #### Scenario: RC-R21.01 single-file below threshold stays unwrapped
 
@@ -1391,6 +1392,20 @@ The system MUST render the Dataset Card's Data Fields as per-sheet collapsible t
 - WHEN the card is generated
 - THEN both origins SHALL render their own `<details>` block
 - AND each block SHALL list that origin's full column list
+
+#### Scenario: RC-R21.10 a control-character sample does not make the card binary (#348)
+
+- GIVEN one column whose sampled value is `"\x00"` (the corpus of #348: a one-row table whose only value is a NUL)
+- WHEN `build_dataset_card` runs
+- THEN the rendered card SHALL hold no `Cc` character other than `\n`/`\r`
+- AND the value SHALL appear as the printable escape `\x00`
+
+#### Scenario: RC-R21.11 a separator in a sample cannot split the row (#348)
+
+- GIVEN one column whose sampled value is `"a|b"` and another whose value contains a backtick
+- WHEN `build_dataset_card` runs
+- THEN the value SHALL be rendered as `a\|b` inside one cell and the backtick value SHALL be fenced with two backticks
+- AND the row SHALL still carry exactly the table's seven cells
 
 ### Requirement: Staged per-sheet Parquet lookup accepts collapsed single-underscore names (RC-R22)
 

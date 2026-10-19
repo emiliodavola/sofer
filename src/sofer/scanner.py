@@ -399,12 +399,12 @@ def discover_files(
     return results
 
 
-def merge_entries(
+def merge_entries_counted(
     discovered: list[Path],
     raw_toml: dict[str, Any],
     base_dir: Path,
     data_dir: Path,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     """Add new ``[[file]]`` entries for each file in *discovered*.
 
     Deduplication: a discovered file is skipped when its computed destination
@@ -430,6 +430,19 @@ def merge_entries(
     The *raw_toml* dict is mutated in-place and also returned for convenience.
     All non-``[[file]]`` top-level keys (``[dataset]``, ``[meta]``, ``[[check]]``,
     ``[[quality]]``) are preserved untouched.
+
+    Args:
+        discovered: Absolute paths of supported source files to register.
+        raw_toml:   Parsed TOML dict, mutated in place.
+        base_dir:   Dataset root the registered local paths are relative to.
+        data_dir:   Copy destination root (the artifact cache).
+
+    Returns:
+        ``(raw_toml, added)`` where *added* is the number of ``[[file]]``
+        entries this call appended. It is the count callers report as
+        ``registered`` (issue #345): measuring it as a before/after difference
+        of entry counts is wrong, because the placeholders this function strips
+        were never part of the merged list.
     """
     # Strip template entries left over from ``sofer init`` (their local
     # path is a placeholder that starts with ``TODO:`` and would cause
@@ -490,7 +503,34 @@ def merge_entries(
         existing.add(dest)
         added += 1
 
-    return raw_toml
+    return raw_toml, added
+
+
+def merge_entries(
+    discovered: list[Path],
+    raw_toml: dict[str, Any],
+    base_dir: Path,
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Add new ``[[file]]`` entries for each file in *discovered*.
+
+    Backward-compatible wrapper over :func:`merge_entries_counted` for callers
+    that only need the merged TOML. Callers that report a registration count
+    SHALL use :func:`merge_entries_counted`, so the reported number is the one
+    the merge computed instead of a before/after difference of entry counts
+    (issue #345).
+
+    Args:
+        discovered: Absolute paths of supported source files to register.
+        raw_toml:   Parsed TOML dict, mutated in place.
+        base_dir:   Dataset root the registered local paths are relative to.
+        data_dir:   Copy destination root (the artifact cache).
+
+    Returns:
+        The mutated *raw_toml* dict.
+    """
+    merged, _added = merge_entries_counted(discovered, raw_toml, base_dir, data_dir)
+    return merged
 
 
 def move_to_raw(

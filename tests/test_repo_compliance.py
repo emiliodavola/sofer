@@ -2,6 +2,7 @@
 
 import inspect
 import re
+import unicodedata
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -4192,3 +4193,79 @@ class TestCardSectionKeysFromToml:
         assert cfg.bias_risks_limitations == ""
         assert cfg.contact == ""
         assert cfg.curation_rationale == ""
+
+
+# ── #348: the card is a document, not a container for raw control bytes ───────
+
+
+def _card_with(example: str, name: str = "col_a") -> str:
+    """Render a one-column card whose sampled value is *example*."""
+    cfg = DatasetConfig(
+        name="escape-ds",
+        repo_id="user/escape-ds",
+        description="Escaping fixture",
+        license="cc0-1.0",
+    )
+    schema = [
+        ColumnSchema(
+            name=name,
+            dtype="categorical/text",
+            nullable=True,
+            example=example,
+            unique=1,
+            missing=0.0,
+        )
+    ]
+    return build_dataset_card(cfg, schema)
+
+
+class TestCardDataCellsArePrintable:
+    """#348: data-derived cells render as printable text.
+
+    The generator interpolated each sampled value verbatim into the Example cell,
+    so a corpus whose value is a control character produced a card that `grep` and
+    `diff` classify as binary. The Parquet keeps the value (that is correct); the
+    document must render it. The same cell is also the place where a `|` splits a
+    row and a stray backtick closes the code span early, which is the same defect
+    class and is covered here.
+    """
+
+    def test_control_character_sample_is_rendered_visibly(self) -> None:
+        """A NUL sample becomes `\x00`; the card carries no raw control byte."""
+        result = _card_with("\x00", name="CPV2022")
+
+        assert "\x00" not in result
+        assert b"\x00" not in result.encode("utf-8")
+        assert "`\\x00`" in result
+        raw_controls = [
+            ch for ch in result if unicodedata.category(ch) == "Cc" and ch not in "\n\r"
+        ]
+        assert raw_controls == [], f"card still carries raw control bytes: {raw_controls!r}"
+
+    def test_other_control_characters_are_escaped_too(self) -> None:
+        """The rule is the `Cc` category, not the single NUL of the report."""
+        result = _card_with("a\x1bb\x07", name="esc")
+
+        assert "`a\\x1bb\\x07`" in result
+        assert "\x1b" not in result
+
+    def test_a_separator_in_a_sample_cannot_split_the_row(self) -> None:
+        """`a|b` renders as `a\\|b` and the row keeps its seven cells."""
+        result = _card_with("a|b", name="sep")
+
+        assert "`a\\|b`" in result
+        row = next(line for line in result.splitlines() if line.startswith("| `sep`"))
+        cells = re.split(r"(?<!\\)\|", row)[1:-1]
+        assert len(cells) == 7, row
+
+    def test_a_backtick_in_a_sample_keeps_the_value(self) -> None:
+        """A backtick grows the fence instead of closing the span early."""
+        result = _card_with("a`b", name="tick")
+
+        assert "``a`b``" in result
+
+    def test_ordinary_values_render_exactly_as_before(self) -> None:
+        """The common case is byte-identical: no escaping is applied to it."""
+        result = _card_with("30", name="age")
+
+        assert "| `age` | categorical/text | - | Yes | `30` | 1 | 0.0% |" in result

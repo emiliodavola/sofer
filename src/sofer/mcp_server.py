@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 """MCP server exposing sofer's deterministic dataset pipeline to agents.
 
-Serves the pipeline as 15 MCP callables (10 logical tools), 3 resources, and
+Serves the pipeline as 19 MCP callables (10 logical tools), 3 resources, and
 3 prompts over stdio (fastmcp v3.4.x, optional ``mcp`` extra). Thin adapter
 over domain modules — never re-implements logic, never calls an LLM, and ships
 no remote/streamable-http transport in v1. Its network access is the HF upload
@@ -47,11 +47,12 @@ Security model (REVISION-2 design, findings CF-1/CF-2):
 Every tool docstring states its side effects and network usage verbatim.
 The token and approval phrase are never logged, returned, or placed in
 docstrings or resources; the unconfigured-approval preflight guidance carries
-the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only. The four
+the ``SOFER_MCP_APPROVAL_PHRASE`` variable NAME only. The five
 ``sofer_auth_status`` posture fields (``phrase_source``, ``server_process_id``,
-``server_started_at``, ``server_version``) are non-secret process-lifecycle
-metadata: ``phrase_source`` describes the configuration path only — the phrase,
-any phrase-derived value, and the configured env value never appear in them.
+``server_started_at``, ``server_version``, ``server_root``) are non-secret
+process-lifecycle metadata: ``phrase_source`` describes the configuration path
+only — the phrase, any phrase-derived value, and the configured env value never
+appear in them.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import hmac
 import io
 import ntpath
@@ -67,9 +69,10 @@ import re
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, ParamSpec, TypeVar
 
 from pydantic import Field
 
@@ -88,7 +91,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
         "--with 'sofer[mcp]' sofer-mcp --help"
     ) from _exc
 
-from . import _toml, failure_report, meta_edit, workflow
+from . import _toml, failure_report, file_edit, meta_edit, workflow
 from . import config as sofer_config
 from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
@@ -126,7 +129,7 @@ from .scanner import (
     copy_files,
     discover_files,
     format_stale_cache_warning,
-    merge_entries,
+    merge_entries_counted,
     move_to_raw,
     stale_cache_registrations,
     write_toml,
@@ -152,6 +155,16 @@ _OUTPUT_FIELD_DESCRIPTION: str = (
     "'... [truncated: N bytes]' marker when larger."
 )
 
+# Documented on both scan tools' output_schema (issue #345): the count is what
+# the TOML merge of that same call appended, so it agrees with the written
+# config and reads 0 on an idempotent re-scan.
+_REGISTERED_FIELD_DESCRIPTION: str = (
+    "Number of [[file]] entries this call appended, as reported by the TOML "
+    "merge itself: on a tree with nothing registered yet it equals the number "
+    "of newly registered files, and an idempotent re-scan reports 0. "
+    "Init placeholders the merge strips are never subtracted from it."
+)
+
 # Error-envelope fields merged into every tool's output_schema so the
 # machine-readable recovery metadata (error_code, message, next) survives
 # FastMCP's output_schema validation on BOTH success and error returns —
@@ -161,6 +174,14 @@ _ERROR_ENVELOPE_SCHEMA_FIELDS: dict[str, dict[str, str]] = {
     "message": {"type": "string"},
     "next": {"type": "object"},
     "hints": {"type": "object"},
+    # Issue #347: one schema home for every envelope's per-call root echo.
+    "effective_root": {
+        "type": "string",
+        "description": (
+            "Absolute resolved containment root this call used; platform-native "
+            "separators. Equals the registration root unless a per-call root was given."
+        ),
+    },
 }
 
 # Optional explicit-dialect echo (MSP-R18): the four CSV-reading tools add a
@@ -208,6 +229,9 @@ _PHASED_INSTRUCTIONS: str = (
     "prepare bakes whatever is there into the Dataset Card and LICENSE. On an "
     "MCP-driven run the agent completes them; the human supplies only what the "
     "data cannot determine (license, source).\n"
+    "    Optional registration shape: sofer_file_set replaces the [[file]] array, so a "
+    "recursive folder entry, column_types, convert_to_parquet or include_in_schema can be "
+    "declared without leaving the tool surface.\n"
     "  Phase 1 Build: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all\n"
     "  Phase 2 Publish: sofer_publish(dry_run=True) -> STOP (human approval) -> sofer_publish_confirm\n"
     "    Posture (issue #338): sofer_auth_status reports the configured visibility and, with "
@@ -215,6 +239,11 @@ _PHASED_INSTRUCTIONS: str = (
     "only with the approval phrase plus the exact target state. A publish whose configured "
     "visibility differs from the repository's is refused.\n"
     "Each tool lists Requires: and Next: so tools/list is self-sufficient.\n"
+    "Per-call root (issue #347): every path-bearing tool accepts root=<existing directory> and "
+    "runs that ONE call against it; the envelope echoes effective_root. Omitted (or blank) keeps "
+    "the registration root. SOFER_MCP_ROOT_ALLOWLIST (build-time, os.pathsep-separated) restricts "
+    "which roots are admitted. Resources always read the server root — read another dataset tree "
+    "through sofer_validate/sofer_codebook with root, not through sofer:// URIs.\n"
     "Publishing to Hugging Face Hub happens ONLY through sofer_publish_confirm, "
     "which requires explicit human authorization (acknowledge_risk=True; "
     "the config's confidential flag must be acknowledged; an approval phrase "
@@ -350,6 +379,17 @@ class PathOutsideRootError(MCPToolError):
     """A path argument or resource URI resolves outside the server root (CF-2)."""
 
 
+class RootUnavailableError(MCPToolError):
+    """A per-call ``root`` cannot be used (issue #347).
+
+    Raised for a missing directory, a path that exists but is not a directory,
+    or a root the configured ``SOFER_MCP_ROOT_ALLOWLIST`` does not admit. It is
+    a typed throw (transport-mapped to ``isError``) because the 10.3 envelope
+    ``error_code`` enum is closed and containment-adjacent failures never
+    travel through ``_error_envelope``.
+    """
+
+
 class HFTokenError(MCPToolError):
     """HF authentication is missing or empty (adv7)."""
 
@@ -361,6 +401,21 @@ class HFTokenError(MCPToolError):
 _SERVER_ROOT: Path | None = None
 _APPROVAL_PHRASE: str | None = None
 _EXEC_LOCK = threading.Lock()
+
+# Per-call containment root (issue #347). The context variable is bound by
+# ``_with_call_root`` for the duration of one tool call and reset in a
+# ``finally`` block, so it can never leak into the next call; ``_get_root()``
+# prefers it over the registration root.
+_EFFECTIVE_ROOT: ContextVar[Path | None] = ContextVar("sofer_effective_root", default=None)
+
+_MCP_ROOT_ALLOWLIST_ENV_VAR = "SOFER_MCP_ROOT_ALLOWLIST"
+_ROOT_ALLOWLIST: tuple[Path, ...] | None = None
+
+_ROOT_FIELD_DESCRIPTION = (
+    "Per-call containment root: an existing directory that every path argument of THIS call "
+    "resolves inside. Relative values anchor on the server root, never the cwd. Omitted (or "
+    "blank) = the registration root, unchanged. The call echoes effective_root in its envelope."
+)
 
 # Monotonic stamp state (issue #145): the previous server_started_at, kept so
 # back-to-back captures within one process strictly increase even when the
@@ -423,14 +478,151 @@ _SERVER_STARTED_AT: str = _next_started_at()
 _SERVER_VERSION: str = get_version()
 
 
-def _get_root() -> Path:
-    """Return the containment root captured by :func:`build_server`.
+def _registration_root() -> Path:
+    """Return the root captured at :func:`build_server` (never the per-call one).
 
-    Falls back to the resolved current working directory when no server was
-    built yet (unit-test convenience); real servers always set it at build
-    time.
+    The registration root stays the trusted default and the relative anchor for
+    a per-call ``root`` (issue #347); omitted-``root`` calls and the allowlist
+    gate are measured against it.
     """
     return _SERVER_ROOT if _SERVER_ROOT is not None else Path.cwd().resolve()
+
+
+def _get_root() -> Path:
+    """Return the containment root the current call must use.
+
+    Precedence (issue #347): the per-call root bound by
+    :func:`_with_call_root`, then the registration root captured by
+    :func:`build_server`, then the resolved current working directory when no
+    server was built yet (unit-test convenience). Real servers always set the
+    registration root at build time.
+    """
+    effective = _EFFECTIVE_ROOT.get()
+    if effective is not None:
+        return effective
+    return _registration_root()
+
+
+def _resolve_root_allowlist(raw: str | None) -> tuple[Path, ...] | None:
+    """Resolve ``SOFER_MCP_ROOT_ALLOWLIST`` into entries, read once per server.
+
+    Split on :data:`os.pathsep` — never commas, which are legal filename
+    characters on every supported platform. Blank segments (blank value, stray
+    separators) are dropped; a value that is blank after stripping means
+    unrestricted (``None``).
+
+    Args:
+        raw: The environment value, or ``None`` when unset.
+
+    Returns:
+        The resolved entries, or ``None`` when the list is unset/empty.
+    """
+    if raw is None or not raw.strip():
+        return None
+    entries: list[Path] = []
+    for part in raw.split(os.pathsep):
+        if not part.strip():
+            continue
+        entries.append(Path(part).expanduser().resolve())
+    return tuple(entries) or None
+
+
+def _resolve_call_root(raw: str) -> Path:
+    """Resolve one per-call ``root`` exactly as issue #347 pins it.
+
+    ``expanduser`` -> relative values anchor on the registration root (never
+    the ambient cwd) -> ``resolve()`` -> must exist and be a directory -> the
+    allowlist gate, when configured. Escaping relative roots (``..``) are legal
+    when they resolve to an existing directory: ``root`` IS the boundary, not a
+    path contained in one.
+
+    Args:
+        raw: The caller-supplied ``root`` value.
+
+    Returns:
+        The resolved directory.
+
+    Raises:
+        RootUnavailableError: The path is missing, is not a directory, or is
+            outside every configured allowlist entry (which names the entries).
+    """
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = _registration_root() / candidate
+    resolved = candidate.resolve()
+    if not resolved.exists():
+        raise RootUnavailableError(f"root not found: {resolved}")
+    if not resolved.is_dir():
+        raise RootUnavailableError(f"root exists but is not a directory: {resolved}")
+    allowlist = _ROOT_ALLOWLIST
+    if allowlist is not None and not any(resolved.is_relative_to(entry) for entry in allowlist):
+        entries = os.pathsep.join(str(entry) for entry in allowlist)
+        raise RootUnavailableError(
+            f"root is not allowed by {_MCP_ROOT_ALLOWLIST_ENV_VAR}: {resolved} (allowed: {entries})"
+        )
+    return resolved
+
+
+def _stamp_envelope(result: dict[str, Any]) -> None:
+    """Echo the effective root and root the continuation (issue #347).
+
+    A success envelope, a refusal and an error envelope all pass through the
+    decorator, so this is the single home for the echo: a future tool cannot
+    forget it. ``next.arguments.root`` is added only when the effective root
+    differs from the registration root, keeping today's chain payloads
+    byte-identical; human-gate and degraded shapes without ``arguments`` are
+    left untouched.
+
+    Args:
+        result: The dict a tool body returned.
+    """
+    effective = _get_root()
+    result["effective_root"] = str(effective)
+    if effective.resolve() == _registration_root().resolve():
+        return
+    next_call = result.get("next")
+    if not isinstance(next_call, dict):
+        return
+    arguments = next_call.get("arguments")
+    if isinstance(arguments, dict) and arguments:
+        arguments["root"] = str(effective)
+
+
+_ResultT = TypeVar("_ResultT")
+_ParamsT = ParamSpec("_ParamsT")
+
+
+def _with_call_root(fn: Callable[_ParamsT, _ResultT]) -> Callable[_ParamsT, _ResultT]:
+    """Bind one tool call's ``root`` for its duration and stamp its envelope.
+
+    Applied directly at each ``def sofer_*``. The wrapped body keeps its
+    ``root`` parameter and never reads it: resolution and the echo live in this
+    one place, and ``functools.wraps`` keeps the real signature visible to
+    FastMCP (including ``root``).
+
+    Args:
+        fn: The tool callable.
+
+    Returns:
+        The wrapped callable, with identical name, docstring and signature.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: _ParamsT.args, **kwargs: _ParamsT.kwargs) -> _ResultT:
+        raw = kwargs.get("root")
+        token = None
+        if raw is not None and str(raw).strip():
+            token = _EFFECTIVE_ROOT.set(_resolve_call_root(str(raw)))
+        try:
+            result = fn(*args, **kwargs)
+            if isinstance(result, dict):
+                _stamp_envelope(result)
+            return result
+        finally:
+            if token is not None:
+                _EFFECTIVE_ROOT.reset(token)
+
+    return wrapper
 
 
 @contextlib.contextmanager
@@ -536,6 +728,30 @@ def _dialect_envelope(delimiter: str | None, encoding: str | None) -> dict[str, 
 
 _WIN_DRIVE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z]:[/\\]")
 
+# Remedy appended to every containment refusal (issue #343): the caller of a
+# tool cannot read sofer's source, so the message itself must name the lever
+# that moves the root and the fact that changing it needs a host restart.
+_ROOT_REMEDY = "set SOFER_MCP_ROOT or --root at server start, then restart the host"
+
+
+def _outside_root_message(what: str, raw: str | Path, root: Path) -> str:
+    """Build an actionable containment refusal (issue #343).
+
+    The prefix ``"<what> resolves outside the server root"`` is substring-
+    asserted by existing tests and SHALL stay intact; the resolved root and the
+    remedy are appended, never reworded in.
+
+    Args:
+        what: Human-readable label for the offending argument (e.g. "config").
+        raw:  The raw user-supplied path (never re-resolved here).
+        root: The containment root the path was compared against.
+
+    Returns:
+        The refusal message naming the label, the root, the rejected path and
+        the remedy.
+    """
+    return f"{what} resolves outside the server root ({root.resolve()}): {raw} — {_ROOT_REMEDY}"
+
 
 def _is_absolute_or_drive(raw: str | Path) -> bool:
     """Return True when *raw* is absolute on POSIX or is a Windows drive/UNC path.
@@ -597,17 +813,17 @@ def _contained_path(
     """
     raw_str = str(raw)
     if not Path(raw_str).is_absolute() and _is_absolute_or_drive(raw_str):
-        raise PathOutsideRootError(f"{what} resolves outside the server root: {raw}")
+        raise PathOutsideRootError(_outside_root_message(what, raw, root))
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         expanded_str = str(candidate)
         if not candidate.is_absolute() and _is_absolute_or_drive(expanded_str):
-            raise PathOutsideRootError(f"{what} resolves outside the server root: {raw}")
+            raise PathOutsideRootError(_outside_root_message(what, raw, root))
         candidate = root / candidate
     resolved = candidate.resolve()
     root_resolved = root.resolve()
     if not resolved.is_relative_to(root_resolved):
-        raise PathOutsideRootError(f"{what} resolves outside the server root: {raw}")
+        raise PathOutsideRootError(_outside_root_message(what, raw, root))
     if extensions is not None and resolved.suffix.lower() not in extensions:
         allowed = ", ".join(extensions)
         raise MCPToolError(
@@ -662,7 +878,7 @@ def _validate_file_entries(cfg: DatasetConfig) -> list[str]:
     for entry in cfg.files:
         local = entry.resolve(base_dir)
         if not local.resolve().is_relative_to(root_resolved):
-            errors.append(f"[[file]] local resolves outside the server root: {local}")
+            errors.append(_outside_root_message("[[file]] local", local, root_resolved))
         if _remote_is_unsafe(entry.remote):
             errors.append(
                 f"[[file]] remote is unsafe (absolute or contains '..'): {entry.remote!r}"
@@ -718,7 +934,7 @@ def _validate_output_targets(
     for label, candidate in targets:
         resolved = Path(candidate).resolve()
         if not resolved.is_relative_to(root_resolved):
-            errors.append(f"{label} resolves outside the server root: {resolved}")
+            errors.append(_outside_root_message(label, resolved, root_resolved))
     return errors
 
 
@@ -752,8 +968,90 @@ def _validate_doc_files(cfg: DatasetConfig) -> list[str]:
             continue
         resolved = resolved.resolve()
         if not resolved.is_relative_to(root_resolved):
-            errors.append(f"[dataset] {field_name} resolves outside the server root: {resolved}")
+            errors.append(_outside_root_message(f"[dataset] {field_name}", resolved, root_resolved))
     return errors
+
+
+def _validate_file_set_entries(
+    entries: Sequence[Mapping[str, Any]], *, base_dir: Path, root: Path
+) -> list[str]:
+    """Containment and uniqueness checks for ``sofer_file_set`` (issue #344).
+
+    The model validates shape (``file_edit.normalize_entries``); this layer
+    validates what only the server knows: the local path must exist and stay
+    inside the containment root, a ``recursive`` entry must point at a
+    directory and a file entry at a file, remotes must be safe, and no two
+    entries may register the same local or remote. A recursive entry's remote
+    folder also SHALL NOT contain another entry's remote, which is the
+    double-registration the template's folder shape makes easy to create.
+
+    Args:
+        entries: Normalized ``[[file]]`` mappings.
+        base_dir: Directory relative locals resolve against (the TOML's own).
+        root: The containment root.
+
+    Returns:
+        Human-readable violation messages (empty when every entry is valid).
+    """
+    root_resolved = root.resolve()
+    errors: list[str] = []
+    local_seen: dict[Path, int] = {}
+    remote_seen: dict[str, int] = {}
+    remotes: list[tuple[int, str, bool]] = []
+    for index, entry in enumerate(entries, start=1):
+        local = Path(entry["local"]).expanduser()
+        if not local.is_absolute():
+            local = base_dir / local
+        local = local.resolve()
+        recursive = bool(entry.get("recursive"))
+        if not local.is_relative_to(root_resolved):
+            errors.append(
+                _outside_root_message(f"[[file]] local (entry {index})", local, root_resolved)
+            )
+        elif not local.exists():
+            errors.append(f"[[file]] local (entry {index}) not found: {local}")
+        elif recursive and not local.is_dir():
+            errors.append(
+                f"[[file]] local (entry {index}) must be a directory when recursive = true: {local}"
+            )
+        elif not recursive and not local.is_file():
+            errors.append(
+                f"[[file]] local (entry {index}) must be a file when recursive is not set: {local}"
+            )
+        previous_local = local_seen.get(local)
+        if previous_local is not None:
+            errors.append(
+                f"[[file]] local (entry {index}) duplicates entry {previous_local}: {local}"
+            )
+        else:
+            local_seen[local] = index
+        if _remote_is_unsafe(entry["remote"]):
+            errors.append(
+                f"[[file]] remote (entry {index}) is unsafe (absolute or contains '..'): "
+                f"{entry['remote']!r}"
+            )
+        normalized_remote = entry["remote"].replace("\\", "/").strip("/")
+        previous_remote = remote_seen.get(normalized_remote)
+        if previous_remote is not None:
+            errors.append(
+                f"[[file]] remote (entry {index}) duplicates entry {previous_remote}: "
+                f"{entry['remote']!r}"
+            )
+        else:
+            remote_seen[normalized_remote] = index
+        remotes.append((index, normalized_remote, recursive))
+    for index, prefix, recursive in remotes:
+        if not recursive or not prefix:
+            continue
+        for other_index, other_remote, _other_recursive in remotes:
+            if other_index == index:
+                continue
+            if other_remote == prefix or other_remote.startswith(prefix + "/"):
+                errors.append(
+                    f"[[file]] remote (entry {index}) folder {prefix!r} would double-register "
+                    f"entry {other_index}'s remote {other_remote!r}; use one shape or the other"
+                )
+    return list(dict.fromkeys(errors))
 
 
 def _reload_tool_config(start: Path) -> None:
@@ -1216,6 +1514,7 @@ def _refusal(
 # ---------------------------------------------------------------------------
 
 
+@_with_call_root
 def sofer_validate(
     config: Annotated[
         str,
@@ -1223,6 +1522,10 @@ def sofer_validate(
             description="Path to the dataset TOML file, relative to the server root or absolute inside it (e.g. 'dataset.toml')"
         ),
     ],
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Validate a dataset configuration and its files read-only.
 
@@ -1266,6 +1569,7 @@ def sofer_validate(
         }
 
 
+@_with_call_root
 def sofer_meta_check(
     config: Annotated[
         str,
@@ -1273,6 +1577,10 @@ def sofer_meta_check(
             description="Path to the dataset TOML file, relative to the server root or absolute inside it (e.g. 'dataset.toml')"
         ),
     ],
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Report the [meta] fields that still carry a sofer init placeholder, read-only.
 
@@ -1320,6 +1628,7 @@ def sofer_meta_check(
         }
 
 
+@_with_call_root
 def sofer_meta_set(
     config: Annotated[
         str,
@@ -1339,6 +1648,10 @@ def sofer_meta_set(
             description="When True, compute and verify the edit and report what it would write; the dataset TOML is left untouched."
         ),
     ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Write the given [meta] keys into the dataset TOML, preserving everything else.
 
@@ -1447,6 +1760,112 @@ def sofer_meta_set(
         }
 
 
+@_with_call_root
+def sofer_file_set(
+    config: Annotated[
+        str,
+        Field(description="Path to the dataset TOML file whose [[file]] entries are written"),
+    ],
+    entries: Annotated[
+        list[dict[str, Any]],
+        Field(
+            description=(
+                "Complete replacement list of [[file]] tables. Each supports local "
+                "(required, existing path under the server root), remote (required, "
+                "safe relative path), recursive, convert_to_parquet, upload_as_csv, "
+                'include_in_schema (booleans) and column_types ({column = "string"}); '
+                "an unknown key is refused naming the accepted set. Folder and file "
+                "remotes that would double-register are refused."
+            )
+        ),
+    ],
+    dry_run: Annotated[
+        bool,
+        Field(
+            description="When true, compute and verify the edit and report what it would write; the dataset TOML is left untouched."
+        ),
+    ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
+) -> dict[str, Any]:
+    """Write the [[file]] entries of the dataset TOML, preserving everything else.
+
+    Side effects: rewrites the dataset TOML's [[file]] array only (atomic tmp+os.replace; other keys, comments and tables byte-preserved) unless dry_run. Network usage: none.
+
+    When to use: when the registration shape matters — a recursive folder entry, column_types for a zero-padded code, convert_to_parquet/include_in_schema — or to replace the flat entries scan_apply produces. It is the only way to write [[file]] entries over MCP.
+    Example: sofer_file_set(config="dataset.toml", entries=[{"local": "raw/Labels", "remote": "Labels/", "recursive": True}])
+    Requires: dataset TOML exists under server root; every local exists and stays under the root; the edited document must still parse. Next: sofer_validate, then sofer_prepare.
+
+    Args:
+        config: Path to the dataset TOML, contained under the server root.
+        entries: The complete replacement list — this tool REPLACES the array,
+            it does not append (``sofer_scan_apply`` appends). An empty list is
+            refused while the file still registers entries, so a careless call
+            cannot erase the registrations.
+        dry_run: When ``True``, nothing is written.
+
+    Returns:
+        The standard envelope plus ``dry_run``, ``changed``, ``entries`` (the
+        number written) and ``config_errors``. Re-running with the entries the
+        file already holds changes nothing, so the call is idempotent.
+    """
+    with _tool_execution(), _capture_output() as (out, err):
+        try:
+            toml_path = _contained_path(
+                config, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        except PathOutsideRootError:
+            raise
+        try:
+            current = DatasetConfig.from_toml(toml_path, discovery_root=_get_root())
+        except Exception as exc:
+            return _refusal(
+                [f"Failed to read TOML: {exc}"],
+                tool_name="sofer_file_set",
+                config_path=config,
+            )
+        if not entries and current.files:
+            return _refusal(
+                [
+                    f"refusing to erase the {len(current.files)} existing [[file]] "
+                    "entries; pass the complete replacement list"
+                ],
+                tool_name="sofer_file_set",
+                config_path=config,
+            )
+        try:
+            normalized = file_edit.normalize_entries(entries)
+        except file_edit.FileEditError as exc:
+            return _refusal([str(exc)], tool_name="sofer_file_set", config_path=config)
+        errors = _validate_file_set_entries(normalized, base_dir=toml_path.parent, root=_get_root())
+        if errors:
+            return _refusal(errors, tool_name="sofer_file_set", config_path=config)
+        try:
+            result = file_edit.set_files(toml_path, normalized, dry_run=dry_run)
+        except file_edit.FileEditError as exc:
+            return _refusal([str(exc)], tool_name="sofer_file_set", config_path=config)
+        count = len(result.entries)
+        if dry_run:
+            print(f"  DRY RUN  {toml_path.name}: would write {count} [[file]] entries")
+        elif result.changed:
+            print(f"  OK  {toml_path.name}: wrote {count} [[file]] entries")
+        else:
+            print(f"  OK  {toml_path.name}: already up to date")
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "output": _captured_text(out, err),
+            "dry_run": result.dry_run,
+            "changed": result.changed,
+            "entries": count,
+            "config_errors": [],
+            "next": _workflow_next("sofer_file_set", config),
+        }
+
+
+@_with_call_root
 def sofer_prepare(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file under the server root")
@@ -1472,6 +1891,10 @@ def sofer_prepare(
             description="Verify the built package via datasets.load_dataset() when true; skips gracefully if datasets is not installed."
         ),
     ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Prepare a dataset package locally (Parquet conversion + docs).
 
@@ -1512,6 +1935,7 @@ def sofer_prepare(
         }
 
 
+@_with_call_root
 def sofer_publish(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file under the server root")
@@ -1561,6 +1985,10 @@ def sofer_publish(
             )
         ),
     ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Plan or perform a local delivery of a prepared dataset package.
 
@@ -1616,6 +2044,7 @@ def sofer_publish(
         }
 
 
+@_with_call_root
 def sofer_publish_confirm(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file under the server root")
@@ -1682,6 +2111,10 @@ def sofer_publish_confirm(
             )
         ),
     ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Upload a prepared dataset package to Hugging Face Hub.
 
@@ -1871,6 +2304,7 @@ def sofer_publish_confirm(
         }
 
 
+@_with_call_root
 def sofer_codebook(
     path: Annotated[
         str,
@@ -1908,6 +2342,10 @@ def sofer_codebook(
                 "csv_encoding); when omitted, the configured value applies."
             )
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Generate a markdown codebook for one data file.
@@ -1949,6 +2387,7 @@ def sofer_codebook(
         }
 
 
+@_with_call_root
 def sofer_codebook_all(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file under the server root")
@@ -1987,6 +2426,10 @@ def sofer_codebook_all(
                 "dataset's configured value applies."
             )
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Generate one codebook per [[file]] entry in a dataset config.
@@ -2043,6 +2486,7 @@ def sofer_codebook_all(
         }
 
 
+@_with_call_root
 def sofer_profile(
     dataset: Annotated[
         str,
@@ -2077,6 +2521,10 @@ def sofer_profile(
                 "csv_encoding); when omitted, the configured value applies."
             )
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Profile a dataset read-only and write a metadata.yaml document.
@@ -2142,6 +2590,7 @@ def sofer_profile(
         }
 
 
+@_with_call_root
 def sofer_profile_all(
     config: Annotated[
         str,
@@ -2169,6 +2618,10 @@ def sofer_profile_all(
                 "omitted, the configured csv_encoding applies."
             )
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Profile every [[file]] entry in a dataset config and write metadata.yaml documents.
@@ -2240,6 +2693,7 @@ def sofer_profile_all(
         }
 
 
+@_with_call_root
 def sofer_render(
     package: Annotated[
         str,
@@ -2254,6 +2708,10 @@ def sofer_render(
         ),
     ] = None,
     force: Annotated[bool, Field(description="Overwrite existing README.md when true.")] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Render README.md from a metadata.yaml document.
 
@@ -2299,6 +2757,7 @@ def sofer_render(
         }
 
 
+@_with_call_root
 def sofer_render_all(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file under the server root (batch render)")
@@ -2306,6 +2765,10 @@ def sofer_render_all(
     output_dir: Annotated[
         str | None,
         Field(description=_batch_output_dir_description("renders", sofer_config.RENDER_DIR)),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Render README.md for every [[file]] entry from its metadata.yaml.
@@ -2371,6 +2834,7 @@ def sofer_render_all(
         }
 
 
+@_with_call_root
 def sofer_auth_status(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file to check publish authorization for")
@@ -2385,6 +2849,10 @@ def sofer_auth_status(
             )
         ),
     ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Check whether a dataset is ready to publish (token, posture, approval phrase).
 
@@ -2414,16 +2882,18 @@ def sofer_auth_status(
     ``{"approval_phrase": "<from human>"}`` and no ``approval_phrase_*``
     key
 
-    The envelope carries four posture fields — non-secret
+    The envelope carries five posture fields — non-secret
     process-lifecycle metadata captured once at ``build_server`` and never
     re-derived: ``phrase_source`` (``"env" | "explicit" | "none"``; explicit
     argument > ``SOFER_MCP_APPROVAL_PHRASE`` > none; blank maps to
     ``"none"``, and a blank explicit argument never falls back to the
     environment), ``server_process_id`` (the hosting process id),
     ``server_started_at`` (an ISO-8601 UTC microsecond stamp that strictly
-    increases across builds — the restart-proof signal), and
+    increases across builds — the restart-proof signal),
     ``server_version`` (the package version from installed metadata,
-    non-empty, never raises). The phrase, any phrase-derived value, and the
+    non-empty, never raises), and ``server_root`` (issue #343: the resolved
+    containment root every path argument must stay inside; a non-secret path
+    the operator already chose). The phrase, any phrase-derived value, and the
     configured env value never appear in any posture field —
     ``phrase_source`` describes the configuration path only, and the
     unconfigured guidance keeps the variable NAME and the read-once/restart
@@ -2510,6 +2980,7 @@ def sofer_auth_status(
             "server_process_id": _SERVER_PROCESS_ID,
             "server_started_at": _SERVER_STARTED_AT,
             "server_version": _SERVER_VERSION,
+            "server_root": str(_get_root()),
             "next": _workflow_next("sofer_auth_status", config),
             "hints": next_hint,
             "config_errors": config_errors,
@@ -2543,6 +3014,7 @@ def _read_posture(cfg: DatasetConfig, token: str | None) -> tuple[str, bool | No
     return ("private" if observed else "public", observed)
 
 
+@_with_call_root
 def sofer_repo_settings(
     config: Annotated[
         str, Field(description="Path to the dataset TOML file whose target repository is inspected")
@@ -2570,6 +3042,10 @@ def sofer_repo_settings(
         bool,
         Field(description="When true, report what a write would change and change nothing."),
     ] = False,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
     """Read the target repository's visibility, and set it only with explicit authorization.
 
@@ -2747,6 +3223,7 @@ def _scan_prologue(
     return toml_path, raw_toml, toml_path.parent.resolve(), []
 
 
+@_with_call_root
 def sofer_scan_dry_run(
     config: Annotated[
         str,
@@ -2764,6 +3241,10 @@ def sofer_scan_dry_run(
                 "supported formats."
             )
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Discover unregistered data files in a dataset tree (read-only).
@@ -2835,9 +3316,11 @@ def sofer_scan_dry_run(
                 "message": str(exc),
                 "next": {},
             }
-        before = len(raw_toml.get("file", []))
-        merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
-        registered = len(merged.get("file", [])) - before
+        # #345: the count comes from the merge itself. Measuring it as a
+        # before/after difference of entry counts subtracted the ``raw/example*``
+        # init placeholders that this same merge strips, so every greenfield
+        # scan reported two fewer registrations than the TOML it wrote.
+        merged, registered = merge_entries_counted(discovered, raw_toml, base_dir, data_dir)
         try:
             planned = copy_files(discovered, base_dir, data_dir, dry_run=True, force=False)
         except FileExistsError as exc:
@@ -2887,6 +3370,7 @@ def sofer_scan_dry_run(
         }
 
 
+@_with_call_root
 def sofer_scan_apply(
     config: Annotated[
         str,
@@ -2907,6 +3391,10 @@ def sofer_scan_apply(
                 "supported formats."
             )
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Register discovered data files and copy them into the artifact cache.
@@ -2976,9 +3464,8 @@ def sofer_scan_apply(
                 "message": str(exc),
                 "next": {},
             }
-        before = len(raw_toml.get("file", []))
-        merged = merge_entries(discovered, raw_toml, base_dir, data_dir)
-        registered = len(merged.get("file", [])) - before
+        # #345: the count comes from the merge itself (see sofer_scan_dry_run).
+        merged, registered = merge_entries_counted(discovered, raw_toml, base_dir, data_dir)
         # Stale-registration report (#339/D5): name cache/-only entries whose
         # raw/ source is missing, without rewriting them.
         for line in format_stale_cache_warning(
@@ -3027,6 +3514,7 @@ def sofer_scan_apply(
         }
 
 
+@_with_call_root
 def sofer_init(
     name: Annotated[
         str, Field(description="Dataset name used for <name>.toml (e.g. 'my-dataset')")
@@ -3053,6 +3541,10 @@ def sofer_init(
         Field(
             description="Working directory for init; must stay under the server root. When None, the live process CWD is used only when it is a strict descendant of the server root; otherwise the call is refused — pass cwd='<dataset dir>' explicitly."
         ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
 ) -> dict[str, Any]:
     """Create <name>.toml from _INIT_TEMPLATE and scaffold raw/.
@@ -3114,7 +3606,7 @@ def sofer_init(
                 "exit_code": 1,
                 "output": _captured_text(out, err),
                 "config_errors": [
-                    f"[tool.sofer] raw_dir resolves outside the server root: {raw_dir.resolve()}"
+                    _outside_root_message("[tool.sofer] raw_dir", raw_dir.resolve(), base_dir)
                 ],
                 "error_code": "CONFIG_ERROR",
                 "message": "raw_dir outside root",
@@ -3416,6 +3908,30 @@ def _register_tools(server: _FastMCP) -> None:
         },
     )
     server.tool(
+        sofer_file_set,
+        description=_workflow_description(sofer_file_set),
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "exit_code": {"type": "integer"},
+                "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                "dry_run": {"type": "boolean"},
+                "changed": {"type": "boolean"},
+                "entries": {"type": "integer"},
+                "config_errors": {"type": "array"},
+                **_ERROR_ENVELOPE_SCHEMA_FIELDS,
+            },
+            "required": ["ok", "exit_code", "output"],
+        },
+    )
+    server.tool(
         sofer_prepare,
         description=_workflow_description(sofer_prepare),
         annotations={
@@ -3641,7 +4157,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "discovered": {"type": "integer"},
-                "registered": {"type": "integer"},
+                "registered": {
+                    "type": "integer",
+                    "description": _REGISTERED_FIELD_DESCRIPTION,
+                },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
@@ -3664,7 +4183,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "discovered": {"type": "integer"},
-                "registered": {"type": "integer"},
+                "registered": {
+                    "type": "integer",
+                    "description": _REGISTERED_FIELD_DESCRIPTION,
+                },
                 "copied": {"type": "integer"},
                 "moved": {"type": "integer"},
                 "config_errors": {"type": "array"},
@@ -3744,6 +4266,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "server_version": {
                     "type": "string",
                     "description": "Package version from installed metadata (_version.get_version()), non-empty, never raises.",
+                },
+                "server_root": {
+                    "type": "string",
+                    "description": "Resolved containment root this call may touch, captured at build_server (--root > SOFER_MCP_ROOT > process cwd). A non-secret path the operator already chose; every path argument resolves inside it (issue #343).",
                 },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
@@ -4146,7 +4672,11 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     """
     global _SERVER_ROOT, _APPROVAL_PHRASE, _PHRASE_SOURCE, _SERVER_PROCESS_ID
     global _SERVER_STARTED_AT, _SERVER_VERSION
+    global _ROOT_ALLOWLIST
     _SERVER_ROOT = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
+    # Issue #347: the allowlist is build-time posture, read exactly once like
+    # the approval phrase. Changing it requires a server restart.
+    _ROOT_ALLOWLIST = _resolve_root_allowlist(os.environ.get(_MCP_ROOT_ALLOWLIST_ENV_VAR))
     # Resolve the approval phrase exactly once: explicit argument >
     # SOFER_MCP_APPROVAL_PHRASE > none (fail-closed). A blank/whitespace value
     # maps to None; a blank explicit argument never falls back to the env.

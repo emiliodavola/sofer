@@ -66,6 +66,15 @@ def _tools_dict(tmp_path: Path) -> dict[str, Any]:
     return _run(_list_tools(build_server(root=tmp_path)))
 
 
+_ROOT_MCP_ONLY: frozenset[str] = frozenset({"root"})
+"""MSP-R21 (issue #347): the per-call containment root is MCP-only by design.
+
+A CLI invocation is a fresh process whose cwd *is* the directory the human
+chose; there is no stale registration to retarget, so the surface has no CLI
+counterpart. Every MCP area is exempt from mapping it.
+"""
+
+
 @dataclass(frozen=True)
 class AreaParity:
     """One CLI command area and its declared surface contract."""
@@ -352,6 +361,7 @@ class TestAreaParity:
                 set(area.flag_map.values())
                 | set(area.positionals.values())
                 | set(area.exempt_params)
+                | _ROOT_MCP_ONLY
             )
             stray = props - covered
             assert not stray, (

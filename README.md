@@ -140,6 +140,7 @@ stale (the TOML or any declared source file is newer than the newest Parquet).
 | ------- | ------------ | -------------- |
 | **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
 | **MCP `cwd` param** | The server root is chosen at startup by `--root PATH` or the `SOFER_MCP_ROOT` environment variable (the argument wins; with neither, the resolved process cwd). `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
+| **MCP per-call `root`** | Every path-bearing tool (18 of 19; `sofer_report_failure` excepted) accepts `root="<existing directory>"` and runs **that one call** against it. The envelope echoes `effective_root`, and a bound continuation carries `root` when it differs from the registration root. Omitted or blank keeps the registration root, byte-identical to before. `SOFER_MCP_ROOT_ALLOWLIST` (read once at server start, `os.pathsep`-separated — `;` on Windows, `:` on POSIX) admits only roots equal to or below an entry; the registration root and omitted-`root` calls are never gated. | Relative `root` values anchor on the registration root, never the cwd; a missing path, a file, or a root outside the allowlist raises `RootUnavailableError`. Resources (`sofer://…`) still read the server root — use the tool with `root` to read another tree. Cross-platform by construction: both sides are `resolve()`-ed and the only platform fact is `os.pathsep`. |
 | **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `registration_path` (keyed relative to `raw/`). |
 | **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
 | **Console encoding** | Nothing to do: the CLI never aborts on a character the active console encoding cannot represent — the character is substituted in the emitted text and the command keeps its documented exit code (CLI-R11). Unicode-capable terminals (Windows Terminal, VS Code, macOS, Linux) are unaffected and keep sofer's `⚠`/`✓`/`✗`/`→` markers. | Affects streams that are not a Unicode-capable console: output redirected to a file or pipe (`sofer scan --help > out.txt`), an IDE/CI capture, or a legacy code page forced with `PYTHONIOENCODING=cp1252`. The unencodable character is written as a placeholder (or an escape sequence) instead of raising `UnicodeEncodeError`. To keep every marker, set `PYTHONIOENCODING=utf-8`. |
@@ -377,6 +378,19 @@ exception type and message plus the active transfer backend, and retries once.
 A total failure reports `Result: 0 uploaded, N failed` and, when the repository
 ends up empty, says so explicitly.
 
+The package manifest on disk is the object of record for both the plan and the
+enforcement: `prepare` writes `build/manifest.json`, every later build phase
+(`codebook_all`, `profile_all`, `render_all`) refreshes it, and `publish` reads it
+instead of deriving its own. A manifest that does not declare the delivery this
+tree holds — a file it omits, or one it promises and the tree no longer has — is
+therefore refused before any network call, and so is a record that cannot be read
+(`UNREADABLE_MANIFEST`). The recovery is the same — re-run the build chain
+(`sofer prepare --force --all-files`) and retry — while `--dry-run` only warns and
+still prints the plan. Per-file codebooks are required exactly when the package
+carries the root `codebook.md` index: an index with no page under `codebooks/`
+blocks the confirm, while a package that never generated codebooks keeps them
+optional and ships without a warning.
+
 If a publish reports `0 uploaded, N failed` with an `I/O error`, re-run it with
 the xet transfer backend disabled **before** assuming the package or the token
 is wrong:
@@ -611,8 +625,8 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
 ```
 
-The server exposes 18 tool callables (`sofer_validate`, `sofer_meta_check`,
-`sofer_meta_set`, `sofer_prepare`,
+The server exposes 19 tool callables (`sofer_validate`, `sofer_meta_check`,
+`sofer_meta_set`, `sofer_file_set`, `sofer_prepare`,
 `sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
 `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
 `sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
@@ -631,6 +645,12 @@ arrives with a leading `/` and must still resolve inside the root.
 `sofer://status` is a static resource with no path variables. It returns the
 server posture snapshot (`approval_configured`, `phrase_source`, `root`,
 `version`, `started_at`, `tool_count`) and never reads a dataset file.
+
+`sofer_auth_status` reports that same root as `server_root` alongside its other
+posture fields, so an agent can preflight reachability before a write attempt.
+A containment refusal keeps its `<what> resolves outside the server root`
+prefix and appends the resolved root plus the remedy (`set SOFER_MCP_ROOT or
+--root at server start, then restart the host`).
 
 ### Canonical build chain — Phased (tools/list is self-sufficient)
 
@@ -655,6 +675,7 @@ Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer
 | 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force`, `extensions` | Phase 0 preview/apply after `init`. Both MOVE loose files into `raw/` unconditionally — the phase is mandatory, with no opt-in flag; `sofer_scan_dry_run` previews it without mutating. |
 | M | `sofer_meta_check` | `config` | Read the metadata state without running the validator; `readOnlyHint:true`. Reports the same warning `sofer_validate` prints. |
 | M | `sofer_meta_set` | `config`, `values`, `dry_run` | Write `[meta]` before Phase 1 (the only way over MCP): description/license/source/tags, plus any other card key. Preserves every other key and comment; `build_stale` names a `build/` tree that predates the write. Called with no `values` it writes nothing and returns a continuation asking for them. |
+| M | `sofer_file_set` | `config`, `entries`, `dry_run` | Replace the `[[file]]` array from the tool surface: the only way over MCP to declare a recursive folder entry, `column_types`, `convert_to_parquet`/`upload_as_csv` or `include_in_schema`. Every local must exist under the server root; a folder remote that would double-register a file entry is refused; an empty list is refused while entries exist. |
 | 1 | `sofer_validate` | `config` | Quick check; always first for existing datasets. |
 | 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | After validate; writes Parquet+README+LICENSE. |
 | 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | After prepare; batch codebooks. |
