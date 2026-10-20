@@ -5,1012 +5,179 @@
 > **Sofer** (Hebrew: סופר, "scribe") — a person who meticulously transcribes
 > sacred texts. This tool brings the same care to dataset documentation.
 
-**A command-line tool that turns a raw dataset into a documented, profiled,
-and quality-assessed package — combining automatic inference with human
-knowledge, and publishable to Hugging Face Hub or any local directory.**
+**sofer is both a command-line tool and a Model Context Protocol (MCP) server.
+Both turn a raw dataset into a documented, profiled, and quality-assessed
+package — combining automatic inference with human knowledge, and publishable
+to Hugging Face Hub or any local directory.**
 
 [![CI](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python >=3.10](https://img.shields.io/badge/python-3.10%2B-3776AB)](pyproject.toml)
 
-## Table of Contents
+## What sofer does
 
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Why](#why)
-- [Typical workflow](#typical-workflow)
-- [TOML reference](#toml-reference)
-- [Directory layout](#directory-layout)
-- [Profiling and rendering](#profiling-and-rendering)
-- [Command reference](#command-reference)
-- [Flags at a glance](#flags-at-a-glance)
-- [Troubleshooting HF uploads](#troubleshooting-hf-uploads)
-- [Assisted failure reporting](#assisted-failure-reporting)
-- [Data format support](#data-format-support)
-- [Parquet conversion limitations](#parquet-conversion-limitations)
-- [Split detection](#split-detection)
-- [Validation and quality checks](#validation-and-quality-checks)
-- [Verify the built package (prepare --verify)](#verify-the-built-package-prepare---verify)
-- [Codebook generation](#codebook-generation)
-- [AI and MCP server](#ai-and-mcp-server)
-- [Configuration](#configuration)
-- [Architecture summary](#architecture-summary)
-- [Quality gates and security scanning](#quality-gates-and-security-scanning)
-- [Related](#related)
+sofer fills the gap between a folder of raw files and a reusable dataset. It
+converts tabular data, inspects the schema, detects splits, profiles columns,
+flags possible PII, generates a codebook and a Dataset Card, and validates the
+result before delivery.
+
+It is for researchers, data stewards, and teams who publish datasets — whether
+the destination is Hugging Face Hub, an object store, or a local directory.
+
+**Principles:**
+
+- **Automate observations; do not invent semantic knowledge.** sofer marks an
+  inference as a guess, never as a fact.
+- **Confidential by default.** Repositories are private unless you explicitly
+  change the posture.
+- **Validate before publishing.** Never ship a broken dataset.
+- **Two-step workflow.** `prepare` builds offline; `publish` delivers.
+- **Read-only profiling.** `profile` never modifies the source dataset.
+- **Domain-agnostic.** Works for census data, surveys, spreadsheets, document
+  collections, and other tabular sources.
 
 ## Install
 
-sofer is a standalone CLI — install it once, run it anywhere. Install it from
-the git tag of the release you want. Replace `X.Y.Z` with the latest version
-(check the repo's tags/releases):
+Install the release tag you want, replacing `X.Y.Z`:
 
 ```bash
-# with uv (isolated tool install):
 uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
-# or with pip:
+```
+
+Then verify:
+
+```bash
+sofer --help
+sofer --version
+```
+
+`sofer --version` matches the release tag. Other supported install paths:
+
+```bash
 pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
-# alias — same wheel, explicit extra:
 pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
-# transient run without installing:
 uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
 
-Then run `sofer --help`. `sofer --version` always matches the release tag
-(e.g. `v0.3.0` installs as `sofer v0.3.0`).
+See [installation alternatives](docs/getting-started.md#install) for the full
+comparison.
 
 ## Quick start
 
+Run these commands from the dataset directory.
+
 ```bash
-# 1. Generate a configuration template
+# 1. Create the configuration and scaffold raw/
 sofer init my-dataset --user myuser
 
-# 2. Scan for data files
+# 2. Discover data files
 sofer scan my-dataset.toml
 
-# 3. Edit my-dataset.toml (repo_id, description, tags, etc.)
+# 3. Fill the human metadata step
+sofer meta check my-dataset.toml
+sofer meta set my-dataset.toml \
+  --set description="<what the data contains>" \
+  --set license="<license from the data owner>" \
+  --set source="<source organisation>" \
+  --set tags="<tag1>,<tag2>"
 
 # 4. Build the package locally — no network calls
 sofer prepare my-dataset.toml
 
-# 5. Publish to Hugging Face Hub (or --target local)
-sofer publish my-dataset.toml
+# 5. Inspect the result in build/
+
+# 6. Publish as a separate, explicit step
+sofer publish my-dataset.toml --dry-run
+sofer publish my-dataset.toml --target local --output ./out/   # no network
+# or: sofer publish my-dataset.toml                            # Hugging Face Hub
 ```
 
-See [Typical workflow](#typical-workflow) for the full annotated walkthrough.
+> **`scan` moves files.** Phase 1 MOVEs loose supported files into `raw/`,
+> preserving the tree; Phase 2 copies `raw/` to `cache/`. The move keeps the
+> registered sources in `raw/`, not only in the disposable `cache/`.
 
-## Why
+> **Local build is not publishing.** `prepare` writes the package to `build/`
+> and never contacts Hugging Face. Inspect and edit the artifacts before you
+> publish.
 
-Sharing data for analysis is hard. The [Leek group guide](https://github.com/jtleek/datasharing)
-defines the gold standard: ship (1) raw data, (2) tidy data, (3) a codebook,
-and (4) a recipe. sofer fills the gap between your local files and a
-well-documented, reusable dataset — whether it ends up on Hugging Face Hub,
-in an object store, or in a local directory.
+> **Repositories are private by default.** A public target is a separate
+> decision and needs explicit authorization. See [Security](docs/security.md).
 
-**Key principles:**
+## What the package contains
 
-- **Automate observations; don't invent semantic knowledge.**
-  sofer infers what is reliably inferable and marks everything else as a
-  guess — it never presents an inference as a fact.
-- **Confidential by default.** Repos are private unless you say otherwise.
-- **Validate before publishing.** Never ship a broken dataset.
-- **Self-documenting.** Every dataset gets structured metadata, a codebook,
-  and a README.
-- **Two-step workflow.** `prepare` generates everything offline; `publish`
-  delivers the prepared package. Inspect and edit artifacts before they go
-  anywhere.
-- **Read-only profiling.** `profile` never modifies the source dataset.
-- **Domain-agnostic.** Works for census data, survey exports, shapefiles,
-  document collections — anything you'd put in a dataset repository.
-
-## Typical workflow
-
-```bash
-# 1. Create a configuration template (use --user to set repo_id "myuser/my-dataset")
-#    Template uses Windows-safe placeholder [[file]] local = "raw/example.csv" (no colon, valid NTFS)
-sofer init my-dataset --user myuser
-
-# 2. Scan for data files (auto-registers all CSV, Parquet, Excel, JSONL files)
-sofer scan my-dataset.toml
-
-# 3. Edit my-dataset.toml (repo_id, description, tags, etc.)
-
-# 4. Generate the dataset package locally — zero network calls:
-#    Parquet conversion, Dataset Card (README.md), LICENSE, schema report
-sofer prepare my-dataset.toml
-
-#    (optionally with per-file codebooks)
-sofer prepare my-dataset.toml --all-files
-
-# 5. Validate locally — no network calls
-sofer validate my-dataset.toml
-
-# 6. Publish to Hugging Face (auto-creates the repo if missing)
-sofer publish my-dataset.toml
-
-#    ...or copy the package to a local directory (no network)
-sofer publish my-dataset.toml --target local --output ./out/
+```text
+build/                  prepare output; publish input
+├── *.parquet           converted data (or originals with convert_to_parquet = false)
+├── README.md           generated Dataset Card
+├── LICENSE             generated from [meta] license
+├── manifest.json       delivery record used by publish
+├── codebook.md         root index, with --all-files
+└── codebooks/          one page per file, with --all-files
 ```
 
-`publish` re-runs `prepare` automatically whenever the package is missing or
-stale (the TOML or any declared source file is newer than the newest Parquet).
+The source layout is `raw/` → `cache/` → `build/`:
 
-### Windows notes — CWD, placeholders, and separators
+- `raw/` is the tracked source root.
+- `cache/` is the gitignored artifact cache used by `scan`.
+- `build/` is the package directory, configurable with `[dataset] build_dir`.
 
-| Topic | What to do | Why / detail |
-| ------- | ------------ | -------------- |
-| **CLI CWD** | Always run `sofer init` from the dataset directory (e.g. `C:\Users\...\test`). The CLI uses live `Path.cwd()` — `test.toml` and `raw/` are created exactly where you run it. | Running from the parent creates `test.toml`/`raw/` in the wrong place. `cd` into the dataset dir first. |
-| **MCP `cwd` param** | The server root is chosen at startup by `--root PATH` or the `SOFER_MCP_ROOT` environment variable (the argument wins; with neither, the resolved process cwd). `sofer_init` has an optional `cwd`. When `cwd` is `None` it uses the live `Path.cwd()` only when that is a **strict descendant** of the server root; otherwise the call is REFUSED (fails closed) naming the required `cwd="<dataset dir>"` argument — it does **not** fall back to the server root. An explicit `cwd="C:/Users/.../Desktop/test"` is still supported as a per-call `effective_root` via `_contained_path` and never mutates the global root. | Rejects with `PathOutsideRootError` for explicit `cwd` outside the server root (no `../` above root, no `C:/evil`, no symlink escape). The `cwd=None` auto case is contained by a strict `is_relative_to` descendant check — never escapes, never mutates `_SERVER_ROOT`, and refuses (naming `cwd`) instead of falling back when the live cwd is not a strict descendant. |
-| **MCP per-call `root`** | Every path-bearing tool (18 of 19; `sofer_report_failure` excepted) accepts `root="<existing directory>"` and runs **that one call** against it. The envelope echoes `effective_root`, and a bound continuation carries `root` when it differs from the registration root. Omitted or blank keeps the registration root, byte-identical to before. `SOFER_MCP_ROOT_ALLOWLIST` (read once at server start, `os.pathsep`-separated — `;` on Windows, `:` on POSIX) admits only roots equal to or below an entry; the registration root and omitted-`root` calls are never gated. | Relative `root` values anchor on the registration root, never the cwd; a missing path, a file, or a root outside the allowlist raises `RootUnavailableError`. Resources (`sofer://…`) still read the server root — use the tool with `root` to read another tree. Cross-platform by construction: both sides are `resolve()`-ed and the only platform fact is `os.pathsep`. |
-| **Placeholder** | The template uses `local = "raw/example.csv"` — valid NTFS (`:` is reserved for drive/ADS). The old `TODO: raw/...` was invalid and made `sofer_validate` fail. After `init`, run `sofer_scan_apply` to replace the placeholder with real entries (e.g. `cache/DATA_GOT_ALL.xlsx`, `cache/dataset.xlsx`). | `raw/example.csv` is a harmless stub; `scan` overwrites the `[[file]]` list with discovered files via `registration_path` (keyed relative to `raw/`). |
-| **Path separators** | Always write `raw/` and `cache/` with forward slashes in TOML (`raw/example.csv`, `cache/file.csv`). Both CLI and MCP normalize to POSIX internally. | Works on Windows and POSIX; `ntpath.splitdrive` would treat `C:/...` as absolute, but `raw/...` stays relative and contained. |
-| **Console encoding** | Nothing to do: the CLI never aborts on a character the active console encoding cannot represent — the character is substituted in the emitted text and the command keeps its documented exit code (CLI-R11). Unicode-capable terminals (Windows Terminal, VS Code, macOS, Linux) are unaffected and keep sofer's `⚠`/`✓`/`✗`/`→` markers. | Affects streams that are not a Unicode-capable console: output redirected to a file or pipe (`sofer scan --help > out.txt`), an IDE/CI capture, or a legacy code page forced with `PYTHONIOENCODING=cp1252`. The unencodable character is written as a placeholder (or an escape sequence) instead of raising `UnicodeEncodeError`. To keep every marker, set `PYTHONIOENCODING=utf-8`. |
+Supported input formats: CSV (`.csv`), TSV (`.tsv`), Parquet (`.parquet`),
+Excel (`.xlsx`), and JSON Lines (`.jsonl`). See
+[Dataset configuration](docs/dataset-config.md#source-layout) and
+[Data package](docs/data-package.md#supported-formats) for conversion rules,
+limitations, and splits.
 
-Reproducible greenfield chain (run from the correct CWD / `cwd` — issue #113 checklist f):
+## MCP for AI agents
 
-```bash
-# CLI (from C:\Users\...\Desktop\test):
-sofer init test --user <hf-user>
-sofer scan test.toml              # or: sofer scan --dry-run first
-sofer validate test.toml
-sofer prepare test.toml
-sofer codebook --all-files --config test.toml   # or sofer codebook_all via MCP
-# profile/render are optional triage before publish:
-# sofer profile / sofer render --all-files
-sofer publish test.toml --dry-run   # review build/ diff
-# after human approval:
-sofer publish test.toml             # --target hf (needs HF_TOKEN)
-```
+sofer ships a stdio Model Context Protocol server with **19 tools**, **4
+resources**, and **3 prompts**. It exposes the same deterministic pipeline and
+calls no LLM; the only network access is the Hugging Face upload in
+`sofer_publish_confirm`. `fastmcp` is included by default, and `sofer[mcp]` is
+an alias for the same wheel.
+
+Use `sofer mcp add --agent <opencode|codex|gemini|pi|hermes|all>` to register
+it. The canonical chain is:
 
 ```python
-# MCP (server root must contain the dataset dir; cwd stays under root):
-sofer_init(name="test", user="<hf-user>", cwd="C:/Users/.../Desktop/test")
-sofer_scan_dry_run(config="test.toml")   # preview — no writes
-sofer_scan_apply(config="test.toml")     # registers DATA_GOT_ALL.xlsx + dataset.xlsx -> cache/
-sofer_validate(config="test.toml")       # must pass before build
-sofer_prepare(config="test.toml")
-sofer_codebook_all(config="test.toml")
-sofer_profile_all(config="test.toml")
-sofer_render_all(config="test.toml")
-sofer_publish(config="test.toml", dry_run=True)   # STOP — human reviews build/
-sofer_auth_status(config="test.toml")             # preflight: token / confidential / approval_phrase
-# after approval:
-sofer_publish_confirm(config="test.toml", acknowledge_risk=True)
+# Phase 0 Bootstrap
+sofer_init(name="my-dataset", user="myuser")
+sofer_scan_apply(config="my-dataset.toml")
+sofer_meta_set(config="my-dataset.toml", values={"license": "<license>"})
+# Phase 1 Build
+sofer_validate(config="my-dataset.toml")
+sofer_prepare(config="my-dataset.toml", output_dir=None, run_checks=True, force=False)
+sofer_codebook_all(config="my-dataset.toml")
+sofer_profile_all(config="my-dataset.toml")
+sofer_render_all(config="my-dataset.toml")
+# Phase 2 Publish
+sofer_publish(config="my-dataset.toml", dry_run=True)
 ```
 
-> If a previous buggy run left `C:\Users\...\Desktop\test.toml` or `C:\Users\...\Desktop\raw\` in the parent, delete them — re-running `sofer_init` from the correct `C:\Users\...\Desktop\test` is idempotent and will not duplicate parent artifacts.
+See [MCP server](docs/mcp.md) and [Agent setup](docs/agent-setup.md).
 
-## TOML reference
+## Documentation
 
-```toml
-[dataset]
-name = "my-dataset"
-repo_id = "your-username/my-dataset"
-private = true
-build_dir = "build"   # prepare output directory (default: "build")
-
-[meta]
-description = "Short description"
-license = "MIT"
-tags = ["tag1", "tag2"]
-# Those three are an example, not the whole set: every [meta] key the card
-# reads is listed in openspec/specs/repo-compliance/spec.md §2.1.1.
-
-# Every file or directory to publish gets its own [[file]] section.
-# Source files live in raw/; scan copies to cache/ (cache/ is what prepare reads).
-[[file]]
-local = "cache/file.csv"
-remote = "file.csv"
-
-[[file]]
-local = "cache/documents/"
-remote = "docs/"
-recursive = true
-
-# Validation checks: run before every publish.
-[[check]]
-min_files = 2
-
-[[check]]
-columns = "file.csv"
-expected = ["column_a", "column_b"]
-
-# Quality checks: run automatically with sensible defaults.
-# Uncomment to customise severity or thresholds:
-# [[quality]]
-# check = "duplicates"
-# severity = "fail"
-#
-# [[quality]]
-# check = "null_profiling"
-# max_null_pct = 15.0
-```
-
-## Directory layout
-
-```
-raw/            tracked source root — loose CSV/XLSX/JSONL MOVEs to raw/<relative> then scan copies to cache/ (e.g. raw/DPTO.csv -> cache/DPTO.csv)
-cache/          sofer artifact cache (OUTPUT_DIR, gitignored) — scan destination (Phase 2 copy keyed relative to raw/); codebook --all-files writes build/codebooks/ + build/codebook.md
-build/          prepare output + publish input (per-dataset [dataset] build_dir, default "build")
-```
-
-Pipeline: `raw/` (tracked) -> `cache/` (gitignored) -> `build/` (gitignored)
-
-```
-raw/DPTO.csv                -> cache/DPTO.csv                -> build/*.parquet
-raw/Labels/etiquetas_a.csv  -> cache/Labels/etiquetas_a.csv  -> build/*.parquet
-```
-
-`sofer init` scaffolds `raw/` (`mkdir -p raw/`, idempotent); `sofer init --move-existing` moves
-depth-1 supported files into `raw/` (opt-in, `--dry-run` previews, `--force` skips prompt).
-`sofer scan` MOVEs loose supported files outside `raw/`/`cache/`/`EXCLUSIONS` into
-`raw/<relative_to(base_dir)>` preserving tree (`mkdir -p` parents, `check_raw_collisions`
-before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then
-copies `raw/` → `cache/` keyed relative to `raw/`. The move is not optional in either
-scan surface: `sofer_scan_apply` runs it unconditionally, like the CLI, so the registered
-sources never live only in the disposable `cache/`.
-
-## Profiling and rendering
-
-`profile` and `render` form a lightweight, read-only documentation pipeline
-that works on a dataset file alone — no TOML needed:
-
-```bash
-# 1. Introspect a dataset and write metadata.yaml next to it (source untouched)
-sofer profile raw/contacts.csv
-# Batch: one metadata.yaml per [[file]] under cache/profiles/<rel_stem>.metadata.yaml
-sofer profile dataset.toml --all-files
-sofer profile dataset.toml --all-files --output ./out   # Option B: rel outputs anchor to TOML dir
-# For .xlsx with N>1 sheets, N files are emitted as profiles/<rel>/<stem>__<sanitized>.metadata.yaml
-# (single-sheet stays stem.metadata.yaml), reusing sanitize_sheet_name (lower->NFKD->ascii->space->_->[^a-z0-9_-]->_->__+->_->strip, empty->sheet) with seen _{n} dedup and normalized __+->_ collision (partial-write then ValueError naming ::sheet), mirroring codebook/prepare stem__sheet parity
-# Overwrite guard: without --force an existing destination raises FileExistsError
-sofer profile raw/contacts.csv --output ./out --force    # overwrite
-
-# 2. Render a status-annotated README.md from that metadata
-sofer render raw/            # directory containing metadata.yaml
-sofer render raw/metadata.yaml   # ...or the file directly
-# Batch: one README per [[file]] under cache/renders/<rel_stem>.README.md
-sofer render dataset.toml --all-files
-sofer render dataset.toml --all-files --output ./out
-# For .xlsx with N>1 sheets, N READMEs are emitted as renders/<rel>/<stem>__<sanitized>.README.md
-# (single-sheet stays stem.README.md) with the same sanitization/dedup/collision parity as profile
-sofer render raw/ --output ./out --force
-```
-
-`metadata.yaml` is the machine-readable source of truth; `render` is a pure
-projection of it — it never recomputes inference. Inference states are always
-rendered distinctly so a reader can tell a fact from a guess:
-
-| Status | Meaning | Rendered |
-| --- | --- | --- |
-| `confirmed` | high-confidence, corroborated inference | `email` |
-| `inferred` | plausible but unverified guess | `email (inferred, 78%)` |
-| `unknown` | not reliably inferable | `unknown` |
-
-Unknown human-input fields (description, license, source) render as `unknown`
-too — never blank, never fabricated.
-
-### Semantic types and PII detection
-
-`profile` distinguishes **what a column is** (semantic type) from **whether it
-is sensitive** (possible PII) — two independent, extensible detector sets:
-
-- **Semantic type** — the *meaning* of a column beyond its storage type
-  (`integer` → `identifier`, a value matching an email pattern → `email`).
-  Each detection carries a confidence score: `match_rate × prior`, where the
-  prior reflects how reliable the pattern itself is.
-- **Possible PII** — heuristic detection of potentially sensitive data
-  (email, phone, …). Always reported as **`possible_pii`**, never as a
-  categorical verdict: a pattern match is an observation, not a legal or
-  ethical conclusion.
-
-```yaml
-# excerpt from metadata.yaml
-schema:
-  - name: email
-    storage_type: categorical/text
-    semantic_type:
-      type: email
-      status: confirmed          # confirmed | inferred | unknown
-      confidence: 0.98
-    pii:
-      - label: email
-        note: possible_pii
-```
-
-Detectors are pluggable — adding a new semantic type or PII pattern is a new
-detector class, no changes to the pipeline.
-
-## Command reference
-
-| Command | Description |
+| Task | Read |
 | --- | --- |
-| `init <name>` | Generate a ready-to-edit `.toml` template with Windows-safe placeholder `[[file]] local = "raw/example.csv"` (valid NTFS, `ntpath.splitdrive` → `""`, no colon). Requires `--user USER` (HF username/org for `repo_id "USER/<name>"`); a missing `--user` exits 2, and placeholder (`YOUR_USER`) or unsafe identity values exit 1 before any write — the success line prints the absolute `config_path`. |
-| `scan [config.toml]` | MOVE loose supported files to `raw/<relative>` preserving tree (`mkdir -p raw/`, `check_raw_collisions` before any move, `--dry-run` prints `-> raw/<rel>`, `--force`/`[y/N]` gate, atomic), then key each file relative to `raw/` (`raw/DPTO.csv` → `cache/DPTO.csv`) by its path relative to `raw/`, register in TOML, copy to `cache/`. Flags: `--dry-run`, `--force`, `--ext` (repeatable filter). |
-| `meta check <config.toml>` | Report the `[meta]` fields that still carry an `init` placeholder (empty, or starting with `TODO`, `YOUR_`, `example` — `meta_placeholder_prefixes`). Read-only, and informational: the exit code is 0 whatever it reports, exactly like the `sofer validate` warning it mirrors; only an unreadable config exits 1. `--json` emits the stable status object. |
-| `meta set <config.toml> --set KEY=VALUE` | Write `[meta]` keys into the dataset TOML, preserving every other key, comment and table. `--set` is repeatable and reads the value per the key's kind: text verbatim, a list as comma-separated items (`--set tags=a,b`), a flag as `true`/`false`. `--dry-run` reports the plan and writes nothing; `--json` emits the stable status object. The write is atomic, a refusal writes nothing, and re-running with the values the file already holds writes nothing. 38 keys are settable — every `[meta]` key the pipeline reads. |
-| `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` | Register `sofer-mcp` with the selected agent(s). Flags: `--scope user\|project`, `--cwd PATH` (absolute, must be an existing directory), `--timeout SECONDS`, `--connect-timeout SECONDS`, `--no-timeout`, `--dry-run`. Idempotent, preserves others, backs up to `.bak`, atomic write, per-agent env (`HF_TOKEN`, `SOFER_MCP_APPROVAL_PHRASE`) and per-agent host timeouts. Prefers native `mcp add` when available. |
-| `mcp remove --agent <...\|all>` | Remove `sofer-mcp` from the selected agent(s). Flags: `--scope`, `--dry-run`. Idempotent, preserves others, backs up, atomic, prefers native `mcp remove`. |
-| `mcp doctor [--agent <...\|all>] [--json]` | Measure the **real** cold start: spawn `sofer-mcp` (or the module entry point when the console script is not on `PATH`) and time the stdio `initialize` round trip, printing it beside the per-agent entry key and the value `mcp add` writes there. Budget: `[tool.sofer] mcp_connect_timeout_seconds`. Informational — exceeding the budget never changes the exit code, because a slow machine is not a broken registration. Reads and writes nothing. |
-| `profile <dataset>` | Introspect a dataset file read-only (CSV, TSV, Parquet, Excel, JSONL) and write a `metadata.yaml` documenting the detected schema, per-column semantic types, and possible PII. Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/profiles/<rel_stem>.metadata.yaml` or `__<sanitized>.metadata.yaml` per sheet for `.xlsx` N>1, `PurePath.suffixes`, sanitization + `seen _{n}`, normalized `__+`→`_` collision `ValueError` with `::sheet`), `--force` (overwrite guard), `--config` (TOML path for batch), `--delimiter D` / `--encoding E` (explicit CSV dialect, wins over config). Relative `--output` anchors to TOML dir (Option B); `cache/` untouched when `--output` given. |
-| `render <package>` | Render a status-annotated `README.md` from `metadata.yaml` (the file itself or the directory containing it). Flags: `--output DIR`, `--all-files` (TOML `[[file]]` → `cache/renders/<rel_stem>.README.md` or `__<sanitized>.README.md` per sheet for `.xlsx` N>1 with same sanitization/dedup/collision parity, skip missing `metadata.yaml`), `--force`, `--config`. |
-| `codebook <file>` | Generate a markdown codebook for one file. Supports CSV, TSV, Parquet, Excel, JSONL. Flags: `-o/--output FILE`, `--max-sample N`, `--delimiter D` / `--encoding E` (explicit CSV dialect, wins over config). |
-| `codebook --all-files` | Generate one codebook per `[[file]]` entry under the package `build_dir` (`build/codebooks/`), plus a root `build/codebook.md` index. Use `--config` to specify the TOML file, `--output` to override the directory, and `--delimiter D` / `--encoding E` to override the dataset `[meta]` dialect for every file. |
-| `prepare <config.toml>` | Generate the full dataset package locally: CSV→Parquet conversion, cross-file schema checks, schema report, Dataset Card (`README.md`), `LICENSE`, and — with `--all-files` — per-file codebooks. Never contacts HF. Flags: `--output DIR` (default `[dataset] build_dir`), `--all-files`, `--no-checks`, `--force`, `--verify`. Orphan pruning: with `--force` removes stale files not in `expanded_planned_remotes` plus `README.md`/`LICENSE`/`codebook.md`/`codebooks/**` (idempotent; `--force` off leaves orphans). |
-| `publish <config.toml>` | Deliver the prepared package: `--target hf` (default) ensures the HF repo, gates on the quality report, and pushes the package in a single `upload_folder` call; `--target local` copies the package to `--output` with no network. Auto-prepares when artifacts are stale or missing. Flags: `--target hf\|local`, `--output DIR`, `--force`, `--keep-csv`, `--dry-run`, `--clean` (delete build after successful `hf` upload only when `fail==0`, quality passed, not `--dry-run`; `--output` anchoring via `resolve_output_dir`), `--clean-cache`/`--all` (also delete `cache/` at `cfg._base_dir/cache`, shared tool-wide — sibling datasets may be affected; requires `--clean`). For `--target local`, `--clean` deletes the resolved destination only. |
-| `validate <config.toml>` | Verify config + data integrity + quality checks. Never contacts HF. |
-| `report-failure <file>` | Retry sending a failure report persisted by the assisted failure reporter (JSON under the sofer state directory). Prints the created issue URL on success, or the saved path, retry command, manual `github.com/<repo>/issues/new` URL and `gh auth login` when `gh` is missing, unauthenticated, or offline. |
-| `--help` | Detailed help for any command. |
-| `sofer-mcp` | Launch the MCP server over stdio (15 tools, 4 resources, 3 prompts). Requires the mcp extra — see AI and MCP server. |
-
-> `sofer upload` was removed in favor of `prepare` + `publish` — the
-> generation half (offline, inspectable) and the delivery half (network).
-
-### Flags at a glance
-
-| Flag | Commands | What it does |
-| --- | --- | --- |
-| `--keep-csv` | `publish` (HF target only) | Also upload the original CSV alongside the converted Parquet; no effect with `--target local`. |
-| `--no-checks` | `prepare` | Skip the structural and quality validators — generate the package without running checks. |
-| `--force` | `init`, `prepare`, `publish`, `profile`, `render`, `scan` | Overwrite existing artifacts or destination files, and skip the interactive confirmation prompt. |
-| `--dry-run` | `init`, `publish`, `scan` | Preview the run without side effects — no network calls, no file copies, no TOML writes. |
-| `--clean` | `publish` | Delete the build directory after a successful `hf` publish (`fail==0`, quality passed, not `--dry-run`); build-only by default. Anchored via `resolve_output_dir(cfg, --output)` so `--output ./staging` deletes `./staging`. For `local`, deletes the resolved destination only; without `--clean` nothing is deleted. |
-| `--clean-cache` / `--all` | `publish` (with `--clean`) | Also delete `cache/` (`cfg._base_dir/cache`, `config.OUTPUT_DIR`, shared tool-wide). Requires explicit opt-in; sibling datasets share `cache/` — warn before use. |
-| `--all-files` | `codebook`, `prepare`, `profile`, `render` | Batch mode: generate one artifact per `[[file]]` entry (`build/codebooks/`, `build/codebooks/`, `cache/profiles/`, `cache/renders/`); requires `[[file]]` entries; collisions raise `ValueError`. |
-| `--config` | `codebook`, `profile`, `render` | Path to the TOML config for `--all-files` (default: `default_config_name` from `[tool.sofer]`). |
-| `--delimiter D` / `--encoding E` | `codebook`, `profile` | Optional explicit CSV dialect for this invocation. Resolution: explicit value → configured value (single-file: `[tool.sofer]`; `codebook --all-files`: dataset `[meta]`) → existing reader fallback. Omitted = unchanged. `.tsv` stays tab-delimited and the explicit delimiter applies to `.csv`; the explicit encoding applies to `.csv`/`.tsv`. A supplied value is echoed on stderr. |
-| `--ext <ext>` | `scan` | Filter scan to specific extensions (repeatable, e.g. `--ext csv --ext jsonl`); omitted means all supported formats. |
-| `--user USER` | `init` | Hugging Face username/org for `repo_id` (e.g. `--user myuser` → `repo_id "myuser/<name>"`); required — missing `--user` exits 2, placeholder (`YOUR_USER`) or unsafe values exit 1, no file written. |
-| `--output DIR` | `codebook`, `prepare`, `publish`, `profile`, `render` | Write output to `DIR` instead of the default location (`[dataset] build_dir` for `prepare`; for `codebook`, `-o`/`--output` is the output file path, default stdout). `publish --clean` respects `--output` for build only; `cache/` always at `cfg._base_dir/cache`. |
-| `--agent` / `--scope` | `mcp add`, `mcp remove`, `mcp doctor` | `mcp add --agent <opencode\|codex\|gemini\|pi\|hermes\|all> [--scope user\|project] [--cwd PATH] [--user-config PATH] [--dry-run]`; `remove` same without `--cwd`; `doctor --agent <opencode\|codex\|gemini\|pi\|hermes\|all>` restricts the report to one agent's entry key (it takes no `--scope`). |
-| `--cwd PATH` | `mcp add` | Absolute cwd for the server; must be an existing directory (otherwise exit 1 naming the resolved path). A tree outside the home and the process cwd is accepted with a warning naming it. |
-| `--user-config PATH` | `mcp add`, `mcp remove` | Explicit user-scope config **file** for the selected agent; wins over the adapter's env override (Pi's `PI_CODING_AGENT_DIR`, codex's `CODEX_HOME`) and the `Path.home()` default. Rejected with `--agent all` — one path cannot name four different files. |
-| `--dry-run` (mcp) | `mcp add`, `mcp remove` | Preview without writing — no file or `.bak` created. |
-| `--timeout SECONDS` | `mcp add` | Per-request (tool call) deadline written into the entry, in seconds. Default: `[tool.sofer] mcp_request_timeout_seconds`. A non-positive value exits 2. |
-| `--connect-timeout SECONDS` | `mcp add` | Initial-connection / cold-start deadline written into the entry, in seconds. Default: `[tool.sofer] mcp_connect_timeout_seconds`. |
-| `--no-timeout` | `mcp add` | Omit the timeout keys entirely, restoring the pre-#287/#296 entry shape and, with it, native codex/gemini delegation — the only path where sofer does not rewrite the config file, because a TOML or JSON edit rewrites the whole document (a TOML edit may strip comments). |
-| `--json` | `mcp doctor` | Emit the machine-readable status line as stable JSON (CLI-R10): `ok`, `exit_code` and `message`, plus `measured_ms`, `entry_point`, `connect_timeout_seconds`, `exceeds_budget`, `guidance` and one row per agent. |
-
-### Troubleshooting HF uploads
-
-`sofer publish --target hf` delivers the whole package with a single
-`upload_folder` call. When that call fails, sofer prints the underlying
-exception type and message plus the active transfer backend, and retries once.
-A total failure reports `Result: 0 uploaded, N failed` and, when the repository
-ends up empty, says so explicitly.
-
-The package manifest on disk is the object of record for both the plan and the
-enforcement: `prepare` writes `build/manifest.json`, every later build phase
-(`codebook_all`, `profile_all`, `render_all`) refreshes it, and `publish` reads it
-instead of deriving its own. A manifest that does not declare the delivery this
-tree holds — a file it omits, or one it promises and the tree no longer has — is
-therefore refused before any network call, and so is a record that cannot be read
-(`UNREADABLE_MANIFEST`). The recovery is the same — re-run the build chain
-(`sofer prepare --force --all-files`) and retry — while `--dry-run` only warns and
-still prints the plan. Per-file codebooks are required exactly when the package
-carries the root `codebook.md` index: an index with no page under `codebooks/`
-blocks the confirm, while a package that never generated codebooks keeps them
-optional and ships without a warning.
-
-If a publish reports `0 uploaded, N failed` with an `I/O error`, re-run it with
-the xet transfer backend disabled **before** assuming the package or the token
-is wrong:
-
-```bash
-# macOS / Linux
-HF_HUB_DISABLE_XET=1 sofer publish my-dataset.toml
-# Windows (PowerShell)
-$env:HF_HUB_DISABLE_XET = "1"; sofer publish my-dataset.toml
-```
-
-`HF_HUB_DISABLE_XET` is read once, when `huggingface_hub` is imported, so it must
-be set in the environment of the `sofer` process — setting it after the process
-starts has no effect. The retry count, the probed environment-variable names and
-the error-message cap are `[tool.sofer]` defaults (`hf_upload_retry_count`,
-`hf_backend_disable_env`, `hf_backend_prefix_env`, `hf_upload_error_max_chars`).
-
-## Assisted failure reporting
-
-When a CLI command fails with an uncaught error, sofer prints the traceback and —
-on an interactive terminal only — offers to file a GitHub issue in the repository
-configured by `failure_report_repo`. Nothing is ever filed without your explicit
-consent, and you review the complete body before it is sent.
-
-The report contains only the command and its arguments, the error and traceback,
-and the `sofer` / Python / platform versions. It never contains dataset contents,
-never contains environment-variable or secret values, and replaces your home
-directory with `~` in every path inside the report.
-
-```bash
-# interactive: answer "y" at the prompt to review and send the report
-sofer validate my-dataset.toml
-```
-
-If `gh` is missing, unauthenticated, or the network is down, the report is written
-to one timestamped JSON file per failure under the sofer state directory
-(`~/.local/state/sofer/failure-reports/`; `%LOCALAPPDATA%\sofer\failure-reports`
-on Windows) and sofer prints the triple safety net: the saved path, the retry
-command, the manual `github.com/<repo>/issues/new` URL, and the permanent fix
-`gh auth login`.
-
-```bash
-# retry a persisted report once gh is authenticated / online
-sofer report-failure ~/.local/state/sofer/failure-reports/failure-20260925T101112000000Z-12345.json
-```
-
-The state location can be overridden with `SOFER_STATE_HOME`; the target repo and
-the report bounds are `[tool.sofer]` keys (`failure_report_repo`,
-`failure_report_dir`, `failure_report_traceback_max_chars`,
-`failure_report_manual_url_max_chars`, `failure_report_gh_timeout_seconds`,
-`failure_report_duplicate_limit`, `failure_report_duplicate_query_tokens`).
-
-## Data format support
-
-| Format | `scan` | `codebook` | `profile` | `prepare` | `publish` |
-| --- | --- | --- | --- | --- | --- |
-| CSV (`.csv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
-| TSV (`.tsv`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
-| Parquet (`.parquet`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Excel (`.xlsx`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
-| JSON Lines (`.jsonl`) | ✅ | ✅ | ✅ | ✅¹ | ✅ |
-
-¹ `prepare` converts `csv/tsv/xlsx/jsonl` to normalized Parquet by default (Excel → one Parquet per sheet as `stem__sheet.parquet`); set `convert_to_parquet = false` per `[[file]]` to keep the original. `upload_as_csv = true` is a deprecated alias for `convert_to_parquet = false` on `.csv` only. `publish` delivers the prepared package unchanged (`--keep-csv` keeps the original `.csv` alongside its Parquet, CSV-only).
-
-² **Conversion never changes a value.** A column whose values are zero-padded codes (a leading `0` followed by digits, e.g. `"001"`) is not a number, so `prepare` forces it to `string` instead of letting pyarrow's inference store an integer: it probes the source (at most `leading_zero_probe_rows` rows, default 1000), prints each decision, and keeps the source text. To state that intent in the config, add an inline `column_types = { "<column>" = "string" }` table to the `[[file]]` entry, naming the columns to keep as strings. `"string"` is the only type accepted today; any other value is refused naming the accepted set. A value the protection cannot cover is never shipped: `prepare` **fails**, naming the column, a sample value and the exact declaration that fixes it, delivers nothing for that file, and exits non-zero. `sofer validate` reports the same finding as a warning before you run `prepare`.
-
-### Parquet conversion limitations
-
-`prepare` converts CSV to Parquet with pyarrow's automatic type inference — best-effort, not guaranteed. These patterns MAY produce unexpected column types (or a failed conversion, in which case `prepare` prints a warning and stages the original CSV instead). Zero-padded codes are **not** one of them: `prepare` protects them (footnote ²) and refuses to deliver a value it cannot preserve.
-
-| CSV pattern | What can go wrong | Workaround |
-| --- | --- | --- |
-| Comma as decimal separator (`3,14`) | pyarrow reads the comma as a field delimiter, not a decimal mark | Use a non-comma `csv_delimiter` in the TOML |
-| Mixed-type column, >50 % numeric-looking with some text | pyarrow may promote the whole column to `string` or fail | Clean the column or accept the `string` type |
-| Extremely long string fields (>2 GB) | `large_string` handles them, but the CSV parser can hit memory limits | Split the file or trim the field |
-
-## Split detection
-
-`prepare` groups files into `train` / `validation` / `test` splits automatically, following the Hugging Face repository conventions. Detection reads the remote paths declared in the TOML:
-
-- **Keywords.** `train` / `training`, `validation` / `valid` / `val` / `dev`, and `test` / `testing` / `eval` / `evaluation` are recognised split keywords.
-- **Delimiting rule.** A keyword counts only when it is delimited by non-word characters — `test-file.csv` is a test split, `testfile.csv` is not (`-`, `_`, `.`, and whitespace all delimit; a bare run of word characters does not).
-- **Sources, in cascade order** — the first source that yields at least one split wins:
-  1. Top-level directory name — `train/data.csv`, `test/data.csv`
-  2. Filename stem — `train.csv`, `my-train-data.csv`
-  3. Shard pattern — `train-00001-of-00005.parquet` (needs at least two distinct splits to count)
-- **Fallback.** When nothing matches, every file is assigned to a single `train` split.
-- **Exclusions.** `README.md`, `LICENSE`, `.gitattributes`, and `.gitignore` are never treated as data splits. Files that match a keyword group together into that split; anything else is reported as unclassified.
-
-The HF dataset viewer requires a `train` split to auto-load a repository — if detection leaves you without one, name a file or directory with `train` in it.
-
-## Validation and quality checks
-
-Every dataset is checked before publish:
-
-### Integrity checks
-
-| Check | What it does | Blocks publish? |
-| --- | --- | --- |
-| File existence | Every declared path must exist on disk | Yes |
-| Min file count | Configurable via `[[check]] min_files` | Yes |
-| Min total size | Configurable via `[[check]] min_total_size_mb` | No (warning) |
-| CSV columns | Checks expected columns exist | Yes |
-| Config integrity | Valid `repo_id`, valid paths | Yes |
-
-### Quality checks
-
-| Check | What it detects |
-| --- | --- |
-| Duplicates | Duplicate rows in tabular data |
-| Empty rows | Rows with no values |
-| Empty columns | Columns with no values |
-| Null profiling | Columns exceeding null threshold |
-| Format consistency | Mixed types within columns |
-| Corrupt records | Unparseable rows |
-| Value range | Values outside min/max bounds |
-| Cross-file types | Dtype mismatches across configs |
-| Encoding validation | File encoding issues |
-
-Quality checks run in a single streaming pass and their per-row memory is
-bounded independently of the dataset size (issue #290). Three `[tool.sofer]`
-keys control the scan — see
-[docs/configuration.md#quality-scan-bounds](docs/configuration.md#quality-scan-bounds):
-
-- `quality_full_scan` (`auto` / `always` / `never`) decides when the whole
-  file is read. `auto` (default) scans every row only for the `fail` checks
-  that actually need it (`quality_row_requiring_checks`, default
-  `corrupt_records`); an 8 KB probe such as `encoding_validation` never
-  triggers a full pass.
-- `quality_max_dup_tracking` caps the distinct row hashes tracked by the
-  `duplicates` check (default 1 000 000). When the cap is hit the finding is
-  marked **partial** and names the cap, rather than silently missing later
-  duplicates.
-- A dataset may override the policy with an optional `[quality]` table
-  (`full_scan`, `max_sample`).
-
-Findings carry a **partial** flag when their evidence comes from a sampled
-scan or a capped accumulator; `validate` prints it as `(partial)` and the
-on-disk quality report as `*(partial — sample-based)*`.
-
-### Verify the built package (prepare --verify)
-
-`prepare --verify` runs an end-to-end load check on the freshly built package:
-it calls `datasets.load_dataset()` on the output directory — the same call a
-user makes with `load_dataset("user/repo")` — and compares the splits it
-returns against the ones detected from the remote file paths. The result is
-printed after the prepare summary:
-
-- **SKIPPED** — the optional `datasets` package is not installed, or it cannot
-  be imported (a broken `fsspec`/`xet` config, a partially installed wheel).
-  Install it with `pip install datasets` and re-run; the report names the
-  exception that stopped the import.
-- **PASSED** — `load_dataset()` succeeded and the detected splits match.
-- **FAILED** — `load_dataset()` raised, or the splits differ from what was
-  detected; the report lists the errors and warnings.
-
-Verification is informational and non-blocking: it never fails the `prepare`
-run. Check the report, fix the layout, and re-run.
-
-## Codebook generation
-
-### Single file
-
-```bash
-sofer codebook raw/persons.csv -o codebook.md
-```
-
-Supports CSV, TSV, Parquet, Excel (.xlsx), and JSON Lines (.jsonl).
-Produces a table with: column name, inferred type, actual dtype (for
-typed formats), unique values, missing percentage, and a sample value.
-
-### Batch generation
-
-```bash
-sofer codebook --all-files --config my-dataset.toml
-```
-
-Generates one codebook per registered file under `build/codebooks/<rel-stem>.md`
-(the package `build_dir`, where `publish` collects codebooks), plus a root
-`build/codebook.md` index with a table of contents and relative links to all
-per-table codebooks.  Files from the same source directory that would
-resolve to the same output stem (collision) are detected before writing — the
-non-colliding files still get their codebook written; the run fails with an
-error listing the colliding sources.
-
-For `.xlsx` with multiple sheets, one codebook per sheet is emitted as
-`codebooks/<rel>/<stem>__<sanitized>.md` reusing `sanitize_sheet_name` dedup
-(`Ventas`/`VENTAS` → `__ventas`, `__ventas_2`); single-sheet `.xlsx` stays
-`stem.md`.  The root index `**Tables:**` counts sheets and `**Total columns:**`
-sums across all emitted codebooks.  The Dataset Card's `### Data Fields`
-renders per-sheet collapsible tables: each table in its own
-`<details><summary>Data Fields -- <sheet> (N columns)</summary>` with a blank
-line after `</summary>` so HF renders the table inside (HF-compatible,
-*cada tabla por separado*), gated by `card_collapse_threshold` (`[tool.sofer]`
-default `15`).
-
-### Codebooks in the package
-
-`prepare --all-files` writes codebooks directly into the output directory
-(Option B) instead of the shared `cache/`:
-
-- Per-file codebooks land under `build/codebooks/` mirroring their relative
-  paths (e.g., `raw/DPTO.csv` → `build/codebooks/DPTO.md`; `.xlsx` with 2
-  sheets → `build/codebooks/Report__ventas.md` + `Report__costos.md`).
-- The root index `codebook.md` is written to the output root.
-- `publish` stages these codebooks after the data files, so the repo ends up
-  with `codebooks/**/*.md` plus the root `codebook.md`.
-
-## AI and MCP server
-
-sofer ships a Model Context Protocol (MCP) server that exposes the
-same deterministic pipeline (validate → prepare → codebook → profile →
-render → publish) to AI agents over stdio — no LLM is called, and the only
-network access is the Hugging Face upload inside `sofer_publish_confirm`.
-
-### Install
-
-`fastmcp` is included by default — `sofer[mcp]` is now an alias:
-
-```bash
-pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
-# alias still works (same wheel):
-pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
-uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
-uv tool install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
-uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
-```
-
-### Launch
-
-```bash
-sofer-mcp          # stdio MCP server (JSON-RPC 2.0 over stdin/stdout)
-```
-
-The server exposes 19 tool callables (`sofer_validate`, `sofer_meta_check`,
-`sofer_meta_set`, `sofer_file_set`, `sofer_prepare`,
-`sofer_publish`, `sofer_publish_confirm`, `sofer_codebook`,
-`sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`, `sofer_render`,
-`sofer_render_all`, `sofer_scan_dry_run`, `sofer_scan_apply`, `sofer_init`,
-`sofer_auth_status`, `sofer_repo_settings`,
-`sofer_report_failure`), 4 resources (`sofer://dataset/{config}`,
-`sofer://codebook/{data_file}`, `sofer://metadata/{data_file}`, and the
-static `sofer://status`), and 3 prompts (`prepare_dataset`,
-`assess_dataset`, `finalize_and_publish`). No remote/streamable-http
-transport is exposed in v1.
-
-Resource URIs are resolved **relative to the server root** — e.g.
-`sofer://dataset/dataset.toml` reads `<root>/dataset.toml`. Absolute POSIX
-paths are also accepted (rest-pattern templates): `sofer://dataset//tmp/...`
-arrives with a leading `/` and must still resolve inside the root.
-
-`sofer://status` is a static resource with no path variables. It returns the
-server posture snapshot (`approval_configured`, `phrase_source`, `root`,
-`version`, `started_at`, `tool_count`) and never reads a dataset file.
-
-`sofer_auth_status` reports that same root as `server_root` alongside its other
-posture fields, so an agent can preflight reachability before a write attempt.
-A containment refusal keeps its `<what> resolves outside the server root`
-prefix and appends the resolved root plus the remedy (`set SOFER_MCP_ROOT or
---root at server start, then restart the host`).
-
-### Canonical build chain — Phased (tools/list is self-sufficient)
-
-```
-Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]
-  sofer_init → sofer_scan_dry_run / sofer_scan_apply → sofer_meta_set
-  Metadata step (between bootstrap and Phase 1): sofer_meta_check reports the
-  placeholders, sofer_meta_set writes [meta] description, license, source, tags
-  and any other card key
-Phase 1 Build: sofer_validate → sofer_prepare → sofer_codebook_all → sofer_profile_all → sofer_render_all
-Phase 2 Publish: sofer_publish(dry_run=True) → STOP (human approval) → sofer_publish_confirm
-```
-
-- **Phase 0** `init→scan` is REQUIRED for greenfield (no `.toml` or empty `[[file]]`), optional otherwise. Build assumes `[[file]]` entries exist.
-- Each tool lists `Requires:` and `Next:` so `tools/list` alone teaches the order; server `instructions` is the single source for the phased diagram and the UNTRUSTED disclaimer.
-- `sofer_auth_status` is the preflight: checks `token`/`confidential`/`approval_phrase` without network, and reports the configured visibility; `check_remote=true` adds the repository's *current* visibility (one read-only call).
-- `sofer_repo_settings` reads the same posture and can set the target visibility; a write needs the approval phrase **and** the exact state (`private=true|false`). A publish whose configured visibility differs from the repository's is refused.
-
-| Step | Tool | Key args | When to use |
-| ------ | ------ | ---------- | ------------- |
-| 0 | `sofer_init` | `name`, `user`, `cwd`, `move_existing`, `dry_run`, `force` | Greenfield bootstrap; creates TOML + `raw/` (Windows: `cwd` must stay under server root via `_contained_path`; `raw/example.csv` is NTFS-safe). |
-| 0 | `sofer_scan_dry_run` / `sofer_scan_apply` | `config`, `force`, `extensions` | Phase 0 preview/apply after `init`. Both MOVE loose files into `raw/` unconditionally — the phase is mandatory, with no opt-in flag; `sofer_scan_dry_run` previews it without mutating. |
-| M | `sofer_meta_check` | `config` | Read the metadata state without running the validator; `readOnlyHint:true`. Reports the same warning `sofer_validate` prints. |
-| M | `sofer_meta_set` | `config`, `values`, `dry_run` | Write `[meta]` before Phase 1 (the only way over MCP): description/license/source/tags, plus any other card key. Preserves every other key and comment; `build_stale` names a `build/` tree that predates the write. Called with no `values` it writes nothing and returns a continuation asking for them. |
-| M | `sofer_file_set` | `config`, `entries`, `dry_run` | Replace the `[[file]]` array from the tool surface: the only way over MCP to declare a recursive folder entry, `column_types`, `convert_to_parquet`/`upload_as_csv` or `include_in_schema`. Every local must exist under the server root; a folder remote that would double-register a file entry is refused; an empty list is refused while entries exist. |
-| 1 | `sofer_validate` | `config` | Quick check; always first for existing datasets. |
-| 2 | `sofer_prepare` | `config`, `output_dir`, `run_checks`, `force`, `verify` | After validate; writes Parquet+README+LICENSE. |
-| 3 | `sofer_codebook_all` | `config`, `output_dir`, `delimiter`, `encoding` | After prepare; batch codebooks. |
-| 4a | `sofer_profile` | `dataset`, `output_dir`, `force`, `delimiter`, `encoding` | Single-file triage (`assess_dataset`). |
-| 4b | `sofer_profile_all` | `config`, `output_dir`, `delimiter`, `encoding` | Phase 1 step 4 batch (`cache/profiles/`). |
-| 5a | `sofer_render` | `package`, `output_dir`, `force` | Single-file render after `sofer_profile`. |
-| 5b | `sofer_render_all` | `config`, `output_dir` | Phase 1 step 5 batch (`cache/renders/`); requires `profile_all`. |
-| 6 | `sofer_publish` | `config`, `target="local"`, `output_dir`, `force`, `dry_run` | `dry_run=True` preview; **STOP** before confirm. |
-| 7 | `sofer_publish_confirm` | `config`, `target="hf"`, `output_dir`, `acknowledge_risk`, `acknowledge_confidential`, `acknowledge_public`, `approval_phrase`, `force` | Only after human approval. A public target (`[dataset] private = false`) needs its own `acknowledge_public` — `acknowledge_risk` covers the irreversible upload, not the exposure. The envelope records the posture (configured, observed, acknowledged). |
-| * | `sofer_auth_status` | `config`, `check_remote` | Preflight without publish; reports the configured visibility, and the repository's current one with `check_remote=true`; `readOnlyHint:true`. |
-| * | `sofer_repo_settings` | `config`, `private`, `approval_phrase`, `dry_run` | Read the target repository's visibility and posture; `private` + `approval_phrase` sets the visibility (needs a token). `openWorldHint:true`. |
-| * | `sofer_codebook` | `path`, `output_file`, `max_sample`, `delimiter`, `encoding` | Single-file codebook. |
-| * | `sofer_report_failure` | `error`, `command`, `trace`, `confirm`, `force` | Prepare a confidential failure report and (only with `confirm=true`) file it via `gh`; searches open issues for duplicates first. `openWorldHint:true`. |
-
-`sofer_report_failure` never includes dataset contents or environment-variable values and
-anonymizes home paths to `~`. With the default `confirm=false` it returns the prepared body,
-title, manual URL and any matching open issues without creating anything; `confirm=true` files
-the issue (or persists it locally when `gh` is missing, unauthenticated, or offline). See
-[Assisted failure reporting](#assisted-failure-reporting).
-
-Prompts `prepare_dataset`, `assess_dataset`, `finalize_and_publish` encode this chain with per-step args and copy-paste examples; `assess_dataset` uses the subset `sofer_validate → sofer_profile(dataset) → sofer_render(package)` for single-file triage.
-
-Copy-paste chaining example (canonical order — paste into the MCP client):
-
-```python
-sofer_validate(config="dataset.toml")
-sofer_prepare(config="dataset.toml", output_dir=None, run_checks=True)
-sofer_codebook_all(config="dataset.toml", output_dir=None)
-sofer_profile_all(config="dataset.toml", output_dir=None)
-sofer_render_all(config="dataset.toml", output_dir=None)
-sofer_publish(
-    config="dataset.toml", dry_run=True
-)  # STOP — get approval before sofer_publish_confirm
-sofer_auth_status(config="dataset.toml")  # preflight: token/confidential/approval
-# after approval:
-sofer_publish_confirm(config="dataset.toml", acknowledge_risk=True)
-```
-
-Args: `config` (TOML path, must stay under server root), `dataset`/`package` (single file), `output_dir`/`output_file` (override dir/file or `None`), `run_checks` (replaces `no_checks`), `force` (overwrite guard), `cwd` on `sofer_init` (per-call `effective_root` under server root, never global). Batch via `*_all(config)` — no `all_files` flag. See [Windows notes](#windows-notes--cwd-placeholders-and-separators) for CWD and placeholder handling.
-
-Optional `delimiter` / `encoding` on the CSV-reading tools (`sofer_codebook`, `sofer_codebook_all`, `sofer_profile`, `sofer_profile_all`) state the CSV dialect for this call: the explicit value wins over the configured one (dataset `[meta]` for the `_all` tools, `[tool.sofer]` otherwise); omitting both keeps the current behaviour. The response echoes the supplied values in `dialect` (`null` when neither is supplied). `.tsv` stays tab-delimited; the explicit delimiter applies to `.csv`.
-
-> **Breaking changes (pre-1.0, v0.4):** `output` → `output_file` (sofer_codebook) / `output_dir` (all others); `no_checks` → `run_checks=True`; `sofer_profile`/`sofer_render` split into `sofer_profile`+`sofer_profile_all` and `sofer_render`+`sofer_render_all` (remove `all_files`); `target` is now `Literal["local"]` / `Literal["hf"]` (single-value const); expected failures now return `{ok:false, error_code, message, next, config_errors}` instead of throwing.
-
-### Agent setup (example: Claude Code)
-
-```bash
-claude mcp add sofer -- uv run sofer-mcp
-```
-
-The server's containment root defaults to its working directory (the process
-cwd, resolved). Point it at a specific tree with `--root PATH` or the
-`SOFER_MCP_ROOT` environment variable — the argument wins when both are set.
-Any path outside that root is refused with `PathOutsideRootError` (fail
-closed), so the agent can only reach the chosen tree (see the security model
-below).
-
-### Register sofer-mcp with AI agents (opencode, codex, gemini, pi, hermes)
-
-`sofer` can register itself in the five supported agent configs
-idempotently, preserving existing servers and backing up the original to
-`.bak`:
-
-```bash
-sofer mcp add --agent all                 # register in all five
-sofer mcp add --agent opencode --scope project --cwd ./my-proj
-sofer mcp add --agent codex --scope user
-sofer mcp add --agent gemini --scope user --dry-run   # preview, no write
-sofer mcp add --agent pi --scope user                 # pi-mcp-adapter
-sofer mcp add --agent hermes --scope user             # Hermes Agent (config.yaml)
-sofer mcp remove --agent all              # remove from all five
-```
-
-Per-agent locations and shapes:
-
-| Agent | Scope | File | Entry |
-| ------- | ------- | ------ | ------- |
-| opencode | `--scope project` | `./opencode.json` | `mcp.sofer={type:"local",command:["sofer-mcp"],cwd}` |
-| opencode | `--scope user` | `~/.config/opencode/opencode.json` | same |
-| codex | `--scope user` | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) | `[mcp_servers.sofer] command, cwd, env_vars=[HF_TOKEN,…]` |
-| codex | `--scope project` | `./.codex/config.toml` | same |
-| gemini | `--scope user` | `~/.config/gemini/settings.json` | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"$HF_TOKEN",…}}` |
-| gemini | `--scope project` | `./.gemini/settings.json` | same |
-| pi | `--scope user` | `$PI_CODING_AGENT_DIR/mcp.json` (default `~/.pi/agent/mcp.json`) | `mcpServers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
-| pi | `--scope project` | `./.pi/mcp.json` | same |
-| hermes | `--scope user` | `$HERMES_HOME/config.yaml` (default `~/.hermes/config.yaml`) | `mcp_servers.sofer={command:"sofer-mcp",cwd,env:{HF_TOKEN:"${HF_TOKEN}",…}}` |
-| hermes | `--scope project` | the same user-scope file — Hermes has no project-scope config, and the substitution is named on stderr | same |
-
-- **Host timeouts (issues #287, #296).** `sofer mcp add` also writes the host's **per-request**
-  and **connect/startup** deadlines into the `sofer` entry, so two failures stop looking like a
-  broken registration. Both are real: `sofer-mcp` imports pandas, pyarrow, datasets and fastmcp
-  before it can answer `initialize`, so a **first launch after an install or upgrade is slower than a
-  warm one**, and when it exceeds the host's connect deadline the host reports
-  `Connection failed … timed out` — which reads exactly like a broken registration. Measure that first
-  launch **on your machine** with `sofer mcp doctor`, which prints it beside the key and the value
-  written here and names the flags that raise them; the written value comes from `[tool.sofer]`, never
-  from a number frozen in this document. A tool call on a real corpus runs for minutes
-  (`sofer_prepare` measured ~680 s, `sofer_codebook_all` ~100 s on 3.2 GB / 66.2 M rows) against a
-  documented 60 s default, where the server **finishes, writes its artifacts and loses only the
-  response** — so the caller cannot tell a failure from an unheard success. The key name and the unit
-  are per agent:
-
-  | Agent | Per-request key | Connect/startup key | Unit | Host default |
-  | ------- | ------- | ------- | ------- | ------- |
-  | pi | `timeout` | — (connects in the background) | seconds | 60, reset by progress notifications |
-  | hermes | `timeout` | `connect_timeout` | seconds | 300 / 60 |
-  | codex | `tool_timeout_sec` | `startup_timeout_sec` | seconds | 60 / 10 |
-  | gemini | `timeout` | — (same key covers discovery) | **milliseconds** | 600 000 |
-  | opencode | — | `timeout` | **milliseconds** | 5 000 for the tool fetch; 30 000 in code |
-
-  Defaults come from `[tool.sofer] mcp_request_timeout_seconds` (900) and
-  `mcp_connect_timeout_seconds` (120); override per invocation with `--timeout` / `--connect-timeout`,
-  or omit both keys with `--no-timeout`. Writing a timeout is also why native codex/gemini delegation
-  now declines with the reason `timeout` — neither `<agent> mcp add` takes a timeout flag — and
-  `--no-timeout` is what restores that path. The decline names that flag on stderr, but only when
-  `timeout` is the *sole* reason: with an env key present the reasons are `env forwarding, timeout` and
-  the flag clears only the second, so naming it there would send the user to a flag that changes
-  nothing. The trade-off itself is not avoidable by doing both — writing the timeouts after a native
-  write would go through sofer's writer anyway, and for codex that is a whole-document `tomli_w`
-  rewrite, which is exactly what `--no-timeout` avoids. **opencode** used to be the exception, and is
-  not any more: it receives `timeout` as a single scalar in **milliseconds** carrying the *connect*
-  budget — the shape the schema for the layout this command writes accepts, and the budget that scalar
-  documents (fetching the server's tools, i.e. the cold start that bites). It is never written as the
-  nested object some releases document, which would risk failing validation of the whole `mcp` block
-  for a sub-key name that differs between those releases. A host whose entry accepts no timeout key at
-  all is still named on stderr rather than given an invented one. The **position** of the opencode entry
-  needs no such note, and knowing why is worth more than the key sitting next to it: a v2 opencode reads
-  its servers from `mcp.servers.<name>` while this command writes the entry at `mcp.<name>` — the
-  position v1's schema declares and v2 still reads, because v2 normalizes the flat V1 form in memory (it
-  decodes each `mcp.<name>` as the V1 server schema, migrates it and merges it into `mcp.servers`, without
-  rewriting your file) and its own migration page promises that existing supported V1 configuration keeps
-  working without conversion. One entry serves both generations; writing `mcp.servers.<name>` here would
-  be the actual defect, since that is where a stable opencode does not look.
-- **Long calls reset their own deadline.** Every long tool (`sofer_prepare`, `sofer_codebook_all`,
-  `sofer_profile_all`, `sofer_render_all`, `sofer_publish_confirm`) re-announces progress while it
-  runs, which is what resets a host's per-request timeout — so a long tool also survives a host whose
-  timeout cannot be configured. Their `tools/list` descriptions say so, and name the expected
-  duration.
-- **Who fills `[meta]` (issue #288).** `sofer init` writes a `[meta]` block whose values are
-  placeholders. Filling them is a **required step between bootstrap and Phase 1**, and it is the one
-  step a human and an agent share: on an MCP-driven run the **agent** completes what the data can
-  determine (description, tags), and the **human** supplies what it cannot (license, source).
-  `sofer_meta_check` reports the state on demand and `sofer_meta_set` is the write a tool can perform
-  (issue #323) — before those existed the step was only prose, since an MCP client has no file writer.
-  `sofer_validate` also warns while any `[meta]` value is still empty or still starts with `TODO`,
-  `YOUR_` or `example`, so the step reaches the agent through the envelope instead of appearing only
-  in the generated card. The warning never changes the exit code, and neither does `sofer_meta_check`.
-- **User-scope resolution:** the paths below are sofer's **default** resolution under `Path.home()`.
-  Agents such as opencode read their config from the system **account** home instead, so when the two
-  differ the entry can land in a file the agent never reads. Pass `--user-config PATH` to state the
-  file explicitly — it wins over the adapter's env override and the home default. When the two homes
-  differ, `sofer` prints a warning naming both instead of reporting a clean success.
-- **Idempotency:** re-running with the same `cwd` and env does no write and
-  creates no `.bak`; the file is byte-identical.
-- **Backup:** before the first mutation the original is copied to `<path>.bak`
-  (single file, overwrites any existing `.bak`).
-- **Atomic write:** the new content is written to a temporary file in the
-  same directory and committed via `os.replace`.
-- **Cwd:** `--cwd` is stored as the resolved absolute path and must be an
-  **existing directory**; otherwise the command exits 1 naming the resolved
-  path. A tree outside the home and the process cwd is accepted with a warning
-  naming it — an explicit `--cwd` is your own declaration, so an unusual tree is
-  named rather than refused.
-- **Env:** `HF_TOKEN` and `SOFER_MCP_APPROVAL_PHRASE` from the shell are
-  forwarded — codex as an `env_vars` allow-list, gemini, pi and hermes as an
-  explicit `env` dict (no shell inheritance). Gemini emits `$KEY` references;
-  Pi and Hermes emit `${KEY}` references — `pi-mcp-adapter` interpolates only
-  the braced form, and Hermes resolves `${VAR}` / `${env:VAR}` inside a server
-  entry. Opencode receives no env. When
-  `HF_TOKEN`/`SOFER_MCP_APPROVAL_PHRASE` are set and `--agent opencode`
-  (or `all`) is chosen, `sofer mcp add` prints a warning on stderr naming
-  the dropped variables and leaves the exit code unchanged.
-- **Delegation:** when a native binary is available (`codex`/`gemini`), its
-  `mcp add`/`remove` is tried first (probe via `shutil.which` + `mcp --help`
-  with a 3 s timeout) — but only when it can faithfully reproduce what the
-  file edit would write. The native CLI must be able to forward the same env
-  NAMES and the requested scope: Gemini receives `--scope user|project` (its
-  CLI supports it), while Codex has no scope selector and its native env flag
-  takes literal values. A non-empty env (both agents), or `--scope project`
-  for Codex, therefore makes sofer decline, print a warning on stderr naming
-  the reason (`env forwarding`, `project scope` — NAMES only, never values),
-  and edit the config file instead. On any native failure or timeout the command also falls
-  back to direct file edit. Opencode and Pi always use file-edit (Pi ships no
-  native `mcp add` CLI).
-- **TOML warning:** edits via `tomli`/`tomli-w` do not preserve comments or
-  formatting in `config.toml` — the file is reformatted and comments are
-  stripped.
-- **YAML edits:** the `hermes` adapter splices only the `sofer` entry into
-  `config.yaml`, so unrelated keys, comments and indentation are preserved.
-- **Hermes scope:** Hermes reads a single user-scope config, so `--scope
-  project` for `--agent hermes` resolves to that same file — no
-  `<cwd>/.hermes/config.yaml` is written, and the substitution is named on
-  stderr.
-- **Unreadable:** a malformed or unreadable config exits 1 and creates no
-  backup or new file.
-
-### Security model
-
-- **Path containment (server root).** The server captures a root at build
-  time (`build_server(root=...)`; default: the process cwd, resolved;
-  overridden by `--root`/`SOFER_MCP_ROOT` at the `sofer-mcp` entry point) and
-  refuses any tool argument, resource URI, `output` directory, or
-  `[[file]]` local/remote that resolves outside it — including `..`
-  traversal, absolute paths, drive/UNC-prefixed remotes, and symlink/junction
-  escapes. The server can neither read nor write outside its root. Plain
-  artifacts are read via `file://` URIs, which are governed by the MCP
-  client's own permission model (e.g. the host's file allow-list); the
-  server adds no new escape hatches beyond it.
-- **Fail-closed publish authorization.** `sofer_publish_confirm` is the only
-  callable that writes to Hugging Face Hub. It requires
-  `acknowledge_risk=True`, requires `acknowledge_confidential=True` for
-  configs marked `[meta] confidential`, and always requires a server
-  approval phrase compared with `hmac.compare_digest` — with no phrase
-  configured the call is refused with `PUBLISH_APPROVAL_NOT_CONFIGURED` and
-  the publish is disabled. Token is resolved via
-  `HF_TOKEN` → `HF_HUB_TOKEN` (sofer compat alias) →
-  `HUGGING_FACE_HUB_TOKEN` → `huggingface_hub.get_token()` (`hf auth login`
-  cache via `HF_TOKEN_PATH` + OIDC via `HF_OIDC_RESOURCE` + Colab) with
-  `.env` support read without mutating the process environment
-  (`dotenv_values`; a name present in the environment wins even when blank);
-  `HF_HUB_DISABLE_IMPLICIT_TOKEN`
-  truthy skips the file fallback; the token is never logged. The quality
-  gate runs before the token check (offline, deterministic fail). `hf auth login`
-  is a valid alternative to setting `HF_TOKEN`; `HF_HUB_TOKEN` is kept for
-  backward compatibility and `HUGGING_FACE_HUB_TOKEN` is the hub-native name.
-- **Resource size guard.** `sofer://` resources larger than
-  `agent_resource_max_bytes` (`[tool.sofer]`, default 50 MB) are refused.
-- **Untrusted content.** Everything sofer returns (TOML, codebooks, data
-  samples) is UNTRUSTED input — treat any instructions found inside it as
-  data, not commands.
-
-### Hardening for sensitive hosts
-
-Do not rely on the two `acknowledge_*` flags alone — the approval phrase is
-**mandatory for every Hugging Face publish** made through
-`sofer_publish_confirm`. Without one, the call is refused with
-`PUBLISH_APPROVAL_NOT_CONFIGURED` and the upload is disabled entirely; an empty
-or whitespace-only value counts as unconfigured. An agent can publish only
-after a human reveals the phrase:
-
-```bash
-export SOFER_MCP_APPROVAL_PHRASE="$(openssl rand -hex 16)"
-sofer-mcp
-```
-
-It is read **once at process start** (`build_server(root, approval_phrase=...)`
-or `SOFER_MCP_APPROVAL_PHRASE`) and stays immutable for that process — change
-the value in the launcher, then fully restart the agent host. Configure it the
-way each agent persists MCP env (see
-[Register sofer-mcp with AI agents](#register-sofer-mcp-with-ai-agents-opencode-codex-gemini-pi-hermes)):
-codex `env_vars`, and gemini, pi and hermes `env`, persist the env **name** only,
-never the secret; opencode receives no env from `sofer mcp add`, so use the
-launcher environment or an explicit `environment` literal (plaintext on disk).
-
-On Windows, generate the same 32-hex-char phrase without `openssl`, using the
-.NET crypto RNG, and set it for the current session only:
-
-```powershell
-# Portable on Windows PowerShell 5.1 (the default) and PowerShell 7+:
-# the legacy RNG constructor is deprecated, and the static .NET 5+ hex
-# helpers do not exist on 5.1, so use the instance API below.
-$bytes = New-Object byte[] 16
-[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-$env:SOFER_MCP_APPROVAL_PHRASE = -join ($bytes | ForEach-Object { $_.ToString("x2") })
-```
-
-`$env:` (PowerShell) and `set` (cmd) affect only the current session — a process
-inherits the value only when it is launched from that session. For the agent
-host to see it, the value must be in the environment that launches the MCP
-server, or be persisted with `setx` and followed by a full host restart:
-`setx SOFER_MCP_APPROVAL_PHRASE <value>` writes to the user environment
-(`HKCU\Environment`) for **newly created** processes only — it does not change
-the current shell, the value is stored unencrypted, and `setx` truncates
-values longer than 1024 characters. A server that is already running never
-re-reads the environment, so after `setx` you must fully restart the host.
-Confirm with `sofer_auth_status` → `approval_configured` (see **Verify** below).
-
-**Windows:** the variable must be in the launcher's environment — the process
-that starts `sofer-mcp` — not merely in the shell you typed in, and the host
-must be fully restarted for the change to take effect.
-
-**Verify:** `sofer_auth_status(config)` → `approval_configured` (`true` when the
-server has a non-blank phrase; `requires_approval_phrase` is always `true`).
-`PUBLISH_APPROVAL_NOT_CONFIGURED` = no phrase on the server;
-`PUBLISH_APPROVAL_REQUIRED` = the phrase passed to the call is missing or does
-not match.
-
-## Configuration
-
-Tool-wide defaults live in a `pyproject.toml` under `[tool.sofer]` — every
-value has a sensible default, so the whole section is optional. sofer finds it
-by walking up from the dataset directory, then from the current working
-directory, and finally falls back to built-in defaults; the first
-`pyproject.toml` found stops the search.
-
-The full reference lives in
-[docs/configuration.md#discovery-and-precedence](docs/configuration.md#discovery-and-precedence).
-
-Set `SOFER_VERBOSE=1` to print where the tool-wide configuration came from —
-full explanation in
-[docs/configuration.md#seeing-which-file-was-used](docs/configuration.md#seeing-which-file-was-used).
-
-## Architecture summary
-
-sofer is a single Python package (`src/sofer/`) with one module per concern:
-CLI dispatch in `cli.py` (10 subcommands), dataset configuration in `model.py`,
-tool-wide defaults in `config.py` (`[tool.sofer]` discovery), and each command
-owning its domain module (scanner, codebook, prepare, publish, profile, render,
-mcp_registration). The annotated module tree lives in
-[CONTRIBUTING.md#architecture](CONTRIBUTING.md#architecture).
-
-Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Quality gates and security scanning
-
-- **Type checking**: `src/` and `scripts/` pass two type gates — **mypy** (strict mode,
-  `[tool.mypy]`) and **pyright** (`standard` mode, `[tool.pyright]`) — both declared in
-  `pyproject.toml` and run in CI and in the local pre-commit hooks. `tests/` is excluded
-  from both gates by policy (`openspec/specs/ci/spec.md` CI-09).
-- **Coverage gate**: total test coverage is gated at **90%** — the floor lives
-  in `pyproject.toml` (`[tool.coverage.report] fail_under = 90`) and is enforced
-  by coverage.py on every PR (`ci.yml`) and before every release
-  (`release.yml`). Evidence is self-hosted: an `htmlcov` artifact
-  (`coverage-html`) plus a missing-lines report in the job log
-  (`uv run coverage report -m`). No third-party coverage service is used.
-- **CodeQL scanning**: the Python codebase is scanned on every push and pull
-  request to `main`/`dev`, and weekly (`.github/workflows/codeql.yml`, Advanced
-  Setup with `.github/codeql/config.yml`). While the repository is private, code
-  scanning cannot be enabled (it requires GitHub Code Security on private
-  repositories), so the SARIF report is published as the `codeql-sarif` workflow
-  artifact; once the repository is public the results move to the **Security**
-  tab (set `upload: always` in the workflow). Alerts are informational and never
-  block merges.
+| Install alternatives, full walkthrough, metadata step | [Getting started](docs/getting-started.md) |
+| Commands, flags, `meta`, and `mcp` | [CLI reference](docs/cli.md) |
+| Dataset TOML, `[meta]`, `[[file]]`, `[[check]]`, `[[quality]]` | [Dataset configuration](docs/dataset-config.md) |
+| Formats, conversion, splits, quality, codebooks, profiling | [Data package](docs/data-package.md) |
+| `[tool.sofer]` defaults and precedence | [Tool-wide configuration](docs/configuration.md) |
+| MCP tools, resources, prompts, and response contracts | [MCP server](docs/mcp.md) |
+| Agent registration, environment, and timeouts | [Agent setup](docs/agent-setup.md) |
+| Path containment, approval phrase, credentials | [Security](docs/security.md) |
+| Windows, Hub uploads, and failure reports | [Troubleshooting](docs/troubleshooting.md) |
+
+## Contributing
+
+Architecture, development setup, conventions, and quality gates live in
+[CONTRIBUTING.md](CONTRIBUTING.md). Pull requests are welcome; see the
+[PR template](.github/PULL_REQUEST_TEMPLATE.md). Security reports follow
+[SECURITY.md](SECURITY.md).
 
 ## Related
 
 - [Leek group data sharing guide](https://github.com/jtleek/datasharing)
 - [Hugging Face Hub documentation](https://huggingface.co/docs/hub/)
+- [MIT License](LICENSE)
