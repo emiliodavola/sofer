@@ -51,13 +51,16 @@ src/sofer/
 ├── _converters.py       # Format-specific Parquet conversion
 ├── _parquet_helpers.py  # Shared Parquet dtype helpers
 ├── _toml.py             # TOML parser selection (tomllib/tomli fallback)
-├── cli.py               # argparse CLI with 10 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
+├── _yaml.py             # YAML parsing + surgical single-entry editing (MCP configs)
+├── cli.py               # argparse CLI with 11 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp, meta, report-failure)
 ├── config.py            # Tool-wide defaults from [tool.sofer] (discovery + reload)
 ├── model.py             # DatasetConfig + InferenceStatus
 ├── checks.py            # DatasetValidator — data integrity checks
 ├── quality.py           # QualityValidator — 9 quality checks (single-pass)
 ├── codebook.py          # Multi-format codebook generator
 ├── scanner.py           # File discovery, TOML merge, copy-to-cache
+├── file_edit.py         # Surgical [[file]] editor for the dataset TOML
+├── meta_edit.py         # Surgical [meta] editor for the dataset TOML
 ├── prepare.py           # Offline generation: Parquet conversion, card, LICENSE, codebooks
 ├── publish.py           # Delivery: HF upload_folder / local copy, auto-prepare, dry-run
 ├── semantic.py          # Semantic type inference detectors (email)
@@ -73,8 +76,15 @@ src/sofer/
 ├── workflow.py          # Typed workflow metadata + result envelopes for adapters
 ├── failure_report.py    # Assisted failure reporting: context, anonymization, gh send, persistence
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
+├── mcp_doctor.py        # Real sofer-mcp cold-start measurement vs the written deadline
 └── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini/pi/hermes)
 ```
+
+The module set is whatever `ls src/sofer/` reports — the tree above is a reading aid, not an
+exhaustive contract. **Windows safety:** placeholders use `raw/example.csv` (NTFS-valid; `:` is
+reserved — the old `TODO: raw/...` was invalid); MCP `sofer_init(cwd=...)` resolves per call through
+`_contained_path` + `is_relative_to` as `effective_root` under the server root, never mutating a
+global root; TOML paths use forward slashes (`raw/`, `cache/`).
 
 ## Development conventions
 
