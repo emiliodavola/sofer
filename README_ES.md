@@ -6,7 +6,8 @@
 > meticulosamente textos sagrados. Esta herramienta aplica el mismo cuidado a la
 > documentación de conjuntos de datos.
 
-**Una herramienta de línea de comandos que convierte un conjunto de datos en
+**sofer es tanto una herramienta de línea de comandos como un servidor Model
+Context Protocol (MCP). Ambas interfaces convierten un conjunto de datos en
 bruto en un paquete documentado, perfilado y evaluado en cuanto a calidad —
 combinando inferencia automática con conocimiento humano, y publicable en
 Hugging Face Hub o en cualquier directorio local.**

@@ -5,9 +5,10 @@
 > **Sofer** (Hebrew: סופר, "scribe") — a person who meticulously transcribes
 > sacred texts. This tool brings the same care to dataset documentation.
 
-**A command-line tool that turns a raw dataset into a documented, profiled,
-and quality-assessed package — combining automatic inference with human
-knowledge, and publishable to Hugging Face Hub or any local directory.**
+**sofer is both a command-line tool and a Model Context Protocol (MCP) server.
+Both turn a raw dataset into a documented, profiled, and quality-assessed
+package — combining automatic inference with human knowledge, and publishable
+to Hugging Face Hub or any local directory.**
 
 [![CI](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml/badge.svg)](https://github.com/emiliodavola/sofer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
