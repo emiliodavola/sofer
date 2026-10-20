@@ -1,20 +1,35 @@
-# odd/ — harness task tracking
+# odd/ — durable task records for ODD work
 
-This directory is **task tracking for the development harness**, not project source. It holds one
-file per substantial feature under `odd/tasks/`, recording the task list, the decisions taken before
-implementation, and the evidence that closed each task — the durable counterpart to the session's
-visible todo list.
+This directory holds optional durable task records for **Organic Driven Development (ODD)**, the
+workflow defined in `AGENTS.md` → Workflow. Nothing here is project source: it is working context,
+not product, and nothing under `odd/` is imported, packaged or executed by `sofer`.
 
-Boundaries:
+## ODD in one paragraph
 
-- **Not part of the shipped package.** Nothing under `odd/` is imported, packaged or executed by
-  `sofer`. The module inventory of `AGENTS.md` rule 10 is `ls src/sofer/`, and this directory sits
-  outside it.
-- **Not a substitute for the SDD record.** The durable contract lives in `openspec/` — the specs
-  under `openspec/specs/`, and the change folder under `openspec/changes/`. These files are the
-  working plan that produced it, kept because the reasoning behind a change is worth more than the
-  change.
+ODD is the workflow for new work: **authorize** (analysis and review stay read-only unless
+implementation is requested), **explore proportionately** (verify against the code and docs before
+writing), **implement** the smallest coherent change, and **verify** with the applicable gates,
+reporting actual results and any unavailable checks. Small changes go directly; the issue and PR are
+the default record for scope, decisions, verification and delivery.
+
+## When a task file is justified
+
+Create a file under `odd/tasks/` only when essential decisions, dependencies or unfinished work
+cannot live in the issue/PR and would otherwise be lost when resuming across sessions or handing work
+over. State that continuity need before creating the file. Do not duplicate issue/PR content by
+routine, and do not treat a task file as a required dossier for every change.
+
+The existing files are historical delivery records: keep the decisions, task lists and commit
+evidence they carry, and do not rewrite them. A closed task records its commit identity as evidence.
+
+## Boundaries
+
+- **Not part of the shipped package.** Nothing here participates in the `sofer` runtime. The module
+  inventory is whatever `ls src/sofer/` reports (AGENTS.md rule 10), and this directory sits outside
+  it.
 - **Not a gate.** No test, guard or CI job reads this directory.
-
-A feature file is written before the first source edit and updated as tasks close; each closed task
-records its commit identity as evidence.
+- **OpenSpec is the record of existing contracts, not an ODD requirement.** The specs under
+  `openspec/specs/`, their `## Test Mapping` tables, `openspec/test-mapping-registry.md`, the
+  archived changes and `scripts/check_test_mapping.py` remain in force. When an authorized change
+  alters an existing contract, update that contract in place. New ODD work does not need a proposal,
+  design, change folder or archive report, and does not need a parallel ODD and SDD dossier.
