@@ -73,7 +73,7 @@ sofer init my-dataset --user myuser
 # 2. Discover data files
 sofer scan my-dataset.toml
 
-# 3. Fill the human metadata step (see below)
+# 3. Fill the human metadata step
 sofer meta check my-dataset.toml
 sofer meta set my-dataset.toml \
   --set description="<what the data contains>" \
@@ -102,11 +102,6 @@ sofer publish my-dataset.toml --target local --output ./out/   # no network
 
 > **Repositories are private by default.** A public target is a separate
 > decision and needs explicit authorization. See [Security](docs/security.md).
-
-The metadata step is shared work: an agent can infer the description and tags,
-while a human supplies the license and source. `sofer meta check` reports
-placeholders and `sofer meta set` writes the real values. Do not guess a
-license or a source.
 
 ## What the package contains
 
