@@ -51,13 +51,16 @@ src/sofer/
 ├── _converters.py       # Format-specific Parquet conversion
 ├── _parquet_helpers.py  # Shared Parquet dtype helpers
 ├── _toml.py             # TOML parser selection (tomllib/tomli fallback)
-├── cli.py               # argparse CLI with 10 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
+├── _yaml.py             # YAML parsing + surgical single-entry editing (MCP configs)
+├── cli.py               # argparse CLI with 11 subcommands (init, scan, validate, prepare, publish, codebook, profile, render, mcp, meta, report-failure)
 ├── config.py            # Tool-wide defaults from [tool.sofer] (discovery + reload)
 ├── model.py             # DatasetConfig + InferenceStatus
 ├── checks.py            # DatasetValidator — data integrity checks
 ├── quality.py           # QualityValidator — 9 quality checks (single-pass)
 ├── codebook.py          # Multi-format codebook generator
 ├── scanner.py           # File discovery, TOML merge, copy-to-cache
+├── file_edit.py         # Surgical [[file]] editor for the dataset TOML
+├── meta_edit.py         # Surgical [meta] editor for the dataset TOML
 ├── prepare.py           # Offline generation: Parquet conversion, card, LICENSE, codebooks
 ├── publish.py           # Delivery: HF upload_folder / local copy, auto-prepare, dry-run
 ├── semantic.py          # Semantic type inference detectors (email)
@@ -73,8 +76,15 @@ src/sofer/
 ├── workflow.py          # Typed workflow metadata + result envelopes for adapters
 ├── failure_report.py    # Assisted failure reporting: context, anonymization, gh send, persistence
 ├── mcp_server.py        # Optional MCP server (stdio) — tools, resources, prompts
+├── mcp_doctor.py        # Real sofer-mcp cold-start measurement vs the written deadline
 └── mcp_registration.py  # MCP agent registration adapters (opencode/codex/gemini/pi/hermes)
 ```
+
+The module set is whatever `ls src/sofer/` reports — the tree above is a reading aid, not an
+exhaustive contract. **Windows safety:** placeholders use `raw/example.csv` (NTFS-valid; `:` is
+reserved — the old `TODO: raw/...` was invalid); MCP `sofer_init(cwd=...)` resolves per call through
+`_contained_path` + `is_relative_to` as `effective_root` under the server root, never mutating a
+global root; TOML paths use forward slashes (`raw/`, `cache/`).
 
 ## Development conventions
 
@@ -140,6 +150,60 @@ fix(encoding): reject non-UTF-8 files in quality check
 ```
 
 Prefixes: `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `refactor`.
+
+## Releases
+
+Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag
+runs lint + the full test matrix + a wheel-build validation job, then creates a GitHub Release with
+auto-generated notes. There is no PyPI publishing. A `citation-check` guard job fails the workflow
+when `CITATION.cff` does not declare the tagged version, so the CFF must be synced before tagging.
+
+### Cutting a release
+
+1. On `dev`, sync `CITATION.cff` with the release version: run
+   `python scripts/update_citation.py --version X.Y.Z`, review the `CITATION.cff` diff, and commit
+   it. The bump belongs on `dev` so the merge below carries it to `main`.
+2. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev` — the merge carries the
+   `CITATION.cff` bump committed in step 1. Note: `main` is **not** a fast-forward of `dev`
+   (release PR merge commits live on `main`), so always use `--no-ff`.
+3. Do **not** bump a version anywhere else: the version is derived from the tag at build time
+   (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth —
+   `pyproject.toml` has no static `version` field and there is no `__version__` constant.
+4. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push
+   with `git push origin main --follow-tags`.
+5. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job
+   asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases
+   with notes generated from commits/PRs since the previous tag.
+
+### Release rules
+
+- Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the
+  release notes (e.g. v0.2.0 removed the `upload` subcommand). The shipped version always equals the
+  tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed
+  metadata (never a static constant).
+- **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed
+  before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and
+  remotely, and re-tag.
+- **Type-gate nuance (Python 3.13).** The workflow's lint job intentionally runs mypy only under
+  Python 3.13, mirroring CI. Do not add mypy to the version matrix: a `3.10` development environment
+  installs the conditional `tomli` backport (`pyproject.toml:27`), which makes the
+  `import tomli as _tomli` arm of the five `try:` / `except ImportError:` fallbacks live and the
+  `import tomllib as _tomli` arm dead, so the second import of the same name triggers `no-redef`
+  errors (known latent issue in `cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`,
+  `model.py`) — and it leaves the COV-06 per-file gates unsatisfiable by construction, because the
+  dead arm cannot be executed by any test while `# pragma: no cover` is forbidden in those modules
+  (AGENTS.md rule 14). The dev-environment pin (`.python-version`) is therefore `3.13`; a
+  contributor whose interpreter is older must pass `--python 3.13` explicitly for those two gates
+  (`uv run --python 3.13 mypy src/ scripts/`, `uv run --python 3.13 coverage run -m pytest`). A
+  pyright gate (`uv run pyright`, `[tool.pyright]`) now covers the same `src/` and `scripts/` scope;
+  the four `try:` / `except ImportError:` `tomli` sites named here are resolved for that gate by the
+  committed `typings/tomli-stubs/` stub (`mcp_server.py` is version-gated instead, so a static
+  checker prunes its `tomli` arm; mypy already resolves the remaining sites through the global
+  `ignore_missing_imports = true`), never by adding `tomli` to the dev group — which is exactly the
+  move this note forbids.
+- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev`
+  (typically at release time). The release-time `CITATION.cff` bump is itself a `dev` commit
+  (step 1), so `main` never receives CFF content that did not arrive through a merge.
 
 ## Pull requests
 

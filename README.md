@@ -62,6 +62,19 @@ uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mc
 See [installation alternatives](docs/getting-started.md#install) for the full
 comparison.
 
+### MCP server
+
+The same install ships the `sofer-mcp` server. Register it with a supported agent — `opencode`,
+`codex`, `gemini`, `pi`, `hermes`, or `all`:
+
+```bash
+sofer mcp add --agent <agent>
+```
+
+The command writes the host's MCP configuration; `--scope` and `--cwd` control where. See
+[agent setup](docs/agent-setup.md) for registration and [MCP server](docs/mcp.md) for the tool
+surface.
+
 ## Quick start
 
 Run these commands from the dataset directory.

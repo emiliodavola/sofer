@@ -1,5 +1,40 @@
 # Agent Instructions — sofer
 
+## Workflow: Organic Driven Development (ODD)
+
+ODD is the workflow for new work. It has four moves:
+
+1. **Authorization.** Analysis, review, and planning requests are read-only. Implement only when the
+   user explicitly asks for implementation.
+2. **Proportionate exploration.** Verify the request against the code and docs before writing;
+   explore only as deep as the decision requires.
+3. **Implementation.** Make the smallest coherent change. Small changes go directly; a dossier is
+   not required merely because work touches several files.
+4. **Verification.** Run the applicable gates and report actual results, including failures,
+   skips, and unavailable checks.
+
+The issue and PR are the default record for scope, decisions, verification, and delivery. Create a
+durable task document (for example under `odd/tasks/`) only when essential decisions, dependencies,
+or unfinished work cannot live in the issue/PR and would otherwise be lost across sessions. State
+that continuity need before creating the document. Do not duplicate issue/PR content by routine.
+
+SDD is not required for new ODD work: no new proposal, design, change folder, or archive report is
+needed. OpenSpec remains the record of existing contracts — the specs, `## Test Mapping` tables, the
+registry, the archives, and `scripts/check_test_mapping.py` stay in force and unchanged in scope.
+When an authorized change alters an existing OpenSpec contract, update that contract in place; do not
+require parallel ODD and SDD dossiers, and do not extend mapping requirements automatically to every
+ODD task. Historical OpenSpec records are never rewritten.
+
+Keep the full-suite cadence from rule 6: `uv run pytest tests/ -q` after every change batch. Focused
+tests may support iteration; they never replace the full suite.
+
+### GitHub assignment
+
+Every issue or pull request an agent creates SHALL be assigned to the authenticated GitHub user
+(`gh api user --jq .login`, or `--assignee @me`) unless the user says otherwise. Assign at creation
+time. If the assignment fails, do not block delivery: record the failed assignment and its reason in
+the report.
+
 ## Code Quality Standards
 
 ### 1. No hardcoded values
@@ -81,42 +116,46 @@ The most critical bug pattern we've seen: code that uses a hardcoded default ins
   together, and let the guards in `tests/test_ci_workflows.py` catch the drift.
 
 ### 10. Architecture: one module per concern
-- CLI dispatch: `cli.py` (10 subcommands: init, scan, validate, prepare, publish, codebook, profile, render, mcp, report-failure)
-- Dataset config model: `model.py`
-- Tool config defaults: `config.py` (discovery + reload, profile_dir/render_dir)
-- Format registry: `_formats.py`
-- Each command gets its own domain module: `scanner.py`, `codebook.py`, `prepare.py`, `publish.py`, `profile.py`, `render.py`, `mcp_registration.py`, `mcp_server.py`
-- Supporting domains: `checks.py`, `quality.py`, `metadata.py`, `semantic.py`, `pii.py`, `repo_compliance.py`, `splits.py`, `verification.py`, `execution_context.py`, `manifest.py`, `workflow.py`
-- Shared utilities: `_sentinels.py`, `_csv_reader.py`, `_parquet_helpers.py`, `_clean.py`, `_converters.py`, `_mirror.py`, `_patterns.py`, `_toml.py`, `_version.py`
-- The module set is whatever `ls src/sofer/` reports — the directory is the source of truth; the groups above are a reading aid, not an exhaustive list. `__init__.py` is the package docstring + public API.
-- Windows safety: placeholders use `raw/example.csv` (NTFS-valid, `:` reserved — old `TODO: raw/...` was invalid); MCP `sofer_init(cwd=...)` resolves per-call via `_contained_path` + `is_relative_to` as `effective_root` under server root, never mutating global `_SERVER_ROOT`; TOML paths use forward slashes (`raw/`, `cache/`).
+- One module per concern: a command owns its domain module, and shared helpers live in `src/sofer/_*.py`.
+- The module set is whatever `ls src/sofer/` reports — the directory is the source of truth, not a list
+  in this file. `__init__.py` is the package docstring + public API.
+- The full inventory, CLI subcommand list, and Windows path/containment notes live in
+  CONTRIBUTING → Architecture.
 
-### 11. PR template
-- All pull requests must use the template in `.github/PULL_REQUEST_TEMPLATE.md`.
-- Fill every section — don't leave placeholders or `<!-- comments -->`.
-- Verification section must contain **actual command output**, not placeholders.
-- SDD artifacts section is mandatory when the change followed the SDD workflow; for ad-hoc fixes it can be omitted but the change description must still be thorough.
+### 11. PR template and delivery record
+- All pull requests must use `.github/PULL_REQUEST_TEMPLATE.md`. Fill every section — no
+  placeholders or `<!-- comments -->` — and put **actual command output** in Verification.
+- Link the issue and any evidence artifacts that exist; the PR describes what, why, and how.
+- OpenSpec artifacts are required only when the change uses OpenSpec: name the specs touched and
+  the archive path for a change folder delivered by the PR. Ordinary ODD work needs no SDD
+  artifacts section and is not made less thorough by that omission.
 
 ### 12. Release process
-Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag runs lint + the full test matrix + a wheel-build validation job, then creates a GitHub Release with auto-generated notes. There is no PyPI publishing. A `citation-check` guard job fails the workflow when `CITATION.cff` does not declare the tagged version, so the CFF must be synced before tagging.
+Releases are **tag-driven and automated** by `.github/workflows/release.yml`: pushing a `v*` tag
+runs lint, the full test matrix, and wheel validation, then creates a GitHub Release with generated
+notes. There is no PyPI publishing.
 
-Cutting a release:
-1. On `dev`, sync `CITATION.cff` with the release version: run `python scripts/update_citation.py --version X.Y.Z`, review the `CITATION.cff` diff, and commit it. The bump belongs on `dev` so the merge below carries it to `main`.
-2. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev` — the merge carries the `CITATION.cff` bump committed in step 1. Note: `main` is **not** a fast-forward of `dev` (release PR merge commits live on `main`), so always use `--no-ff`.
-3. Do **not** bump a version anywhere else: the version is derived from the tag at build time (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth — `pyproject.toml` has no static `version` field and there is no `__version__` constant.
-4. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push with `git push origin main --follow-tags`.
-5. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases with notes generated from commits/PRs since the previous tag.
+- `CITATION.cff` MUST declare the tagged version before tagging; the `citation-check` guard fails the
+  workflow otherwise.
+- The tag is the single source of truth for the version (hatch-vcs). Never add a static version
+  field or a second bump location.
+- Versioning is semver; pre-1.0 minor bumps may carry breaking changes — document them in the
+  release notes. The shipped version always equals the tag: `--version` resolves from installed
+  metadata, never from a static constant.
+- **Never move or delete a pushed tag** unless the release job never ran (quality gates failed before
+  publishing); then fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
+- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev`,
+  typically at release time.
+- Python 3.13 is required for the mypy and complete-suite coverage gates; the `tomli` rationale and
+  the exact invocations are in CONTRIBUTING → Releases.
 
-Rules:
-- Versioning is semver; pre-1.0 minor bumps (0.x) may carry breaking changes — document them in the release notes (e.g. v0.2.0 removed the `upload` subcommand). The shipped version always equals the tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed metadata (never a static constant).
-- **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
-- The workflow's lint job intentionally runs mypy only under Python 3.13, mirroring CI. Do not add mypy to the version matrix: a `3.10` development environment installs the conditional `tomli` backport (`pyproject.toml:27`), which makes the `import tomli as _tomli` arm of the five `try:` / `except ImportError:` fallbacks live and the `import tomllib as _tomli` arm dead, so the second import of the same name triggers `no-redef` errors (known latent issue in `cli.py`, `config.py`, `mcp_registration.py`, `mcp_server.py`, `model.py`) — and it leaves the COV-06 per-file gates unsatisfiable by construction, because the dead arm cannot be executed by any test while `# pragma: no cover` is forbidden in those modules (rule 14). The dev-environment pin (`.python-version`) is therefore `3.13`; a contributor whose interpreter is older must pass `--python 3.13` explicitly for those two gates (`uv run --python 3.13 mypy src/ scripts/`, `uv run --python 3.13 coverage run -m pytest`). A pyright gate (`uv run pyright`, `[tool.pyright]`) now covers the same `src/` and `scripts/` scope; the four `try:` / `except ImportError:` `tomli` sites named here are resolved for that gate by the committed `typings/tomli-stubs/` stub (`mcp_server.py` is version-gated instead, so a static checker prunes its `tomli` arm; mypy already resolves the remaining sites through the global `ignore_missing_imports = true`), never by adding `tomli` to the dev group — which is exactly the move this note forbids.
-- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev` (typically at release time). The release-time `CITATION.cff` bump is itself a `dev` commit (rule 12, step 1), so `main` never receives CFF content that did not arrive through a merge.
+The complete cutting-a-release runbook, the immutable-tag exception, and the full Python 3.13
+rationale: CONTRIBUTING → Releases.
 
 ### 13. README / README_ES sync
-- `README_ES.md` mirrors the user-facing headings and section order of `README.md`.
-  Any change to a translated README section MUST update the matching `README_ES.md`
-  section in the same commit; section additions/removals MUST land in both files.
+- **Every** change to `README.md` MUST also update `README_ES.md` in the **same commit** — not only
+  section additions or changes classified as user-facing. `README_ES.md` mirrors the headings and
+  section order of `README.md`.
 - Technical content (commands, flags, TOML/YAML excerpts, CLI output, filenames,
   URLs) stays in English in both files; only prose is translated.
 
@@ -149,18 +188,20 @@ Rules:
   floor.
 - Adjacent policy pointer (not part of this rule's mandate): the three second-tier per-file floors (`profile.py`, `mcp_registration.py`, `verification.py`) are deliberately **not** CI-gated — they stay verify-phase evidence only, and arming a gate for them is a spec change (see spec `coverage` COV-07).
 
-### 15. SDD archive placement
-- A completed SDD change SHALL be archived **inside the pull request that delivers it**: the same PR
-  that merges the change also moves `openspec/changes/<change>/` to
+### 15. OpenSpec archive placement (when OpenSpec is used)
+- A completed OpenSpec change SHALL be archived **inside the pull request that delivers it**: the
+  same PR that merges the change also moves `openspec/changes/<change>/` to
   `openspec/changes/archive/<change>/` and adds its `archive-report.md`. The archive is part of the
   change, not follow-up housekeeping.
 - Never open a second PR whose only purpose is to archive a change that already merged. By then the
   change is delivered, the archive is orphaned from its own diff, and the reviewer can no longer read
   the change and its record together — which is exactly what happened to the changes delivered by
   #276 and #279 and only archived later in #281.
-- The PR body's SDD artifacts section (rule 11) SHALL name the archive path for the change it
-  delivers. **"Not archived yet — archive after merge" is not a valid state for a merged change.**
+- The PR body's OpenSpec artifacts description (rule 11) SHALL name the archive path for the change
+  it delivers. **"Not archived yet — archive after merge" is not a valid state for a merged change.**
 - An archive report's claims SHALL be true of the artifact they describe. A report saying "all tasks
   complete" while the archived `tasks.md` still carries a `pending` row is a **defect in the durable
   record**, not a cosmetic slip — the archived report is the only thing a future reader has (see the
   #281 correction in #282).
+- Ordinary ODD work creates no change folder, so it has no archive report and no archive step.
+  Historical OpenSpec archives are never rewritten.
