@@ -97,8 +97,11 @@ def _copy_mode(staging: Path, mode: int | None) -> None:
 
     Also best effort: a filesystem that refuses ``chmod`` (some SMB, FUSE or
     NFS mounts do) must not turn a write the previous writer completed into a
-    hard failure. The file then keeps the staging mode, which is never wider
-    than the destination's.
+    hard failure. The replacement then keeps the staging mode (``0600``),
+    which matches what the previous writer left for an ordinary destination,
+    is wider than a destination narrower than ``0600`` (a read-only ``0400``,
+    say) and narrower than a group- or world-readable one. Nothing in the
+    return value reports that the carry-over failed.
     """
     if mode is None:
         return
@@ -128,11 +131,12 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
     never opened. That path may already hold the user's data or another
     writer's staging file, and opening it would also follow a symlink and
     truncate its target. The staging file is removed on any failure, not only
-    on ``OSError``, so an intervention cannot leave a unique orphan behind.
+    on ``OSError``, so an interruption does not leave one behind; a cleanup the
+    filesystem itself refuses is swallowed, and that file stays.
 
     The destination's existing permission bits are carried over to the new
-    file. A destination that does not exist yet keeps the mode the
-    temporary-file API assigns (``0600``), which is never wider than before.
+    file when the filesystem allows ``chmod``. A destination that does not
+    exist yet keeps the mode the temporary-file API assigns (``0600``).
     No ``fsync`` is issued, so this guarantees atomic replacement, not
     durability across a power loss.
 
