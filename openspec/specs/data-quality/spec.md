@@ -341,6 +341,13 @@ name the file each pair came from together with the offending row numbers, and
 SHALL list pairs round-robin across the affected files, so the report item cap
 cannot let one noisy file hide the others.
 
+Equality SHALL be over the parsed field strings, and the digest input SHALL frame the field
+boundaries unambiguously (each part length-prefixed) rather than joining the fields with a
+separator, because any separator byte can occur inside a cell: `["a|b", "c"]` and `["a", "b|c"]`
+are different rows and SHALL NOT be reported as duplicates (issue #368). Empty fields,
+backslashes, control characters and Unicode content SHALL be preserved exactly; no value SHALL
+be stripped, normalized or coerced.
+
 The number of distinct row hashes tracked SHALL be capped at `quality_max_dup_tracking`
 (`[tool.sofer]`, default 1 000 000). Once the cap is reached the system MUST stop inserting new
 hashes and MUST NOT evict a tracked hash; a finding produced under the cap SHALL be marked `partial`
@@ -365,6 +372,18 @@ THEN the report SHALL have a warning
   AND the warning SHALL mention the duplicate row numbers
   AND the warning SHALL name the file the rows came from
 ```
+
+**A separator inside a cell does not make two rows equal**
+
+```
+GIVEN a two-column CSV whose data rows are `a|b;c` and `a;b|c`, and another whose rows are
+      `a|;` and `a;|`
+WHEN QualityValidator.run() executes
+THEN no duplicates finding SHALL be produced
+  AND an exact repeated row that contains a pipe SHALL still be reported with its row numbers
+```
+
+**Evidence:** `test: tests/test_quality.py::TestCheckDuplicates::test_a_pipe_in_a_cell_does_not_make_two_rows_equal`, `test: tests/test_quality.py::TestCheckDuplicates::test_empty_fields_are_framed_unambiguously`, `test: tests/test_quality.py::TestCheckDuplicates::test_backslashes_and_unicode_keep_their_boundaries`, `test: tests/test_quality.py::TestCheckDuplicates::test_an_exact_repeated_row_with_a_pipe_is_still_reported`
 
 **Identical rows in different files are NOT duplicates**
 

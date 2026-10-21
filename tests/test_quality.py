@@ -269,6 +269,66 @@ class TestCheckDuplicates:
         qr = [r for r in report.quality_results if r.check == "duplicates"]
         assert len(qr) == 0, f"Cross-file duplicates should NOT be flagged, but got: {qr}"
 
+    @staticmethod
+    def _duplicates(cfg: DatasetConfig) -> list[QualityResult]:
+        report = _run_quality(cfg)
+        return [r for r in report.quality_results if r.check == "duplicates"]
+
+    def test_a_pipe_in_a_cell_does_not_make_two_rows_equal(self, tmp_path):
+        """Issue #368: joining fields with a separator is ambiguous."""
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|b", "c"], ["a", "b|c"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_empty_fields_are_framed_unambiguously(self, tmp_path):
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|", ""], ["a", "|"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_backslashes_and_unicode_keep_their_boundaries(self, tmp_path):
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["é|b", "c"], ["é", "b|c"], ["a\\", "b|c"], ["a\\|b", "c"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_an_exact_repeated_row_with_a_pipe_is_still_reported(self, tmp_path):
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|b", "c"], ["1", "2"], ["a|b", "c"]],
+        )
+
+        findings = self._duplicates(cfg)
+
+        assert [finding.message for finding in findings] == [
+            "Duplicate rows: data.csv: Row 1 = Row 3"
+        ]
+
+    def test_no_false_duplicate_when_duplicates_is_a_fail_check(self, tmp_path):
+        """A false finding would block the dataset, so the file must pass."""
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|b", "c"], ["a", "b|c"]],
+            quality_checks=[QualityCheck(check="duplicates", severity="fail")],
+        )
+
+        report = _run_quality(cfg)
+
+        assert report.passed is True
+        assert [r for r in report.quality_results if r.check == "duplicates"] == []
+
 
 # ── 4.3 Empty rows ──────────────────────────────────────────────────────────────
 
