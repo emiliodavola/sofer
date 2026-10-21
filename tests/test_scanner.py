@@ -885,6 +885,40 @@ class TestWriteToml:
 
         assert sorted(item.name for item in tmp_path.iterdir()) == ["out.toml"]
 
+    def test_a_failed_replace_leaves_the_config_and_cleans_its_staging_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refused commit must not truncate the config nor orphan a staging file."""
+        from sofer import _atomic
+
+        config = tmp_path / "out.toml"
+        config.write_bytes(b'[dataset]\nname = "old"\n')
+        before = config.read_bytes()
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_atomic.os, "replace", _boom)
+        with pytest.raises(OSError, match="disk full"):
+            write_toml({"dataset": {"name": "new"}}, config)
+
+        assert config.read_bytes() == before
+        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".sofer-")] == []
+
+    def test_the_written_bytes_are_the_serialized_toml_with_platform_newlines(
+        self, tmp_path: Path
+    ) -> None:
+        """This writer keeps its pre-existing platform translation (issue #371)."""
+        import tomli_w
+
+        raw = {"dataset": {"name": "ñandú — ünïcode", "repo_id": "u/r"}}
+        config = tmp_path / "out.toml"
+
+        write_toml(raw, config)
+
+        expected = tomli_w.dumps(raw).replace("\n", os.linesep).encode("utf-8")
+        assert config.read_bytes() == expected
+
 
 # ------------------------------------------------------------------
 # TestIntegration
@@ -893,6 +927,37 @@ class TestWriteToml:
 
 class TestIntegration:
     """End-to-end tests through the full scan pipeline."""
+
+    def test_scan_copies_before_a_real_config_replace_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SCN-08: the copy phase lands before the TOML is committed (issue #371)."""
+        from argparse import Namespace
+
+        from sofer import _atomic
+        from sofer.cli import _cmd_scan
+
+        cfg = tmp_path / "d.toml"
+        cfg.write_bytes(b'[dataset]\nname = "x"\nrepo_id = "u/r"\n')
+        before = cfg.read_bytes()
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        (raw / "a.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        real_replace = _atomic.os.replace
+
+        def _boom_for_config(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            if Path(dst).resolve() == cfg.resolve():
+                raise OSError("disk full")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(_atomic.os, "replace", _boom_for_config)
+
+        rc = _cmd_scan(Namespace(config=str(cfg), dry_run=False, force=True, ext=None))
+
+        assert rc == 1
+        assert cfg.read_bytes() == before
+        assert (tmp_path / "cache" / "a.csv").exists()
+        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".sofer-")] == []
 
     def test_full_pipeline(self, tmp_path: Path, monkeypatch) -> None:
         """Full scan produces valid TOML that passes DatasetConfig.validate()."""
