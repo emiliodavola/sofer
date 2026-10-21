@@ -112,11 +112,11 @@ class TestAtomicWriteText:
     ) -> None:
         destination = tmp_path / "dataset.toml"
         destination.write_text("first", encoding="utf-8")
-        staged: list[str] = []
+        staged: list[Path] = []
         real_replace = os.replace
 
         def _record(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
-            staged.append(Path(source).name)
+            staged.append(Path(source))
             real_replace(source, target)
 
         monkeypatch.setattr(_toml.os, "replace", _record)
@@ -125,7 +125,36 @@ class TestAtomicWriteText:
 
         assert len(staged) == 2
         assert staged[0] != staged[1]
-        assert all(name != "dataset.toml.tmp" for name in staged)
+        assert all(path.name != "dataset.toml.tmp" for path in staged)
+        # A staging file outside the destination's directory would make the
+        # replacement cross-device (EXDEV) on a split mount.
+        assert all(path.parent == destination.parent for path in staged)
+
+    def test_a_refused_chmod_does_not_abort_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Some SMB/FUSE mounts refuse chmod; the write must still land."""
+        destination = tmp_path / "dataset.toml"
+        destination.write_text("old", encoding="utf-8")
+
+        def _refuse(*args: object, **kwargs: object) -> None:
+            raise PermissionError("operation not permitted")
+
+        monkeypatch.setattr(_toml.os, "chmod", _refuse)
+        _toml.atomic_write_text(destination, "new")
+
+        assert destination.read_text(encoding="utf-8") == "new"
+
+    def test_a_non_oserror_failure_leaves_no_staging_file(self, tmp_path: Path) -> None:
+        """An encoding failure is not an OSError, and must not orphan a file."""
+        destination = tmp_path / "dataset.toml"
+        destination.write_text("old", encoding="utf-8")
+
+        with pytest.raises(UnicodeEncodeError):
+            _toml.atomic_write_text(destination, "\ud800", encoding="utf-8")
+
+        assert destination.read_text(encoding="utf-8") == "old"
+        assert sorted(item.name for item in tmp_path.iterdir()) == ["dataset.toml"]
 
     def test_crlf_bytes_and_the_encoding_are_preserved(self, tmp_path: Path) -> None:
         destination = tmp_path / "dataset.toml"
@@ -140,6 +169,23 @@ class TestAtomicWriteText:
         _toml.atomic_write_text(destination, 'a = "1"\n')
 
         assert destination.read_text(encoding="utf-8") == 'a = "1"\n'
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+    def test_a_new_destination_is_never_wider_than_0600(self, tmp_path: Path) -> None:
+        destination = tmp_path / "new.toml"
+
+        _toml.atomic_write_text(destination, 'a = "1"\n')
+
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX NAME_MAX")
+    def test_a_destination_near_the_name_limit_still_writes(self, tmp_path: Path) -> None:
+        """The staging name must not grow with the destination's name."""
+        destination = tmp_path / ("d" * 240 + ".toml")
+
+        _toml.atomic_write_text(destination, "new")
+
+        assert destination.read_text(encoding="utf-8") == "new"
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
     def test_the_destinations_permission_bits_are_preserved(self, tmp_path: Path) -> None:

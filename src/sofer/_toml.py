@@ -21,11 +21,23 @@ never opened, because it may already belong to the user or to another writer.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 import tempfile
 from pathlib import Path
 from typing import Any, BinaryIO
+
+_STAGING_PREFIX = ".sofer-"
+"""Prefix of the staging file :func:`atomic_write_text` creates.
+
+The name is deliberately independent of the destination's name: a staging
+file that repeated it grew the basename by fourteen characters, which would
+push a 242-character destination - writable before - past ``NAME_MAX``.
+"""
+
+_STAGING_SUFFIX = ".tmp"
+"""Suffix that keeps a leftover staging file recognizable as such."""
 
 
 def _parser() -> Any:
@@ -80,6 +92,30 @@ def _destination_mode(path: Path) -> int | None:
         return None
 
 
+def _copy_mode(staging: Path, mode: int | None) -> None:
+    """Give *staging* the destination's permission bits, when they are known.
+
+    Also best effort: a filesystem that refuses ``chmod`` (some SMB, FUSE or
+    NFS mounts do) must not turn a write the previous writer completed into a
+    hard failure. The file then keeps the staging mode, which is never wider
+    than the destination's.
+    """
+    if mode is None:
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(staging, mode)
+
+
+def _discard(staging: Path) -> None:
+    """Remove the staging file this call created, ignoring a cleanup failure.
+
+    Cleanup must not mask the exception already propagating, and the path is
+    ours alone by construction.
+    """
+    with contextlib.suppress(OSError):
+        staging.unlink(missing_ok=True)
+
+
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Replace *path* with *text* through an exclusively created temporary file.
 
@@ -87,11 +123,12 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
     before it. ``newline=""`` suppresses translation, so the bytes outside the
     edited region are the bytes that were read (CRLF documents stay CRLF).
 
-    The staging file is unique to this call (issue #365): a fixed
-    ``<destination>.tmp`` sibling is never opened. That path may already hold
-    the user's data or another writer's staging file, and opening it would
-    also follow a symlink and truncate its target. Only the file created here
-    is removed on failure.
+    The staging file is unique to this call and its name does not grow with
+    the destination (issue #365): a fixed ``<destination>.tmp`` sibling is
+    never opened. That path may already hold the user's data or another
+    writer's staging file, and opening it would also follow a symlink and
+    truncate its target. The staging file is removed on any failure, not only
+    on ``OSError``, so an intervention cannot leave a unique orphan behind.
 
     The destination's existing permission bits are carried over to the new
     file. A destination that does not exist yet keeps the mode the
@@ -110,22 +147,22 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
     """
     mode = _destination_mode(path)
     staging: Path | None = None
+    replaced = False
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding=encoding,
             newline="",
             dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
+            prefix=_STAGING_PREFIX,
+            suffix=_STAGING_SUFFIX,
             delete=False,
         ) as handle:
             staging = Path(handle.name)
             handle.write(text)
-        if mode is not None:
-            os.chmod(staging, mode)
+        _copy_mode(staging, mode)
         os.replace(staging, path)
-    except OSError:
-        if staging is not None:
-            staging.unlink(missing_ok=True)
-        raise
+        replaced = True
+    finally:
+        if not replaced and staging is not None:
+            _discard(staging)
