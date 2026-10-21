@@ -134,9 +134,9 @@ a tag cannot publish while a core module (`cli.py`, `scanner.py`, `prepare.py`,
 
 CodeQL SHALL scan the Python codebase through a versioned Advanced-Setup
 workflow committed at `.github/workflows/codeql.yml` — enabled by the workflow,
-never by GitHub's Default Setup UI. Scanning SHALL trigger on push to `main` and
-`dev`, on pull requests targeting `main` and `dev`, and on a weekly `schedule`
-cron. The workflow SHALL declare `permissions: security-events: write`. While
+never by GitHub's Default Setup UI. Scanning SHALL trigger on push to `main`, on
+pull requests targeting `main`, and on a weekly `schedule` cron. The workflow
+SHALL declare `permissions: security-events: write`. While
 the repository is private, code scanning cannot be enabled (it requires GitHub
 Code Security), so the `analyze` step SHALL declare `upload: never` and SHALL
 write SARIF to `codeql-results`; a dedicated `actions/upload-artifact` step
@@ -149,14 +149,15 @@ informational only (no merge gating).
 
 - GIVEN `.github/workflows/codeql.yml` parsed
 - WHEN the triggers are enumerated
-- THEN `push` SHALL target `[main, dev]`, `pull_request` SHALL target
-  `[main, dev]`, and a `schedule` with a weekly `cron` SHALL be declared
+- THEN `push` SHALL target `[main]`, `pull_request` SHALL target `[main]`, and a
+  `schedule` with a weekly `cron` SHALL be declared
 
-#### Scenario: Pull request includes dev
+#### Scenario: Pull request targets main
 
 - GIVEN the parsed `pull_request` trigger
 - WHEN its branch list is inspected
-- THEN `dev` SHALL be included alongside `main`
+- THEN `main` SHALL be its only entry — issue #362 retired `dev`, so a `dev`
+  entry could only scan a branch nobody merges into
 
 #### Scenario: Security-events write permission declared
 
@@ -814,30 +815,33 @@ CI-04 uses.
 
 ---
 
-### Requirement: CI workflow gates push and pull requests on long-lived branches (CI-16)
+### Requirement: CI workflow gates push and pull requests on the long-lived branch (CI-16)
 
 > Added by change `2026-09-26-ci-push-trigger` (GitHub #262). Before this change `ci.yml`
-> contained no `push` trigger, so a direct push to `dev` or `main` bypassed the
-> lint/test/coverage gates the PR pipeline enforces.
+> contained no `push` trigger, so a direct push to a long-lived branch bypassed the
+> lint/test/coverage gates the PR pipeline enforces. Issue #362 retired `dev`, leaving
+> `main` as the only long-lived branch.
 
-`.github/workflows/ci.yml` SHALL trigger on `push` to `main` and `dev` and on `pull_request`
-targeting `main` and `dev`, mirroring `.github/workflows/codeql.yml`'s branch list. Every
-commit that lands on a long-lived branch SHALL therefore be gated by the `lint`, `test`, and
-`coverage` jobs, not only commits that arrive through a pull request. A static guard in
+`.github/workflows/ci.yml` SHALL trigger on `push` to `main` and on `pull_request`
+targeting `main`, mirroring `.github/workflows/codeql.yml`'s branch list. Every
+commit that lands on `main` SHALL therefore be gated by the `lint`, `test`, and
+`coverage` jobs, not only commits that arrive through a pull request. The
+`pull_request.branches` filter matches the pull request's base branch, so
+short-lived work branches are covered without being listed. A static guard in
 `tests/test_ci_workflows.py` SHALL assert the trigger contract so it cannot silently regress.
 
-#### Scenario: Push trigger targets main and dev
+#### Scenario: Push trigger targets main
 
 - GIVEN `.github/workflows/ci.yml` parsed
 - WHEN its `push` trigger is inspected
-- THEN `push.branches` SHALL be `[main, dev]`, so a direct push to either long-lived branch
+- THEN `push.branches` SHALL be `[main]`, so a direct push to the long-lived branch
   is gated
 
-#### Scenario: Pull request trigger still targets main and dev
+#### Scenario: Pull request trigger targets main
 
 - GIVEN `.github/workflows/ci.yml` parsed
 - WHEN its `pull_request` trigger is inspected
-- THEN `pull_request.branches` SHALL be `[main, dev]`
+- THEN `pull_request.branches` SHALL be `[main]`
 
 ## Test Mapping
 
@@ -860,7 +864,7 @@ evidence recorded in the verify report.
 | CI-03 | Tag push below the floor yields no release | verify:Verify-phase static evidence — needs-chain proof per the PB-05/MSP-R12 precedent (no release path below the floor) |
 | CI-03 | Release coverage job runs the core 100% gates | test:tests/test_ci_workflows.py — `test_release_coverage_job_runs_core_100_gates`: YAML inspection of the release.yml `coverage` job steps |
 | CI-04 | Push, PR, and weekly triggers present | test:tests/test_ci_workflows.py — `test_codeql_has_push_pr_and_weekly_triggers`: YAML inspection of codeql.yml |
-| CI-04 | Pull request includes dev | test:tests/test_ci_workflows.py — `test_codeql_pull_request_targets_dev`: YAML inspection |
+| CI-04 | Pull request targets main | test:tests/test_ci_workflows.py — `test_codeql_pull_request_targets_main`: YAML inspection |
 | CI-04 | Security-events write permission declared | test:tests/test_ci_workflows.py — `test_codeql_security_write_permission_and_python`: YAML inspection |
 | CI-04 | SARIF stays a workflow artifact while the repository is private | test:tests/test_ci_workflows.py — `test_codeql_private_window_publishes_sarif_artifact_without_upload`: YAML inspection |
 | CI-05 | Config file referenced by init | test:tests/test_ci_workflows.py — YAML inspection |
@@ -899,5 +903,5 @@ evidence recorded in the verify report.
 | CI-14 | minor/patch groups exclude majors | test:tests/test_ci_workflows.py — `test_dependabot_groups_exclude_majors`: YAML inspection of every update's `groups` update-types |
 | CI-15 | Workflow-level permissions grant no write access | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of release.yml workflow-level permissions |
 | CI-15 | Only the release job declares contents write | test:tests/test_ci_workflows.py — `test_release_workflow_permissions_are_least_privilege`: YAML inspection of every release.yml job's permissions |
-| CI-16 | Push trigger targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
-| CI-16 | Pull request trigger still targets main and dev | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main_and_dev`: YAML inspection of the ci.yml triggers |
+| CI-16 | Push trigger targets main | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main`: YAML inspection of the ci.yml triggers |
+| CI-16 | Pull request trigger targets main | test:tests/test_ci_workflows.py — `test_ci_has_push_and_pr_triggers_targeting_main`: YAML inspection of the ci.yml triggers |

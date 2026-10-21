@@ -6,6 +6,11 @@
 # the repository is public. Alerts themselves are toggled in
 # Settings → Code security; this file drives the update pull requests.
 #
+# Target branch: no update declares `target-branch`, so Dependabot follows the
+# repository default branch (`main` since issue #362 retired `dev`). Keep it
+# implicit: an explicit override would pin updates to one branch forever and
+# would silently keep pointing at a retired branch.
+#
 # Cadence: both ecosystems run `monthly` (the first of each month). Routine
 # version updates are low-value here — with `ruff`, `mypy` and `pyright`
 # ignored, only single-home dependencies arrive — and this schedule does NOT
