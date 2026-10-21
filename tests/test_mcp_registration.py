@@ -2425,3 +2425,67 @@ class TestRegistrationTimeouts:
         # No timeouts requested → nothing to drop, nothing to say.
         assert mcp_registration.dropped_timeout_note("pi", None) is None
         assert mcp_registration.dropped_timeout_note("unregistered", timeouts) is None
+
+
+class TestAtomicWriteStaging:
+    """Issue #371: registration shares the package's single replace primitive."""
+
+    def test_a_preexisting_tmp_sibling_is_untouched(self, tmp_path: Path) -> None:
+        """The writer must never open the predictable ``<config>.tmp`` path."""
+        path = tmp_path / "opencode.json"
+        sibling = path.with_name(path.name + ".tmp")
+        sibling.write_text("pre-existing staging file", encoding="utf-8")
+        doc = {"mcp": {"sofer": {"command": "sofer-mcp"}}}
+
+        mcp_registration.atomic_write(path, doc, "json")
+
+        assert sibling.read_text(encoding="utf-8") == "pre-existing staging file"
+        written = json.loads(path.read_text(encoding="utf-8"))
+        assert written["mcp"]["sofer"]["command"] == "sofer-mcp"
+
+    def test_no_staging_file_survives_for_any_format(self, tmp_path: Path) -> None:
+        doc = {"mcp": {"sofer": {"command": "sofer-mcp"}}}
+
+        for fmt, name in (("json", "a.json"), ("toml", "b.toml"), ("yaml", "c.yaml")):
+            mcp_registration.atomic_write(tmp_path / name, doc, fmt)
+
+        assert [item.name for item in tmp_path.iterdir() if item.name.startswith(".sofer-")] == []
+        assert sorted(item.name for item in tmp_path.iterdir()) == ["a.json", "b.toml", "c.yaml"]
+
+    def test_json_keeps_the_declared_serialization_and_non_ascii_values(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "opencode.json"
+        doc = {"mcp": {"sofer": {"command": "sofer-mcp", "note": "ñandú — ünïcode"}}}
+
+        mcp_registration.atomic_write(path, doc, "json")
+
+        assert path.read_text(encoding="utf-8") == (
+            json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+        )
+
+    def test_toml_output_is_the_exact_tomli_w_bytes(self, tmp_path: Path) -> None:
+        import tomli_w
+
+        path = tmp_path / "config.toml"
+        doc = {"mcp": {"sofer": {"command": "sofer-mcp", "note": "ñandú"}}}
+
+        mcp_registration.atomic_write(path, doc, "toml")
+
+        assert path.read_bytes() == tomli_w.dumps(doc).encode("utf-8")
+
+    def test_a_failed_replace_leaves_the_document_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "opencode.json"
+        path.write_text('{"original": true}\n', encoding="utf-8")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mcp_registration._atomic.os, "replace", _boom)
+        with pytest.raises(OSError, match="disk full"):
+            mcp_registration.atomic_write(path, {"mcp": {}}, "json")
+
+        assert path.read_text(encoding="utf-8") == '{"original": true}\n'
+        assert [item.name for item in tmp_path.iterdir() if item.name.startswith(".sofer-")] == []
