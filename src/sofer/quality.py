@@ -27,8 +27,10 @@ most ``config.PROBE_CHUNK_BYTES`` of the file it judges (issue #326).
 
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -78,6 +80,31 @@ def _capped_append(target: list[Any], item: Any, limit: int) -> None:
     """
     if len(target) < limit:
         target.append(item)
+
+
+def _decodes_probe(chunk: bytes, encoding: str, *, final: bool) -> bool:
+    """Return whether *chunk* decodes as *encoding*, tolerating a split tail.
+
+    ``final`` says whether the probe reached physical end-of-file. When it did
+    not, an incomplete sequence at the tail is completed by bytes this probe
+    never reads, so the incremental decoder holds those bytes back instead of
+    rejecting them (issue #370). Invalid bytes that are decidable inside the
+    chunk still raise, and ``errors="strict"`` never hides them.
+
+    Args:
+        chunk: The bytes the probe read.
+        encoding: One candidate encoding from ``ENCODING_FALLBACKS``.
+        final: ``True`` when ``chunk`` ends at physical end-of-file.
+
+    Returns:
+        ``True`` when the chunk is decodable under the rule above.
+    """
+    decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+    try:
+        decoder.decode(chunk, final)
+    except UnicodeError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -177,10 +204,10 @@ class QualityValidator:
             self._had_eligible = True
 
             # ── Pre-scan: encoding validation ──────────────────────────
-            self._check_encoding_validation(resolved)
+            encoding_reported = self._check_encoding_validation(resolved)
 
             # ── Streaming pass — interleave all per-row checks ─────────
-            self._process_file(resolved)
+            self._process_file(resolved, encoding_reported=encoding_reported)
 
         # ── Post-scan checks ───────────────────────────────────────────
         self._check_cross_file_types()
@@ -256,11 +283,17 @@ class QualityValidator:
     #  File processing (single pass, interleaved)
     # ------------------------------------------------------------------
 
-    def _process_file(self, resolved: Path) -> None:
+    def _process_file(self, resolved: Path, *, encoding_reported: bool = False) -> None:
         """Open one CSV/TSV and distribute all rows to active accumulators.
 
         Non-eligible paths return immediately with no accumulator updates and
         no ``ran_checks`` mutation (defensive guard for direct calls).
+
+        Args:
+            resolved: The file to stream.
+            encoding_reported: ``True`` when :meth:`_check_encoding_validation`
+                already appended a finding for this file, so a mid-stream
+                decode failure is not reported a second time.
         """
         if not is_text_eligible(resolved):
             return
@@ -314,7 +347,24 @@ class QualityValidator:
             self._col_nonempty.setdefault(f"{fname}::{col_name}", False)
 
         row_number = 0
-        for _header, row in gen:
+        while True:
+            try:
+                _header, row = next(gen)
+            except StopIteration:
+                break
+            except ValueError as exc:
+                # The decoded prefix passed but the stream did not: a mislabeled
+                # file whose first invalid byte sits past the probe window. It
+                # must become a finding, never an exception out of ``run()``
+                # (issue #370). When the probe already reported the file, the
+                # same problem is not reported twice.
+                if not encoding_reported:
+                    self._add_result(
+                        "corrupt_records",
+                        "fail",
+                        f"Cannot read '{fname}': {exc}",
+                    )
+                return
             if row is None:  # header-only yield already consumed
                 continue
             row_number += 1
@@ -673,7 +723,7 @@ class QualityValidator:
                     from_sample=True,
                 )
 
-    def _check_encoding_validation(self, resolved: Path) -> None:
+    def _check_encoding_validation(self, resolved: Path) -> bool:
         """Probe the first ``config.PROBE_CHUNK_BYTES`` with ``utf-8-sig → utf-8``.
 
         Non-eligible paths return immediately with no finding and no
@@ -684,31 +734,40 @@ class QualityValidator:
         The prefix is read with a **bounded** read (issue #326): the probe only
         answers a question about the file's first ``probe_chunk_bytes``, so
         materializing the file to slice it made the pass's peak follow the
-        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.  The
-        bytes judged are the same ones ``read_bytes()[:n]`` judged, including
-        the truncation of a multi-byte sequence that straddles the boundary.
+        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.
+
+        What the judged prefix proves (issue #370): a sequence cut by the
+        window is completed by bytes the probe deliberately does not read, so
+        it is not evidence of a bad encoding; only a sequence cut by physical
+        end-of-file is.  The file's size, read from the open descriptor, tells
+        the two apart without a second read, which keeps the bound intact.
+
+        Returns:
+            ``True`` when a finding was appended for this file, so the caller
+            can avoid reporting the same decode failure twice; ``False`` when
+            the file passed, was skipped, or held no active check.
         """
         if not is_text_eligible(resolved):
-            return
+            return False
         if "encoding_validation" not in self._checks:
-            return
+            return False
         self._ran_checks.add("encoding_validation")
         sev = self._checks["encoding_validation"]["severity"]
-        # Read the first probe-sized chunk and try each encoding
+        # Read the first probe-sized chunk and learn whether it reached EOF
         try:
             with resolved.open("rb") as fh:
                 chunk = fh.read(config.PROBE_CHUNK_BYTES)
+                size = os.fstat(fh.fileno()).st_size
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
-            return
+            return True
+        final = len(chunk) >= size
         for enc in ENCODING_FALLBACKS:
-            try:
-                chunk.decode(enc)
-                return  # success
-            except (UnicodeDecodeError, UnicodeError):
-                continue
+            if _decodes_probe(chunk, enc, final=final):
+                return False  # success
         msg = f"Cannot decode '{resolved.name}' — all encodings failed"
         self._add_result("encoding_validation", sev, msg)
+        return True
 
     # ------------------------------------------------------------------
     #  Cross-file type collection
