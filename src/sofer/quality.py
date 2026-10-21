@@ -204,10 +204,10 @@ class QualityValidator:
             self._had_eligible = True
 
             # ── Pre-scan: encoding validation ──────────────────────────
-            self._check_encoding_validation(resolved)
+            encoding_reported = self._check_encoding_validation(resolved)
 
             # ── Streaming pass — interleave all per-row checks ─────────
-            self._process_file(resolved)
+            self._process_file(resolved, encoding_reported=encoding_reported)
 
         # ── Post-scan checks ───────────────────────────────────────────
         self._check_cross_file_types()
@@ -283,11 +283,17 @@ class QualityValidator:
     #  File processing (single pass, interleaved)
     # ------------------------------------------------------------------
 
-    def _process_file(self, resolved: Path) -> None:
+    def _process_file(self, resolved: Path, *, encoding_reported: bool = False) -> None:
         """Open one CSV/TSV and distribute all rows to active accumulators.
 
         Non-eligible paths return immediately with no accumulator updates and
         no ``ran_checks`` mutation (defensive guard for direct calls).
+
+        Args:
+            resolved: The file to stream.
+            encoding_reported: ``True`` when :meth:`_check_encoding_validation`
+                already appended a finding for this file, so a mid-stream
+                decode failure is not reported a second time.
         """
         if not is_text_eligible(resolved):
             return
@@ -341,7 +347,24 @@ class QualityValidator:
             self._col_nonempty.setdefault(f"{fname}::{col_name}", False)
 
         row_number = 0
-        for _header, row in gen:
+        while True:
+            try:
+                _header, row = next(gen)
+            except StopIteration:
+                break
+            except ValueError as exc:
+                # The decoded prefix passed but the stream did not: a mislabeled
+                # file whose first invalid byte sits past the probe window. It
+                # must become a finding, never an exception out of ``run()``
+                # (issue #370). When the probe already reported the file, the
+                # same problem is not reported twice.
+                if not encoding_reported:
+                    self._add_result(
+                        "corrupt_records",
+                        "fail",
+                        f"Cannot read '{fname}': {exc}",
+                    )
+                return
             if row is None:  # header-only yield already consumed
                 continue
             row_number += 1
@@ -700,7 +723,7 @@ class QualityValidator:
                     from_sample=True,
                 )
 
-    def _check_encoding_validation(self, resolved: Path) -> None:
+    def _check_encoding_validation(self, resolved: Path) -> bool:
         """Probe the first ``config.PROBE_CHUNK_BYTES`` with ``utf-8-sig → utf-8``.
 
         Non-eligible paths return immediately with no finding and no
@@ -718,11 +741,16 @@ class QualityValidator:
         it is not evidence of a bad encoding; only a sequence cut by physical
         end-of-file is.  The file's size, read from the open descriptor, tells
         the two apart without a second read, which keeps the bound intact.
+
+        Returns:
+            ``True`` when a finding was appended for this file, so the caller
+            can avoid reporting the same decode failure twice; ``False`` when
+            the file passed, was skipped, or held no active check.
         """
         if not is_text_eligible(resolved):
-            return
+            return False
         if "encoding_validation" not in self._checks:
-            return
+            return False
         self._ran_checks.add("encoding_validation")
         sev = self._checks["encoding_validation"]["severity"]
         # Read the first probe-sized chunk and learn whether it reached EOF
@@ -732,13 +760,14 @@ class QualityValidator:
                 size = os.fstat(fh.fileno()).st_size
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
-            return
+            return True
         final = len(chunk) >= size
         for enc in ENCODING_FALLBACKS:
             if _decodes_probe(chunk, enc, final=final):
-                return  # success
+                return False  # success
         msg = f"Cannot decode '{resolved.name}' — all encodings failed"
         self._add_result("encoding_validation", sev, msg)
+        return True
 
     # ------------------------------------------------------------------
     #  Cross-file type collection

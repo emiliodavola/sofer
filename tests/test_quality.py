@@ -621,6 +621,13 @@ class TestEncodingProbeBoundary:
         return [r for r in report.quality_results if r.check == "encoding_validation"]
 
     @staticmethod
+    def _single_column_payload(window: int, char: str) -> bytes:
+        """One-column rows whose *char* has exactly one byte inside *window*."""
+        header = b"value\n"
+        filler = b"a\n" * ((window - len(header) - 1) // 2) + b"a"
+        return header + filler + char.encode("utf-8") + b"\n1\n"
+
+    @staticmethod
     def _straddling(window: int, char: str, inside: int, prefix: bytes = b"") -> bytes:
         """Build a payload whose *char* is cut after *inside* bytes by *window*."""
         encoded = char.encode("utf-8")
@@ -688,6 +695,52 @@ class TestEncodingProbeBoundary:
         cfg = self._cfg(tmp_path, b"a;b\n1;2\n")
 
         assert self._findings(cfg) == []
+
+    def test_a_valid_character_cut_by_the_window_passes_mid_stream(self, tmp_path):
+        """The cut character in a later row must not fail the streaming pass."""
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, self._single_column_payload(window, "é"))
+
+        report = QualityValidator(cfg).run()
+        findings = [
+            r
+            for r in report.quality_results
+            if r.check in {"encoding_validation", "corrupt_records"}
+        ]
+        assert findings == []
+
+    def test_a_non_utf8_row_inside_the_window_is_reported_once(self, tmp_path):
+        """The probe reports it; the streaming pass must not duplicate it."""
+        cfg = self._cfg(tmp_path, b"a;b\n1;2\n\xff;2\n")
+
+        report = QualityValidator(cfg).run()
+
+        encoding = [r for r in report.quality_results if r.check == "encoding_validation"]
+        corrupt = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert [r.severity for r in encoding] == ["fail"]
+        assert corrupt == []
+
+    def test_a_non_utf8_tail_cannot_abort_the_run(self, tmp_path):
+        """A row the probe never saw must become a finding, not an exception.
+
+        The probe judges the first ``probe_chunk_bytes``. A mislabeled file
+        whose first invalid byte sits past that window decodes its header, so
+        the streaming pass is the one that discovers the problem; before the
+        fix the ``ValueError`` escaped ``run()`` and the caller got no report
+        at all.
+        """
+        window = config.PROBE_CHUNK_BYTES
+        payload = b"a;b\n" + b"1;2\n" * (window // 4) + b"\xff;2\n" + b"3;4\n"
+        cfg = self._cfg(tmp_path, payload)
+
+        report = QualityValidator(cfg).run()
+
+        corrupt = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert [r.severity for r in corrupt] == ["fail"]
+        assert "data.csv" in corrupt[0].message
+        encoding = [r for r in report.quality_results if r.check == "encoding_validation"]
+        assert encoding == []
 
 
 # ── Persisted quality report (Issue #14) ─────────────────────────────────────

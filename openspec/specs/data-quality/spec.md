@@ -510,6 +510,12 @@ THEN a warning SHALL be appended mentioning the column
 (different from the header length) via manual `len(row) != len(header)`
 comparison on every row. Default severity: `fail`.
 
+A file whose stream stops decoding after its header was read — a mislabeled file whose first
+invalid byte sits past the encoding probe window of §4.9 — SHALL produce one `fail`
+`corrupt_records` finding naming the file, and SHALL NOT abort the pass, unless
+`encoding_validation` already reported that file; in that case the single encoding finding
+stands.
+
 #### Scenarios
 
 **Uniform row lengths**
@@ -527,6 +533,18 @@ GIVEN a CSV where row 55 has fewer fields than the header
 WHEN _check_corrupt_records() runs
 THEN a fail-level error SHALL be appended mentioning row 55
 ```
+
+**A row the probe never saw cannot abort the run**
+
+```
+GIVEN a multi-row file whose header decodes but whose first invalid byte lies past the 8 KB
+      encoding probe window
+WHEN QualityValidator.run() scans it
+THEN one `fail` corrupt_records finding naming the file SHALL be appended
+  AND the call SHALL return a report instead of raising
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_non_utf8_tail_cannot_abort_the_run`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_non_utf8_row_inside_the_window_is_reported_once`
 
 ### 4.7 Value range — configurable min/max per column
 
