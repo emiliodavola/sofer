@@ -179,6 +179,29 @@ def _run_quality(cfg: DatasetConfig) -> ValidationReport:
     return v.run()
 
 
+def _two_same_basename_csvs(
+    tmp_path: Path,
+    left: list[list[str]],
+    right: list[list[str]],
+) -> DatasetConfig:
+    """Two declared sources both named ``data.csv``, in different folders.
+
+    The layouts are valid and indistinguishable by basename, which is exactly
+    the collision issue #369 is about.
+    """
+    left_path = _make_csv(tmp_path / "a" / "data.csv", left)
+    right_path = _make_csv(tmp_path / "b" / "data.csv", right)
+    return DatasetConfig(
+        name="test",
+        repo_id="u/test",
+        _base_dir=tmp_path,
+        files=[
+            FileEntry(local=left_path, remote="a/data.csv"),
+            FileEntry(local=right_path, remote="b/data.csv"),
+        ],
+    )
+
+
 # ── 4.2 Duplicates ──────────────────────────────────────────────────────────────
 
 
@@ -329,6 +352,60 @@ class TestCheckDuplicates:
         assert report.passed is True
         assert [r for r in report.quality_results if r.check == "duplicates"] == []
 
+    def test_same_basename_sources_are_not_duplicates_of_each_other(self, tmp_path):
+        """Issue #369: one row in each of a/data.csv and b/data.csv is no pair."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id", "val"], ["1", "x"]],
+            [["id", "val"], ["1", "x"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_real_duplicates_in_a_same_basename_source_are_disambiguated(self, tmp_path):
+        """The pair is real, so the message must say which data.csv it is."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id", "val"], ["1", "x"], ["1", "x"]],
+            [["id", "val"], ["2", "y"]],
+        )
+
+        findings = self._duplicates(cfg)
+
+        assert [finding.message for finding in findings] == [
+            "Duplicate rows: a/data.csv: Row 1 = Row 2"
+        ]
+
+    def test_reversing_the_declaration_order_keeps_per_file_results(self, tmp_path):
+        """The left file repeats, so order must not change the attribution."""
+        left = _make_csv(
+            tmp_path / "a" / "data.csv",
+            [["id", "val"], ["1", "x"], ["1", "x"]],
+        )
+        right = _make_csv(tmp_path / "b" / "data.csv", [["id", "val"], ["2", "y"]])
+        forward = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            _base_dir=tmp_path,
+            files=[
+                FileEntry(local=left, remote="a/data.csv"),
+                FileEntry(local=right, remote="b/data.csv"),
+            ],
+        )
+        reversed_order = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            _base_dir=tmp_path,
+            files=[
+                FileEntry(local=right, remote="b/data.csv"),
+                FileEntry(local=left, remote="a/data.csv"),
+            ],
+        )
+
+        assert [f.message for f in self._duplicates(forward)] == [
+            f.message for f in self._duplicates(reversed_order)
+        ]
+
 
 # ── 4.3 Empty rows ──────────────────────────────────────────────────────────────
 
@@ -422,6 +499,33 @@ class TestCheckEmptyColumns:
         report = _run_quality(cfg)
         qr = [r for r in report.quality_results if r.check == "empty_columns"]
         assert len(qr) == 0, f"Zero-row file should not report empty columns, but got: {qr}"
+
+    def test_same_basename_sources_keep_independent_empty_columns(self, tmp_path):
+        """Issue #369: `notes` empty in a/data.csv but populated in b/data.csv."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id", "notes"], ["1", ""], ["2", "  "]],
+            [["id", "notes"], ["1", "x"], ["2", "y"]],
+        )
+
+        report = _run_quality(cfg)
+
+        findings = [r for r in report.quality_results if r.check == "empty_columns"]
+        assert [f.message for f in findings] == ["Fully empty columns in 'a/data.csv': notes"]
+
+    def test_a_header_only_same_basename_source_cannot_erase_the_other(self, tmp_path):
+        """The zero-row source must not overwrite the populated one's count."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id"]],
+            [["id"], ["1"], ["2"]],
+        )
+
+        validator = QualityValidator(cfg)
+        validator.run()
+
+        assert sorted(validator._file_row_count.values()) == [0, 2]
+        assert len(validator._file_row_count) == 2
 
 
 class TestCheckNullProfiling:
@@ -631,6 +735,21 @@ class TestCheckCrossFileTypes:
         assert len(qr) == 0, (
             f"Zero-row file should not participate in cross_file_types, but got: {qr}"
         )
+
+    def test_same_basename_sources_are_tracked_separately(self, tmp_path):
+        """Issue #369: a/data.csv and b/data.csv are two sources, not one."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["year"], ["2020"]],
+            [["total"], ["10"]],
+        )
+
+        validator = QualityValidator(cfg)
+        validator.run()
+
+        assert sorted(validator._file_col_types) == ["a/data.csv", "b/data.csv"]
+        assert validator._file_col_types["a/data.csv"] == {"year": "numeric"}
+        assert validator._file_col_types["b/data.csv"] == {"total": "numeric"}
 
 
 # ── 4.10 Encoding validation ─────────────────────────────────────────────────────
@@ -1478,15 +1597,18 @@ class TestColNonemptyBoolean:
         cfg, _ = _make_csv_cfg(tmp_path, ["note"], [["a"], ["a"], ["b"]])
         validator = QualityValidator(cfg)
         validator.run()
-        assert validator._col_nonempty == {"data.csv::note": True}
-        assert isinstance(validator._col_nonempty["data.csv::note"], bool)
+        assert len(validator._col_nonempty) == 1
+        ((_source, column), seen) = next(iter(validator._col_nonempty.items()))
+        assert column == "note"
+        assert seen is True
+        assert isinstance(seen, bool)
 
     def test_empty_column_stays_false_and_is_reported(self, tmp_path):
         """A fully empty column keeps ``False`` and still produces a finding."""
         cfg, _ = _make_csv_cfg(tmp_path, ["note"], [[""], ["  "]])
         validator = QualityValidator(cfg)
         report = validator.run()
-        assert validator._col_nonempty["data.csv::note"] is False
+        assert list(validator._col_nonempty.values()) == [False]
         assert any(r.check == "empty_columns" for r in report.quality_results)
 
     def test_memory_is_o_columns_not_o_rows(self, tmp_path):
@@ -1496,7 +1618,7 @@ class TestColNonemptyBoolean:
         validator = QualityValidator(cfg)
         validator.run()
         assert len(validator._col_nonempty) == 1
-        assert validator._col_nonempty["data.csv::note"] is True
+        assert list(validator._col_nonempty.values()) == [True]
 
 
 # ── Bounded quality scan (issue #290) ─────────────────────────────────────────
@@ -1580,7 +1702,7 @@ class TestAccumulatorCaps:
         validator.run()
         # Pairs are grouped per file (issue #293) and each file's list is capped
         # at the report limit (issue #290), so the first N pairs are kept.
-        pairs = validator._dup_findings["data.csv"]
+        ((_source, pairs),) = validator._dup_findings.items()
         assert len(pairs) == _config.REPORT_MAX_ITEMS
         assert pairs[0] == (1, 2)
         assert pairs[-1] == (1, _config.REPORT_MAX_ITEMS + 1)

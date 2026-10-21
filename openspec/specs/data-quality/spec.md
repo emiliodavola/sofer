@@ -331,12 +331,22 @@ on the first failure — all checks run regardless. `run()` SHALL gate on text-e
 (`is_text_eligible()` in `src/sofer/_formats.py`, `TEXT_SUFFIXES = {".csv", ".tsv"}` via
 `Path.suffix.lower()`) — see §4.10 and §4.11 for the full gating contract.
 
+**Source identity (issue #369).** Two declared files may share a basename in different folders, so no
+per-source accumulator SHALL key on the basename. Every per-source mapping (headers, row counts,
+inferred types, duplicate pairs, per-column empty/null bookkeeping, corrupt-record attribution and the
+duplicate hash namespace) SHALL key on one collision-free identity: the dataset-relative POSIX path
+when the resolved source is under the dataset root, otherwise its resolved absolute POSIX path. The
+column SHALL be part of a structured `(identity, column)` key, never concatenated into a string with a
+separator that a path or header could contain. Findings SHALL print the basename while it is
+unambiguous and the identity when two declared sources share it, so an existing single-file message is
+unchanged and a colliding one stays resolvable.
+
 ### 4.1 Duplicates — row-hash based, streaming
 
 **Requirement:** The system MUST detect exact duplicate rows by computing a
 hash of each row's concatenated field values, **scoped per file**. Two identical
 rows in different files SHALL NOT be reported as duplicates. The hash key MUST
-include the filename to prevent cross-file collisions. Duplicate warnings MUST
+include the source identity (§4.0) to prevent cross-file and same-basename collisions. Duplicate warnings MUST
 name the file each pair came from together with the offending row numbers, and
 SHALL list pairs round-robin across the affected files, so the report item cap
 cannot let one noisy file hide the others.
@@ -392,6 +402,18 @@ GIVEN file_a.csv row 1 equals file_b.csv row 1
 WHEN QualityValidator.run() processes both files
 THEN no duplicate warning SHALL be produced for those rows
 ```
+
+**Same-basename sources stay distinct**
+
+```
+GIVEN `a/data.csv` and `b/data.csv`, each holding one identical row, and a real repeat inside `a/data.csv`
+WHEN QualityValidator.run() executes
+THEN no duplicate pair SHALL join the two files
+  AND the real pair SHALL be reported as `a/data.csv: Row 1 = Row 2`
+  AND reversing the declaration order SHALL produce the same message
+```
+
+**Evidence:** `test: tests/test_quality.py::TestCheckDuplicates::test_same_basename_sources_are_not_duplicates_of_each_other`, `test: tests/test_quality.py::TestCheckDuplicates::test_real_duplicates_in_a_same_basename_source_are_disambiguated`, `test: tests/test_quality.py::TestCheckDuplicates::test_reversing_the_declaration_order_keeps_per_file_results`, `test: tests/test_cli.py::TestValidateSameBasenameSources::test_identical_rows_in_same_basename_sources_are_not_duplicates`
 
 **Duplicate tracking cap is reached**
 
