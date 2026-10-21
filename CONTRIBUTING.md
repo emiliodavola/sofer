@@ -160,6 +160,9 @@ when `CITATION.cff` does not declare the tagged version, so the CFF must be sync
 
 ### Cutting a release
 
+Track each release with the **Release** issue template (`.github/ISSUE_TEMPLATE/release.md`); it
+mirrors this runbook as a checklist. The steps below are the authority.
+
 1. Select `X.Y.Z` and create a short-lived release-preparation branch from updated `main`. Run
    `uv run --python 3.13 python scripts/update_citation.py --version X.Y.Z`, review the
    `CITATION.cff` diff, and open a preparation PR against `main`.
@@ -170,11 +173,18 @@ when `CITATION.cff` does not declare the tagged version, so the CFF must be sync
 3. Do **not** bump a version anywhere else: the version is derived from the tag at build time
    (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth —
    `pyproject.toml` has no static `version` field and there is no `__version__` constant.
-4. Fetch current remote refs and tags. Verify `RELEASE_SHA` is reachable from `origin/main`, that its
-   own checks succeeded, that its `CITATION.cff` matches `X.Y.Z`, and that `vX.Y.Z` exists neither
-   locally nor remotely. In a clean checkout of that exact commit, run
-   `uv run --python 3.13 python scripts/update_citation.py --check --version X.Y.Z`. Stop on any
-   mismatch or ambiguity.
+4. Run the preflight on that exact commit. It is read-only and fails closed: it verifies reachability
+   from `origin/main`, checks the `CITATION.cff` **at that commit** through the same
+   `update_citation.py --check` gate `release.yml` runs, and confirms `vX.Y.Z` exists neither locally
+   nor remotely. It prints no tag command unless every check passes.
+
+   ```bash
+   git fetch origin --prune --tags
+   uv run --python 3.13 python scripts/release_preflight.py --version X.Y.Z --sha <RELEASE_SHA>
+   ```
+
+   Stop on any refusal, including an unreachable remote — it refuses rather than assuming the tag is
+   free. The preflight never creates or pushes the tag.
 5. With explicit release authorization, set `RELEASE_VERSION` (the approved version without the
    leading `v`) and `RELEASE_SHA` (the full approved commit OID), confirm both values match the
    approved release, then create and push the annotated tag. `--no-follow-tags` is required so only
