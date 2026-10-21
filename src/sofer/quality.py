@@ -82,6 +82,42 @@ def _capped_append(target: list[Any], item: Any, limit: int) -> None:
         target.append(item)
 
 
+_ROW_LENGTH_PREFIX_BYTES = 4
+"""Width of the length prefix that frames each part of a row digest.
+
+Four bytes frame a part of up to 4 GiB, far beyond any CSV cell the reader
+materializes, and they make the concatenation unambiguous (issue #368).
+"""
+
+
+def _row_digest(file_identity: str, row: list[str]) -> str:
+    """Return the duplicate-detection digest of one parsed row.
+
+    The parts are length-framed before hashing, never joined with a separator:
+    any chosen separator can occur inside a cell, so ``['a|b', 'c']`` and
+    ``['a', 'b|c']`` produced the same preimage and two different rows were
+    reported as exact duplicates (issue #368). Framing keeps field boundaries,
+    empty fields, backslashes and Unicode content intact without normalizing
+    any value, and two different rows cannot encode to the same bytes.
+
+    MD5 stays: it is an equality fingerprint inside one scan, never a security
+    primitive (``usedforsecurity=False``).
+
+    Args:
+        file_identity: The namespace the comparison is scoped to.
+        row: The parsed field strings, exactly as the reader produced them.
+
+    Returns:
+        The hexadecimal digest of the framed parts.
+    """
+    digest = hashlib.md5(usedforsecurity=False)
+    for part in (file_identity, *row):
+        encoded = part.encode("utf-8")
+        digest.update(len(encoded).to_bytes(_ROW_LENGTH_PREFIX_BYTES, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
 def _decodes_probe(chunk: bytes, encoding: str, *, final: bool) -> bool:
     """Return whether *chunk* decodes as *encoding*, tolerating a split tail.
 
@@ -442,8 +478,7 @@ class QualityValidator:
         # false positives). New hashes stop at the cap; the cap is reported as
         # a partial finding instead of silently evicting tracked rows (issue #290).
         if "duplicates" in self._checks:
-            row_str = f"{self._current_file}|{'|'.join(row)}"
-            h = hashlib.md5(row_str.encode("utf-8"), usedforsecurity=False).hexdigest()
+            h = _row_digest(self._current_file, row)
             if h in self._dup_hashes:
                 self._record_duplicate_pair(self._dup_hashes[h], row_number)
             elif len(self._dup_hashes) < self._dup_tracking_cap:
