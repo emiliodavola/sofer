@@ -751,6 +751,121 @@ class TestCheckCrossFileTypes:
         assert validator._file_col_types["a/data.csv"] == {"year": "numeric"}
         assert validator._file_col_types["b/data.csv"] == {"total": "numeric"}
 
+    @staticmethod
+    def _saturated_pair(tmp_path: Path, first: list[list[str]], second: list[list[str]]):
+        """Two sources whose configured sample is exactly filled by the first."""
+        first_path = _make_csv(tmp_path / "numeric.csv", first)
+        second_path = _make_csv(tmp_path / "text.csv", second)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=first_path, remote="numeric.csv"),
+                FileEntry(local=second_path, remote="text.csv"),
+            ],
+            quality=QualityConfig(max_sample=3),
+        )
+        return cfg
+
+    def test_a_saturated_first_file_cannot_decide_the_second(self, tmp_path):
+        """Issue #367: the first file fills the shared budget, hiding the mismatch."""
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["twenty"], ["thirty"], ["forty"]],
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert len(findings) == 1
+        assert "year" in findings[0].message
+        assert "numeric.csv=numeric" in findings[0].message
+        assert "text.csv=categorical/text" in findings[0].message
+
+    def test_text_then_numeric_order_reports_the_same_facts(self, tmp_path):
+        """Declaration order must not decide whether the mismatch is visible."""
+        numeric = _make_csv(tmp_path / "numeric.csv", [["year"], ["2020"], ["2021"], ["2022"]])
+        text = _make_csv(tmp_path / "text.csv", [["year"], ["twenty"], ["thirty"], ["forty"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=text, remote="text.csv"),
+                FileEntry(local=numeric, remote="numeric.csv"),
+            ],
+            quality=QualityConfig(max_sample=3),
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert len(findings) == 1
+        message = findings[0].message
+        assert "numeric.csv=numeric" in message
+        assert "text.csv=categorical/text" in message
+
+    def test_compatible_files_at_the_cap_produce_no_mismatch(self, tmp_path):
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["2023"], ["2024"], ["2025"]],
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert findings == []
+
+    def test_missing_values_use_the_source_own_values(self, tmp_path):
+        """A file with missing values infers from its own non-missing sample."""
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [
+                ["year"],
+                [""],
+                [
+                    "",
+                ],
+                ["twenty"],
+            ],
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert len(findings) == 1
+        assert "text.csv=categorical/text" in findings[0].message
+
+    def test_cross_file_types_work_without_format_consistency(self, tmp_path, monkeypatch):
+        """Collecting type evidence must not depend on an unrelated check."""
+        from sofer import quality as quality_module
+
+        monkeypatch.delitem(quality_module._BUILTIN_DEFAULTS, "format_consistency")
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["twenty"], ["thirty"], ["forty"]],
+        )
+
+        validator = QualityValidator(cfg)
+        assert "format_consistency" not in validator._checks
+        report = validator.run()
+
+        findings = [r for r in report.quality_results if r.check == "cross_file_types"]
+        assert len(findings) == 1
+        assert "text.csv=categorical/text" in findings[0].message
+
+    def test_the_per_source_sample_does_not_outlive_the_source(self, tmp_path):
+        """Only the inferred types are retained after each source is processed."""
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["twenty"], ["thirty"], ["forty"]],
+        )
+
+        validator = QualityValidator(cfg)
+        validator.run()
+
+        assert validator._file_samples == {}
+
 
 # ── 4.10 Encoding validation ─────────────────────────────────────────────────────
 
