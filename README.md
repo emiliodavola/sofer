@@ -38,7 +38,19 @@ the destination is Hugging Face Hub, an object store, or a local directory.
 
 ## Install
 
-Install the release tag you want, replacing `X.Y.Z`:
+sofer is not published to PyPI, so installing it by package name alone
+resolves nothing: install it from a release tag in Git.
+
+Take the latest release tag — published on the
+[releases page](https://github.com/emiliodavola/sofer/releases/latest), or
+printed by an authenticated `gh` CLI:
+
+```bash
+gh release view --repo emiliodavola/sofer --json tagName --jq .tagName
+# e.g. v0.6.2
+```
+
+Then install that tag, replacing `X.Y.Z`:
 
 ```bash
 uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
@@ -58,6 +70,12 @@ pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
 pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
 uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
+
+**Upgrading.** The tag pin is deliberate: `uv tool upgrade sofer` does not move
+a pinned tag to a newer release. Re-run the install with the new tag — or the
+resolve-latest command above — and `--force`. Installing without an `@tag`
+follows the tip of `main`, whose version is a development build (for example
+`0.6.2.dev7+g4de2c3d`), not a release.
 
 See [installation alternatives](docs/getting-started.md#install) for the full
 comparison.

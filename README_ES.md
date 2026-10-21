@@ -42,7 +42,19 @@ directorio local.
 
 ## Instalación
 
-Instalá el tag de release que quieras, reemplazando `X.Y.Z`:
+sofer no se publica en PyPI, así que instalarlo solo por nombre de paquete no
+resuelve nada: se instala desde un tag de release en Git.
+
+Tomá el tag de la última release — publicado en la
+[página de releases](https://github.com/emiliodavola/sofer/releases/latest), o
+impreso por un CLI `gh` autenticado:
+
+```bash
+gh release view --repo emiliodavola/sofer --json tagName --jq .tagName
+# por ejemplo: v0.6.2
+```
+
+Después instalá ese tag, reemplazando `X.Y.Z`:
 
 ```bash
 uv tool install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z" --force
@@ -63,6 +75,12 @@ pip install "sofer @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
 pip install "sofer[mcp] @ git+https://github.com/emiliodavola/sofer.git@vX.Y.Z"
 uvx --from git+https://github.com/emiliodavola/sofer.git@vX.Y.Z --with "sofer[mcp]" sofer-mcp --help
 ```
+
+**Actualizar.** El pin al tag es deliberado: `uv tool upgrade sofer` no mueve un
+tag fijado a una release más nueva. Volvé a correr la instalación con el tag
+nuevo — o el comando que resuelve la última release — con `--force`. Instalar
+sin `@tag` sigue la punta de `main`, cuya versión es un build de desarrollo (por
+ejemplo `0.6.2.dev7+g4de2c3d`), no una release.
 
 Ver [alternativas de instalación](docs/getting-started.md#install) para la
 comparación completa.

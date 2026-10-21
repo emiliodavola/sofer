@@ -12,8 +12,19 @@ directory.
 
 ## Install
 
-sofer is a standalone CLI. Install it from the git tag of the release you want;
-replace `X.Y.Z` with that tag.
+sofer is a standalone CLI and is not published to PyPI, so installing it by
+package name alone resolves nothing. Install it from a release tag in Git.
+
+Take the latest release tag — published on the
+[releases page](https://github.com/emiliodavola/sofer/releases/latest), or
+printed by an authenticated `gh` CLI:
+
+```bash
+gh release view --repo emiliodavola/sofer --json tagName --jq .tagName
+# e.g. v0.6.2
+```
+
+Then install that tag, replacing `X.Y.Z`:
 
 ```bash
 # with uv (isolated tool install):
@@ -39,6 +50,12 @@ sofer --version
 
 `sofer --version` matches the release tag (`v0.6.2` installs as
 `sofer v0.6.2`).
+
+Upgrading is explicit by design: `uv tool upgrade sofer` does not move a pinned
+tag to a newer release. Re-run the install with the new tag (or the
+resolve-latest command above) and `--force`. Installing without an `@tag`
+follows the tip of `main`, whose version is a development build of hatch-vcs
+(for example `0.6.2.dev7+g4de2c3d`), not a release.
 
 ## Quick start
 
