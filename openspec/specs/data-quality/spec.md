@@ -250,6 +250,11 @@ def stream_csv(
 7. On every data row: the consumer SHALL detect corrupt records via
    `len(row) != len(header)` on each row. (`csv.reader` defaults to
    `strict=False`, so it does NOT raise `csv.Error` on inconsistent lengths.)
+8. The separator is a caller decision, not a reader heuristic: the caller resolves it per
+   format with `field_delimiter(path, configured)` in `src/sofer/_formats.py`. A `.tsv`
+   (case-insensitive) is tab-delimited regardless of the dataset's CSV delimiter, and a `.csv`
+   uses the configured value (issue #366). The reader SHALL NOT sniff, and SHALL NOT switch
+   separator by suffix on its own.
 
 ### 3.2 Scenarios
 
@@ -326,15 +331,32 @@ on the first failure — all checks run regardless. `run()` SHALL gate on text-e
 (`is_text_eligible()` in `src/sofer/_formats.py`, `TEXT_SUFFIXES = {".csv", ".tsv"}` via
 `Path.suffix.lower()`) — see §4.10 and §4.11 for the full gating contract.
 
+**Source identity (issue #369).** Two declared files may share a basename in different folders, so no
+per-source accumulator SHALL key on the basename. Every per-source mapping (headers, row counts,
+inferred types, duplicate pairs, per-column empty/null bookkeeping, corrupt-record attribution and the
+duplicate hash namespace) SHALL key on one collision-free identity: the dataset-relative POSIX path
+when the resolved source is under the dataset root, otherwise its resolved absolute POSIX path. The
+column SHALL be part of a structured `(identity, column)` key, never concatenated into a string with a
+separator that a path or header could contain. Findings SHALL print the basename while it is
+unambiguous and the identity when two declared sources share it, so an existing single-file message is
+unchanged and a colliding one stays resolvable.
+
 ### 4.1 Duplicates — row-hash based, streaming
 
 **Requirement:** The system MUST detect exact duplicate rows by computing a
 hash of each row's concatenated field values, **scoped per file**. Two identical
 rows in different files SHALL NOT be reported as duplicates. The hash key MUST
-include the filename to prevent cross-file collisions. Duplicate warnings MUST
+include the source identity (§4.0) to prevent cross-file and same-basename collisions. Duplicate warnings MUST
 name the file each pair came from together with the offending row numbers, and
 SHALL list pairs round-robin across the affected files, so the report item cap
 cannot let one noisy file hide the others.
+
+Equality SHALL be over the parsed field strings, and the digest input SHALL frame the field
+boundaries unambiguously (each part length-prefixed) rather than joining the fields with a
+separator, because any separator byte can occur inside a cell: `["a|b", "c"]` and `["a", "b|c"]`
+are different rows and SHALL NOT be reported as duplicates (issue #368). Empty fields,
+backslashes, control characters and Unicode content SHALL be preserved exactly; no value SHALL
+be stripped, normalized or coerced.
 
 The number of distinct row hashes tracked SHALL be capped at `quality_max_dup_tracking`
 (`[tool.sofer]`, default 1 000 000). Once the cap is reached the system MUST stop inserting new
@@ -361,6 +383,18 @@ THEN the report SHALL have a warning
   AND the warning SHALL name the file the rows came from
 ```
 
+**A separator inside a cell does not make two rows equal**
+
+```
+GIVEN a two-column CSV whose data rows are `a|b;c` and `a;b|c`, and another whose rows are
+      `a|;` and `a;|`
+WHEN QualityValidator.run() executes
+THEN no duplicates finding SHALL be produced
+  AND an exact repeated row that contains a pipe SHALL still be reported with its row numbers
+```
+
+**Evidence:** `test: tests/test_quality.py::TestCheckDuplicates::test_a_pipe_in_a_cell_does_not_make_two_rows_equal`, `test: tests/test_quality.py::TestCheckDuplicates::test_empty_fields_are_framed_unambiguously`, `test: tests/test_quality.py::TestCheckDuplicates::test_backslashes_and_unicode_keep_their_boundaries`, `test: tests/test_quality.py::TestCheckDuplicates::test_an_exact_repeated_row_with_a_pipe_is_still_reported`
+
 **Identical rows in different files are NOT duplicates**
 
 ```
@@ -368,6 +402,18 @@ GIVEN file_a.csv row 1 equals file_b.csv row 1
 WHEN QualityValidator.run() processes both files
 THEN no duplicate warning SHALL be produced for those rows
 ```
+
+**Same-basename sources stay distinct**
+
+```
+GIVEN `a/data.csv` and `b/data.csv`, each holding one identical row, and a real repeat inside `a/data.csv`
+WHEN QualityValidator.run() executes
+THEN no duplicate pair SHALL join the two files
+  AND the real pair SHALL be reported as `a/data.csv: Row 1 = Row 2`
+  AND reversing the declaration order SHALL produce the same message
+```
+
+**Evidence:** `test: tests/test_quality.py::TestCheckDuplicates::test_same_basename_sources_are_not_duplicates_of_each_other`, `test: tests/test_quality.py::TestCheckDuplicates::test_real_duplicates_in_a_same_basename_source_are_disambiguated`, `test: tests/test_quality.py::TestCheckDuplicates::test_reversing_the_declaration_order_keeps_per_file_results`, `test: tests/test_cli.py::TestValidateSameBasenameSources::test_identical_rows_in_same_basename_sources_are_not_duplicates`
 
 **Duplicate tracking cap is reached**
 
@@ -510,6 +556,12 @@ THEN a warning SHALL be appended mentioning the column
 (different from the header length) via manual `len(row) != len(header)`
 comparison on every row. Default severity: `fail`.
 
+A file whose stream stops decoding after its header was read — a mislabeled file whose first
+invalid byte sits past the encoding probe window of §4.9 — SHALL produce one `fail`
+`corrupt_records` finding naming the file, and SHALL NOT abort the pass, unless
+`encoding_validation` already reported that file; in that case the single encoding finding
+stands.
+
 #### Scenarios
 
 **Uniform row lengths**
@@ -527,6 +579,18 @@ GIVEN a CSV where row 55 has fewer fields than the header
 WHEN _check_corrupt_records() runs
 THEN a fail-level error SHALL be appended mentioning row 55
 ```
+
+**A row the probe never saw cannot abort the run**
+
+```
+GIVEN a multi-row file whose header decodes but whose first invalid byte lies past the 8 KB
+      encoding probe window
+WHEN QualityValidator.run() scans it
+THEN one `fail` corrupt_records finding naming the file SHALL be appended
+  AND the call SHALL return a report instead of raising
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_non_utf8_tail_cannot_abort_the_run`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_non_utf8_row_inside_the_window_is_reported_once`
 
 ### 4.7 Value range — configurable min/max per column
 
@@ -570,6 +634,13 @@ etc.). Files with zero data rows SHALL be excluded from comparison to avoid
 `"unknown"` type mismatches against files with real data. Default severity:
 `warn`.
 
+Each source's type SHALL be inferred from that source's own non-missing sample, capped by the
+configured `max_sample`, so a source that fills the budget cannot decide a later source's type
+(issue #367). Only the inferred per-source types SHALL be retained: the sample belongs to the source
+being streamed and SHALL be dropped once its types are inferred, keeping memory per-source rather
+than per-dataset. Collecting type evidence SHALL NOT depend on the `format_consistency` check being
+active; that check keeps its own dataset-level sample and behavior.
+
 #### Scenarios
 
 **Compatible types**
@@ -589,6 +660,18 @@ WHEN _check_cross_file_types() runs
 THEN a warning SHALL mention the column and both files
 ```
 
+**A filled sample budget does not hide a later source's type**
+
+```
+GIVEN numeric.csv with three numeric values and text.csv with three text values for column "year"
+  AND quality_max_sample = 3
+WHEN QualityValidator.run() executes over both, in either declaration order
+THEN exactly one cross_file_types warning SHALL name "year", numeric.csv as numeric and
+      text.csv as categorical/text
+```
+
+**Evidence:** `test: tests/test_quality.py::TestCheckCrossFileTypes::test_a_saturated_first_file_cannot_decide_the_second`, `test: tests/test_quality.py::TestCheckCrossFileTypes::test_text_then_numeric_order_reports_the_same_facts`, `test: tests/test_quality.py::TestCheckCrossFileTypes::test_missing_values_use_the_source_own_values`, `test: tests/test_quality.py::TestCheckCrossFileTypes::test_cross_file_types_work_without_format_consistency`
+
 **Zero-row file excluded from type comparison**
 
 ```
@@ -601,16 +684,29 @@ THEN no cross-file type mismatch SHALL be reported for "CPV2010_REF_ID"
 ### 4.9 Encoding validation — detect non-UTF-8 files in text-eligible inputs
 
 **Requirement:** The system MUST verify each text-eligible (`.csv`/`.tsv`, case-insensitive)
-file is decodable via `["utf-8-sig", "utf-8"]` by reading `config.PROBE_CHUNK_BYTES` (8 KB)
-and trying `chunk.decode(enc)` in order. If any succeeds the check SHALL pass; only if all
+file is decodable via `["utf-8-sig", "utf-8"]` by reading at most `config.PROBE_CHUNK_BYTES`
+(8 KB) and decoding that prefix with an incremental decoder per encoding, in order. If any
+encoding decodes the prefix under the boundary rule below, the check SHALL pass; only if all
 fail SHALL a `fail` error naming the file be appended. The read MUST be bounded: the probe
 SHALL NOT materialize a file larger than `PROBE_CHUNK_BYTES` in order to slice it (issue #326),
 so the pass's peak never follows the file size. Non-eligible files (`.xlsx`, `.parquet`,
 `.jsonl`, `.csv.gz` → `.gz`, no extension) SHALL be skipped with no finding and no `ran_checks`
 entry. `latin-1`/`cp1252` SHALL NOT be retried.
 
+**Boundary rule (issue #370):** an incomplete multibyte sequence at the end of the prefix is
+NOT evidence of a bad encoding when more source bytes remain, because the bytes that complete
+it are outside the judged window and the probe deliberately does not read them. The same
+incomplete sequence at physical end-of-file IS an encoding error and SHALL fail. The
+implementation distinguishes the two from the open descriptor's size, without reading past
+`PROBE_CHUNK_BYTES` and without `errors="ignore"`/`errors="replace"`, which would hide invalid
+bytes inside the judged prefix.
+
 > Previously: `utf-8-sig → utf-8 → latin-1 → cp1252` on every file; binary files produced
 > fail findings blocking publish. Now scoped to text-eligible inputs only with UTF-8-only chain.
+>
+> Previously (until issue #370): `chunk.decode(enc)` judged the truncated prefix as a complete
+> byte string, so a valid 2-, 3- or 4-byte character that happened to straddle the 8 KB
+> boundary produced a fail finding on a valid file.
 
 #### Scenarios
 
@@ -629,6 +725,28 @@ GIVEN a `.csv` whose 8 KB chunk fails both `utf-8-sig` and `utf-8`
 WHEN _check_encoding_validation runs
 THEN a `fail` error naming the file SHALL be appended
 ```
+
+**A character cut by the probe boundary does not fail a valid file**
+
+```
+GIVEN a valid UTF-8 `.csv` whose 2-, 3- or 4-byte character begins inside the probe window
+      and ends after it, with and without a BOM and under a deliberately small window
+WHEN QualityValidator.run() scans it
+THEN no encoding finding SHALL be appended
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_character_cut_by_the_window_is_not_an_error`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_bom_and_a_character_cut_by_the_window_are_both_accepted`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_deliberately_small_window_still_tolerates_the_cut`
+
+**A character truncated by physical end-of-file still fails**
+
+```
+GIVEN a file whose incomplete multibyte sequence ends at physical EOF, both shorter than the
+      probe window and exactly as long as it
+WHEN QualityValidator.run() scans it
+THEN a `fail` encoding finding SHALL be appended
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_character_truncated_by_a_short_file_still_fails`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_character_truncated_at_an_exact_window_still_fails`
 
 **xlsx skipped regardless of 8 KB content**
 
@@ -717,13 +835,16 @@ WHEN `QualityValidator.run()` executes
 THEN `quality_results` SHALL be empty and `ran_checks` SHALL be empty
 ```
 
-**TSV is eligible**
+**TSV is eligible and parsed with tabs**
 
 ```
-GIVEN a `.tsv` with a short row (field count mismatch)
+GIVEN a tab-delimited `.tsv` whose second data row has one field fewer than the header
+  AND the default CSV delimiter (`;`) or a comma override in the dataset config
 WHEN `QualityValidator.run()` executes
-THEN a `corrupt_records` `fail` finding SHALL be produced
+THEN a `corrupt_records` `fail` finding SHALL name the file, the row and both field counts
 ```
+
+**Evidence:** `test: tests/test_quality.py::TestTsvEligible::test_tsv_short_row_produces_corrupt_records_fail`, `test: tests/test_quality.py::TestTsvEligible::test_a_csv_delimiter_override_does_not_reach_tsv`, `test: tests/test_cli.py::TestValidateTsvDelimiter::test_a_short_tsv_row_fails_validate_with_the_file_and_counts`
 
 **Case-insensitive and no-extension skipped**
 

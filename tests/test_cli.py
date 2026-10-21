@@ -1051,6 +1051,58 @@ class TestValidateRanChecks:
         )
 
 
+class TestValidateTsvDelimiter:
+    """Issue #366: `sofer validate` reads a `.tsv` with tabs, not the CSV delimiter."""
+
+    def test_a_short_tsv_row_fails_validate_with_the_file_and_counts(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        tsv = tmp_path / "data.tsv"
+        with open(tsv, "w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, delimiter="\t").writerows(
+                [["a", "b", "c"], ["1", "2", "3"], ["4", "5"]]
+            )
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "data.tsv"\nremote = "data.tsv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_validate(Namespace(config=str(toml_path)))
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "corrupt_records: Row 2 in 'data.tsv' has 2 fields, header has 3" in out
+
+
+class TestValidateSameBasenameSources:
+    """Issue #369: two `data.csv` sources are not each other's duplicates."""
+
+    def test_identical_rows_in_same_basename_sources_are_not_duplicates(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        for folder in ("a", "b"):
+            (tmp_path / folder).mkdir()
+            with open(tmp_path / folder / "data.csv", "w", newline="", encoding="utf-8") as handle:
+                csv.writer(handle, delimiter=";").writerows([["id", "val"], ["1", "x"]])
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "a/data.csv"\nremote = "a/data.csv"\n\n'
+            '[[file]]\nlocal = "b/data.csv"\nremote = "b/data.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_validate(Namespace(config=str(toml_path)))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Duplicate rows" not in out
+
+
 # ── PUB-11 / PRP-09 — CLI publish --clean / --clean-cache / --all ───────────────
 
 
@@ -3661,7 +3713,7 @@ class TestMetaCommand:
     def test_set_reports_a_failed_write_and_leaves_the_file(
         self, tmp_path: Path, capsys, monkeypatch
     ) -> None:
-        from sofer import _toml
+        from sofer import _atomic
 
         path = self._dataset(tmp_path)
         before = path.read_bytes()
@@ -3669,7 +3721,7 @@ class TestMetaCommand:
         def _boom(*args: object, **kwargs: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(_toml.os, "replace", _boom)
+        monkeypatch.setattr(_atomic.os, "replace", _boom)
         rc = cli._cmd_meta_set(self._set(path, ["description=Real"]))
         assert rc == 1
         assert "cannot write" in capsys.readouterr().err

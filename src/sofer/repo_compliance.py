@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from . import config
+from ._converters import is_convertible_remote
 from ._mirror import expanded_planned_remotes, parquet_remote_for, planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
@@ -284,36 +285,56 @@ def _read_csv_sample(
     path: Path,
     delimiter: str | None = None,
     encoding: str | None = None,
-) -> tuple[list[str], list[list[str]]] | None:
-    """Read the header and a sample of rows from a CSV file.
+    sample_size: int | None = None,
+) -> tuple[list[str], list[list[str]], int] | None:
+    """Read a CSV once, keeping a bounded sample and the exact record count.
 
-    Returns ``(headers, rows)`` on success, or ``None`` if the file cannot
-    be read.  When *delimiter* is ``None``, auto-detect with ``csv.Sniffer``
-    with the configured ``csv_delimiter`` as fallback.  When *encoding* is
-    ``None``, the configured ``csv_encoding`` applies.  Neither default is
-    a literal (AGENTS.md rule 3, issue #202): the schema-report caller
-    passes the dataset ``cfg`` values explicitly, and direct callers inherit
-    the tool-wide ``[tool.sofer]`` configuration.
+    Returns ``(headers, sample, row_count)`` on success, or ``None`` if the file
+    cannot be read. ``sample`` holds at most *sample_size* data records;
+    ``row_count`` counts every data record, so it cannot be recovered from
+    ``len(sample)`` (issue #373). One pass, not two: the loop that counts is the
+    loop that keeps the prefix, so retained memory is bounded by the sample and
+    the widest record, never by the total row count.
+
+    Counting follows ``csv.reader`` record semantics, not physical lines: a
+    quoted multiline value is one record and a blank line is one empty record.
+    A decode or parse failure after the prefix still returns ``None`` and
+    discards the whole file -- a counted schema built from the prefix of an
+    unreadable file would claim a completeness the file does not have.
+
+    When *delimiter* is ``None``, auto-detect with ``csv.Sniffer`` with the
+    configured ``csv_delimiter`` as fallback.  When *encoding* is ``None``, the
+    configured ``csv_encoding`` applies.  Neither default is a literal
+    (AGENTS.md rule 3, issue #202): the schema-report caller passes the dataset
+    ``cfg`` values explicitly, and direct callers inherit the tool-wide
+    ``[tool.sofer]`` configuration.  *sample_size* resolves to the configured
+    ``schema_sample_size`` at call time.
     """
     effective_encoding = encoding if encoding is not None else config.CSV_ENCODING
+    limit = sample_size if sample_size is not None else config.SCHEMA_SAMPLE_SIZE
     try:
         with open(path, newline="", encoding=effective_encoding) as fh:
             if delimiter is None:
                 try:
-                    sample = fh.read(config.PROBE_CHUNK_BYTES)
+                    probe = fh.read(config.PROBE_CHUNK_BYTES)
                     fh.seek(0)
-                    dialect = csv.Sniffer().sniff(sample)
+                    dialect = csv.Sniffer().sniff(probe)
                     delimiter = dialect.delimiter
                 except csv.Error:
                     delimiter = config.CSV_DELIMITER
 
             reader = csv.reader(fh, delimiter=delimiter)
             headers = next(reader)
-            rows = list(reader)
+            sample: list[list[str]] = []
+            row_count = 0
+            for row in reader:
+                if row_count < limit:
+                    sample.append(row)
+                row_count += 1
     except Exception:
         return None
 
-    return headers, rows
+    return headers, sample, row_count
 
 
 def _map_parquet_type(pa_type: object) -> str:
@@ -500,21 +521,6 @@ def _staged_xlsx_sheet_parquets(staging_dir: Path, parquet_key: str) -> list[Pat
     return [p for p in alt if p.is_file() and p.stem != base_stem]
 
 
-def _is_convertible_entry(entry: FileEntry) -> bool:
-    """Whether *entry* names a table the schema report can read (RC-R05).
-
-    The single definition of "convertible" shared by the schema collection loop
-    and the planned-remote classifier (AGENTS.md rule 4): a declared ``.csv`` /
-    ``.tsv`` / ``.xlsx`` / ``.jsonl`` remote that is not a recursive tree.
-    """
-    if entry.recursive:
-        return False
-    from ._converters import CONVERTIBLE_SUFFIXES
-
-    suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
-    return suffix in CONVERTIBLE_SUFFIXES
-
-
 def _is_schema_eligible(entry: FileEntry) -> bool:
     """Whether the schema report *attempts* to read *entry* (RC-R05/RC-R12).
 
@@ -523,8 +529,14 @@ def _is_schema_eligible(entry: FileEntry) -> bool:
     tree, non-convertible remote, ``include_in_schema = false``); one that is
     eligible but yields no column **could not be read**.  Those two cases must
     not share a grouping policy (#304 D1).
+
+    Convertibility itself comes from
+    :func:`sofer._converters.is_convertible_remote`, the single owner of that
+    rule (issue #372); ``include_in_schema`` is this caller's own filter.
     """
-    return _is_convertible_entry(entry) and entry.include_in_schema
+    return (
+        is_convertible_remote(entry.remote, recursive=entry.recursive) and entry.include_in_schema
+    )
 
 
 def _note_column_origin(
@@ -599,7 +611,7 @@ def _build_schema_report_impl(
     from ._converters import normalize_parquet_remote
 
     for entry in cfg.files:
-        if not _is_convertible_entry(entry):
+        if not is_convertible_remote(entry.remote, recursive=entry.recursive):
             continue
 
         _had_potential_csv_entries = True
@@ -787,6 +799,7 @@ def _build_schema_report_impl(
                 )
         else:
             # ── Read from original file (fallback for any convertible suffix) ─
+            row_count: int | None = None
             if suffix == ".xlsx":
                 try:
                     import openpyxl
@@ -835,18 +848,30 @@ def _build_schema_report_impl(
                 except Exception:
                     continue
             else:
-                # csv/tsv
+                # csv/tsv: one pass that keeps only the configured sample while
+                # counting every record (issue #373). Retaining the whole file
+                # would make schema_sample_size a bound on inference work, not on
+                # memory.
                 tsv_delim = "\t" if suffix == ".tsv" else delimiter
-                result = _read_csv_sample(local, delimiter=tsv_delim, encoding=csv_encoding)
-                if result is None:
+                csv_sample = _read_csv_sample(
+                    local,
+                    delimiter=tsv_delim,
+                    encoding=csv_encoding,
+                    sample_size=config.SCHEMA_SAMPLE_SIZE,
+                )
+                if csv_sample is None:
                     continue  # skip missing / unreadable files gracefully
-                headers, rows = result
+                headers, rows, row_count = csv_sample
+                # ``rows`` is already capped by the reader; the exact total is
+                # ``row_count`` and must not be taken from ``len(rows)``.
             # Normalize headers: strip whitespace, preserve case
             headers = [normalize_header(h) for h in headers]
             sample = rows[: min(len(rows), config.SCHEMA_SAMPLE_SIZE)]
+            if row_count is None:
+                row_count = len(rows)
             # Key by verbatim remote (first-wins via setdefault) — local
             # filenames collide across subdirectories with the same basename.
-            row_counts.setdefault(entry.remote, len(rows))
+            row_counts.setdefault(entry.remote, row_count)
 
             for idx, col in enumerate(headers):
                 col_name = col

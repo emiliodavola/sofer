@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict
 
-from . import _toml, _yaml
+from . import _atomic, _toml, _yaml
 
 AgentName: TypeAlias = str
 """Registry key for one supported MCP agent — the domain of :data:`ADAPTERS`.
@@ -798,31 +798,35 @@ def _yaml_config_key(pre_write: str, doc: dict[str, Any]) -> str | None:
 
 
 def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
-    """Atomically write *doc* to *path* via tmp+os.replace.
+    """Atomically write *doc* to *path* through the shared staging primitive.
 
-    The ``json`` and ``toml`` branches serialize *doc* wholesale. The ``yaml``
-    branch instead splices *doc* into the **pre-write** text read back from
-    *path* -- preserving the document's comments, key order, indentation and
-    line-ending convention (LF or CRLF) outside the edited entry -- and
-    therefore MUST be called while the file still holds the pre-write content.
-    The caller reaches it after the single ``.bak`` backup, and nothing mutates
-    the file in between; when *path* does not exist the merged document is
-    rendered fresh.
+    Format-specific serialization stays here, and so does each format's
+    pre-existing newline policy: the ``json`` and ``toml`` branches serialize
+    *doc* wholesale (the ``json`` branch keeps the platform text-mode
+    translation it has always had, the ``toml`` branch writes exactly the bytes
+    ``tomli_w`` produces). The ``yaml`` branch instead splices *doc* into the
+    **pre-write** text read back from *path* -- preserving the document's
+    comments, key order, indentation and line-ending convention (LF or CRLF)
+    outside the edited entry -- and therefore MUST be called while the file
+    still holds the pre-write content, written with ``newline=""`` so that
+    convention survives byte-for-byte. The caller reaches it after the single
+    ``.bak`` backup, and nothing mutates the file in between; when *path* does
+    not exist the merged document is rendered fresh.
 
     Args:
         path: Destination file.
         doc: Document to serialize.
         fmt: ``"json"``, ``"toml"`` or ``"yaml"``.
+
+    Raises:
+        RuntimeError: The ``toml`` branch runs without ``tomli-w`` installed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    # Ensure tmp is in same directory for atomic replace
     if fmt == "json":
         # Whole-document rewrite: text-mode newline translation is pre-existing,
         # declared JSON behavior and stays out of the YAML preservation scope.
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
+        content = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+        _atomic.atomic_write_text(path, content, encoding="utf-8", newline=None)
     elif fmt == "yaml":
         # newline="" disables universal-newline translation on both ends so the
         # pre-write LF/CRLF convention survives byte-for-byte. `open` is used
@@ -838,16 +842,13 @@ def atomic_write(path: Path, doc: dict[str, Any], fmt: str) -> None:
             content = _yaml.dump(doc)
         else:
             content = _yaml.splice_entry(pre_write, key, _SOFER_ENTRY_NAME, doc)
-        with open(tmp, "w", encoding="utf-8", newline="") as fh:
-            fh.write(content)
+        _atomic.atomic_write_text(path, content, encoding="utf-8")
     else:
         try:
             import tomli_w as _tomli_w
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("tomli-w required for TOML writing") from exc
-        with open(tmp, "wb") as fh:
-            _tomli_w.dump(doc, fh)
-    os.replace(tmp, path)
+        _atomic.atomic_write_text(path, _tomli_w.dumps(doc), encoding="utf-8")
 
 
 def native_delegation_decline_reasons(

@@ -63,6 +63,7 @@ import contextlib
 import functools
 import hmac
 import io
+import json
 import ntpath
 import os
 import re
@@ -78,9 +79,11 @@ from pydantic import Field
 
 try:
     from fastmcp import FastMCP as _FastMCP
+    from fastmcp.exceptions import ResourceError as _ResourceError
     from fastmcp.resources import ResourceSecurity as _ResourceSecurity
     from fastmcp.server.dependencies import get_context as _get_context
     from fastmcp.server.middleware import Middleware as _Middleware
+    from fastmcp.tools import ToolResult as _ToolResult
 except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monkeypatch
     raise ImportError(
         "sofer's MCP server requires 'fastmcp' — install with: "
@@ -93,6 +96,7 @@ except ImportError as _exc:  # pragma: no cover - exercised via sys.modules monk
 
 from . import _toml, failure_report, file_edit, meta_edit, workflow
 from . import config as sofer_config
+from . import mcp_admission as admission
 from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
@@ -203,6 +207,11 @@ _DIALECT_ENVELOPE_SCHEMA_FIELD: dict[str, dict[str, Any]] = {
 # error envelope, so they are deliberately absent here.
 _ERROR_CODES: tuple[str, ...] = (
     "CONFIG_ERROR",
+    "INITIALIZATION_REQUIRED",
+    "INITIALIZATION_IN_PROGRESS",
+    "INITIALIZATION_CONTEXT_BUSY",
+    "INITIALIZATION_CONTEXT_MISMATCH",
+    "INITIALIZATION_SESSION_UNAVAILABLE",
     "VALIDATION_FAILED",
     "QUALITY_GATE_FAILED",
     "PUBLISH_RISK_NOT_ACKD",
@@ -216,6 +225,13 @@ _ERROR_CODES: tuple[str, ...] = (
 
 _PHASED_INSTRUCTIONS: str = (
     "Operate sofer's deterministic dataset pipeline.\n"
+    "Init gate (issue #360): every NEW MCP session MUST call sofer_init BEFORE any other tool. "
+    "sofer_init is the only tool admitted while uninitialized; every other tool and every "
+    "data-bearing resource read is refused with INITIALIZATION_REQUIRED. Call it once per "
+    "session with config=<existing TOML> to attach, or name/user/cwd to create. A dry_run "
+    "preview never initializes the session. Tool/resource listing, the static prompts, and "
+    "sofer://status remain available without init and never unlock a later call. Changing the "
+    "active dataset requires calling sofer_init again for the new target.\n"
     "Phased canonical chain (tools/list alone teaches the order):\n"
     "  Phase 0 Bootstrap [conditional: REQUIRED if greenfield — no TOML / empty [[file]]]\n"
     "    sofer_init -> sofer_scan_dry_run / sofer_scan_apply -> sofer_meta_set\n"
@@ -251,7 +267,9 @@ _PHASED_INSTRUCTIONS: str = (
     "publish is disabled). All path arguments and resources are "
     "contained under the server root. Preflight: sofer_auth_status checks token/confidential/approval without network. "
     f"{_UNTRUSTED_NOTE}\n"
-    "Next hint: start with sofer_validate for existing datasets, or sofer_init + sofer_scan_apply for greenfield. sofer_auth_status is the preflight tool."
+    "Next hint: start with sofer_init (attach config=..., or create with name/user/cwd); then "
+    "sofer_validate for an existing dataset, or sofer_scan_dry_run for greenfield. "
+    "sofer_auth_status is the publish preflight tool."
 )
 
 # ---------------------------------------------------------------------------
@@ -623,6 +641,208 @@ def _with_call_root(fn: Callable[_ParamsT, _ResultT]) -> Callable[_ParamsT, _Res
                 _EFFECTIVE_ROOT.reset(token)
 
     return wrapper
+
+
+# ---------------------------------------------------------------------------
+#  Init admission (issue #360) — session-owned state + dispatch gate
+# ---------------------------------------------------------------------------
+
+#: Attribute attached to the framework's per-session outbound channel. In
+#: fastmcp 4.0.11 a request-scoped ``ServerSession``/``Connection`` is built per
+#: request on the modern protocol, but the server-owned ``outbound`` channel is
+#: created once per client session and discarded when that session closes — for
+#: stdio, SSE, and the in-memory transport alike. It is therefore the correct
+#: holder for state that MUST survive across calls and MUST NOT survive the
+#: session. ``tests/test_mcp_admission.py`` pins that lifecycle against the
+#: installed framework.
+_ADMISSION_ATTR = "_sofer_init_admission"
+_ADMISSION_CREATE_LOCK = threading.Lock()
+
+#: The ticket for the admitted request whose tool body is about to run. anyio's
+#: threadpool copies context variables into the worker thread, so the wrapper
+#: applied at registration settles the state there — even after cancellation of
+#: the awaiting coroutine, which is what D4's lease requires.
+_ADMISSION_TICKET: ContextVar[_AdmissionTicket | None] = ContextVar(
+    "sofer_admission_ticket", default=None
+)
+
+#: Tool names the server actually registered. Filled by :func:`_register_tools`
+#: through the same helper every tool uses, so a future tool is protected
+#: automatically. A name missing here is NOT a registered tool: the framework's
+#: standard "unknown tool" error stands, and readiness is never consulted (D2).
+_REGISTERED_TOOL_NAMES: set[str] = set()
+
+
+def _session_admission() -> admission.SessionAdmission | None:
+    """Return the admission state of the current live session, or ``None``.
+
+    Reads the server-owned ``outbound`` channel of the framework session. When
+    no live session object is reachable (for example outside a request
+    context), admission is unavailable and the caller must fail closed with
+    ``INITIALIZATION_SESSION_UNAVAILABLE`` — never fall back to a process
+    global.
+
+    Returns:
+        The session's state object, or ``None`` when no session identity exists.
+    """
+    try:
+        ctx = _get_context()
+        request = ctx.request_context
+        if request is None:  # pragma: no cover - defensive
+            return None
+        session = getattr(request, "session", None)
+        if session is None:  # pragma: no cover - defensive
+            return None
+        connection = session._connection
+    except (AttributeError, RuntimeError):
+        return None
+    outbound = getattr(connection, "outbound", None)
+    holder: Any = outbound if outbound is not None and hasattr(outbound, "__dict__") else connection
+    with _ADMISSION_CREATE_LOCK:
+        state = getattr(holder, _ADMISSION_ATTR, None)
+        if isinstance(state, admission.SessionAdmission):
+            return state
+        state = admission.SessionAdmission()
+        try:
+            setattr(holder, _ADMISSION_ATTR, state)
+        except (AttributeError, TypeError):  # pragma: no cover - defensive
+            return None
+        return state
+
+
+class _AdmissionTicket:
+    """One admitted request's settlement handle (idempotent).
+
+    The ticket is settled exactly once: by the registered tool wrapper when the
+    body finishes (the normal path, robust to a cancelled awaiting task) or by
+    the middleware on a pre-handler failure. A second settle is a no-op.
+    """
+
+    def __init__(self, state: admission.SessionAdmission, *, is_init: bool) -> None:
+        self.state = state
+        self.is_init = is_init
+        self._lock = threading.Lock()
+        self._settled = False
+
+    @property
+    def settled(self) -> bool:
+        """Whether this request's state transition already ran."""
+        with self._lock:
+            return self._settled
+
+    def finish(self, context: admission.AdmissionContext | None = None) -> None:
+        """Settle the admitted request once.
+
+        Args:
+            context: The context to publish for a successful init; ignored for
+                a non-init request and for a failed or previewed init.
+        """
+        with self._lock:
+            if self._settled:
+                return
+            self._settled = True
+        if self.is_init:
+            self.state.settle_init(context)
+        else:
+            self.state.release()
+
+
+def _init_context_from_envelope(envelope: Any) -> admission.AdmissionContext | None:
+    """Extract the publishable context from a successful init envelope.
+
+    ``session_ready`` is the single success signal: a preview, a refusal, or an
+    error keeps it false and therefore publishes nothing (D3/D4).
+    """
+    if not isinstance(envelope, dict) or envelope.get("session_ready") is not True:
+        return None
+    if envelope.get("initialization_mode") not in ("create", "attach"):
+        return None
+    root = envelope.get("effective_root")
+    config = envelope.get("config_path")
+    if not isinstance(root, str) or not root.strip():
+        return None
+    if not isinstance(config, str) or not config.strip():
+        return None
+    return admission.AdmissionContext(Path(root), Path(config))
+
+
+def _admission_completed(fn: Callable[_ParamsT, _ResultT]) -> Callable[_ParamsT, _ResultT]:
+    """Settle this request's admission ticket when the tool body finishes.
+
+    Applied centrally in :func:`_register_tools`, so every current and future
+    tool is covered without a per-handler check. A direct Python call (no MCP
+    request) has no ticket and is unaffected.
+
+    Args:
+        fn: The registered tool callable.
+
+    Returns:
+        The wrapped callable, signature preserved for framework introspection.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: _ParamsT.args, **kwargs: _ParamsT.kwargs) -> _ResultT:
+        ticket = _ADMISSION_TICKET.get()
+        if ticket is None:
+            return fn(*args, **kwargs)
+        try:
+            result = fn(*args, **kwargs)
+        except BaseException:
+            # A failed or cancelled init never restores the discarded context;
+            # a failed protected call simply drops its lease.
+            ticket.finish(None)
+            raise
+        ticket.finish(_init_context_from_envelope(result) if ticket.is_init else None)
+        return result
+
+    return wrapper
+
+
+def _resolved_call_root_or_none(raw: Any) -> Path | None:
+    """Resolve a request's ``root`` for admission, ``None`` when unresolvable."""
+    if raw is None or not str(raw).strip():
+        return _registration_root()
+    try:
+        return _resolve_call_root(str(raw))
+    except (RootUnavailableError, OSError):
+        return None
+
+
+def _resolved_config_or_none(raw: Any, call_root: Path | None) -> Path | None:
+    """Resolve a request's ``config`` for admission, ``None`` when unresolvable."""
+    if call_root is None or not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return _contained_path(raw, root=call_root, what="config", extensions=_CONFIG_EXTENSIONS)
+    except (PathOutsideRootError, MCPToolError, OSError):
+        return None
+
+
+def _refusal_tool_result(refusal: admission.AdmissionRefusal) -> _ToolResult:
+    """Render an admission refusal as the common structured tool result (D6)."""
+    envelope = _error_envelope(refusal.error_code, refusal.message, next_call=refusal.next_call)
+    return _ToolResult(structured_content=envelope)
+
+
+def _resource_refusal(refusal: admission.AdmissionRefusal, uri: str) -> _ResourceError:
+    """Render an admission refusal as a resource error carrying the same envelope.
+
+    A refused resource call retries as ``resources/read`` — never as a tool — so
+    its ``next`` names the action and the original URI (issue #360 D6).
+    """
+    envelope = _error_envelope(refusal.error_code, refusal.message, next_call=refusal.next_call)
+    if refusal.error_code != admission.ERROR_INIT_SESSION_UNAVAILABLE:
+        envelope["next"] = {"action": "resources/read", "uri": uri}
+    return _ResourceError(json.dumps(envelope))
+
+
+def _split_sofer_uri(uri: str) -> tuple[str | None, str]:
+    """Split ``sofer://<kind>/<path>`` into ``(kind, path)``; ``kind`` may be None."""
+    prefix, separator, rest = uri.partition("://")
+    if prefix != "sofer" or not separator:
+        return None, ""
+    kind, _, path = rest.partition("/")
+    return kind, path
 
 
 @contextlib.contextmanager
@@ -3514,17 +3734,77 @@ def sofer_scan_apply(
         }
 
 
+def _init_failure(
+    out: io.StringIO,
+    err: io.StringIO,
+    errors: list[str],
+    *,
+    mode: str,
+    next_call: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the ``CONFIG_ERROR`` envelope for an admitted init attempt (D3/D6).
+
+    ``CONFIG_ERROR`` is a validation failure AFTER init was admitted, so it keeps
+    the common error envelope and carries the real diagnostics. It never grants
+    readiness; the dispatch layer settles the session in ``U``.
+
+    Args:
+        out: Captured stdout buffer.
+        err: Captured stderr buffer.
+        errors: Validation diagnostics (non-empty).
+        mode: ``"create"`` or ``"attach"``.
+        next_call: Recovery continuation, or ``None``.
+
+    Returns:
+        The ``ok:false`` envelope with ``session_ready: false``.
+    """
+    message = "; ".join(errors) or "Configuration error"
+    print(f"  X  {message}", file=sys.stderr)
+    return {
+        "ok": False,
+        "exit_code": 1,
+        "output": _captured_text(out, err),
+        "config_errors": errors,
+        "error_code": "CONFIG_ERROR",
+        "message": message,
+        "next": next_call or {},
+        "initialization_mode": mode,
+        "session_ready": False,
+    }
+
+
+def _init_preview_next(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return the deterministic "run it for real" continuation for a preview."""
+    retry = dict(arguments)
+    retry["dry_run"] = False
+    return workflow.WorkflowCall(
+        "sofer_init",
+        retry,
+        reason="Preview only: re-run this same init with dry_run=false to initialize the session.",
+    ).to_dict()
+
+
 @_with_call_root
 def sofer_init(
     name: Annotated[
-        str, Field(description="Dataset name used for <name>.toml (e.g. 'my-dataset')")
-    ],
-    user: Annotated[
-        str,
+        str | None,
         Field(
-            description="Hugging Face username or organization for repo_id (e.g. 'myuser' -> repo_id 'myuser/<name>'). Required — placeholders such as YOUR_USER are rejected."
+            description=(
+                "Dataset name used for <name>.toml (e.g. 'my-dataset'). "
+                "Required in create mode; optional identity assertion in attach mode."
+            )
         ),
-    ],
+    ] = None,
+    user: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Hugging Face username or organization for repo_id (e.g. 'myuser' -> "
+                "repo_id 'myuser/<name>'). Required in create mode — placeholders such as "
+                "YOUR_USER are rejected. Optional identity assertion in attach mode."
+            )
+        ),
+    ] = None,
     move_existing: Annotated[
         bool,
         Field(description="When true, move depth-1 supported files into raw/ preserving tree."),
@@ -3532,45 +3812,182 @@ def sofer_init(
     dry_run: Annotated[
         bool,
         Field(
-            description="When true, preview creation without writing any files (no TOML, no raw/, no moves)."
+            description=(
+                "When true, preview only: no files are written and the session is NOT "
+                "initialized. A successful preview points back to the same init with dry_run=false."
+            )
         ),
     ] = False,
-    force: Annotated[bool, Field(description="Overwrite existing <name>.toml when true.")] = False,
+    force: Annotated[
+        bool, Field(description="Overwrite existing <name>.toml when true (create mode only).")
+    ] = False,
     cwd: Annotated[
         str | None,
         Field(
-            description="Working directory for init; must stay under the server root. When None, the live process CWD is used only when it is a strict descendant of the server root; otherwise the call is refused — pass cwd='<dataset dir>' explicitly."
+            description=(
+                "Create mode: working directory for init; must stay under the server root. "
+                "When None, the live process CWD is used only when it is a strict descendant of "
+                "the server root; otherwise the call is refused — pass cwd='<dataset dir>' "
+                "explicitly. Attach mode: must be omitted."
+            )
         ),
     ] = None,
     root: Annotated[
         str | None,
         Field(description=_ROOT_FIELD_DESCRIPTION),
     ] = None,
+    config: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Attach mode: existing dataset TOML to initialize the session against. No "
+                "files are written. Omitted (or null) selects create mode; name/user/cwd then "
+                "create a new dataset."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
-    """Create <name>.toml from _INIT_TEMPLATE and scaffold raw/.
+    """Phase 0 bootstrap: create a dataset, or attach the session to an existing configuration.
 
-    Side effects: writes <name>.toml and creates raw/ (mkdir -p) unless dry_run; with move_existing moves depth-1 files into raw/. The identity is validated BEFORE any write (INIT-05): a missing/blank/unsafe name or user refuses with a CONFIG_ERROR envelope and nothing is written. When cwd is given, writes are anchored under that directory contained under the server root; when None, the live process CWD is used only when it is a strict descendant of the server root (INIT-02) — otherwise the call is refused naming the required cwd argument. Never mutates the global server root.
-    Network usage: none.
+    Mode selector (issue #360 D3): a non-blank ``config`` selects ATTACH; omitted
+    or null selects CREATE; an empty/whitespace-only ``config`` is a
+    ``CONFIG_ERROR``; a supplied config that is missing, invalid, or uncontained
+    never falls back to creation.
 
-    When to use: Phase 0 bootstrap for greenfield datasets when no TOML exists; run before scan.
-    Example: sofer_init(name="my-dataset", user="myuser")
-    Requires: server root writable. Next: fill [meta] description/license/source/tags with sofer_meta_set (or edit the TOML by hand), then sofer_scan_apply to register files.
+    Create mode writes <name>.toml and creates raw/ (mkdir -p) unless dry_run, and
+    moves depth-1 files into raw/ with move_existing; the identity is validated
+    before any write, and cwd must stay under the server root. Attach mode reads
+    and parses the configuration, derives the identity from ``[dataset] name`` and
+    the ``repo_id`` owner, and binds the session to the ACTUAL config path (an
+    attached filename need not be ``<name>.toml``); supplied name/user are exact
+    assertions, cwd must be omitted, force/move_existing must be false, and
+    nothing is written or fetched. Repairable conditions (empty ``[[file]]``,
+    placeholders, missing sources, an unprepared build) do not block attach; a
+    malformed or identity-invalid TOML is refused. Network usage: none.
+
+    When to use: the FIRST call of every MCP session, before any other tool
+    (Phase 0 Bootstrap). Create a greenfield dataset with name/user/cwd, or attach
+    an existing configuration with config. A dry_run previews without initializing.
+    Example: sofer_init(config="dataset.toml") or
+    sofer_init(name="my-dataset", user="myuser", cwd="datasets/my-dataset")
+    Requires: create mode needs a writable server root; attach mode needs an
+    existing, model-parseable TOML under the call root.
+    Next: create -> sofer_scan_dry_run; attach -> sofer_meta_check. Then fill [meta] description/license/source/tags with sofer_meta_set (or edit the TOML by hand) before validation and prepare.
 
     Args:
-        name: Dataset name used for ``<name>.toml`` — a safe single path component.
+        name: Dataset name used for ``<name>.toml`` — a safe single path component
+            (create) or a non-blank assertion (attach).
+        user: Hugging Face username for ``repo_id`` (create) or an assertion
+            (attach) — never a placeholder.
         move_existing: When ``True``, move depth-1 supported files into ``raw/``.
-        dry_run: When ``True``, preview without writing any files (no TOML,
-            no ``raw/``, no moves).
-        force: Overwrite existing ``<name>.toml`` when ``True``.
-        user: Hugging Face username for ``repo_id`` — required, never a placeholder.
-        cwd: Working directory for init; must stay under server root. ``None``
-            uses the live process CWD only when it is a strict descendant of
-            the server root, otherwise refuses naming the required argument.
+        dry_run: When ``True``, preview without writing and without granting
+            readiness.
+        force: Overwrite existing ``<name>.toml`` when ``True`` (create only).
+        cwd: Working directory for create; must stay under server root (create
+            only).
+        root: Per-call containment root; omitted keeps the registration root.
+        config: Existing dataset TOML to attach; selects attach mode.
     """
     with _tool_execution(), _capture_output() as (out, err):
+        if config is not None and not config.strip():
+            return _init_failure(
+                out,
+                err,
+                [
+                    "config must be non-empty when supplied; omit config entirely to create a dataset"
+                ],
+                mode="attach",
+            )
+
+        # ---- Attach mode (D3): read-only binding to an existing config -------
+        if config is not None:
+            incompatible: list[str] = []
+            if cwd is not None:
+                incompatible.append("cwd must be omitted when config is supplied (attach mode)")
+            if force:
+                incompatible.append("force must be false when config is supplied (attach mode)")
+            if move_existing:
+                incompatible.append(
+                    "move_existing must be false when config is supplied (attach mode)"
+                )
+            if incompatible:
+                return _init_failure(out, err, incompatible, mode="attach")
+            call_root = _get_root()
+            config_path = _contained_path(
+                config,
+                root=call_root,
+                what="config",
+                extensions=_CONFIG_EXTENSIONS,
+            )
+            try:
+                attached = DatasetConfig.from_toml(config_path, discovery_root=call_root)
+            except Exception as exc:
+                return _init_failure(out, err, [f"Failed to read TOML: {exc}"], mode="attach")
+            repo_user = attached.repo_id.split("/", 1)[0] if "/" in attached.repo_id else ""
+            identity_errors = validate_identity(attached.name, repo_user)
+            if name is not None:
+                if not name.strip():
+                    identity_errors.append("name must be non-empty when supplied")
+                elif name != attached.name:
+                    identity_errors.append(
+                        f"name assertion mismatch: config declares '{attached.name}', got '{name}'"
+                    )
+            if user is not None:
+                if not user.strip():
+                    identity_errors.append("user must be non-empty when supplied")
+                elif user != repo_user:
+                    identity_errors.append(
+                        f"user assertion mismatch: config owner is '{repo_user}', got '{user}'"
+                    )
+            if identity_errors:
+                return _init_failure(out, err, identity_errors, mode="attach")
+            dataset_root = config_path.parent
+            attach_arguments: dict[str, Any] = {"config": str(config_path)}
+            if dry_run:
+                print(f"  DRY RUN  Would attach {config_path}")
+                return {
+                    "ok": True,
+                    "exit_code": 0,
+                    "output": _captured_text(out, err),
+                    "config_errors": [],
+                    "config_path": str(config_path),
+                    "dataset_root": str(dataset_root),
+                    "initialization_mode": "attach",
+                    "session_ready": False,
+                    "next": _init_preview_next(attach_arguments),
+                }
+            print(f"  OK  Attached {config_path} (dataset {attached.name})")
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "output": _captured_text(out, err),
+                "config_errors": [],
+                "config_path": str(config_path),
+                "dataset_root": str(dataset_root),
+                "initialization_mode": "attach",
+                "session_ready": True,
+                "next": workflow.WorkflowCall(
+                    "sofer_meta_check",
+                    attach_arguments,
+                    reason="A dataset context is initialized. Review [meta] placeholders next.",
+                ).to_dict(),
+            }
+
+        # ---- Create mode -----------------------------------------------------
         errors = validate_identity(name, user)
         if errors:
-            return _refusal(errors)
+            return _init_failure(out, err, errors, mode="create")
+        if name is None or user is None:  # pragma: no cover - validate_identity covers
+            return _init_failure(
+                out, err, ["name and user are required in create mode"], mode="create"
+            )
+        create_arguments: dict[str, Any] = {"name": name, "user": user}
+        if move_existing:
+            create_arguments["move_existing"] = True
+        if force:
+            create_arguments["force"] = True
+        if cwd is not None:
+            create_arguments["cwd"] = cwd
         # Per-call effective root (INIT-02): cwd=None -> fail-closed strict
         # descendant of the server root; cwd=str -> contained under it
         # (escapes raise PathOutsideRootError, the pinned str-branch contract).
@@ -3580,7 +3997,7 @@ def sofer_init(
                     None, live_cwd=Path.cwd().resolve(), server_root=_get_root()
                 )
             except IdentityResolutionError as exc:
-                return _refusal([str(exc)])
+                return _init_failure(out, err, [str(exc)], mode="create")
         else:
             effective_root = _contained_path(cwd, root=_get_root(), what="cwd", must_exist=False)
         # Re-anchor [tool.sofer] discovery on the effective root (per-call):
@@ -3601,28 +4018,28 @@ def sofer_init(
         raw_dir = effective_root / sofer_config.RAW_DIR
         base_dir = effective_root.resolve()
         if not raw_dir.resolve().is_relative_to(base_dir):
-            return {
-                "ok": False,
-                "exit_code": 1,
-                "output": _captured_text(out, err),
-                "config_errors": [
-                    _outside_root_message("[tool.sofer] raw_dir", raw_dir.resolve(), base_dir)
-                ],
-                "error_code": "CONFIG_ERROR",
-                "message": "raw_dir outside root",
-                "next": {},
-            }
+            return _init_failure(
+                out,
+                err,
+                [_outside_root_message("[tool.sofer] raw_dir", raw_dir.resolve(), base_dir)],
+                mode="create",
+            )
         if toml_path.exists() and not force:
             print(f"  X  File already exists: {toml_path.name}", file=sys.stderr)
-            return {
-                "ok": False,
-                "exit_code": 1,
-                "output": _captured_text(out, err),
-                "config_errors": [f"File already exists: {toml_path.name}"],
-                "error_code": "CONFIG_ERROR",
-                "message": f"File already exists: {toml_path.name}",
-                "next": {"force": True},
-            }
+            return _init_failure(
+                out,
+                err,
+                [f"File already exists: {toml_path.name}"],
+                mode="create",
+                next_call=workflow.WorkflowCall(
+                    "sofer_init",
+                    {"config": str(toml_path)},
+                    reason=(
+                        "The target already exists. Attach it with config instead of "
+                        "overwriting it with force."
+                    ),
+                ).to_dict(),
+            )
         candidates: list[Path] = []
         existing: list[Path] = []
         if move_existing:
@@ -3631,15 +4048,7 @@ def sofer_init(
                 check_flatten_collisions(candidates + existing, base_dir)
             except ValueError as exc:
                 print(f"  X  {exc}", file=sys.stderr)
-                return {
-                    "ok": False,
-                    "exit_code": 1,
-                    "output": _captured_text(out, err),
-                    "config_errors": [str(exc)],
-                    "error_code": "CONFIG_ERROR",
-                    "message": str(exc),
-                    "next": {},
-                }
+                return _init_failure(out, err, [str(exc)], mode="create")
             if dry_run:
                 if candidates:
                     print("  DRY RUN  Would move the following files:")
@@ -3658,7 +4067,9 @@ def sofer_init(
                     "output": _captured_text(out, err),
                     "config_errors": [],
                     **report_identity(identity),
-                    "next": _workflow_next("sofer_init", str(toml_path)),
+                    "initialization_mode": "create",
+                    "session_ready": False,
+                    "next": _init_preview_next(create_arguments),
                 }
         if dry_run and not move_existing:
             print(f"  DRY RUN  Would create {toml_path.name}")
@@ -3669,7 +4080,9 @@ def sofer_init(
                 "output": _captured_text(out, err),
                 "config_errors": [],
                 **report_identity(identity),
-                "next": _workflow_next("sofer_init", str(toml_path)),
+                "initialization_mode": "create",
+                "session_ready": False,
+                "next": _init_preview_next(create_arguments),
             }
         # TOML write BEFORE the raw/ scaffold: a write failure never leaves
         # an orphan raw/ (no partial state, INIT-05 robustness).
@@ -3692,6 +4105,8 @@ def sofer_init(
             "output": _captured_text(out, err),
             "config_errors": [],
             **report_identity(identity),
+            "initialization_mode": "create",
+            "session_ready": True,
             "next": _workflow_next("sofer_init", str(toml_path)),
         }
 
@@ -3827,8 +4242,20 @@ def sofer_report_failure(
 
 
 def _register_tools(server: _FastMCP) -> None:
-    """Register the 18 tool callables on *server*."""
-    server.tool(
+    """Register the 19 tool callables on *server*.
+
+    Every callable goes through :func:`_admission_completed`, so the per-request
+    init-admission ticket is settled by the tool body itself. Registering
+    through this one helper means a tool added later cannot forget it (issue
+    #360 D2).
+    """
+
+    def register(fn: Callable[..., Any], **kwargs: Any) -> None:
+        """Register *fn* wrapped for admission settlement."""
+        _REGISTERED_TOOL_NAMES.add(fn.__name__)
+        server.tool(_admission_completed(fn), **kwargs)
+
+    register(
         sofer_validate,
         description=_workflow_description(sofer_validate),
         annotations={
@@ -3856,7 +4283,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_meta_check,
         description=_workflow_description(sofer_meta_check),
         annotations={
@@ -3879,7 +4306,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_meta_set,
         description=_workflow_description(sofer_meta_set),
         annotations={
@@ -3907,7 +4334,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_file_set,
         description=_workflow_description(sofer_file_set),
         annotations={
@@ -3931,7 +4358,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_prepare,
         description=_workflow_description(sofer_prepare),
         annotations={
@@ -3953,7 +4380,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_publish,
         description=_workflow_description(sofer_publish),
         annotations={
@@ -3977,7 +4404,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_publish_confirm,
         description=_workflow_description(sofer_publish_confirm),
         annotations={
@@ -4008,7 +4435,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_codebook,
         description=_workflow_description(sofer_codebook),
         annotations={
@@ -4030,7 +4457,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_codebook_all,
         description=_workflow_description(sofer_codebook_all),
         annotations={
@@ -4054,7 +4481,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_profile,
         description=_workflow_description(sofer_profile),
         annotations={
@@ -4076,7 +4503,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_profile_all,
         description=_workflow_description(sofer_profile_all),
         annotations={
@@ -4099,7 +4526,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_render,
         description=_workflow_description(sofer_render),
         annotations={
@@ -4119,7 +4546,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_render_all,
         description=_workflow_description(sofer_render_all),
         annotations={
@@ -4141,7 +4568,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_scan_dry_run,
         description=_workflow_description(sofer_scan_dry_run),
         annotations={
@@ -4167,7 +4594,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_scan_apply,
         description=_workflow_description(sofer_scan_apply),
         annotations={
@@ -4195,7 +4622,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_init,
         description=_workflow_description(sofer_init),
         annotations={
@@ -4212,13 +4639,27 @@ def _register_tools(server: _FastMCP) -> None:
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "config_path": {"type": "string"},
                 "dataset_root": {"type": "string"},
+                "initialization_mode": {
+                    "type": "string",
+                    "enum": ["create", "attach"],
+                    "description": (
+                        "Which init mode ran: create (name/user/cwd) or attach (an existing config)."
+                    ),
+                },
+                "session_ready": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when a completed non-dry-run init bound this session to the "
+                        "dataset; a preview or a failure leaves it false."
+                    ),
+                },
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
             },
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_auth_status,
         description=_workflow_description(sofer_auth_status),
         annotations={
@@ -4277,7 +4718,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_report_failure,
         description=_workflow_description(sofer_report_failure),
         annotations={
@@ -4305,7 +4746,7 @@ def _register_tools(server: _FastMCP) -> None:
             "required": ["ok", "exit_code", "output"],
         },
     )
-    server.tool(
+    register(
         sofer_repo_settings,
         description=_workflow_description(sofer_repo_settings),
         annotations={
@@ -4500,6 +4941,7 @@ def _prompt_prepare_dataset(config: str, output: str | None = None) -> str:
         f"You are preparing the dataset configured at {config!r} for publication.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run) -> sofer_publish_confirm.\n"
+        f"0. If this session is not initialized yet, call sofer_init(config={config!r}) first (attach) or sofer_init(name=..., user=..., cwd=...) to create; every other tool is refused with INITIALIZATION_REQUIRED until init succeeds.\n"
         f"1. sofer_validate(config={config!r}) — validate config/data/quality; if it fails, stop and fix.\n"
         f"2. sofer_prepare(config={config!r}, output_dir={output_repr}) — args: config, output_dir, run_checks, force, verify; writes Parquet+README+LICENSE into output (default [dataset] build_dir).\n"
         f"3. sofer_codebook_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir; writes per-file codebooks + codebook.md.\n"
@@ -4531,6 +4973,7 @@ def _prompt_assess_dataset(config: str, dataset: str) -> str:
         f"at {config!r}.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run) -> sofer_publish_confirm.\n"
+        f"0. If this session is not initialized yet, call sofer_init(config={config!r}) first (attach) or sofer_init(name=..., user=..., cwd=...) to create; every other tool is refused with INITIALIZATION_REQUIRED until init succeeds.\n"
         f"1. sofer_validate(config={config!r}) — validate config/data/quality; wait for report.\n"
         f"2. sofer_profile(dataset={dataset!r}) — args: dataset, output_dir, force; writes metadata.yaml and surfaces PII findings (single-file).\n"
         f"3. sofer_render(package={dataset!r}) — args: package, output_dir, force; renders README.md from metadata.yaml.\n"
@@ -4556,6 +4999,7 @@ def _prompt_finalize_and_publish(config: str, output: str | None = None) -> str:
         "on Hugging Face Hub.\n"
         "\n"
         "Canonical chain: sofer_validate -> sofer_prepare -> sofer_codebook_all -> sofer_profile_all -> sofer_render_all -> sofer_publish(dry_run=True) -> STOP -> sofer_publish_confirm.\n"
+        f"0. If this session is not initialized yet, call sofer_init(config={config!r}) first (attach) or sofer_init(name=..., user=..., cwd=...) to create; every other tool is refused with INITIALIZATION_REQUIRED until init succeeds.\n"
         f"1. sofer_validate(config={config!r}) — validate; fix failures first.\n"
         f"2. sofer_prepare(config={config!r}, output_dir={output_repr}) — args: config, output_dir, run_checks, force, verify.\n"
         f"3. sofer_codebook_all(config={config!r}, output_dir={output_repr}) — args: config, output_dir.\n"
@@ -4583,6 +5027,144 @@ def _register_prompts(server: _FastMCP) -> None:
     server.prompt("prepare_dataset")(_prompt_prepare_dataset)
     server.prompt("assess_dataset")(_prompt_assess_dataset)
     server.prompt("finalize_and_publish")(_prompt_finalize_and_publish)
+
+
+# ---------------------------------------------------------------------------
+#  Init admission gate (issue #360) — default deny at the dispatch boundary
+# ---------------------------------------------------------------------------
+
+
+class _InitAdmissionMiddleware(_Middleware):
+    """Require a successful ``sofer_init`` before any protected MCP operation.
+
+    This is the ONE dispatch point the policy lives in (issue #360 D2): every
+    registered tool is covered, including tools added later, and no handler
+    carries a copied check. Discovery endpoints — ``tools/list``,
+    ``resources/list``, ``resources/templates/list``, ``prompts/list``, static
+    prompt retrieval, and the static ``sofer://status`` resource — stay
+    available in every state and never unlock a later tool call (D5).
+
+    The configured tool/root matching and state transitions live in
+    :mod:`sofer.mcp_admission`; this class only resolves request arguments,
+    builds the shared error envelope, and owns the request's settlement ticket.
+    """
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        """Admit or refuse one ``tools/call`` before the handler is entered."""
+        name = str(getattr(context.message, "name", "") or "")
+        arguments = dict(getattr(context.message, "arguments", None) or {})
+        if name not in _REGISTERED_TOOL_NAMES and name not in workflow.WORKFLOW_METADATA:
+            # Unknown tool: keep the framework's standard MCP error and never
+            # touch readiness (issue #360 D2).
+            return await call_next(context)
+        policy = admission.classify_tool(name)
+        state = _session_admission()
+        if state is None:
+            return _refusal_tool_result(admission.session_unavailable_refusal())
+        config_argument = arguments.get("config")
+        raw_root = arguments.get("root")
+        call_root = _resolved_call_root_or_none(raw_root)
+        hint_root = call_root if isinstance(raw_root, str) and raw_root.strip() else None
+        requested_config = _resolved_config_or_none(config_argument, call_root)
+        if policy == "init":
+            refusal = state.claim_init(arguments)
+        else:
+            refusal = state.claim_protected(
+                requested_root=call_root,
+                requested_config=requested_config,
+                requires_config=policy == "config",
+                arguments=arguments,
+                config_argument=config_argument if isinstance(config_argument, str) else None,
+                hint_root=hint_root,
+            )
+        if refusal is not None:
+            return _refusal_tool_result(refusal)
+        ticket = _AdmissionTicket(state, is_init=policy == "init")
+        token = _ADMISSION_TICKET.set(ticket)
+        try:
+            return await call_next(context)
+        except asyncio.CancelledError:
+            # A cancelled await can leave the synchronous worker running. The
+            # registered wrapper settles when that worker really stops, so keep
+            # the init state (or the lease) until then, per D4.
+            raise
+        except BaseException:
+            ticket.finish(None)
+            raise
+        else:
+            ticket.finish(None)
+        finally:
+            _ADMISSION_TICKET.reset(token)
+
+    async def on_read_resource(self, context: Any, call_next: Any) -> Any:
+        """Admit or refuse one ``resources/read``; ``sofer://status`` stays open."""
+        uri = str(getattr(context.message, "uri", "") or "")
+        kind, path = _split_sofer_uri(uri)
+        if kind == "status":
+            return await call_next(context)
+        state = _session_admission()
+        if state is None:
+            raise _resource_refusal(admission.session_unavailable_refusal(), uri)
+        refusal = state.claim_protected(
+            requested_root=None,
+            requested_config=None,
+            requires_config=False,
+            arguments={"uri": uri},
+            config_argument=None,
+        )
+        if refusal is not None:
+            raise _resource_refusal(refusal, uri)
+        ticket = _AdmissionTicket(state, is_init=False)
+        try:
+            _enforce_resource_target(state, kind, path, uri)
+            return await call_next(context)
+        finally:
+            ticket.finish(None)
+
+
+def _enforce_resource_target(
+    state: admission.SessionAdmission, kind: str | None, path: str, uri: str
+) -> None:
+    """Enforce the active context on a content resource read (D5).
+
+    Resolution keeps its existing authority (registration-root containment,
+    extension allow-lists); the resource must additionally live inside the
+    active root ``R``, and a ``dataset`` resource must name the active config
+    ``C``. Path-only resources carry no dataset identifier, so root
+    containment — not TOML ownership — is the guarantee.
+    """
+    active = state.context
+    if active is None:  # pragma: no cover - READY always carries a context
+        return
+    try:
+        if kind == "dataset":
+            resolved = _contained_path(
+                path, root=_get_root(), what="config", extensions=_CONFIG_EXTENSIONS
+            )
+        elif kind == "codebook":
+            resolved = _contained_path(
+                path, root=_get_root(), what="data file", extensions=_DATA_EXTENSIONS
+            )
+        elif kind == "metadata":
+            resolved = _contained_path(
+                path, root=_get_root(), what="metadata", extensions=_METADATA_EXTENSIONS
+            )
+        else:
+            # Unknown data-bearing resource: default-protected; the framework's
+            # own "unknown resource" answer stands once the session is ready.
+            return
+    except (PathOutsideRootError, MCPToolError):
+        # The handler re-resolves and raises this same existing error.
+        return
+    if not resolved.resolve().is_relative_to(active.root.resolve()):
+        raise _ResourceError(_outside_root_message(kind or "resource", resolved, active.root))
+    if kind == "dataset" and not active.matches_config(resolved):
+        raise _resource_refusal(
+            admission.context_mismatch_refusal(
+                active=active, requested_root=active.root, requested_config=resolved
+            ),
+            uri,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4691,6 +5273,9 @@ def build_server(root: Path | None = None, approval_phrase: str | None = None) -
     _register_tools(server)
     _register_resources(server)
     _register_prompts(server)
+    # Admission is the OUTERMOST middleware (first added): a refused call never
+    # reaches the heartbeat or the tool handler (issue #360 D2).
+    server.add_middleware(_InitAdmissionMiddleware())
     server.add_middleware(_ProgressHeartbeatMiddleware())
     return server
 

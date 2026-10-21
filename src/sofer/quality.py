@@ -27,15 +27,18 @@ most ``config.PROBE_CHUNK_BYTES`` of the file it judges (issue #326).
 
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
+import os
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from . import config
 from ._csv_reader import ENCODING_FALLBACKS, stream_csv
-from ._formats import is_text_eligible
+from ._formats import field_delimiter, is_text_eligible
 from ._sentinels import MISSING_VALUE_SENTINELS
 from .checks import ValidationReport
 from .codebook import infer_column_type
@@ -78,6 +81,101 @@ def _capped_append(target: list[Any], item: Any, limit: int) -> None:
     """
     if len(target) < limit:
         target.append(item)
+
+
+_ROW_LENGTH_PREFIX_BYTES = 4
+"""Width of the length prefix that frames each part of a row digest.
+
+Four bytes frame a part of up to 4 GiB, far beyond any CSV cell the reader
+materializes, and they make the concatenation unambiguous (issue #368).
+"""
+
+
+def _row_digest(file_identity: str, row: list[str]) -> str:
+    """Return the duplicate-detection digest of one parsed row.
+
+    The parts are length-framed before hashing, never joined with a separator:
+    any chosen separator can occur inside a cell, so ``['a|b', 'c']`` and
+    ``['a', 'b|c']`` produced the same preimage and two different rows were
+    reported as exact duplicates (issue #368). Framing keeps field boundaries,
+    empty fields, backslashes and Unicode content intact without normalizing
+    any value, and two different rows cannot encode to the same bytes.
+
+    MD5 stays: it is an equality fingerprint inside one scan, never a security
+    primitive (``usedforsecurity=False``).
+
+    Args:
+        file_identity: The namespace the comparison is scoped to.
+        row: The parsed field strings, exactly as the reader produced them.
+
+    Returns:
+        The hexadecimal digest of the framed parts.
+    """
+    digest = hashlib.md5(usedforsecurity=False)
+    for part in (file_identity, *row):
+        encoded = part.encode("utf-8")
+        digest.update(len(encoded).to_bytes(_ROW_LENGTH_PREFIX_BYTES, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _source_identity(resolved: Path, base: Path) -> str:
+    """Return the collision-free identity of one source (issue #369).
+
+    A source under the dataset root is named by its dataset-relative POSIX
+    path, which is stable across checkouts and readable in a report; one
+    outside it keeps its resolved absolute POSIX path, which is equally
+    unique. The identity is internal — what the report prints is decided by
+    :func:`_display_names`.
+    """
+    try:
+        return resolved.relative_to(base).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _build_display_map(sources: Sequence[tuple[Path, str]]) -> dict[str, str]:
+    """Map each source identity to the name the report should print.
+
+    The basename stays the printed name while it is unambiguous, so every
+    existing single-file message is unchanged. Identities that share a
+    basename print their identity instead (``a/data.csv``), which is what lets
+    an operator resolve a finding when two declared sources collide
+    (issue #369).
+    """
+    by_basename: dict[str, list[str]] = defaultdict(list)
+    for _resolved, identity in sources:
+        by_basename[Path(identity).name].append(identity)
+    display: dict[str, str] = {}
+    for basename, identities in by_basename.items():
+        for identity in identities:
+            display[identity] = identity if len(identities) > 1 else basename
+    return display
+
+
+def _decodes_probe(chunk: bytes, encoding: str, *, final: bool) -> bool:
+    """Return whether *chunk* decodes as *encoding*, tolerating a split tail.
+
+    ``final`` says whether the probe reached physical end-of-file. When it did
+    not, an incomplete sequence at the tail is completed by bytes this probe
+    never reads, so the incremental decoder holds those bytes back instead of
+    rejecting them (issue #370). Invalid bytes that are decidable inside the
+    chunk still raise, and ``errors="strict"`` never hides them.
+
+    Args:
+        chunk: The bytes the probe read.
+        encoding: One candidate encoding from ``ENCODING_FALLBACKS``.
+        final: ``True`` when ``chunk`` ends at physical end-of-file.
+
+    Returns:
+        ``True`` when the chunk is decodable under the rule above.
+    """
+    decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+    try:
+        decoder.decode(chunk, final)
+    except UnicodeError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -167,20 +265,32 @@ class QualityValidator:
         self._dup_tracking_cap = config.QUALITY_MAX_DUP_TRACKING
         base = self.cfg._base_dir if self.cfg._base_dir else Path.cwd()
 
+        # Resolve every source once: the identity keys all per-source
+        # bookkeeping, and the display map can only tell an ambiguous basename
+        # apart after seeing the whole declaration (issue #369).
+        sources: list[tuple[Path, str]] = []
         for entry in self.cfg.files:
             resolved = entry.resolve(base)
             if not resolved.exists() or resolved.is_dir():
                 continue
             if not is_text_eligible(resolved):
                 continue
+            sources.append((resolved, _source_identity(resolved, base)))
+        self._display_names: dict[str, str] = _build_display_map(sources)
 
+        for resolved, identity in sources:
             self._had_eligible = True
 
             # ── Pre-scan: encoding validation ──────────────────────────
-            self._check_encoding_validation(resolved)
+            encoding_reported = self._check_encoding_validation(resolved)
 
             # ── Streaming pass — interleave all per-row checks ─────────
-            self._process_file(resolved)
+            self._process_file(
+                resolved,
+                identity=identity,
+                display=self._display(identity),
+                encoding_reported=encoding_reported,
+            )
 
         # ── Post-scan checks ───────────────────────────────────────────
         self._check_cross_file_types()
@@ -203,36 +313,46 @@ class QualityValidator:
     def _reset_accumulators(self) -> None:
         self._results: list[QualityResult] = []
         self._had_eligible = False
-        # Per-file state
+        # Per-source state: every mapping is keyed by the collision-free source
+        # identity (``a/data.csv``), never by the basename (issue #369).
         self._file_headers: dict[str, list[str]] = {}
         self._file_row_count: dict[str, int] = {}
         # duplicates
         self._dup_hashes: dict[str, int] = {}  # hash → first row number
-        # Duplicate pairs grouped by file: naming the file keeps the finding
-        # traceable back to a table (issue #293), and capping each file's list at
-        # the report limit keeps memory independent of the dataset size while
-        # every affected file can still reach the report (issue #290).
+        # Duplicate pairs grouped by source: naming the source keeps the finding
+        # traceable back to a table (issue #293), and capping each source's list
+        # at the report limit keeps memory independent of the dataset size while
+        # every affected source can still reach the report (issue #290).
         self._dup_findings: dict[str, list[tuple[int, int]]] = {}
         self._dup_hashes_capped: bool = False  # cap hit → finding is partial
         # empty rows
         self._empty_row_numbers: list[int] = []
-        # empty columns — per-column "seen non-empty" boolean, keyed file::col
-        self._col_nonempty: dict[str, bool] = {}
+        # empty columns — per-column "seen non-empty" boolean, keyed by the
+        # structured pair (source, column): a path or a header may itself
+        # contain any separator a compound string would use (issue #369).
+        self._col_nonempty: dict[tuple[str, str], bool] = {}
         # null profiling
-        self._null_counts: dict[str, tuple[int, int]] = {}  # col → (total, null)
+        self._null_counts: dict[tuple[str, str], tuple[int, int]] = {}
         # format consistency
         self._col_samples: dict[str, list[str]] = defaultdict(list)
+        # cross-file types — this source's own bounded sample, dropped once its
+        # types are inferred, so memory stays per-source rather than
+        # per-dataset (issue #367)
+        self._file_samples: dict[str, list[str]] = defaultdict(list)
         # corrupt records
-        # (file, row, actual, expected)
+        # (source, row, actual, expected)
         self._corrupt_findings: list[tuple[str, int, int, int]] = []
         # value range
         self._col_min: dict[str, float | None] = {}
         self._col_max: dict[str, float | None] = {}
         # cross-file types
         self._file_col_types: dict[str, dict[str, str]] = defaultdict(dict)
-        # current file tracking
-        self._current_file: str = ""
+        # current source tracking
+        self._current_source: str = ""
+        self._current_display: str = ""
         self._current_header: list[str] = []
+        # identity → the name the report uses (basename unless ambiguous)
+        self._display_names = {}
         # partial scan tracking (Issue #14)
         self._scan_is_partial: bool = False
         # ran checks tracking (Issue #14)
@@ -256,17 +376,44 @@ class QualityValidator:
     #  File processing (single pass, interleaved)
     # ------------------------------------------------------------------
 
-    def _process_file(self, resolved: Path) -> None:
+    def _display(self, identity: str) -> str:
+        """Return the name the report prints for *identity* (issue #369)."""
+        return self._display_names.get(identity, Path(identity).name)
+
+    def _process_file(
+        self,
+        resolved: Path,
+        *,
+        identity: str | None = None,
+        display: str | None = None,
+        encoding_reported: bool = False,
+    ) -> None:
         """Open one CSV/TSV and distribute all rows to active accumulators.
 
         Non-eligible paths return immediately with no accumulator updates and
         no ``ran_checks`` mutation (defensive guard for direct calls).
+
+        Rows are read with the separator the format defines: a ``.tsv`` is
+        tab-delimited regardless of the dataset's CSV delimiter, and a ``.csv``
+        keeps the configured one (issue #366).
+
+        Args:
+            resolved: The file to stream.
+            identity: The collision-free identity all per-source bookkeeping is
+                keyed by; a direct helper call falls back to the basename.
+            display: The name findings print for this source.
+            encoding_reported: ``True`` when :meth:`_check_encoding_validation`
+                already appended a finding for this file, so a mid-stream
+                decode failure is not reported a second time.
         """
         if not is_text_eligible(resolved):
             return
-        fname = resolved.name
-        self._current_file = fname
-        self._file_row_count[fname] = 0
+        self._file_samples = defaultdict(list)
+        source = identity if identity is not None else resolved.name
+        label = display if display is not None else resolved.name
+        self._current_source = source
+        self._current_display = label
+        self._file_row_count[source] = 0
 
         # Full-scan decision (issue #290): the tri-state policy decides, not
         # severity alone. ``auto`` scans every row only when an active fail
@@ -286,7 +433,7 @@ class QualityValidator:
         try:
             gen = stream_csv(
                 resolved,
-                delimiter=self.cfg.csv_delimiter,
+                delimiter=field_delimiter(resolved, self.cfg.csv_delimiter),
                 encoding=self.cfg.csv_encoding,
                 max_sample=effective_max_sample,
             )
@@ -302,27 +449,44 @@ class QualityValidator:
             self._add_result(
                 "corrupt_records",
                 "fail",
-                f"Cannot read '{fname}': {exc}",
+                f"Cannot read '{label}': {exc}",
             )
             return
         self._current_header = header
-        self._file_headers[fname] = header
+        self._file_headers[source] = header
 
-        # Initialise per-column accumulators for this file's header
-        # Key includes fname to avoid cross-file collision (Issue #14)
+        # Initialise per-column accumulators for this source's header
         for col_name in header:
-            self._col_nonempty.setdefault(f"{fname}::{col_name}", False)
+            self._col_nonempty.setdefault((source, col_name), False)
 
         row_number = 0
-        for _header, row in gen:
+        while True:
+            try:
+                _header, row = next(gen)
+            except StopIteration:
+                break
+            except ValueError as exc:
+                # The decoded prefix passed but the stream did not: a mislabeled
+                # file whose first invalid byte sits past the probe window. It
+                # must become a finding, never an exception out of ``run()``
+                # (issue #370). When the probe already reported the file, the
+                # same problem is not reported twice.
+                if not encoding_reported:
+                    self._add_result(
+                        "corrupt_records",
+                        "fail",
+                        f"Cannot read '{label}': {exc}",
+                    )
+                return
             if row is None:  # header-only yield already consumed
                 continue
             row_number += 1
-            self._file_row_count[fname] = row_number
+            self._file_row_count[source] = row_number
             self._distribute_row(row_number, row)
 
-        # After file processed, infer column types for cross-file comparison
-        self._infer_file_types(fname, header)
+        # After the source is processed, infer column types for cross-file comparison
+        self._infer_file_types(source, header)
+        self._file_samples = defaultdict(list)
 
     def _distribute_row(self, row_number: int, row: list[str]) -> None:
         """Send one data row to every active per-row accumulator."""
@@ -331,7 +495,7 @@ class QualityValidator:
             if len(row) != len(self._current_header):
                 _capped_append(
                     self._corrupt_findings,
-                    (self._current_file, row_number, len(row), len(self._current_header)),
+                    (self._current_source, row_number, len(row), len(self._current_header)),
                     config.REPORT_MAX_CORRUPT_RECORDS,
                 )
                 return  # skip other checks for corrupt rows
@@ -352,10 +516,10 @@ class QualityValidator:
             # empty_columns — per-column "seen non-empty" boolean (issue #290):
             # a value set here was the largest per-row accumulator.
             if not is_missing:
-                self._col_nonempty[f"{self._current_file}::{col_name}"] = True
+                self._col_nonempty[(self._current_source, col_name)] = True
 
             # null_profiling
-            key_n = f"{self._current_file}:{col_name}"
+            key_n = (self._current_source, col_name)
             if key_n in self._null_counts:
                 t, n = self._null_counts[key_n]
                 self._null_counts[key_n] = (t + 1, n + (1 if is_missing else 0))
@@ -366,6 +530,13 @@ class QualityValidator:
             if "format_consistency" in self._checks:
                 if len(self._col_samples[col_name]) < self._max_sample:
                     self._col_samples[col_name].append(value)
+
+            # cross_file_types — this source's own bounded sample (issue #367).
+            # Independent of format_consistency: inferring a source's types must
+            # not depend on an unrelated dataset-level check being active.
+            if "cross_file_types" in self._checks:
+                if len(self._file_samples[col_name]) < self._max_sample:
+                    self._file_samples[col_name].append(value)
 
             # value_range
             if "value_range" in self._checks:
@@ -388,8 +559,7 @@ class QualityValidator:
         # false positives). New hashes stop at the cap; the cap is reported as
         # a partial finding instead of silently evicting tracked rows (issue #290).
         if "duplicates" in self._checks:
-            row_str = f"{self._current_file}|{'|'.join(row)}"
-            h = hashlib.md5(row_str.encode("utf-8"), usedforsecurity=False).hexdigest()
+            h = _row_digest(self._current_source, row)
             if h in self._dup_hashes:
                 self._record_duplicate_pair(self._dup_hashes[h], row_number)
             elif len(self._dup_hashes) < self._dup_tracking_cap:
@@ -450,7 +620,7 @@ class QualityValidator:
             first_row: Row number of the first occurrence.
             dup_row:   Row number of the duplicate occurrence.
         """
-        pairs = self._dup_findings.setdefault(self._current_file, [])
+        pairs = self._dup_findings.setdefault(self._current_source, [])
         _capped_append(pairs, (first_row, dup_row), config.REPORT_MAX_ITEMS)
 
     def _check_duplicates(self) -> None:
@@ -475,10 +645,10 @@ class QualityValidator:
         for depth in range(max((len(p) for p in self._dup_findings.values()), default=0)):
             if len(parts) >= limit:
                 break
-            for fname, pairs in self._dup_findings.items():
+            for source, pairs in self._dup_findings.items():
                 if depth < len(pairs) and len(parts) < limit:
                     first, dup = pairs[depth]
-                    parts.append(f"{fname}: Row {first} = Row {dup}")
+                    parts.append(f"{self._display(source)}: Row {first} = Row {dup}")
         sev = self._checks["duplicates"]["severity"]
         pairs_str = "; ".join(parts)
         if self._dup_hashes_capped:
@@ -516,23 +686,22 @@ class QualityValidator:
         if not self._had_eligible:
             return
         self._ran_checks.add("empty_columns")
-        # Group empty columns per-file using the "fname::col" key format
-        per_file: dict[str, list[str]] = defaultdict(list)
-        for key, seen_nonempty in self._col_nonempty.items():
-            if not seen_nonempty and "::" in key:
-                fname, col = key.split("::", 1)
-                per_file[fname].append(col)
-        if not per_file:
+        # Group empty columns per source using the structured (source, col) key
+        per_source: dict[str, list[str]] = defaultdict(list)
+        for (source, col), seen_nonempty in self._col_nonempty.items():
+            if not seen_nonempty:
+                per_source[source].append(col)
+        if not per_source:
             return
         sev = self._checks["empty_columns"]["severity"]
-        for fname, cols in per_file.items():
-            # Skip zero-row files — a header-only file has no data to check
-            if self._file_row_count.get(fname, 0) == 0:
+        for source, cols in per_source.items():
+            # Skip zero-row sources — a header-only file has no data to check
+            if self._file_row_count.get(source, 0) == 0:
                 continue
             self._add_result(
                 "empty_columns",
                 sev,
-                f"Fully empty columns in '{fname}': {', '.join(cols)}",
+                f"Fully empty columns in '{self._display(source)}': {', '.join(cols)}",
                 from_sample=True,
             )
 
@@ -544,21 +713,16 @@ class QualityValidator:
         self._ran_checks.add("null_profiling")
         threshold = self._checks["null_profiling"].get("max_null_pct", 50.0)
         over_limit: list[str] = []
-        per_file: dict[str, dict[str, tuple[int, int]]] = defaultdict(dict)
-        for key, (total, nulls) in self._null_counts.items():
-            # key format: "filename:colname"
-            if ":" in key:
-                fname, col = key.split(":", 1)
-                per_file[fname][col] = (total, nulls)
-        # Aggregate across files per column (simple: sum counts across files)
+        # Aggregate across sources per column (dataset-level statistic): the
+        # structured key makes the source part explicit, so no separator in a
+        # path or a header can be mistaken for the boundary (issue #369).
         agg: dict[str, tuple[int, int]] = {}
-        for fname, cols in per_file.items():
-            for col, (total, nulls) in cols.items():
-                if col in agg:
-                    pt, pn = agg[col]
-                    agg[col] = (pt + total, pn + nulls)
-                else:
-                    agg[col] = (total, nulls)
+        for (_source, col), (total, nulls) in self._null_counts.items():
+            if col in agg:
+                prev_total, prev_nulls = agg[col]
+                agg[col] = (prev_total + total, prev_nulls + nulls)
+            else:
+                agg[col] = (total, nulls)
         for col, (total, nulls) in agg.items():
             if total == 0:
                 continue
@@ -610,11 +774,12 @@ class QualityValidator:
             return
         sev = self._checks["corrupt_records"]["severity"]
         limit = config.REPORT_MAX_CORRUPT_RECORDS
-        for fname, row, actual, expected in self._corrupt_findings[:limit]:
+        for source, row, actual, expected in self._corrupt_findings[:limit]:
             self._add_result(
                 "corrupt_records",
                 sev,
-                f"Row {row} in '{fname}' has {actual} fields, header has {expected}",
+                f"Row {row} in '{self._display(source)}' has {actual} fields, "
+                f"header has {expected}",
                 from_sample=True,
             )
 
@@ -650,22 +815,24 @@ class QualityValidator:
             return
         self._ran_checks.add("cross_file_types")
         sev = self._checks["cross_file_types"]["severity"]
-        # Find shared column names across files (skip zero-row files)
+        # Find shared column names across sources (skip zero-row sources)
         all_cols: set[str] = set()
         active_files = {f for f in self._file_col_types if self._file_row_count.get(f, 0) > 0}
-        for fname in active_files:
-            cols = self._file_col_types[fname]
+        for source in active_files:
+            cols = self._file_col_types[source]
             all_cols.update(cols.keys())
         for col in all_cols:
             types_found: dict[str, str] = {}
-            for fname in active_files:
-                cols = self._file_col_types[fname]
+            for source in active_files:
+                cols = self._file_col_types[source]
                 if col in cols:
-                    types_found[fname] = cols[col]
+                    types_found[source] = cols[col]
             # Compare types — if they differ, report
             unique_types = set(types_found.values())
             if len(unique_types) > 1:
-                details = "; ".join(f"{f}={t}" for f, t in types_found.items())
+                details = "; ".join(
+                    f"{self._display(source)}={kind}" for source, kind in types_found.items()
+                )
                 self._add_result(
                     "cross_file_types",
                     sev,
@@ -673,7 +840,7 @@ class QualityValidator:
                     from_sample=True,
                 )
 
-    def _check_encoding_validation(self, resolved: Path) -> None:
+    def _check_encoding_validation(self, resolved: Path) -> bool:
         """Probe the first ``config.PROBE_CHUNK_BYTES`` with ``utf-8-sig → utf-8``.
 
         Non-eligible paths return immediately with no finding and no
@@ -684,45 +851,60 @@ class QualityValidator:
         The prefix is read with a **bounded** read (issue #326): the probe only
         answers a question about the file's first ``probe_chunk_bytes``, so
         materializing the file to slice it made the pass's peak follow the
-        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.  The
-        bytes judged are the same ones ``read_bytes()[:n]`` judged, including
-        the truncation of a multi-byte sequence that straddles the boundary.
+        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.
+
+        What the judged prefix proves (issue #370): a sequence cut by the
+        window is completed by bytes the probe deliberately does not read, so
+        it is not evidence of a bad encoding; only a sequence cut by physical
+        end-of-file is.  The file's size, read from the open descriptor, tells
+        the two apart without a second read, which keeps the bound intact.
+
+        Returns:
+            ``True`` when a finding was appended for this file, so the caller
+            can avoid reporting the same decode failure twice; ``False`` when
+            the file passed, was skipped, or held no active check.
         """
         if not is_text_eligible(resolved):
-            return
+            return False
         if "encoding_validation" not in self._checks:
-            return
+            return False
         self._ran_checks.add("encoding_validation")
         sev = self._checks["encoding_validation"]["severity"]
-        # Read the first probe-sized chunk and try each encoding
+        # Read the first probe-sized chunk and learn whether it reached EOF
         try:
             with resolved.open("rb") as fh:
                 chunk = fh.read(config.PROBE_CHUNK_BYTES)
+                size = os.fstat(fh.fileno()).st_size
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
-            return
+            return True
+        final = len(chunk) >= size
         for enc in ENCODING_FALLBACKS:
-            try:
-                chunk.decode(enc)
-                return  # success
-            except (UnicodeDecodeError, UnicodeError):
-                continue
+            if _decodes_probe(chunk, enc, final=final):
+                return False  # success
         msg = f"Cannot decode '{resolved.name}' — all encodings failed"
         self._add_result("encoding_validation", sev, msg)
+        return True
 
     # ------------------------------------------------------------------
     #  Cross-file type collection
     # ------------------------------------------------------------------
 
-    def _infer_file_types(self, fname: str, header: list[str]) -> None:
-        """Infer column types from collected samples for cross-file comparison."""
+    def _infer_file_types(self, source: str, header: list[str]) -> None:
+        """Infer column types from *source*'s own samples for cross-file comparison.
+
+        The sample belongs to the source being streamed, so an earlier source
+        that fills the configured budget cannot decide a later one's type
+        (issue #367). Missing values are filtered before inference, and a
+        column with no non-missing value stays ``"unknown"``.
+        """
         for col_name in header:
-            values = self._col_samples.get(col_name, [])
+            values = self._file_samples.get(col_name, [])
             filtered = [v for v in values if not _is_empty(v)]
             if filtered:
-                self._file_col_types[fname][col_name] = infer_column_type(filtered)
+                self._file_col_types[source][col_name] = infer_column_type(filtered)
             else:
-                self._file_col_types[fname][col_name] = "unknown"
+                self._file_col_types[source][col_name] = "unknown"
 
 
 # ---------------------------------------------------------------------------

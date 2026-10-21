@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from sofer import _toml, meta_edit
+from sofer import _atomic, _toml, meta_edit
 from sofer.cli import _INIT_TEMPLATE
 from sofer.meta_edit import META_KEYS, MetaEditError, apply_meta_edit
 from sofer.model import DatasetConfig
@@ -291,11 +291,22 @@ class TestSetMeta:
         def _boom(*args: object, **kwargs: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(_toml.os, "replace", _boom)
+        monkeypatch.setattr(_atomic.os, "replace", _boom)
         with pytest.raises(MetaEditError, match="cannot write"):
             meta_edit.set_meta(path, {"description": "Real"})
         assert path.read_bytes() == before
         assert not list(tmp_path.glob("*.tmp"))
+
+    def test_a_preexisting_tmp_sibling_survives_a_real_write(self, tmp_path: Path) -> None:
+        """Issue #365: the writer owns a unique temp file, not `<dest>.tmp`."""
+        path = self._dataset(tmp_path)
+        sibling = path.with_name(path.name + ".tmp")
+        sibling.write_bytes(b"pre-existing staging file")
+
+        meta_edit.set_meta(path, {"description": "Real"})
+
+        assert sibling.read_bytes() == b"pre-existing staging file"
+        assert meta_edit.read_meta(path)["description"] == "Real"
 
     def test_read_meta_returns_the_table_or_an_empty_mapping(self, tmp_path: Path) -> None:
         assert meta_edit.read_meta(self._dataset(tmp_path))["license"].startswith("TODO")

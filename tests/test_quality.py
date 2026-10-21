@@ -1,5 +1,6 @@
 """Tests for sofer._csv_reader and sofer.quality."""
 
+import codecs
 import csv
 import tracemalloc
 from pathlib import Path
@@ -178,6 +179,29 @@ def _run_quality(cfg: DatasetConfig) -> ValidationReport:
     return v.run()
 
 
+def _two_same_basename_csvs(
+    tmp_path: Path,
+    left: list[list[str]],
+    right: list[list[str]],
+) -> DatasetConfig:
+    """Two declared sources both named ``data.csv``, in different folders.
+
+    The layouts are valid and indistinguishable by basename, which is exactly
+    the collision issue #369 is about.
+    """
+    left_path = _make_csv(tmp_path / "a" / "data.csv", left)
+    right_path = _make_csv(tmp_path / "b" / "data.csv", right)
+    return DatasetConfig(
+        name="test",
+        repo_id="u/test",
+        _base_dir=tmp_path,
+        files=[
+            FileEntry(local=left_path, remote="a/data.csv"),
+            FileEntry(local=right_path, remote="b/data.csv"),
+        ],
+    )
+
+
 # ── 4.2 Duplicates ──────────────────────────────────────────────────────────────
 
 
@@ -267,6 +291,120 @@ class TestCheckDuplicates:
         report = _run_quality(cfg)
         qr = [r for r in report.quality_results if r.check == "duplicates"]
         assert len(qr) == 0, f"Cross-file duplicates should NOT be flagged, but got: {qr}"
+
+    @staticmethod
+    def _duplicates(cfg: DatasetConfig) -> list[QualityResult]:
+        report = _run_quality(cfg)
+        return [r for r in report.quality_results if r.check == "duplicates"]
+
+    def test_a_pipe_in_a_cell_does_not_make_two_rows_equal(self, tmp_path):
+        """Issue #368: joining fields with a separator is ambiguous."""
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|b", "c"], ["a", "b|c"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_empty_fields_are_framed_unambiguously(self, tmp_path):
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|", ""], ["a", "|"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_backslashes_and_unicode_keep_their_boundaries(self, tmp_path):
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["é|b", "c"], ["é", "b|c"], ["a\\", "b|c"], ["a\\|b", "c"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_an_exact_repeated_row_with_a_pipe_is_still_reported(self, tmp_path):
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|b", "c"], ["1", "2"], ["a|b", "c"]],
+        )
+
+        findings = self._duplicates(cfg)
+
+        assert [finding.message for finding in findings] == [
+            "Duplicate rows: data.csv: Row 1 = Row 3"
+        ]
+
+    def test_no_false_duplicate_when_duplicates_is_a_fail_check(self, tmp_path):
+        """A false finding would block the dataset, so the file must pass."""
+        cfg, _ = _make_csv_cfg(
+            tmp_path,
+            ["left", "right"],
+            [["a|b", "c"], ["a", "b|c"]],
+            quality_checks=[QualityCheck(check="duplicates", severity="fail")],
+        )
+
+        report = _run_quality(cfg)
+
+        assert report.passed is True
+        assert [r for r in report.quality_results if r.check == "duplicates"] == []
+
+    def test_same_basename_sources_are_not_duplicates_of_each_other(self, tmp_path):
+        """Issue #369: one row in each of a/data.csv and b/data.csv is no pair."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id", "val"], ["1", "x"]],
+            [["id", "val"], ["1", "x"]],
+        )
+
+        assert self._duplicates(cfg) == []
+
+    def test_real_duplicates_in_a_same_basename_source_are_disambiguated(self, tmp_path):
+        """The pair is real, so the message must say which data.csv it is."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id", "val"], ["1", "x"], ["1", "x"]],
+            [["id", "val"], ["2", "y"]],
+        )
+
+        findings = self._duplicates(cfg)
+
+        assert [finding.message for finding in findings] == [
+            "Duplicate rows: a/data.csv: Row 1 = Row 2"
+        ]
+
+    def test_reversing_the_declaration_order_keeps_per_file_results(self, tmp_path):
+        """The left file repeats, so order must not change the attribution."""
+        left = _make_csv(
+            tmp_path / "a" / "data.csv",
+            [["id", "val"], ["1", "x"], ["1", "x"]],
+        )
+        right = _make_csv(tmp_path / "b" / "data.csv", [["id", "val"], ["2", "y"]])
+        forward = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            _base_dir=tmp_path,
+            files=[
+                FileEntry(local=left, remote="a/data.csv"),
+                FileEntry(local=right, remote="b/data.csv"),
+            ],
+        )
+        reversed_order = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            _base_dir=tmp_path,
+            files=[
+                FileEntry(local=right, remote="b/data.csv"),
+                FileEntry(local=left, remote="a/data.csv"),
+            ],
+        )
+
+        assert [f.message for f in self._duplicates(forward)] == [
+            f.message for f in self._duplicates(reversed_order)
+        ]
 
 
 # ── 4.3 Empty rows ──────────────────────────────────────────────────────────────
@@ -361,6 +499,33 @@ class TestCheckEmptyColumns:
         report = _run_quality(cfg)
         qr = [r for r in report.quality_results if r.check == "empty_columns"]
         assert len(qr) == 0, f"Zero-row file should not report empty columns, but got: {qr}"
+
+    def test_same_basename_sources_keep_independent_empty_columns(self, tmp_path):
+        """Issue #369: `notes` empty in a/data.csv but populated in b/data.csv."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id", "notes"], ["1", ""], ["2", "  "]],
+            [["id", "notes"], ["1", "x"], ["2", "y"]],
+        )
+
+        report = _run_quality(cfg)
+
+        findings = [r for r in report.quality_results if r.check == "empty_columns"]
+        assert [f.message for f in findings] == ["Fully empty columns in 'a/data.csv': notes"]
+
+    def test_a_header_only_same_basename_source_cannot_erase_the_other(self, tmp_path):
+        """The zero-row source must not overwrite the populated one's count."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["id"]],
+            [["id"], ["1"], ["2"]],
+        )
+
+        validator = QualityValidator(cfg)
+        validator.run()
+
+        assert sorted(validator._file_row_count.values()) == [0, 2]
+        assert len(validator._file_row_count) == 2
 
 
 class TestCheckNullProfiling:
@@ -571,6 +736,136 @@ class TestCheckCrossFileTypes:
             f"Zero-row file should not participate in cross_file_types, but got: {qr}"
         )
 
+    def test_same_basename_sources_are_tracked_separately(self, tmp_path):
+        """Issue #369: a/data.csv and b/data.csv are two sources, not one."""
+        cfg = _two_same_basename_csvs(
+            tmp_path,
+            [["year"], ["2020"]],
+            [["total"], ["10"]],
+        )
+
+        validator = QualityValidator(cfg)
+        validator.run()
+
+        assert sorted(validator._file_col_types) == ["a/data.csv", "b/data.csv"]
+        assert validator._file_col_types["a/data.csv"] == {"year": "numeric"}
+        assert validator._file_col_types["b/data.csv"] == {"total": "numeric"}
+
+    @staticmethod
+    def _saturated_pair(tmp_path: Path, first: list[list[str]], second: list[list[str]]):
+        """Two sources whose configured sample is exactly filled by the first."""
+        first_path = _make_csv(tmp_path / "numeric.csv", first)
+        second_path = _make_csv(tmp_path / "text.csv", second)
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=first_path, remote="numeric.csv"),
+                FileEntry(local=second_path, remote="text.csv"),
+            ],
+            quality=QualityConfig(max_sample=3),
+        )
+        return cfg
+
+    def test_a_saturated_first_file_cannot_decide_the_second(self, tmp_path):
+        """Issue #367: the first file fills the shared budget, hiding the mismatch."""
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["twenty"], ["thirty"], ["forty"]],
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert len(findings) == 1
+        assert "year" in findings[0].message
+        assert "numeric.csv=numeric" in findings[0].message
+        assert "text.csv=categorical/text" in findings[0].message
+
+    def test_text_then_numeric_order_reports_the_same_facts(self, tmp_path):
+        """Declaration order must not decide whether the mismatch is visible."""
+        numeric = _make_csv(tmp_path / "numeric.csv", [["year"], ["2020"], ["2021"], ["2022"]])
+        text = _make_csv(tmp_path / "text.csv", [["year"], ["twenty"], ["thirty"], ["forty"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[
+                FileEntry(local=text, remote="text.csv"),
+                FileEntry(local=numeric, remote="numeric.csv"),
+            ],
+            quality=QualityConfig(max_sample=3),
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert len(findings) == 1
+        message = findings[0].message
+        assert "numeric.csv=numeric" in message
+        assert "text.csv=categorical/text" in message
+
+    def test_compatible_files_at_the_cap_produce_no_mismatch(self, tmp_path):
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["2023"], ["2024"], ["2025"]],
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert findings == []
+
+    def test_missing_values_use_the_source_own_values(self, tmp_path):
+        """A file with missing values infers from its own non-missing sample."""
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [
+                ["year"],
+                [""],
+                [
+                    "",
+                ],
+                ["twenty"],
+            ],
+        )
+
+        findings = [r for r in _run_quality(cfg).quality_results if r.check == "cross_file_types"]
+
+        assert len(findings) == 1
+        assert "text.csv=categorical/text" in findings[0].message
+
+    def test_cross_file_types_work_without_format_consistency(self, tmp_path, monkeypatch):
+        """Collecting type evidence must not depend on an unrelated check."""
+        from sofer import quality as quality_module
+
+        monkeypatch.delitem(quality_module._BUILTIN_DEFAULTS, "format_consistency")
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["twenty"], ["thirty"], ["forty"]],
+        )
+
+        validator = QualityValidator(cfg)
+        assert "format_consistency" not in validator._checks
+        report = validator.run()
+
+        findings = [r for r in report.quality_results if r.check == "cross_file_types"]
+        assert len(findings) == 1
+        assert "text.csv=categorical/text" in findings[0].message
+
+    def test_the_per_source_sample_does_not_outlive_the_source(self, tmp_path):
+        """Only the inferred types are retained after each source is processed."""
+        cfg = self._saturated_pair(
+            tmp_path,
+            [["year"], ["2020"], ["2021"], ["2022"]],
+            [["year"], ["twenty"], ["thirty"], ["forty"]],
+        )
+
+        validator = QualityValidator(cfg)
+        validator.run()
+
+        assert validator._file_samples == {}
+
 
 # ── 4.10 Encoding validation ─────────────────────────────────────────────────────
 
@@ -590,6 +885,156 @@ class TestCheckEncodingValidation:
         qr = [r for r in report.quality_results if r.check == "encoding_validation"]
         assert len(qr) >= 1
         assert qr[0].severity == "fail"
+
+
+class TestEncodingProbeBoundary:
+    """Issue #370: a window that ends mid-character is not an encoding error.
+
+    The probe judges its first ``probe_chunk_bytes``. The bytes that complete a
+    sequence cut by that window exist in the file and are simply not read, so
+    they must not make a valid file fail. Only a sequence cut by physical
+    end-of-file is genuinely undecodable, and that distinction is what the
+    incremental decoder has to preserve.
+    """
+
+    @staticmethod
+    def _cfg(tmp_path: Path, payload: bytes, name: str = "data.csv") -> DatasetConfig:
+        """Write *payload* byte for byte (a text-mode write could not)."""
+        path = tmp_path / name
+        path.write_bytes(payload)
+        return DatasetConfig(
+            name="probe",
+            repo_id="u/probe",
+            files=[FileEntry(local=path, remote=name)],
+        )
+
+    @staticmethod
+    def _findings(cfg: DatasetConfig) -> list[QualityResult]:
+        report = QualityValidator(cfg).run()
+        assert "encoding_validation" in report.ran_checks
+        return [r for r in report.quality_results if r.check == "encoding_validation"]
+
+    @staticmethod
+    def _single_column_payload(window: int, char: str) -> bytes:
+        """One-column rows whose *char* has exactly one byte inside *window*."""
+        header = b"value\n"
+        filler = b"a\n" * ((window - len(header) - 1) // 2) + b"a"
+        return header + filler + char.encode("utf-8") + b"\n1\n"
+
+    @staticmethod
+    def _straddling(window: int, char: str, inside: int, prefix: bytes = b"") -> bytes:
+        """Build a payload whose *char* is cut after *inside* bytes by *window*."""
+        encoded = char.encode("utf-8")
+        assert 1 <= inside < len(encoded), "the cut must fall inside the character"
+        header = prefix + b"value\n"
+        filler = b"a" * (window - len(header) - inside)
+        return header + filler + encoded + b"\n"
+
+    @pytest.mark.parametrize(
+        ("char", "inside"),
+        [("é", 1), ("€", 1), ("€", 2), ("😀", 1), ("😀", 2), ("😀", 3)],
+    )
+    def test_a_character_cut_by_the_window_is_not_an_error(self, tmp_path, char, inside):
+        """2-, 3- and 4-byte characters, cut at every internal offset."""
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, self._straddling(window, char, inside))
+
+        assert self._findings(cfg) == []
+
+    def test_a_bom_and_a_character_cut_by_the_window_are_both_accepted(self, tmp_path):
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, self._straddling(window, "é", 1, prefix=codecs.BOM_UTF8))
+
+        assert self._findings(cfg) == []
+
+    def test_a_deliberately_small_window_still_tolerates_the_cut(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "PROBE_CHUNK_BYTES", 16)
+
+        cfg = self._cfg(tmp_path, self._straddling(16, "😀", 2, prefix=b"x\n"))
+
+        assert self._findings(cfg) == []
+
+    def test_invalid_bytes_inside_the_window_still_fail(self, tmp_path):
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, b"a\n" + b"\xff" + b"b" * window)
+
+        findings = self._findings(cfg)
+        assert [finding.severity for finding in findings] == ["fail"]
+
+    def test_a_character_truncated_by_a_short_file_still_fails(self, tmp_path):
+        """Physical EOF cuts the sequence for real, so it must not be tolerated."""
+        cfg = self._cfg(tmp_path, b"\xc3")
+
+        findings = self._findings(cfg)
+        assert [finding.severity for finding in findings] == ["fail"]
+
+    def test_a_character_truncated_at_an_exact_window_still_fails(self, tmp_path):
+        """A file whose length equals the window ends at physical EOF."""
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, b"a" * (window - 1) + b"\xc3")
+
+        findings = self._findings(cfg)
+        assert [finding.severity for finding in findings] == ["fail"]
+
+    def test_an_empty_file_produces_no_finding(self, tmp_path):
+        cfg = self._cfg(tmp_path, b"")
+
+        assert self._findings(cfg) == []
+
+    def test_a_short_valid_file_produces_no_finding(self, tmp_path):
+        cfg = self._cfg(tmp_path, b"a;b\n1;2\n")
+
+        assert self._findings(cfg) == []
+
+    def test_a_valid_character_cut_by_the_window_passes_mid_stream(self, tmp_path):
+        """The cut character in a later row must not fail the streaming pass."""
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, self._single_column_payload(window, "é"))
+
+        report = QualityValidator(cfg).run()
+        findings = [
+            r
+            for r in report.quality_results
+            if r.check in {"encoding_validation", "corrupt_records"}
+        ]
+        assert findings == []
+
+    def test_a_non_utf8_row_inside_the_window_is_reported_once(self, tmp_path):
+        """The probe reports it; the streaming pass must not duplicate it."""
+        cfg = self._cfg(tmp_path, b"a;b\n1;2\n\xff;2\n")
+
+        report = QualityValidator(cfg).run()
+
+        encoding = [r for r in report.quality_results if r.check == "encoding_validation"]
+        corrupt = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert [r.severity for r in encoding] == ["fail"]
+        assert corrupt == []
+
+    def test_a_non_utf8_tail_cannot_abort_the_run(self, tmp_path):
+        """A row the probe never saw must become a finding, not an exception.
+
+        The probe judges the first ``probe_chunk_bytes``. A mislabeled file
+        whose first invalid byte sits past that window decodes its header, so
+        the streaming pass is the one that discovers the problem; before the
+        fix the ``ValueError`` escaped ``run()`` and the caller got no report
+        at all.
+        """
+        window = config.PROBE_CHUNK_BYTES
+        payload = b"a;b\n" + b"1;2\n" * (window // 4) + b"\xff;2\n" + b"3;4\n"
+        cfg = self._cfg(tmp_path, payload)
+
+        report = QualityValidator(cfg).run()
+
+        corrupt = [r for r in report.quality_results if r.check == "corrupt_records"]
+        assert [r.severity for r in corrupt] == ["fail"]
+        assert "data.csv" in corrupt[0].message
+        encoding = [r for r in report.quality_results if r.check == "encoding_validation"]
+        assert encoding == []
 
 
 # ── Persisted quality report (Issue #14) ─────────────────────────────────────
@@ -882,27 +1327,113 @@ class TestBinaryFormatsSkipped:
 
 
 class TestTsvEligible:
-    """TSV is text-eligible and checked like CSV."""
+    """TSV is text-eligible and parsed with tabs, never the CSV delimiter."""
+
+    @staticmethod
+    def _write(path: Path, rows: list[list[str]]) -> Path:
+        """Write a real tab-delimited file, not a CSV wearing a ``.tsv`` name."""
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, delimiter="\t").writerows(rows)
+        return path
+
+    @staticmethod
+    def _corrupt(cfg: DatasetConfig) -> list[QualityResult]:
+        report = _run_quality(cfg)
+        return [r for r in report.quality_results if r.check == "corrupt_records"]
 
     def test_tsv_short_row_produces_corrupt_records_fail(self, tmp_path):
-        """TSV with short row → corrupt_records fail."""
-        tsv = tmp_path / "data.tsv"
-        with open(tsv, "w", newline="", encoding="utf-8") as f:
-            # Use default delimiter ";" so the validator (which uses cfg.csv_delimiter=";")
-            # correctly parses the file regardless of .tsv suffix.
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(["a", "b", "c"])
-            writer.writerow(["1", "x", "10"])
-            writer.writerow(["2", "y"])  # short row: 2 vs 3
+        """A tab-delimited TSV with a short row → corrupt_records fail."""
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "x", "10"], ["2", "y"]],
+        )
         cfg = DatasetConfig(
             name="test",
             repo_id="u/test",
             files=[FileEntry(local=tsv, remote="data.tsv")],
         )
-        report = _run_quality(cfg)
-        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
-        assert len(qr) >= 1
-        assert any(r.severity == "fail" for r in qr)
+
+        findings = self._corrupt(cfg)
+
+        assert [finding.severity for finding in findings] == ["fail"]
+        assert findings[0].message == "Row 2 in 'data.tsv' has 2 fields, header has 3"
+
+    def test_tsv_overlong_row_is_reported_with_its_field_counts(self, tmp_path):
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "2", "3"], ["4", "5", "6", "7"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 2 in 'data.tsv' has 4 fields, header has 3"
+
+    def test_a_valid_tab_delimited_tsv_produces_no_corrupt_finding(self, tmp_path):
+        """The default CSV delimiter is ``;``; a real TSV must still pass."""
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "2", "3"], ["4", "5", "6"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+        )
+
+        assert self._corrupt(cfg) == []
+
+    def test_an_uppercase_tsv_uses_tabs_too(self, tmp_path):
+        tsv = self._write(
+            tmp_path / "DATA.TSV",
+            [["a", "b", "c"], ["1", "2"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="DATA.TSV")],
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 1 in 'DATA.TSV' has 2 fields, header has 3"
+
+    def test_a_csv_delimiter_override_does_not_reach_tsv(self, tmp_path):
+        """A comma override for CSV must leave TSV tab-delimited."""
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "2"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+            csv_delimiter=",",
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 1 in 'data.tsv' has 2 fields, header has 3"
+
+    def test_a_csv_keeps_the_configured_comma_delimiter(self, tmp_path):
+        """The CSV side keeps honouring the configured separator."""
+        source = tmp_path / "data.csv"
+        with open(source, "w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, delimiter=",").writerows([["a", "b", "c"], ["1", "2"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=source, remote="data.csv")],
+            csv_delimiter=",",
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 1 in 'data.csv' has 2 fields, header has 3"
 
 
 class TestCaseInsensitiveAndNoExtension:
@@ -921,9 +1452,9 @@ class TestCaseInsensitiveAndNoExtension:
             w = csv.writer(f, delimiter=";")
             w.writerow(["a", "b", "c"])
             w.writerow(["1", "x"])  # short
-        # values.TSV with short row — use ";" so default delimiter parses it
+        # values.TSV with short row — real tabs, whatever the CSV delimiter is
         with open(tsv_file, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f, delimiter=";")
+            w = csv.writer(f, delimiter="\t")
             w.writerow(["x", "y", "z"])
             w.writerow(["1", "2"])  # short
         cfg = DatasetConfig(
@@ -1032,7 +1563,7 @@ class TestMixedAndRanChecksAndEncoding:
         b_xlsx.write_bytes(b"PK\x03\x04 fake xlsx")
         c_tsv = tmp_path / "c.tsv"
         with open(c_tsv, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f, delimiter=";")
+            w = csv.writer(f, delimiter="\t")
             w.writerow(["a", "b", "c"])
             w.writerow(["1", "x"])  # short row → corrupt
         cfg = DatasetConfig(
@@ -1181,15 +1712,18 @@ class TestColNonemptyBoolean:
         cfg, _ = _make_csv_cfg(tmp_path, ["note"], [["a"], ["a"], ["b"]])
         validator = QualityValidator(cfg)
         validator.run()
-        assert validator._col_nonempty == {"data.csv::note": True}
-        assert isinstance(validator._col_nonempty["data.csv::note"], bool)
+        assert len(validator._col_nonempty) == 1
+        ((_source, column), seen) = next(iter(validator._col_nonempty.items()))
+        assert column == "note"
+        assert seen is True
+        assert isinstance(seen, bool)
 
     def test_empty_column_stays_false_and_is_reported(self, tmp_path):
         """A fully empty column keeps ``False`` and still produces a finding."""
         cfg, _ = _make_csv_cfg(tmp_path, ["note"], [[""], ["  "]])
         validator = QualityValidator(cfg)
         report = validator.run()
-        assert validator._col_nonempty["data.csv::note"] is False
+        assert list(validator._col_nonempty.values()) == [False]
         assert any(r.check == "empty_columns" for r in report.quality_results)
 
     def test_memory_is_o_columns_not_o_rows(self, tmp_path):
@@ -1199,7 +1733,7 @@ class TestColNonemptyBoolean:
         validator = QualityValidator(cfg)
         validator.run()
         assert len(validator._col_nonempty) == 1
-        assert validator._col_nonempty["data.csv::note"] is True
+        assert list(validator._col_nonempty.values()) == [True]
 
 
 # ── Bounded quality scan (issue #290) ─────────────────────────────────────────
@@ -1283,7 +1817,7 @@ class TestAccumulatorCaps:
         validator.run()
         # Pairs are grouped per file (issue #293) and each file's list is capped
         # at the report limit (issue #290), so the first N pairs are kept.
-        pairs = validator._dup_findings["data.csv"]
+        ((_source, pairs),) = validator._dup_findings.items()
         assert len(pairs) == _config.REPORT_MAX_ITEMS
         assert pairs[0] == (1, 2)
         assert pairs[-1] == (1, _config.REPORT_MAX_ITEMS + 1)

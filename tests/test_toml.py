@@ -1,9 +1,13 @@
-"""Central TOML-parser helper (issue #192).
+"""Central TOML helpers: parser selection (issue #192).
 
-Both selection arms are covered on any interpreter: the ``except`` branch is
+Both parser arms are covered on any interpreter: the ``except`` branch is
 reached by blocking stdlib ``tomllib`` in ``sys.modules`` and injecting a
 fake ``tomli`` backport, so the coverage gate never depends on which Python
 runs the suite.
+
+Atomic replacement does not live in this module any more: :mod:`sofer._atomic`
+owns it for every writer in the package, and ``tests/test_atomic.py`` pins that
+policy (issue #371).
 """
 
 from __future__ import annotations

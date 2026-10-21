@@ -32,9 +32,13 @@ $ uv run pyright
 | File | Lines (+/−) | Description |
 |------|------------|-------------|
 
-## SDD artifacts
+## Artifacts and evidence
 
-<!-- If this change followed SDD, link or list the artifacts. -->
+<!-- Optional: link the issue and any evidence that exists. -->
+
+Issue: #N
+
+<!-- Only when the change uses OpenSpec: name the specs touched and the archive path. -->
 
 Archived at `openspec/changes/archive/<date>-<change>/`
 
@@ -50,5 +54,5 @@ Specs updated: `openspec/specs/<domain>/spec.md`
 - [ ] New behaviour covered by tests
 - [ ] Coverage gate met — `uv run coverage report -m` ≥ 90% (CI enforces `fail_under = 90`)
 - [ ] README updated if CLI surface changed
-- [ ] README_ES.md updated if a translated README section changed
+- [ ] README_ES.md updated in the same commit whenever README.md changed
 - [ ] Related issues linked (`Closes #N`)
