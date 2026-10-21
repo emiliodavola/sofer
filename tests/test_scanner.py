@@ -861,13 +861,29 @@ class TestWriteToml:
         write_toml({"dataset": {"name": "new", "repo_id": "u/r"}}, config)
         assert "new" in config.read_text(encoding="utf-8")
 
-    def test_atomic_write_no_tmp_leftover(self, tmp_path: Path) -> None:
-        """write_toml commits via temp + os.replace — no .tmp file remains."""
+    def test_a_preexisting_tmp_sibling_is_untouched(self, tmp_path: Path) -> None:
+        """The writer must never open the predictable ``<config>.tmp`` path.
+
+        Issue #371: the scanner wrote through that exact sibling before the
+        shared staging primitive landed, so whatever the user or another
+        process kept there could be truncated and then replaced over the config.
+        """
         config = tmp_path / "out.toml"
+        sibling = config.with_name(config.name + ".tmp")
+        sibling.write_text("pre-existing staging file", encoding="utf-8")
+
         write_toml({"dataset": {"name": "x", "repo_id": "u/r"}}, config)
 
-        assert config.exists()
-        assert not config.with_name(config.name + ".tmp").exists()
+        assert sibling.read_text(encoding="utf-8") == "pre-existing staging file"
+        assert 'name = "x"' in config.read_text(encoding="utf-8")
+
+    def test_no_staging_file_survives_a_successful_write(self, tmp_path: Path) -> None:
+        """The staging file created by the call is gone once the config lands."""
+        config = tmp_path / "out.toml"
+
+        write_toml({"dataset": {"name": "x", "repo_id": "u/r"}}, config)
+
+        assert sorted(item.name for item in tmp_path.iterdir()) == ["out.toml"]
 
 
 # ------------------------------------------------------------------

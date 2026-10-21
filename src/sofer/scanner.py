@@ -47,7 +47,7 @@ from typing import Any
 
 import tomli_w
 
-from . import config
+from . import _atomic, config
 from ._formats import SUPPORTED_FORMATS
 from .model import FileEntry
 
@@ -665,10 +665,19 @@ def copy_files(
 def write_toml(raw_toml: dict[str, Any], config_path: Path) -> None:
     """Serialize *raw_toml* and atomically replace *config_path* (SCN-08).
 
-    The TOML is written to a temporary file in the same directory, then moved
-    into place with :func:`os.replace` — so a crash or failure mid-write can
-    never leave a truncated or partial TOML at *config_path*.
+    The document is committed through the package's single staging primitive
+    (:func:`sofer._atomic.atomic_write_text`), so a crash or failure mid-write
+    can never leave a truncated or partial TOML at *config_path*, and this
+    writer never opens a predictable ``<config>.tmp`` sibling that may already
+    belong to the user or to another process (issue #371).
+
+    Platform newline translation is this writer's pre-existing behaviour and
+    stays here: the primitive is asked for ``newline=None``, not its
+    byte-preserving default.
     """
-    tmp = config_path.with_name(config_path.name + ".tmp")
-    tmp.write_text(tomli_w.dumps(raw_toml), encoding=config.OUTPUT_ENCODING)
-    os.replace(tmp, config_path)
+    _atomic.atomic_write_text(
+        config_path,
+        tomli_w.dumps(raw_toml),
+        encoding=config.OUTPUT_ENCODING,
+        newline=None,
+    )
