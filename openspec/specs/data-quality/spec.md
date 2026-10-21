@@ -250,6 +250,11 @@ def stream_csv(
 7. On every data row: the consumer SHALL detect corrupt records via
    `len(row) != len(header)` on each row. (`csv.reader` defaults to
    `strict=False`, so it does NOT raise `csv.Error` on inconsistent lengths.)
+8. The separator is a caller decision, not a reader heuristic: the caller resolves it per
+   format with `field_delimiter(path, configured)` in `src/sofer/_formats.py`. A `.tsv`
+   (case-insensitive) is tab-delimited regardless of the dataset's CSV delimiter, and a `.csv`
+   uses the configured value (issue #366). The reader SHALL NOT sniff, and SHALL NOT switch
+   separator by suffix on its own.
 
 ### 3.2 Scenarios
 
@@ -770,13 +775,16 @@ WHEN `QualityValidator.run()` executes
 THEN `quality_results` SHALL be empty and `ran_checks` SHALL be empty
 ```
 
-**TSV is eligible**
+**TSV is eligible and parsed with tabs**
 
 ```
-GIVEN a `.tsv` with a short row (field count mismatch)
+GIVEN a tab-delimited `.tsv` whose second data row has one field fewer than the header
+  AND the default CSV delimiter (`;`) or a comma override in the dataset config
 WHEN `QualityValidator.run()` executes
-THEN a `corrupt_records` `fail` finding SHALL be produced
+THEN a `corrupt_records` `fail` finding SHALL name the file, the row and both field counts
 ```
+
+**Evidence:** `test: tests/test_quality.py::TestTsvEligible::test_tsv_short_row_produces_corrupt_records_fail`, `test: tests/test_quality.py::TestTsvEligible::test_a_csv_delimiter_override_does_not_reach_tsv`, `test: tests/test_cli.py::TestValidateTsvDelimiter::test_a_short_tsv_row_fails_validate_with_the_file_and_counts`
 
 **Case-insensitive and no-extension skipped**
 

@@ -1051,6 +1051,32 @@ class TestValidateRanChecks:
         )
 
 
+class TestValidateTsvDelimiter:
+    """Issue #366: `sofer validate` reads a `.tsv` with tabs, not the CSV delimiter."""
+
+    def test_a_short_tsv_row_fails_validate_with_the_file_and_counts(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        tsv = tmp_path / "data.tsv"
+        with open(tsv, "w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, delimiter="\t").writerows(
+                [["a", "b", "c"], ["1", "2", "3"], ["4", "5"]]
+            )
+        toml_path = tmp_path / "test.toml"
+        toml_path.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "data.tsv"\nremote = "data.tsv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_validate(Namespace(config=str(toml_path)))
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "corrupt_records: Row 2 in 'data.tsv' has 2 fields, header has 3" in out
+
+
 # ── PUB-11 / PRP-09 — CLI publish --clean / --clean-cache / --all ───────────────
 
 
