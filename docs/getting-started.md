@@ -164,12 +164,15 @@ sources in `raw/`, not only in the disposable `cache/`. See
 
 ## MCP walkthrough
 
-The MCP server exposes the same pipeline. The canonical order is:
+The MCP server exposes the same pipeline. **Every MCP session must call
+`sofer_init` first**; it is the only tool admitted while the session is
+uninitialized. Attach an existing dataset with `config`, or create a greenfield
+one with `name`/`user`/`cwd`. The canonical order for a greenfield dataset is:
 
 ```python
 sofer_init(name="test", user="<hf-user>", cwd="C:/Users/.../Desktop/test")
-sofer_scan_dry_run(config="test.toml")   # preview — no writes
-sofer_scan_apply(config="test.toml")     # register files and copy to cache/
+sofer_scan_dry_run(config="test.toml")  # preview — no writes
+sofer_scan_apply(config="test.toml")  # register files and copy to cache/
 sofer_meta_check(config="test.toml")
 sofer_meta_set(config="test.toml", values={"description": "...", "license": "MIT"})
 sofer_validate(config="test.toml")
@@ -177,10 +180,18 @@ sofer_prepare(config="test.toml")
 sofer_codebook_all(config="test.toml")
 sofer_profile_all(config="test.toml")
 sofer_render_all(config="test.toml")
-sofer_publish(config="test.toml", dry_run=True)   # STOP — human reviews build/
-sofer_auth_status(config="test.toml")             # preflight
+sofer_publish(config="test.toml", dry_run=True)  # STOP — human reviews build/
+sofer_auth_status(config="test.toml")  # preflight
 # after approval:
 sofer_publish_confirm(config="test.toml", acknowledge_risk=True)
+```
+
+For an existing dataset, the session gate is the read-only attach:
+
+```python
+sofer_init(config="test.toml")  # no files written
+sofer_validate(config="test.toml")
+# ... Phase 1 Build and Phase 2 Publish as above
 ```
 
 See [MCP server](mcp.md) for the full tool surface and
