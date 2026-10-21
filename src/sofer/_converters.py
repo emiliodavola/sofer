@@ -15,7 +15,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -49,6 +49,31 @@ _ZERO_PADDED_CODE = re.compile(r"^0\d+$")
 
 #: A plain digit run — the rest of a code column's values (``"5"``).
 _PLAIN_DIGITS = re.compile(r"^\d+$")
+
+
+def is_convertible_remote(remote: str, *, recursive: bool = False) -> bool:
+    """Whether *remote* names a table this package converts (issue #372).
+
+    The single definition of "convertible": the suffix, after folding ``\\`` to
+    ``/`` and lowercasing, belongs to :data:`CONVERTIBLE_SUFFIXES`, and the
+    entry is not a recursive tree.
+
+    This rule answers only "which format is this". It deliberately does not
+    answer whether conversion was requested (``convert_to_parquet``) or whether
+    a column schema was requested (``include_in_schema``). Those stay with each
+    caller: case-fold collision validation considers every convertible remote,
+    while schema collection additionally honours ``include_in_schema``.
+
+    Args:
+        remote: The declared remote path, with POSIX or Windows separators.
+        recursive: Whether the entry declares a recursive tree.
+
+    Returns:
+        ``True`` when the remote names a convertible, non-recursive entry.
+    """
+    if recursive:
+        return False
+    return PurePosixPath(remote.replace("\\", "/")).suffix.lower() in CONVERTIBLE_SUFFIXES
 
 
 class ValueAlterationError(Exception):

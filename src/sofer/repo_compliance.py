@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from . import config
+from ._converters import is_convertible_remote
 from ._mirror import expanded_planned_remotes, parquet_remote_for, planned_remotes
 from ._parquet_helpers import _parquet_to_hf_dtype
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
@@ -500,21 +501,6 @@ def _staged_xlsx_sheet_parquets(staging_dir: Path, parquet_key: str) -> list[Pat
     return [p for p in alt if p.is_file() and p.stem != base_stem]
 
 
-def _is_convertible_entry(entry: FileEntry) -> bool:
-    """Whether *entry* names a table the schema report can read (RC-R05).
-
-    The single definition of "convertible" shared by the schema collection loop
-    and the planned-remote classifier (AGENTS.md rule 4): a declared ``.csv`` /
-    ``.tsv`` / ``.xlsx`` / ``.jsonl`` remote that is not a recursive tree.
-    """
-    if entry.recursive:
-        return False
-    from ._converters import CONVERTIBLE_SUFFIXES
-
-    suffix = PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower()
-    return suffix in CONVERTIBLE_SUFFIXES
-
-
 def _is_schema_eligible(entry: FileEntry) -> bool:
     """Whether the schema report *attempts* to read *entry* (RC-R05/RC-R12).
 
@@ -523,8 +509,14 @@ def _is_schema_eligible(entry: FileEntry) -> bool:
     tree, non-convertible remote, ``include_in_schema = false``); one that is
     eligible but yields no column **could not be read**.  Those two cases must
     not share a grouping policy (#304 D1).
+
+    Convertibility itself comes from
+    :func:`sofer._converters.is_convertible_remote`, the single owner of that
+    rule (issue #372); ``include_in_schema`` is this caller's own filter.
     """
-    return _is_convertible_entry(entry) and entry.include_in_schema
+    return (
+        is_convertible_remote(entry.remote, recursive=entry.recursive) and entry.include_in_schema
+    )
 
 
 def _note_column_origin(
@@ -599,7 +591,7 @@ def _build_schema_report_impl(
     from ._converters import normalize_parquet_remote
 
     for entry in cfg.files:
-        if not _is_convertible_entry(entry):
+        if not is_convertible_remote(entry.remote, recursive=entry.recursive):
             continue
 
         _had_potential_csv_entries = True

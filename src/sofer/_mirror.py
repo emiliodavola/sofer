@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .model import DatasetConfig, FileEntry
+    from .model import DatasetConfig
 
 
 def _validate_remote_paths(cfg: DatasetConfig) -> list[str]:
@@ -74,16 +74,6 @@ def parquet_remote_for(remote: str) -> str:
     return str(PurePosixPath(posix_remote).with_suffix(".parquet"))
 
 
-def _is_convertible_entry(entry: FileEntry) -> bool:
-    """Return True when *entry* is convertible (universal set, normalized)."""
-    # Import here to avoid cycle — _converters never imports _mirror
-    from ._converters import CONVERTIBLE_SUFFIXES
-
-    if entry.recursive:
-        return False
-    return PurePosixPath(entry.remote.replace("\\", "/")).suffix.lower() in CONVERTIBLE_SUFFIXES
-
-
 def _normalized_parquet_key(remote: str) -> str:
     """Return the normalised Parquet key for *remote* (suffix → .parquet, then normalize)."""
     from ._converters import normalize_parquet_remote
@@ -98,6 +88,9 @@ def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
     is scanned.  Normalisation via :func:`sofer._converters.normalize_parquet_remote`
     is applied before case-folding so that accent/space variants are also caught.
     ``convert_to_parquet`` / ``include_in_schema`` do NOT exclude an entry.
+    Whether an entry is convertible at all is decided by
+    :func:`sofer._converters.is_convertible_remote`, the single owner of that
+    rule (issue #372).
 
     Verbatim-equal normalised keys are left to RC-R11's warning and skipped here.
 
@@ -107,10 +100,15 @@ def _validate_case_fold_collisions(cfg: DatasetConfig) -> list[str]:
     Returns:
         A list of error messages (empty = no case-fold collisions).
     """
+    # Import here, not at module level: ``model`` imports this module, so a
+    # module-level ``_converters`` import would pull pyarrow into every
+    # ``sofer.model`` import.
+    from ._converters import is_convertible_remote
+
     errors: list[str] = []
     seen: dict[str, str] = {}
     for entry in cfg.files:
-        if not _is_convertible_entry(entry):
+        if not is_convertible_remote(entry.remote, recursive=entry.recursive):
             continue
         key = _normalized_parquet_key(entry.remote)
         current = entry.remote
