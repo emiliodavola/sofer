@@ -1,7 +1,9 @@
 """Tests for sofer.repo_compliance — Dataset Card, LICENSE, schema report."""
 
+import csv
 import inspect
 import re
+import tracemalloc
 import unicodedata
 from pathlib import Path, PurePosixPath
 
@@ -3825,9 +3827,12 @@ class TestReadCsvSampleConfiguredFallback:
 
         monkeypatch.setattr(_csv.Sniffer, "sniff", _raise)
         monkeypatch.setattr(config, "CSV_DELIMITER", ",")
-        headers, rows = _read_csv_sample(f)
+        result = _read_csv_sample(f)
+        assert result is not None
+        headers, rows, count = result
         assert headers == ["a", "b"]
         assert rows == [["1", "2"]]
+        assert count == 1
 
     def test_sniffer_failure_default_delimiter_mis_splits(self, tmp_path, monkeypatch):
         """Control: the stock ';' fallback would not split a comma file."""
@@ -3841,7 +3846,9 @@ class TestReadCsvSampleConfiguredFallback:
 
         monkeypatch.setattr(_csv.Sniffer, "sniff", _raise)
         monkeypatch.setattr(config, "CSV_DELIMITER", ";")
-        headers, _rows = _read_csv_sample(f)
+        result = _read_csv_sample(f)
+        assert result is not None
+        headers, _rows, _count = result
         assert headers == ["a,b"]
 
     def test_default_encoding_comes_from_config(self, tmp_path, monkeypatch):
@@ -3849,18 +3856,98 @@ class TestReadCsvSampleConfiguredFallback:
         f = tmp_path / "data.csv"
         f.write_bytes(b"name\ncaf\xe9\n")  # latin-1 'é'
         monkeypatch.setattr(config, "CSV_ENCODING", "latin-1")
-        headers, rows = _read_csv_sample(f, delimiter=",")
+        result = _read_csv_sample(f, delimiter=",")
+        assert result is not None
+        headers, rows, count = result
         assert headers == ["name"]
         assert rows == [["caf\u00e9"]]
+        assert count == 1
 
     def test_explicit_encoding_still_wins(self, tmp_path, monkeypatch):
         """An explicit encoding parameter is not overridden by config."""
         f = tmp_path / "data.csv"
         f.write_bytes(b"name\ncaf\xe9\n")  # latin-1 'é'
         monkeypatch.setattr(config, "CSV_ENCODING", "utf-8")
-        headers, rows = _read_csv_sample(f, delimiter=",", encoding="latin-1")
+        result = _read_csv_sample(f, delimiter=",", encoding="latin-1")
+        assert result is not None
+        headers, rows, count = result
         assert headers == ["name"]
         assert rows == [["caf\u00e9"]]
+        assert count == 1
+
+
+class TestReadCsvSampleStreaming:
+    """Issue #373: bounded retention with exact record counts."""
+
+    @staticmethod
+    def _write(source: Path, rows: int) -> None:
+        with source.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(["value"])
+            for number in range(rows):
+                writer.writerow([str(number)])
+
+    def test_the_sample_is_capped_while_every_record_is_counted(self, tmp_path: Path) -> None:
+        source = tmp_path / "data.csv"
+        self._write(source, 1_000)
+
+        result = _read_csv_sample(source, delimiter=";", sample_size=5)
+
+        assert result is not None
+        headers, sample, count = result
+        assert headers == ["value"]
+        assert [row[0] for row in sample] == ["0", "1", "2", "3", "4"]
+        assert count == 1_000
+
+    def test_a_larger_sample_size_retains_a_longer_prefix(self, tmp_path: Path) -> None:
+        """The cap decides the retained prefix, not a slice after materializing."""
+        source = tmp_path / "data.csv"
+        self._write(source, 1_000)
+
+        result = _read_csv_sample(source, delimiter=";", sample_size=9)
+
+        assert result is not None
+        _headers, sample, count = result
+        assert len(sample) == 9
+        assert count == 1_000
+
+    def test_quoted_multiline_and_blank_records_count_as_single_records(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "data.csv"
+        # Exact bytes: ``write_text`` would translate the line endings and the
+        # value inside the quoted record is asserted verbatim.
+        source.write_bytes(b'a;b\n1;"line one\nline two"\n\n2;x\n')
+
+        result = _read_csv_sample(source, delimiter=";", sample_size=10)
+
+        assert result is not None
+        headers, sample, count = result
+        assert headers == ["a", "b"]
+        assert sample[0] == ["1", "line one\nline two"]
+        assert sample[1] == []
+        assert sample[2] == ["2", "x"]
+        assert count == 3
+
+    def test_a_decode_failure_after_the_prefix_discards_the_whole_file(
+        self, tmp_path: Path
+    ) -> None:
+        """No counted schema may be built from the prefix of an unreadable file."""
+        source = tmp_path / "data.csv"
+        # Larger than one text-I/O read chunk, so the invalid byte is reached
+        # only after the first records have been parsed.
+        source.write_bytes(b"a;b\n" + b"1;ok\n" * 5_000 + b"2;\xff\n")
+
+        assert _read_csv_sample(source, delimiter=";", encoding="utf-8", sample_size=2) is None
+
+    def test_a_header_only_file_counts_zero_records(self, tmp_path: Path) -> None:
+        source = tmp_path / "data.csv"
+        source.write_text("a;b\n", encoding="utf-8")
+
+        assert _read_csv_sample(source, delimiter=";") == (["a", "b"], [], 0)
+
+    def test_an_unreadable_file_returns_none(self, tmp_path: Path) -> None:
+        assert _read_csv_sample(tmp_path / "missing.csv") is None
 
 
 class TestCardConfigNames:
@@ -4269,3 +4356,50 @@ class TestCardDataCellsArePrintable:
         result = _card_with("30", name="age")
 
         assert "| `age` | categorical/text | - | Yes | `30` | 1 | 0.0% |" in result
+
+
+class TestSchemaSampleMemory:
+    """Issue #373: sampling bounds retention, not only inference work."""
+
+    @staticmethod
+    def _peak_bytes(root: Path, rows: int, monkeypatch: pytest.MonkeyPatch) -> int:
+        """Peak allocation while reporting schema for a *rows*-row CSV."""
+        source = root / f"rows-{rows}.csv"
+        with source.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(["value"])
+            for number in range(rows):
+                writer.writerow([str(number)])
+        remote = f"data-{rows}.csv"
+        cfg = DatasetConfig(
+            name="memory",
+            repo_id="example/memory",
+            _base_dir=root,
+            files=[FileEntry(local=source, remote=remote, convert_to_parquet=False)],
+        )
+        monkeypatch.setattr(config, "SCHEMA_SAMPLE_SIZE", 8)
+
+        tracemalloc.start()
+        try:
+            columns, row_counts = build_schema_report_with_rows(cfg)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert row_counts == {remote: rows}
+        assert columns[0].unique == 8
+        return peak
+
+    def test_retained_csv_rows_do_not_follow_the_corpus(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fixed sample cap with 100x the rows must not retain 100x the data.
+
+        The 2 MiB slack is an allowance for this narrow-row fixture, not a
+        production configuration or a memory promise: streaming still reads the
+        whole file to keep the count exact.
+        """
+        small = self._peak_bytes(tmp_path, 2_000, monkeypatch)
+        large = self._peak_bytes(tmp_path, 200_000, monkeypatch)
+
+        assert large - small < 2 * 1024 * 1024
