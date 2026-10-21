@@ -297,6 +297,17 @@ class TestSetMeta:
         assert path.read_bytes() == before
         assert not list(tmp_path.glob("*.tmp"))
 
+    def test_a_preexisting_tmp_sibling_survives_a_real_write(self, tmp_path: Path) -> None:
+        """Issue #365: the writer owns a unique temp file, not `<dest>.tmp`."""
+        path = self._dataset(tmp_path)
+        sibling = path.with_name(path.name + ".tmp")
+        sibling.write_bytes(b"pre-existing staging file")
+
+        meta_edit.set_meta(path, {"description": "Real"})
+
+        assert sibling.read_bytes() == b"pre-existing staging file"
+        assert meta_edit.read_meta(path)["description"] == "Real"
+
     def test_read_meta_returns_the_table_or_an_empty_mapping(self, tmp_path: Path) -> None:
         assert meta_edit.read_meta(self._dataset(tmp_path))["license"].startswith("TODO")
         bare = tmp_path / "bare.toml"

@@ -225,8 +225,9 @@ def set_files(
     """Write *entries* into the ``[[file]]`` array of the TOML at *path*.
 
     The document is edited in memory, verified, and then committed with a
-    same-directory temporary file plus ``os.replace`` — a crash or failure
-    mid-write can never leave a truncated TOML. No ``.bak`` is written: the
+    uniquely named same-directory temporary file plus ``os.replace`` - a crash
+    or failure mid-write can never leave a truncated TOML. No ``.bak`` is
+    written: the
     edit is atomic and every refusal happens before the replace.
 
     Args:

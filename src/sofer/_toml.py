@@ -14,12 +14,16 @@ two imports never share one name (no ``no-redef``).
 :func:`atomic_write_text` is the single home for the same-directory
 temporary-file replacement shared by the surgical TOML editors
 (:mod:`sofer.meta_edit`, :mod:`sofer.file_edit`): a crash or failure mid-write
-can never leave a truncated document.
+can never leave a truncated document. The staging file is created exclusively
+by each call (issue #365) - a predictable ``<destination>.tmp`` sibling is
+never opened, because it may already belong to the user or to another writer.
 """
 
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -62,12 +66,38 @@ def loads(text: str) -> dict[str, Any]:
     return data
 
 
+def _destination_mode(path: Path) -> int | None:
+    """Return *path*'s permission bits, or ``None`` when it does not exist.
+
+    Best effort by design: a destination whose metadata cannot be read is
+    still written, and the new file then keeps the restrictive mode the
+    temporary-file API gives it. Failing the write here would turn a
+    preservation nicety into a new restriction, which issue #365 rules out.
+    """
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return None
+
+
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Replace *path* with *text* through a same-directory temporary file.
+    """Replace *path* with *text* through an exclusively created temporary file.
 
     No ``.bak`` is written: the replace is atomic and every refusal happens
     before it. ``newline=""`` suppresses translation, so the bytes outside the
     edited region are the bytes that were read (CRLF documents stay CRLF).
+
+    The staging file is unique to this call (issue #365): a fixed
+    ``<destination>.tmp`` sibling is never opened. That path may already hold
+    the user's data or another writer's staging file, and opening it would
+    also follow a symlink and truncate its target. Only the file created here
+    is removed on failure.
+
+    The destination's existing permission bits are carried over to the new
+    file. A destination that does not exist yet keeps the mode the
+    temporary-file API assigns (``0600``), which is never wider than before.
+    No ``fsync`` is issued, so this guarantees atomic replacement, not
+    durability across a power loss.
 
     Args:
         path: The destination file.
@@ -76,13 +106,26 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
 
     Raises:
         OSError: The write failed; the destination is left untouched and the
-            temporary file is removed.
+            temporary file this call created is removed.
     """
-    tmp = path.with_name(path.name + ".tmp")
+    mode = _destination_mode(path)
+    staging: Path | None = None
     try:
-        with open(tmp, "w", encoding=encoding, newline="") as handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            newline="",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            staging = Path(handle.name)
             handle.write(text)
-        os.replace(tmp, path)
+        if mode is not None:
+            os.chmod(staging, mode)
+        os.replace(staging, path)
     except OSError:
-        tmp.unlink(missing_ok=True)
+        if staging is not None:
+            staging.unlink(missing_ok=True)
         raise

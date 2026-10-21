@@ -779,8 +779,9 @@ def set_meta(
     """Write *values* into the ``[meta]`` table of the TOML at *path*.
 
     The document is edited in memory, verified, and then committed with a
-    same-directory ``tmp`` file plus ``os.replace`` — a crash or failure
-    mid-write can never leave a truncated TOML. No ``.bak`` is written: the
+    uniquely named same-directory temporary file plus ``os.replace`` - a crash
+    or failure mid-write can never leave a truncated TOML. No ``.bak`` is
+    written: the
     edit is atomic, it is limited to the ``[meta]`` table, and every refusal
     happens before the replace (the same contract as ``scanner.write_toml``,
     the writer ``sofer scan --apply`` already uses on this file).
@@ -820,6 +821,10 @@ def set_meta(
 def _atomic_replace(path: Path, text: str) -> None:
     """Replace *path* with *text* through a same-directory temporary file.
 
+    The staging file belongs to the shared writer, which creates it
+    exclusively and owns its cleanup (issue #365); this call must never unlink
+    a ``<path>.tmp`` sibling that another writer or the user may own.
+
     Args:
         path: The destination file.
         text: The complete new content.
@@ -828,13 +833,11 @@ def _atomic_replace(path: Path, text: str) -> None:
         MetaEditError: The write failed; the destination is left untouched and
             the temporary file is removed.
     """
-    tmp = path.with_name(path.name + ".tmp")
     try:
         # ``newline=""`` mirrors _read_text: no translation on write either, so
         # the bytes outside the edited table are the bytes that were read.
         _toml.atomic_write_text(path, text, encoding=config.OUTPUT_ENCODING)
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
         raise MetaEditError(f"cannot write {path}: {exc}") from exc
 
 
