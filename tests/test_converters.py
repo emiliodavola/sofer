@@ -21,16 +21,66 @@ from sofer._converters import (
     _read_csv_raw_values,
     _write_parquet_table,
     convert_file_to_parquet,
+    is_convertible_remote,
     leading_zero_columns,
     normalize_parquet_remote,
     sanitize_sheet_name,
 )
 from sofer._mirror import parquet_remote_for
-from sofer.model import DatasetConfig
+from sofer.model import DatasetConfig, FileEntry
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  normalize_parquet_remote
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIsConvertibleRemote:
+    """Issue #372: the single owner of the convertible-entry rule."""
+
+    @pytest.mark.parametrize(
+        ("remote", "expected"),
+        [
+            ("a.csv", True),
+            ("a.CSV", True),
+            ("a.tsv", True),
+            ("a.xlsx", True),
+            ("a.jsonl", True),
+            ("a.JSoNl", True),
+            ("folder\\a.CSV", True),
+            ("nested/a.JSoNl", True),
+            ("a.parquet", False),
+            ("a.csv.gz", False),
+            ("README", False),
+        ],
+    )
+    def test_the_suffix_decides_after_folding_separators_and_case(
+        self, remote: str, expected: bool
+    ) -> None:
+        assert is_convertible_remote(remote) is expected
+
+    def test_a_recursive_entry_is_never_convertible(self) -> None:
+        assert is_convertible_remote("a.csv", recursive=True) is False
+
+    def test_conversion_and_schema_flags_are_not_part_of_the_rule(self) -> None:
+        """Neither flag may filter the rule (issue #372 acceptance criterion).
+
+        Case-fold collision validation considers every convertible remote even
+        when ``convert_to_parquet`` or ``include_in_schema`` is false, so the
+        predicate must take neither. This exercises every flag combination
+        through ``FileEntry`` to prove the decision is unchanged.
+        """
+        for convert in (False, True):
+            for include in (False, True):
+                entry = FileEntry(
+                    local=Path("unused"),
+                    remote="a.csv",
+                    convert_to_parquet=convert,
+                    include_in_schema=include,
+                )
+                assert is_convertible_remote(entry.remote, recursive=entry.recursive) is True, (
+                    convert,
+                    include,
+                )
 
 
 class TestNormalizeParquetRemote:
