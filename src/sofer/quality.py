@@ -335,6 +335,10 @@ class QualityValidator:
         self._null_counts: dict[tuple[str, str], tuple[int, int]] = {}
         # format consistency
         self._col_samples: dict[str, list[str]] = defaultdict(list)
+        # cross-file types — this source's own bounded sample, dropped once its
+        # types are inferred, so memory stays per-source rather than
+        # per-dataset (issue #367)
+        self._file_samples: dict[str, list[str]] = defaultdict(list)
         # corrupt records
         # (source, row, actual, expected)
         self._corrupt_findings: list[tuple[str, int, int, int]] = []
@@ -404,6 +408,7 @@ class QualityValidator:
         """
         if not is_text_eligible(resolved):
             return
+        self._file_samples = defaultdict(list)
         source = identity if identity is not None else resolved.name
         label = display if display is not None else resolved.name
         self._current_source = source
@@ -481,6 +486,7 @@ class QualityValidator:
 
         # After the source is processed, infer column types for cross-file comparison
         self._infer_file_types(source, header)
+        self._file_samples = defaultdict(list)
 
     def _distribute_row(self, row_number: int, row: list[str]) -> None:
         """Send one data row to every active per-row accumulator."""
@@ -524,6 +530,13 @@ class QualityValidator:
             if "format_consistency" in self._checks:
                 if len(self._col_samples[col_name]) < self._max_sample:
                     self._col_samples[col_name].append(value)
+
+            # cross_file_types — this source's own bounded sample (issue #367).
+            # Independent of format_consistency: inferring a source's types must
+            # not depend on an unrelated dataset-level check being active.
+            if "cross_file_types" in self._checks:
+                if len(self._file_samples[col_name]) < self._max_sample:
+                    self._file_samples[col_name].append(value)
 
             # value_range
             if "value_range" in self._checks:
@@ -878,9 +891,15 @@ class QualityValidator:
     # ------------------------------------------------------------------
 
     def _infer_file_types(self, source: str, header: list[str]) -> None:
-        """Infer column types from collected samples for cross-file comparison."""
+        """Infer column types from *source*'s own samples for cross-file comparison.
+
+        The sample belongs to the source being streamed, so an earlier source
+        that fills the configured budget cannot decide a later one's type
+        (issue #367). Missing values are filtered before inference, and a
+        column with no non-missing value stays ``"unknown"``.
+        """
         for col_name in header:
-            values = self._col_samples.get(col_name, [])
+            values = self._file_samples.get(col_name, [])
             filtered = [v for v in values if not _is_empty(v)]
             if filtered:
                 self._file_col_types[source][col_name] = infer_column_type(filtered)

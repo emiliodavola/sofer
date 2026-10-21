@@ -634,6 +634,13 @@ etc.). Files with zero data rows SHALL be excluded from comparison to avoid
 `"unknown"` type mismatches against files with real data. Default severity:
 `warn`.
 
+Each source's type SHALL be inferred from that source's own non-missing sample, capped by the
+configured `max_sample`, so a source that fills the budget cannot decide a later source's type
+(issue #367). Only the inferred per-source types SHALL be retained: the sample belongs to the source
+being streamed and SHALL be dropped once its types are inferred, keeping memory per-source rather
+than per-dataset. Collecting type evidence SHALL NOT depend on the `format_consistency` check being
+active; that check keeps its own dataset-level sample and behavior.
+
 #### Scenarios
 
 **Compatible types**
@@ -652,6 +659,18 @@ GIVEN file_a.csv with column "year" typed as numeric
 WHEN _check_cross_file_types() runs
 THEN a warning SHALL mention the column and both files
 ```
+
+**A filled sample budget does not hide a later source's type**
+
+```
+GIVEN numeric.csv with three numeric values and text.csv with three text values for column "year"
+  AND quality_max_sample = 3
+WHEN QualityValidator.run() executes over both, in either declaration order
+THEN exactly one cross_file_types warning SHALL name "year", numeric.csv as numeric and
+      text.csv as categorical/text
+```
+
+**Evidence:** `test: tests/test_quality.py::TestCheckCrossFileTypes::test_a_saturated_first_file_cannot_decide_the_second`, `test: tests/test_quality.py::TestCheckCrossFileTypes::test_text_then_numeric_order_reports_the_same_facts`, `test: tests/test_quality.py::TestCheckCrossFileTypes::test_missing_values_use_the_source_own_values`, `test: tests/test_quality.py::TestCheckCrossFileTypes::test_cross_file_types_work_without_format_consistency`
 
 **Zero-row file excluded from type comparison**
 
