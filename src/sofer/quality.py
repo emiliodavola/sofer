@@ -27,8 +27,10 @@ most ``config.PROBE_CHUNK_BYTES`` of the file it judges (issue #326).
 
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -78,6 +80,31 @@ def _capped_append(target: list[Any], item: Any, limit: int) -> None:
     """
     if len(target) < limit:
         target.append(item)
+
+
+def _decodes_probe(chunk: bytes, encoding: str, *, final: bool) -> bool:
+    """Return whether *chunk* decodes as *encoding*, tolerating a split tail.
+
+    ``final`` says whether the probe reached physical end-of-file. When it did
+    not, an incomplete sequence at the tail is completed by bytes this probe
+    never reads, so the incremental decoder holds those bytes back instead of
+    rejecting them (issue #370). Invalid bytes that are decidable inside the
+    chunk still raise, and ``errors="strict"`` never hides them.
+
+    Args:
+        chunk: The bytes the probe read.
+        encoding: One candidate encoding from ``ENCODING_FALLBACKS``.
+        final: ``True`` when ``chunk`` ends at physical end-of-file.
+
+    Returns:
+        ``True`` when the chunk is decodable under the rule above.
+    """
+    decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+    try:
+        decoder.decode(chunk, final)
+    except UnicodeError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -684,9 +711,13 @@ class QualityValidator:
         The prefix is read with a **bounded** read (issue #326): the probe only
         answers a question about the file's first ``probe_chunk_bytes``, so
         materializing the file to slice it made the pass's peak follow the
-        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.  The
-        bytes judged are the same ones ``read_bytes()[:n]`` judged, including
-        the truncation of a multi-byte sequence that straddles the boundary.
+        corpus size (1:1 on a 63 MiB CSV) instead of the configured width.
+
+        What the judged prefix proves (issue #370): a sequence cut by the
+        window is completed by bytes the probe deliberately does not read, so
+        it is not evidence of a bad encoding; only a sequence cut by physical
+        end-of-file is.  The file's size, read from the open descriptor, tells
+        the two apart without a second read, which keeps the bound intact.
         """
         if not is_text_eligible(resolved):
             return
@@ -694,19 +725,18 @@ class QualityValidator:
             return
         self._ran_checks.add("encoding_validation")
         sev = self._checks["encoding_validation"]["severity"]
-        # Read the first probe-sized chunk and try each encoding
+        # Read the first probe-sized chunk and learn whether it reached EOF
         try:
             with resolved.open("rb") as fh:
                 chunk = fh.read(config.PROBE_CHUNK_BYTES)
+                size = os.fstat(fh.fileno()).st_size
         except OSError:
             self._add_result("encoding_validation", sev, f"Cannot read '{resolved.name}'")
             return
+        final = len(chunk) >= size
         for enc in ENCODING_FALLBACKS:
-            try:
-                chunk.decode(enc)
+            if _decodes_probe(chunk, enc, final=final):
                 return  # success
-            except (UnicodeDecodeError, UnicodeError):
-                continue
         msg = f"Cannot decode '{resolved.name}' — all encodings failed"
         self._add_result("encoding_validation", sev, msg)
 

@@ -1,5 +1,6 @@
 """Tests for sofer._csv_reader and sofer.quality."""
 
+import codecs
 import csv
 import tracemalloc
 from pathlib import Path
@@ -590,6 +591,103 @@ class TestCheckEncodingValidation:
         qr = [r for r in report.quality_results if r.check == "encoding_validation"]
         assert len(qr) >= 1
         assert qr[0].severity == "fail"
+
+
+class TestEncodingProbeBoundary:
+    """Issue #370: a window that ends mid-character is not an encoding error.
+
+    The probe judges its first ``probe_chunk_bytes``. The bytes that complete a
+    sequence cut by that window exist in the file and are simply not read, so
+    they must not make a valid file fail. Only a sequence cut by physical
+    end-of-file is genuinely undecodable, and that distinction is what the
+    incremental decoder has to preserve.
+    """
+
+    @staticmethod
+    def _cfg(tmp_path: Path, payload: bytes, name: str = "data.csv") -> DatasetConfig:
+        """Write *payload* byte for byte (a text-mode write could not)."""
+        path = tmp_path / name
+        path.write_bytes(payload)
+        return DatasetConfig(
+            name="probe",
+            repo_id="u/probe",
+            files=[FileEntry(local=path, remote=name)],
+        )
+
+    @staticmethod
+    def _findings(cfg: DatasetConfig) -> list[QualityResult]:
+        report = QualityValidator(cfg).run()
+        assert "encoding_validation" in report.ran_checks
+        return [r for r in report.quality_results if r.check == "encoding_validation"]
+
+    @staticmethod
+    def _straddling(window: int, char: str, inside: int, prefix: bytes = b"") -> bytes:
+        """Build a payload whose *char* is cut after *inside* bytes by *window*."""
+        encoded = char.encode("utf-8")
+        assert 1 <= inside < len(encoded), "the cut must fall inside the character"
+        header = prefix + b"value\n"
+        filler = b"a" * (window - len(header) - inside)
+        return header + filler + encoded + b"\n"
+
+    @pytest.mark.parametrize(
+        ("char", "inside"),
+        [("é", 1), ("€", 1), ("€", 2), ("😀", 1), ("😀", 2), ("😀", 3)],
+    )
+    def test_a_character_cut_by_the_window_is_not_an_error(self, tmp_path, char, inside):
+        """2-, 3- and 4-byte characters, cut at every internal offset."""
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, self._straddling(window, char, inside))
+
+        assert self._findings(cfg) == []
+
+    def test_a_bom_and_a_character_cut_by_the_window_are_both_accepted(self, tmp_path):
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, self._straddling(window, "é", 1, prefix=codecs.BOM_UTF8))
+
+        assert self._findings(cfg) == []
+
+    def test_a_deliberately_small_window_still_tolerates_the_cut(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "PROBE_CHUNK_BYTES", 16)
+
+        cfg = self._cfg(tmp_path, self._straddling(16, "😀", 2, prefix=b"x\n"))
+
+        assert self._findings(cfg) == []
+
+    def test_invalid_bytes_inside_the_window_still_fail(self, tmp_path):
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, b"a\n" + b"\xff" + b"b" * window)
+
+        findings = self._findings(cfg)
+        assert [finding.severity for finding in findings] == ["fail"]
+
+    def test_a_character_truncated_by_a_short_file_still_fails(self, tmp_path):
+        """Physical EOF cuts the sequence for real, so it must not be tolerated."""
+        cfg = self._cfg(tmp_path, b"\xc3")
+
+        findings = self._findings(cfg)
+        assert [finding.severity for finding in findings] == ["fail"]
+
+    def test_a_character_truncated_at_an_exact_window_still_fails(self, tmp_path):
+        """A file whose length equals the window ends at physical EOF."""
+        window = config.PROBE_CHUNK_BYTES
+
+        cfg = self._cfg(tmp_path, b"a" * (window - 1) + b"\xc3")
+
+        findings = self._findings(cfg)
+        assert [finding.severity for finding in findings] == ["fail"]
+
+    def test_an_empty_file_produces_no_finding(self, tmp_path):
+        cfg = self._cfg(tmp_path, b"")
+
+        assert self._findings(cfg) == []
+
+    def test_a_short_valid_file_produces_no_finding(self, tmp_path):
+        cfg = self._cfg(tmp_path, b"a;b\n1;2\n")
+
+        assert self._findings(cfg) == []
 
 
 # ── Persisted quality report (Issue #14) ─────────────────────────────────────

@@ -601,16 +601,29 @@ THEN no cross-file type mismatch SHALL be reported for "CPV2010_REF_ID"
 ### 4.9 Encoding validation — detect non-UTF-8 files in text-eligible inputs
 
 **Requirement:** The system MUST verify each text-eligible (`.csv`/`.tsv`, case-insensitive)
-file is decodable via `["utf-8-sig", "utf-8"]` by reading `config.PROBE_CHUNK_BYTES` (8 KB)
-and trying `chunk.decode(enc)` in order. If any succeeds the check SHALL pass; only if all
+file is decodable via `["utf-8-sig", "utf-8"]` by reading at most `config.PROBE_CHUNK_BYTES`
+(8 KB) and decoding that prefix with an incremental decoder per encoding, in order. If any
+encoding decodes the prefix under the boundary rule below, the check SHALL pass; only if all
 fail SHALL a `fail` error naming the file be appended. The read MUST be bounded: the probe
 SHALL NOT materialize a file larger than `PROBE_CHUNK_BYTES` in order to slice it (issue #326),
 so the pass's peak never follows the file size. Non-eligible files (`.xlsx`, `.parquet`,
 `.jsonl`, `.csv.gz` → `.gz`, no extension) SHALL be skipped with no finding and no `ran_checks`
 entry. `latin-1`/`cp1252` SHALL NOT be retried.
 
+**Boundary rule (issue #370):** an incomplete multibyte sequence at the end of the prefix is
+NOT evidence of a bad encoding when more source bytes remain, because the bytes that complete
+it are outside the judged window and the probe deliberately does not read them. The same
+incomplete sequence at physical end-of-file IS an encoding error and SHALL fail. The
+implementation distinguishes the two from the open descriptor's size, without reading past
+`PROBE_CHUNK_BYTES` and without `errors="ignore"`/`errors="replace"`, which would hide invalid
+bytes inside the judged prefix.
+
 > Previously: `utf-8-sig → utf-8 → latin-1 → cp1252` on every file; binary files produced
 > fail findings blocking publish. Now scoped to text-eligible inputs only with UTF-8-only chain.
+>
+> Previously (until issue #370): `chunk.decode(enc)` judged the truncated prefix as a complete
+> byte string, so a valid 2-, 3- or 4-byte character that happened to straddle the 8 KB
+> boundary produced a fail finding on a valid file.
 
 #### Scenarios
 
@@ -629,6 +642,28 @@ GIVEN a `.csv` whose 8 KB chunk fails both `utf-8-sig` and `utf-8`
 WHEN _check_encoding_validation runs
 THEN a `fail` error naming the file SHALL be appended
 ```
+
+**A character cut by the probe boundary does not fail a valid file**
+
+```
+GIVEN a valid UTF-8 `.csv` whose 2-, 3- or 4-byte character begins inside the probe window
+      and ends after it, with and without a BOM and under a deliberately small window
+WHEN QualityValidator.run() scans it
+THEN no encoding finding SHALL be appended
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_character_cut_by_the_window_is_not_an_error`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_bom_and_a_character_cut_by_the_window_are_both_accepted`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_deliberately_small_window_still_tolerates_the_cut`
+
+**A character truncated by physical end-of-file still fails**
+
+```
+GIVEN a file whose incomplete multibyte sequence ends at physical EOF, both shorter than the
+      probe window and exactly as long as it
+WHEN QualityValidator.run() scans it
+THEN a `fail` encoding finding SHALL be appended
+```
+
+**Evidence:** `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_character_truncated_by_a_short_file_still_fails`, `test: tests/test_quality.py::TestEncodingProbeBoundary::test_a_character_truncated_at_an_exact_window_still_fails`
 
 **xlsx skipped regardless of 8 KB content**
 
