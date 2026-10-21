@@ -614,41 +614,104 @@ def test_release_coverage_job_runs_core_100_gates() -> None:
     )
 
 
+def test_release_workflow_stays_tag_only_and_fully_gated() -> None:
+    """CI-03: publishing stays an explicit tag push gated by every quality job.
+
+    Issue #362 retired `dev` as the integration branch. The migration SHALL NOT
+    turn a merge into a publication: `release.yml` keeps its `v*` tag trigger,
+    gains no branch-push or pull-request trigger, and the `release` job still
+    depends on every gate job. The citation and wheel-version guards stay in
+    place so the shipped version equals the tag.
+    """
+    release, _ = _workflow("release.yml")
+    triggers = _triggers(release)
+    assert set(triggers) == {"push"}, (
+        "release.yml must trigger on a tag push only, so merging to `main` publishes "
+        f"nothing; found {sorted(triggers)} (issue #362)"
+    )
+    assert triggers["push"] == {"tags": ["v*"]}, (
+        "release.yml's push trigger must stay exactly `tags: ['v*']` — no branch "
+        f"filter and no widening; found {triggers['push']!r} (issue #362)"
+    )
+
+    jobs = release.get("jobs", {})
+    assert set(_as_list(jobs.get("release", {}).get("needs"))) == {
+        "lint",
+        "test",
+        "coverage",
+        "build",
+        "citation-check",
+    }, (
+        "the `release` job must still depend on every gate job (lint, test, coverage, "
+        "build, citation-check); a tag below a gate publishes nothing (CI-03)"
+    )
+
+    citation = jobs.get("citation-check", {})
+    assert (
+        _find_step(
+            citation,
+            run='python scripts/update_citation.py --check --version "${GITHUB_REF_NAME#v}"',
+        )
+        is not None
+    ), "citation-check must still verify CITATION.cff against the pushed tag (CI-03)"
+
+    build = jobs.get("build", {})
+    verify_steps = [
+        step
+        for step in build.get("steps", [])
+        if isinstance(step, dict) and "METADATA" in str(step.get("name", ""))
+    ]
+    assert any("GITHUB_REF_NAME" in str(step.get("run", "")) for step in verify_steps), (
+        "the build job must still assert the wheel METADATA version equals the tag "
+        "(`${GITHUB_REF_NAME#v}`), so hatch-vcs' tag-derived version is the only "
+        "version source (CI-03, AGENTS.md rule 12)"
+    )
+
+
 def test_codeql_has_push_pr_and_weekly_triggers() -> None:
-    """CI-04 S1: push/PR on main+dev and a single weekly cron schedule."""
+    """CI-04 S1: push/PR on main only and a single weekly cron schedule."""
     codeql, _ = _workflow("codeql.yml")
     triggers = _triggers(codeql)
-    assert triggers.get("push", {}).get("branches") == ["main", "dev"]
-    assert triggers.get("pull_request", {}).get("branches") == ["main", "dev"]
+    assert triggers.get("push", {}).get("branches") == ["main"]
+    assert triggers.get("pull_request", {}).get("branches") == ["main"]
     schedules = triggers.get("schedule", [])
     assert len(schedules) == 1
     cron = schedules[0].get("cron", "")
     assert re.fullmatch(r"\d+ \d+ \* \* \d+", cron) is not None
 
 
-def test_codeql_pull_request_targets_dev() -> None:
-    """CI-04 S2: pull requests to dev are scanned alongside main."""
+def test_codeql_pull_request_targets_main() -> None:
+    """CI-04 S2: `main` is the only PR base `codeql.yml` scans.
+
+    Issue #362 retired `dev`, so a `dev` entry would silently stop scanning a
+    branch nobody merges into while scanning every short-lived PR twice.
+    """
     codeql, _ = _workflow("codeql.yml")
     pr_branches = _triggers(codeql).get("pull_request", {}).get("branches", [])
-    assert set(pr_branches) == {"main", "dev"}
+    assert pr_branches == ["main"], (
+        "codeql.yml must scan pull requests targeting exactly [main] (CI-04, "
+        f"issue #362); found {pr_branches!r}"
+    )
 
 
-def test_ci_has_push_and_pr_triggers_targeting_main_and_dev() -> None:
-    """CI-16: ci.yml gates pushes and PRs on the long-lived branches.
+def test_ci_has_push_and_pr_triggers_targeting_main() -> None:
+    """CI-16: ci.yml gates pushes and PRs on the single long-lived branch.
 
-    Issue #262: ci.yml triggered only on `pull_request`, so a direct push to
-    `dev` or `main` — or any path that does not open a PR — ran no
-    lint/test/coverage gate. The trigger set now mirrors `codeql.yml`: `push` and
-    `pull_request` both target `[main, dev]`.
+    Issue #262: ci.yml triggered only on `pull_request`, so a direct push to a
+    long-lived branch — or any path that does not open a PR — ran no
+    lint/test/coverage gate. Issue #362 retired `dev`, so the trigger set now
+    mirrors `codeql.yml`: `push` and `pull_request` both target `[main]`. The
+    `pull_request.branches` filter matches the PR's base branch, so short-lived
+    `feat/...`/`fix/...` branches are covered without being listed.
     """
     ci, _ = _workflow("ci.yml")
     triggers = _triggers(ci)
-    assert triggers.get("push", {}).get("branches") == ["main", "dev"], (
-        "ci.yml must trigger on push to [main, dev] so a direct push to a long-lived "
-        "branch is gated (CI-16, issue #262)"
+    assert triggers.get("push", {}).get("branches") == ["main"], (
+        "ci.yml must trigger on push to [main] so a direct push to the long-lived "
+        "branch is gated (CI-16, issue #362)"
     )
-    assert triggers.get("pull_request", {}).get("branches") == ["main", "dev"], (
-        "ci.yml must keep gating pull requests targeting [main, dev] (CI-16)"
+    assert triggers.get("pull_request", {}).get("branches") == ["main"], (
+        "ci.yml must gate pull requests targeting exactly [main] (CI-16, issue #362)"
     )
 
 
@@ -1339,6 +1402,22 @@ def test_dependabot_ignores_fastmcp_majors() -> None:
         "the `fastmcp` ignore must cover exactly major updates "
         "(`version-update:semver-major`); a major requires code adaptation and Dependabot "
         "otherwise rewrites the declared cap (CI-14 S2, GitHub #253)"
+    )
+
+
+def test_dependabot_has_no_explicit_target_branch() -> None:
+    """CI-14: Dependabot follows the repository default branch implicitly.
+
+    Issue #362 made `main` the single long-lived branch. An explicit
+    `target-branch` would pin version updates to one branch forever, so a later
+    default-branch change would silently stop matching — and an obsolete `dev`
+    target would point at a branch that no longer exists.
+    """
+    updates = _dependabot_updates()
+    pinned = [update for update in updates if "target-branch" in update]
+    assert not pinned, (
+        "no Dependabot update may declare `target-branch`; updates follow the "
+        f"repository default branch implicitly (issue #362): {pinned!r}"
     )
 
 

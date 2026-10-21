@@ -143,9 +143,13 @@ notes. There is no PyPI publishing.
   release notes. The shipped version always equals the tag: `--version` resolves from installed
   metadata, never from a static constant.
 - **Never move or delete a pushed tag** unless the release job never ran (quality gates failed before
-  publishing); then fix on `dev`, merge to `main`, delete the tag locally and remotely, and re-tag.
-- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev`,
-  typically at release time.
+  publishing); then repair the preparation through a PR to `main`, delete the tag locally and
+  remotely, and re-tag. A published release's tag is never retagged.
+- Branch flow: `main` is the single long-lived branch and the default. All work lands through a
+  short-lived branch and a reviewed pull request targeting `main`; merging to `main` publishes
+  nothing. The release boundary is a version tag on an approved `main` commit, so `main` may carry
+  unreleased work. (The `dev` retirement in issue #362 was a one-time bootstrap exception; it grants
+  no standing permission to bypass review and no license to reintroduce an integration branch.)
 - Python 3.13 is required for the mypy and complete-suite coverage gates; the `tomli` rationale and
   the exact invocations are in CONTRIBUTING → Releases.
 

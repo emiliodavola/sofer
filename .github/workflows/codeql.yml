@@ -1,13 +1,14 @@
 name: CodeQL
 
 # Advanced Setup, versioned in the repo (CI-04): enabled by this workflow —
-# never by GitHub's Default Setup UI. The weekly cron keeps dormant-branch
-# coverage; the Monday 03:00 UTC slot is off-peak.
+# never by GitHub's Default Setup UI. Since issue #362 retired `dev`, `main` is
+# the only long-lived branch, and the weekly cron keeps scanning it between
+# pushes; the Monday 03:00 UTC slot is off-peak.
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
   schedule:
     - cron: "0 3 * * 1"
 

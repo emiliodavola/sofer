@@ -160,20 +160,39 @@ when `CITATION.cff` does not declare the tagged version, so the CFF must be sync
 
 ### Cutting a release
 
-1. On `dev`, sync `CITATION.cff` with the release version: run
-   `python scripts/update_citation.py --version X.Y.Z`, review the `CITATION.cff` diff, and commit
-   it. The bump belongs on `dev` so the merge below carries it to `main`.
-2. Sync `main` with `dev`: `git checkout main && git merge --no-ff dev` — the merge carries the
-   `CITATION.cff` bump committed in step 1. Note: `main` is **not** a fast-forward of `dev`
-   (release PR merge commits live on `main`), so always use `--no-ff`.
+1. Select `X.Y.Z` and create a short-lived release-preparation branch from updated `main`. Run
+   `uv run --python 3.13 python scripts/update_citation.py --version X.Y.Z`, review the
+   `CITATION.cff` diff, and open a preparation PR against `main`.
+2. Merge that PR only after the applicable checks and review. Record the intended final `main`
+   commit as `RELEASE_SHA` — after a squash or rebase merge that is the merged commit, not the
+   preparation branch's pre-merge commit. If more changes entered `main` in the meantime, decide
+   explicitly whether they belong in the release; never silently tag the newer tip.
 3. Do **not** bump a version anywhere else: the version is derived from the tag at build time
    (hatch-vcs, `[tool.hatch.version] source = "vcs"`). The tag is the single source of truth —
    `pyproject.toml` has no static `version` field and there is no `__version__` constant.
-4. Create an annotated tag on the merge commit (`git tag -a vX.Y.Z -m "sofer vX.Y.Z"`) and push
-   with `git push origin main --follow-tags`.
-5. Verify: `gh run list --workflow=release.yml` must go green (including the wheel-build job
-   asserting the wheel METADATA version equals the tag); the release appears under GitHub Releases
-   with notes generated from commits/PRs since the previous tag.
+4. Fetch current remote refs and tags. Verify `RELEASE_SHA` is reachable from `origin/main`, that its
+   own checks succeeded, that its `CITATION.cff` matches `X.Y.Z`, and that `vX.Y.Z` exists neither
+   locally nor remotely. In a clean checkout of that exact commit, run
+   `uv run --python 3.13 python scripts/update_citation.py --check --version X.Y.Z`. Stop on any
+   mismatch or ambiguity.
+5. With explicit release authorization, set `RELEASE_VERSION` (the approved version without the
+   leading `v`) and `RELEASE_SHA` (the full approved commit OID), confirm both values match the
+   approved release, then create and push the annotated tag. `--no-follow-tags` is required so only
+   that tag is sent, even with `push.followTags=true`:
+
+   ```bash
+   : "${RELEASE_VERSION:?Set RELEASE_VERSION to the approved version without v}"
+   : "${RELEASE_SHA:?Set RELEASE_SHA to the full approved commit OID}"
+   git tag -a "v${RELEASE_VERSION}" "${RELEASE_SHA}" -m "sofer v${RELEASE_VERSION}"
+   git push --no-follow-tags origin "refs/tags/v${RELEASE_VERSION}:refs/tags/v${RELEASE_VERSION}"
+   ```
+
+   The preparation PR already updated remote `main`, so no branch push is needed. Run the push only
+   if tag creation succeeded, and never add `--tags`, `--follow-tags`, `--all`, or `--mirror`.
+6. Verify: track the `release.yml` run for that exact tag/SHA, not an arbitrary latest run. Lint,
+   the full Python/OS test matrix, the coverage and core-coverage gates, wheel validation, and the
+   citation check must all pass before the GitHub Release appears with notes generated from
+   commits/PRs since the previous tag.
 
 ### Release rules
 
@@ -182,8 +201,8 @@ when `CITATION.cff` does not declare the tagged version, so the CFF must be sync
   tag: `vX.Y.Z` installs as `sofer vX.Y.Z` via `--version`, resolved at runtime from installed
   metadata (never a static constant).
 - **Never move or delete a pushed tag** unless the release job never ran (e.g. quality gates failed
-  before publishing); in that case fix on `dev`, merge to `main`, delete the tag locally and
-  remotely, and re-tag.
+  before publishing); in that case repair the preparation through another PR to `main`, delete the
+  tag locally and remotely, and re-tag. A published release's tag is never retagged.
 - **Type-gate nuance (Python 3.13).** The workflow's lint job intentionally runs mypy only under
   Python 3.13, mirroring CI. Do not add mypy to the version matrix: a `3.10` development environment
   installs the conditional `tomli` backport (`pyproject.toml:27`), which makes the
@@ -201,13 +220,18 @@ when `CITATION.cff` does not declare the tagged version, so the CFF must be sync
   checker prunes its `tomli` arm; mypy already resolves the remaining sites through the global
   `ignore_missing_imports = true`), never by adding `tomli` to the dev group — which is exactly the
   move this note forbids.
-- Branch flow: all work lands on `dev` first; `main` receives changes only via merges from `dev`
-  (typically at release time). The release-time `CITATION.cff` bump is itself a `dev` commit
-  (step 1), so `main` never receives CFF content that did not arrive through a merge.
+- Branch flow: `main` is the single long-lived branch and the default. All work lands through a
+  short-lived branch and a reviewed pull request targeting `main`; merging publishes nothing. The
+  release boundary is a version tag on an approved `main` commit, so `main` may carry unreleased
+  work. (Issue #362's `dev` retirement was a one-time bootstrap exception; it grants no standing
+  permission to bypass review and no license to reintroduce an integration branch.)
 
 ## Pull requests
 
-- Open a PR against the `dev` branch.
+- Start a short-lived branch from updated `main`:
+  `git fetch origin --prune && git switch main && git pull --ff-only`, then
+  `git switch -c <type>/<short-description>`.
+- Open a PR against `main`.
 - Fill the PR template — describe what, why, and how.
 - Changes touching a user-facing README section MUST update README_ES.md in the same commit.
 - Link related issues (`Closes #N`).
