@@ -37,7 +37,7 @@ from typing import Any
 
 from . import config
 from ._csv_reader import ENCODING_FALLBACKS, stream_csv
-from ._formats import is_text_eligible
+from ._formats import field_delimiter, is_text_eligible
 from ._sentinels import MISSING_VALUE_SENTINELS
 from .checks import ValidationReport
 from .codebook import infer_column_type
@@ -289,6 +289,10 @@ class QualityValidator:
         Non-eligible paths return immediately with no accumulator updates and
         no ``ran_checks`` mutation (defensive guard for direct calls).
 
+        Rows are read with the separator the format defines: a ``.tsv`` is
+        tab-delimited regardless of the dataset's CSV delimiter, and a ``.csv``
+        keeps the configured one (issue #366).
+
         Args:
             resolved: The file to stream.
             encoding_reported: ``True`` when :meth:`_check_encoding_validation`
@@ -319,7 +323,7 @@ class QualityValidator:
         try:
             gen = stream_csv(
                 resolved,
-                delimiter=self.cfg.csv_delimiter,
+                delimiter=field_delimiter(resolved, self.cfg.csv_delimiter),
                 encoding=self.cfg.csv_encoding,
                 max_sample=effective_max_sample,
             )

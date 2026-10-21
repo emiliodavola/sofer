@@ -1033,27 +1033,113 @@ class TestBinaryFormatsSkipped:
 
 
 class TestTsvEligible:
-    """TSV is text-eligible and checked like CSV."""
+    """TSV is text-eligible and parsed with tabs, never the CSV delimiter."""
+
+    @staticmethod
+    def _write(path: Path, rows: list[list[str]]) -> Path:
+        """Write a real tab-delimited file, not a CSV wearing a ``.tsv`` name."""
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, delimiter="\t").writerows(rows)
+        return path
+
+    @staticmethod
+    def _corrupt(cfg: DatasetConfig) -> list[QualityResult]:
+        report = _run_quality(cfg)
+        return [r for r in report.quality_results if r.check == "corrupt_records"]
 
     def test_tsv_short_row_produces_corrupt_records_fail(self, tmp_path):
-        """TSV with short row → corrupt_records fail."""
-        tsv = tmp_path / "data.tsv"
-        with open(tsv, "w", newline="", encoding="utf-8") as f:
-            # Use default delimiter ";" so the validator (which uses cfg.csv_delimiter=";")
-            # correctly parses the file regardless of .tsv suffix.
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(["a", "b", "c"])
-            writer.writerow(["1", "x", "10"])
-            writer.writerow(["2", "y"])  # short row: 2 vs 3
+        """A tab-delimited TSV with a short row → corrupt_records fail."""
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "x", "10"], ["2", "y"]],
+        )
         cfg = DatasetConfig(
             name="test",
             repo_id="u/test",
             files=[FileEntry(local=tsv, remote="data.tsv")],
         )
-        report = _run_quality(cfg)
-        qr = [r for r in report.quality_results if r.check == "corrupt_records"]
-        assert len(qr) >= 1
-        assert any(r.severity == "fail" for r in qr)
+
+        findings = self._corrupt(cfg)
+
+        assert [finding.severity for finding in findings] == ["fail"]
+        assert findings[0].message == "Row 2 in 'data.tsv' has 2 fields, header has 3"
+
+    def test_tsv_overlong_row_is_reported_with_its_field_counts(self, tmp_path):
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "2", "3"], ["4", "5", "6", "7"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 2 in 'data.tsv' has 4 fields, header has 3"
+
+    def test_a_valid_tab_delimited_tsv_produces_no_corrupt_finding(self, tmp_path):
+        """The default CSV delimiter is ``;``; a real TSV must still pass."""
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "2", "3"], ["4", "5", "6"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+        )
+
+        assert self._corrupt(cfg) == []
+
+    def test_an_uppercase_tsv_uses_tabs_too(self, tmp_path):
+        tsv = self._write(
+            tmp_path / "DATA.TSV",
+            [["a", "b", "c"], ["1", "2"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="DATA.TSV")],
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 1 in 'DATA.TSV' has 2 fields, header has 3"
+
+    def test_a_csv_delimiter_override_does_not_reach_tsv(self, tmp_path):
+        """A comma override for CSV must leave TSV tab-delimited."""
+        tsv = self._write(
+            tmp_path / "data.tsv",
+            [["a", "b", "c"], ["1", "2"]],
+        )
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=tsv, remote="data.tsv")],
+            csv_delimiter=",",
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 1 in 'data.tsv' has 2 fields, header has 3"
+
+    def test_a_csv_keeps_the_configured_comma_delimiter(self, tmp_path):
+        """The CSV side keeps honouring the configured separator."""
+        source = tmp_path / "data.csv"
+        with open(source, "w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, delimiter=",").writerows([["a", "b", "c"], ["1", "2"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=source, remote="data.csv")],
+            csv_delimiter=",",
+        )
+
+        findings = self._corrupt(cfg)
+
+        assert findings[0].message == "Row 1 in 'data.csv' has 2 fields, header has 3"
 
 
 class TestCaseInsensitiveAndNoExtension:
@@ -1072,9 +1158,9 @@ class TestCaseInsensitiveAndNoExtension:
             w = csv.writer(f, delimiter=";")
             w.writerow(["a", "b", "c"])
             w.writerow(["1", "x"])  # short
-        # values.TSV with short row — use ";" so default delimiter parses it
+        # values.TSV with short row — real tabs, whatever the CSV delimiter is
         with open(tsv_file, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f, delimiter=";")
+            w = csv.writer(f, delimiter="\t")
             w.writerow(["x", "y", "z"])
             w.writerow(["1", "2"])  # short
         cfg = DatasetConfig(
@@ -1183,7 +1269,7 @@ class TestMixedAndRanChecksAndEncoding:
         b_xlsx.write_bytes(b"PK\x03\x04 fake xlsx")
         c_tsv = tmp_path / "c.tsv"
         with open(c_tsv, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f, delimiter=";")
+            w = csv.writer(f, delimiter="\t")
             w.writerow(["a", "b", "c"])
             w.writerow(["1", "x"])  # short row → corrupt
         cfg = DatasetConfig(
