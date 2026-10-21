@@ -108,6 +108,8 @@ class TestStdioFraming:
                     assert init is not None
                     tools = await session.list_tools()
                     assert len(tools.tools) == 19
+                    attached = await session.call_tool("sofer_init", {"config": "dataset.toml"})
+                    assert not attached.isError
                     result = await session.call_tool("sofer_validate", {"config": "dataset.toml"})
                     assert not result.isError
                     envelope = json.loads(result.content[0].text)
@@ -690,20 +692,23 @@ class TestConfigStates:
     def test_malformed_config_refuses_with_config_errors(
         self, tmp_path: Path, restore_tool_config: Any
     ) -> None:
-        """Unparseable TOML validates to a refusal envelope carrying
-        ``config_errors`` naming the parse failure."""
+        """Issue #360 D3: an unparseable TOML is refused at attach.
+
+        Attach is the session entry point, so the parse failure surfaces there
+        with ``config_errors`` naming it; no session becomes ready, and the tool
+        that would have consumed the config stays refused.
+        """
         shutil.copy2(MCP_CONFIG_STATES / "malformed.toml", tmp_path / "malformed.toml")
         server = build_server(root=tmp_path)
 
-        envelope = _call(
-            server, "sofer_validate", {"config": str(tmp_path / "malformed.toml")}
-        ).data
+        envelope = _call(server, "sofer_init", {"config": str(tmp_path / "malformed.toml")}).data
         assert envelope["ok"] is False
         assert envelope["exit_code"] == 1
         assert any("Failed to read TOML" in error for error in envelope["config_errors"]), envelope[
             "config_errors"
         ]
         assert "Failed to read TOML" in envelope["output"]
+        assert envelope["session_ready"] is False
 
 
 class TestDeliveryHandoff:

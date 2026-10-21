@@ -183,7 +183,66 @@ def mcp_payload(result: Any) -> Any:
     return result
 
 
-def call_tool(server: Any, name: str, arguments: dict[str, Any] | None = None) -> Any:
+#: Deterministic identity used by the test-only auto-init fallback. It is a
+#: valid identity and a fixed filename, so a root without any dataset still
+#: reaches the tool under test after ONE create-mode init.
+_FIXTURE_INIT_NAME = "fixture-dataset"
+_FIXTURE_INIT_USER = "fixture-user"
+
+
+async def initialize_session(client: Any, arguments: dict[str, Any] | None = None) -> None:
+    """Initialize *client*'s session through the real gate, best effort.
+
+    Issue #360 makes every protected tool refuse until the session called
+    ``sofer_init``. Tests that assert a tool's own behavior need that gate
+    satisfied first. This helper (test-only) tries, in order: attach the call's
+    own ``config``; attach ``dataset.toml``; attach the fixture TOML created by
+    a previous call; create the fixture dataset. A failed attempt is ignored —
+    the tool call that follows then observes the real gate, so a test needing a
+    refusal can pass ``init=False`` and drive a raw client instead.
+
+    Args:
+        client: A connected in-memory ``Client``.
+        arguments: The tool arguments about to be sent (optional).
+    """
+    arguments = arguments or {}
+    root = arguments.get("root")
+    root_args = {"root": root} if isinstance(root, str) and root.strip() else {}
+    candidates: list[dict[str, Any]] = []
+    config = arguments.get("config")
+    if isinstance(config, str) and config.strip():
+        candidates.append({"config": config})
+    candidates.append({"config": "dataset.toml"})
+    candidates.append({"config": f"{_FIXTURE_INIT_NAME}.toml"})
+    for candidate in candidates:
+        try:
+            result = await client.call_tool("sofer_init", {**candidate, **root_args})
+        except Exception:
+            continue
+        if (result.structured_content or {}).get("session_ready") is True:
+            return
+    cwd = root if isinstance(root, str) and root.strip() else "."
+    try:
+        await client.call_tool(
+            "sofer_init",
+            {
+                "name": _FIXTURE_INIT_NAME,
+                "user": _FIXTURE_INIT_USER,
+                "cwd": cwd,
+                **root_args,
+            },
+        )
+    except Exception:
+        return
+
+
+def call_tool(
+    server: Any,
+    name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    init: bool = True,
+) -> Any:
     """Call a registered tool through an in-memory ``Client(server)`` (PB-01).
 
     Shared implementation of the client-boundary call wrapper (PB-09): opens a
@@ -192,10 +251,16 @@ def call_tool(server: Any, name: str, arguments: dict[str, Any] | None = None) -
     modules keep a module-local ``_call`` thin alias that delegates here
     (AGENTS.md rule 4 — the wrapper lives in exactly one place).
 
+    Issue #360: every protected tool needs an initialized session. Unless
+    *init* is ``False``, this helper satisfies the gate inside the SAME client
+    session via :func:`initialize_session`. Tests asserting the gate itself
+    pass ``init=False`` (or use a raw ``Client`` and hold one session).
+
     Args:
         server: The FastMCP server instance to connect an in-memory client to.
         name: The registered tool name (e.g. ``"sofer_validate"``).
         arguments: Tool input arguments; ``None`` for tools that take none.
+        init: When ``True`` (default), initialize the session before the call.
 
     Returns:
         The ``CallToolResult`` with ``data`` unwrapped to a plain dict when
@@ -204,6 +269,8 @@ def call_tool(server: Any, name: str, arguments: dict[str, Any] | None = None) -
 
     async def _go() -> Any:
         async with Client(server) as client:
+            if init and name != "sofer_init":
+                await initialize_session(client, arguments or {})
             return await client.call_tool(name, arguments)
 
     result = asyncio.run(_go())
