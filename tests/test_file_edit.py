@@ -150,6 +150,22 @@ class TestApplyFileEdit:
         ]
         assert not (tmp_path / "dataset.toml.tmp").exists()
 
+    def test_set_files_leaves_a_preexisting_tmp_sibling_untouched(self, tmp_path) -> None:
+        """Issue #365: a real write never consumes the predictable `.tmp` path."""
+        path = _write_doc(tmp_path)
+        sibling = tmp_path / "dataset.toml.tmp"
+        sibling.write_bytes(b"pre-existing staging file")
+
+        result = file_edit.set_files(
+            path, [{"local": "new.csv", "remote": "new.csv"}], dry_run=False
+        )
+
+        assert result.changed is True
+        assert sibling.read_bytes() == b"pre-existing staging file"
+        assert _toml.loads(path.read_text(encoding="utf-8"))["file"] == [
+            {"local": "new.csv", "remote": "new.csv"}
+        ]
+
 
 class TestSoferFileSet:
     """``sofer_file_set`` is the MCP half of the writable ``[[file]]`` surface."""
