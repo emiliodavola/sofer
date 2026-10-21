@@ -45,7 +45,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
-from . import _toml, config
+from . import _atomic, _toml, config
 from .model import DatasetConfig
 
 MetaKind: TypeAlias = Literal["text", "list", "flag"]
@@ -836,7 +836,7 @@ def _atomic_replace(path: Path, text: str) -> None:
     try:
         # ``newline=""`` mirrors _read_text: no translation on write either, so
         # the bytes outside the edited table are the bytes that were read.
-        _toml.atomic_write_text(path, text, encoding=config.OUTPUT_ENCODING)
+        _atomic.atomic_write_text(path, text, encoding=config.OUTPUT_ENCODING)
     except OSError as exc:
         raise MetaEditError(f"cannot write {path}: {exc}") from exc
 

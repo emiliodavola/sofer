@@ -32,7 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
-from . import _toml, config
+from . import _atomic, _toml, config
 
 FileKind: TypeAlias = Literal["text", "flag", "table"]
 """Value kind of one settable ``[[file]]`` key."""
@@ -249,7 +249,7 @@ def set_files(
     changed = updated != original
     if changed and not dry_run:
         try:
-            _toml.atomic_write_text(target, updated, encoding=config.OUTPUT_ENCODING)
+            _atomic.atomic_write_text(target, updated, encoding=config.OUTPUT_ENCODING)
         except OSError as exc:
             raise FileEditError(f"cannot write {target}: {exc}") from exc
     return FileWrite(

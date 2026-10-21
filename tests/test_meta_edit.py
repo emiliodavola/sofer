@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from sofer import _toml, meta_edit
+from sofer import _atomic, _toml, meta_edit
 from sofer.cli import _INIT_TEMPLATE
 from sofer.meta_edit import META_KEYS, MetaEditError, apply_meta_edit
 from sofer.model import DatasetConfig
@@ -291,7 +291,7 @@ class TestSetMeta:
         def _boom(*args: object, **kwargs: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(_toml.os, "replace", _boom)
+        monkeypatch.setattr(_atomic.os, "replace", _boom)
         with pytest.raises(MetaEditError, match="cannot write"):
             meta_edit.set_meta(path, {"description": "Real"})
         assert path.read_bytes() == before
