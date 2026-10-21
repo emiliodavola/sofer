@@ -154,12 +154,22 @@ ningún LLM; el único acceso de red es la subida a Hugging Face dentro de
 `sofer_publish_confirm`. `fastmcp` viene incluido por defecto, y `sofer[mcp]` es
 un alias de la misma rueda.
 
+Toda sesión MCP empieza con `sofer_init`, la única tool admitida mientras la
+sesión no está inicializada. Adjuntá un conjunto de datos existente con
+`config=...`, o creá uno con `name`/`user`/`cwd`; cualquier otra tool y toda
+lectura de resources con datos se rechaza con `INITIALIZATION_REQUIRED` hasta
+que esa llamada tenga éxito. El listado de tools y resources, los prompts
+estáticos y `sofer://status` siguen disponibles sin init.
+
 Usá `sofer mcp add --agent <opencode|codex|gemini|pi|hermes|all>` para
 registrarlo. La cadena canónica es:
 
 ```python
-# Phase 0 Bootstrap
-sofer_init(name="my-dataset", user="myuser")
+# Session gate (adjunta un conjunto de datos existente; no escribe archivos)
+sofer_init(config="my-dataset.toml")
+# ...o creá un conjunto de datos desde cero:
+# sofer_init(name="my-dataset", user="myuser", cwd="datasets/my-dataset")
+# Phase 0 Bootstrap (solo greenfield)
 sofer_scan_apply(config="my-dataset.toml")
 sofer_meta_set(config="my-dataset.toml", values={"license": "<license>"})
 # Phase 1 Build

@@ -78,7 +78,7 @@ def test_every_template_continuation_names_a_registered_tool():
 
 def test_greenfield_branch_chain():
     assert workflow.WORKFLOW_BRANCHES["greenfield"] == (
-        "sofer_init",
+        "sofer_init (create)",
         "sofer_scan_dry_run",
         "sofer_scan_apply",
         "sofer_meta_set",
@@ -97,6 +97,7 @@ def test_greenfield_branch_chain():
 
 def test_existing_config_branch_routes_render_all_to_auth_status():
     assert workflow.WORKFLOW_BRANCHES["existing_config"] == (
+        "sofer_init (attach)",
         "sofer_validate",
         "sofer_file_set",
         "sofer_prepare",

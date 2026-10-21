@@ -104,6 +104,24 @@ Long tool calls reset their own deadline through progress notifications. Their
 `tools/list` descriptions say so and name the expected duration. See
 [Agent setup](agent-setup.md#host-timeouts).
 
+## Init gate refusals
+
+Every MCP session must call `sofer_init` before any other tool; a host that
+skips it (or opens a new session) receives a structured refusal rather than a
+tool error:
+
+| `error_code` | Fix |
+| --- | --- |
+| `INITIALIZATION_REQUIRED` | Call `sofer_init` first. Attach an existing dataset with `config="<dataset.toml>"`, or create one with `name`, `user`, and `cwd`. Follow the envelope's `next` for the exact arguments. |
+| `INITIALIZATION_IN_PROGRESS` | An init is still running in this session. Wait for its result, then retry the original call; do not send a second init. |
+| `INITIALIZATION_CONTEXT_BUSY` | Another admitted request is still executing. Retry the init after it finishes; the active dataset stays valid. |
+| `INITIALIZATION_CONTEXT_MISMATCH` | The call targets a different `root` or `config` than the active one. Run `sofer_init` for that target; there is no silent switch. |
+| `INITIALIZATION_SESSION_UNAVAILABLE` | The transport exposes no live session. Use the shipped stdio transport. |
+
+A `dry_run=true` init never unlocks the session: its continuation points back
+to the same init with `dry_run=false`. A failed attach also leaves the session
+uninitialized, and a supplied `config` never falls back to creating a dataset.
+
 ## Assisted failure reporting
 
 When a CLI command fails with an uncaught error, sofer prints the traceback and,

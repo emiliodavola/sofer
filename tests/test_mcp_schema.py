@@ -341,15 +341,21 @@ class TestOutputSchema:
         assert required == ["ok", "exit_code", "output"]
 
     def test_sofer_init_user_required(self, tmp_path: Path):
-        """INIT-05: sofer_init input schema requires ``user`` as a
-        non-nullable string (mandatory, never optional)."""
+        """Issue #360 D3: ``user`` is optional in the schema.
+
+        Attach mode takes only ``config``; create mode still requires name and
+        user, enforced by the selected mode at call time rather than by the
+        JSON schema (which cannot express that conditional).
+        """
         tools = _tools_dict(tmp_path)
         schema = tools["sofer_init"].inputSchema or {}
         props = schema.get("properties", {})
         user_schema = props.get("user", {})
-        assert "user" in schema.get("required", []), "user must be a required parameter"
-        assert user_schema.get("type") == "string", user_schema
-        assert "null" not in str(user_schema), "user must not be nullable"
+        assert "user" not in schema.get("required", []), "user is create-mode-only"
+        assert "name" not in schema.get("required", []), "name is create-mode-only"
+        assert "string" in str(user_schema), user_schema
+        assert "null" in str(user_schema), "user must be nullable for attach mode"
+        assert "config" in props, "attach mode needs the config selector"
 
 
 class TestEnvelope:

@@ -148,12 +148,22 @@ calls no LLM; the only network access is the Hugging Face upload in
 `sofer_publish_confirm`. `fastmcp` is included by default, and `sofer[mcp]` is
 an alias for the same wheel.
 
+Every MCP session starts with `sofer_init`, the only tool admitted while the
+session is uninitialized. Attach an existing dataset with `config=...`, or
+create one with `name`/`user`/`cwd`; every other tool and every data-bearing
+resource read is refused with `INITIALIZATION_REQUIRED` until it succeeds.
+Tool and resource listing, the static prompts, and `sofer://status` stay
+available without init.
+
 Use `sofer mcp add --agent <opencode|codex|gemini|pi|hermes|all>` to register
 it. The canonical chain is:
 
 ```python
-# Phase 0 Bootstrap
-sofer_init(name="my-dataset", user="myuser")
+# Session gate (attach an existing dataset; no files are written)
+sofer_init(config="my-dataset.toml")
+# ...or create a greenfield dataset:
+# sofer_init(name="my-dataset", user="myuser", cwd="datasets/my-dataset")
+# Phase 0 Bootstrap (greenfield only)
 sofer_scan_apply(config="my-dataset.toml")
 sofer_meta_set(config="my-dataset.toml", values={"license": "<license>"})
 # Phase 1 Build

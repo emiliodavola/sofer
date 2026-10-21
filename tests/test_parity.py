@@ -215,7 +215,10 @@ AREAS: list[AreaParity] = [
             "force": "force",
         },
         positionals={"name": "name"},
-        exempt_params={"cwd": "MCP-only containment policy (INIT-02)"},
+        exempt_params={
+            "cwd": "MCP-only containment policy (INIT-02)",
+            "config": "attach mode (issue #360 D3): no CLI counterpart, CLI init always creates",
+        },
     ),
     AreaParity(
         cli_command="scan",

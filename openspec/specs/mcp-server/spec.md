@@ -94,7 +94,7 @@ Distribution contract for sofer's MCP server: exposes the CLI's deterministic pi
 
 > Added by change `sofer-mcp-server` (archived 2026-08-28). Modified by `mcp-dx-audit-surface` (archived 2026-08-31). Modified by `fix-sofer-init-cwd-windows-todo` (archived 2026-08-31) — adds optional `cwd` to `sofer_init`. Modified by `fix-dataset-identity-context` (archived 2026-09-04) — `sofer_init` output_schema declares `config_path`/`dataset_root` per INIT-03. Modified by `2026-09-25-feat-mcp-failure-report` (issue #244) — 15 callables (+ `sofer_report_failure`). Modified by `2026-10-15-fix-profile-render-default-paths` (issue #294) — the batch `output_dir` descriptions name the resolved default path and the override semantics. Modified under the ODD-only work unit `odd/tasks/meta-tools.md` (issue #323) — 17 callables (+ `sofer_meta_check`, `sofer_meta_set`), which is the tool surface MSP-META-01 requires. Modified by `2026-10-17-feat-visibility-enforcement` (issue #338) — 18 callables (+ `sofer_repo_settings`), `sofer_auth_status` gains the opt-in `check_remote` read, and MSP-R15 is **corrected**: the Phase-1 move has been mandatory since #339, so the `move_loose` opt-in this clause described no longer exists. Modified 2026-10-19 under the ODD-only work unit `odd/tasks/file-entry-tool.md` (issue #344) — 19 callables (+ `sofer_file_set`), the writable `[[file]]` surface. Modified 2026-10-19 under `odd/tasks/per-call-root.md` (issue #347) — every path-bearing tool grows an optional `root` (MSP-R21) and every envelope echoes `effective_root`.
 
-Server SHALL expose 19 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_file_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`. Every path-bearing tool except `sofer_report_failure` SHALL additionally expose `root: str | None = None` as its last parameter (MSP-R21).
+Server SHALL expose 19 callables: `sofer_validate, sofer_meta_check, sofer_meta_set, sofer_file_set, sofer_prepare, sofer_publish, sofer_publish_confirm, sofer_codebook, sofer_codebook_all, sofer_profile, sofer_profile_all, sofer_render, sofer_render_all, sofer_scan_dry_run, sofer_scan_apply, sofer_init, sofer_auth_status, sofer_repo_settings, sofer_report_failure`. Every param SHALL be `Annotated[Field(description)]` non-empty (10.1), and the batch `output_dir` descriptions SHALL name the resolved default path — the artifact-cache write root (`config.OUTPUT_DIR`) joined with the configured sub-directory (`config.PROFILE_DIR` for `sofer_profile_all`, `config.RENDER_DIR` for `sofer_render_all`) — and SHALL state that an override replaces that write root, so the artifacts land in `<output_dir>/<sub-directory>`.  The bare directory name SHALL NOT be presented as the whole default; `target` SHALL be `Literal["local"]`/`Literal["hf"]` single-value (const or enum) (10.5); `output` SHALL split to `output_file` vs `output_dir` (10.7); `all_files` removed — batch via `*_all` (10.6); `no_checks` → `run_checks:bool=true` (10.9); every tool SHALL have `annotations` and typed `output_schema`. `sofer_init` additionally exposes `cwd: str | None = None` per INIT-02 and its `output_schema` SHALL declare `config_path`/`dataset_root` (absolute strings) per INIT-03; under MSP-R23 it also appends `config: str | None = None` as its last parameter, makes `name`/`user` optional (create-mode requirements enforced by the selected mode, never by the JSON schema), and declares `initialization_mode` and `session_ready` in its `output_schema`. `sofer_auth_status` additionally exposes `check_remote: bool = False`: `False` (the default) SHALL keep the preflight offline, and `True` SHALL make one read-only call reporting the repository's current visibility as `remote_visibility`. Every path-bearing tool except `sofer_report_failure` SHALL additionally expose `root: str | None = None` (MSP-R21); `sofer_init` appends `config` after it.
 
 (Previously: `sofer_init` schema carried no identity fields; 11 callables, polymorphic profile/render, free-string target, dual-typed output, bare params, generic schema; then 14 callables without `cwd`.)
 
@@ -121,6 +121,14 @@ Server SHALL expose 19 callables: `sofer_validate, sofer_meta_check, sofer_meta_
 - GIVEN `tools/list` `sofer_init` `output_schema`
 - WHEN inspected
 - THEN `config_path` and `dataset_root` SHALL be declared as string properties and SHALL appear in the call envelope
+
+#### Scenario: sofer_init attach-mode schema
+
+- GIVEN `tools/list` `sofer_init` `input_schema`
+- WHEN inspected
+- THEN `config` SHALL be an optional string, `name`/`user` SHALL be optional nullable strings, and `initialization_mode`/`session_ready` SHALL be declared in `output_schema`
+
+**Evidence:** `test: tests/test_mcp_schema.py::TestOutputSchema::test_sofer_init_user_required`, `test: tests/test_mcp_server.py::TestToolRoster::test_exactly_nineteen_callables`
 
 ---
 
@@ -1524,3 +1532,200 @@ the tool with `root`, not through a `sofer://` URI.
 - AND no root SHALL remain bound afterwards
 
 **Evidence:** `test: tests/test_per_call_root.py::TestResolution::test_concurrent_calls_do_not_leak_roots`
+
+---
+
+### Requirement: Init admission gate (MSP-R23) — Added 2026-10-21, issue #360
+
+Every MCP session SHALL require one explicit, successful `sofer_init` before any
+other registered tool runs or any data-bearing resource is read. `sofer_init`
+SHALL be the only tool admitted while the session is uninitialized. The policy
+SHALL be enforced at the common dispatch/middleware boundary — never in
+`_load_dataset`, per-handler checks, prompts, tool order, or an agent-side
+convention — so a future registered tool is protected automatically. Unknown
+tools keep the framework's standard error and never change readiness.
+
+A session is one live framework session. Its state SHALL be server-owned,
+SHALL NOT be persisted, and SHALL NOT be keyed by a client-supplied identifier.
+It SHALL be stored on the framework-owned per-session outbound channel
+(`ctx.request_context.session._connection.outbound`, fastmcp 4.0.11), because
+the modern protocol rebuilds the request-scoped `Connection`/`ServerSession`
+per request; a runnable lifecycle test SHALL pin that API. A new client
+session, a re-established transport, or a server restart SHALL start
+uninitialized; a transport with no live session SHALL refuse protected
+operations with `INITIALIZATION_SESSION_UNAVAILABLE`.
+
+States SHALL be `U` (uninitialized), `I` (initializing), and `R(A)` (ready for
+one root `R` and config `C`). An admitted init SHALL discard the previous
+context BEFORE validating its own arguments. A non-dry-run success SHALL
+publish the new context atomically; a preview, refusal, exception, or
+cancellation SHALL settle in `U` and NEVER restore the discarded context. An
+ordinary matching request SHALL be admitted against an immutable snapshot and
+SHALL NOT revoke readiness. A request for another root/config SHALL return
+`INITIALIZATION_CONTEXT_MISMATCH` without switching. A second init while one
+runs SHALL return `INITIALIZATION_IN_PROGRESS`; an init while an admitted
+request still executes SHALL return `INITIALIZATION_CONTEXT_BUSY` and keep the
+active context. Leases SHALL be released when the handler work actually stops,
+including after a cancelled await. The existing server-wide tool serialization
+and progress heartbeat SHALL remain.
+
+`sofer_init` SHALL accept an optional non-blank `config` to ATTACH an existing
+TOML: it resolves under the call root, parses with the model parser, derives
+`[dataset] name` and the `repo_id` owner, and matches any supplied `name`/`user`
+as exact assertions. Attach SHALL perform no writes, directory creation, file
+moves, package generation, network access, or overwriting, and SHALL keep the
+ACTUAL config path as `C` (a filename unrelated to the dataset name is
+authoritative; `DatasetIdentity.config_path` SHALL NOT replace it). In attach
+mode `cwd` MUST be omitted and `force`/`move_existing` MUST be false. An
+empty/whitespace `config` SHALL be `CONFIG_ERROR` and SHALL NOT select create
+mode; a missing, invalid, unreadable, or disallowed config SHALL NEVER fall back
+to creation. Create mode SHALL retain the existing identity, containment,
+collision, opt-in move, dry-run, and explicit `force` semantics. Both modes
+SHALL return `session_ready` (`true` only on a completed non-dry-run success),
+`initialization_mode`, the actual `config_path`, `dataset_root`, and
+`effective_root` (`R`); a preview SHALL return `session_ready: false` and a
+continuation to the same init with `dry_run: false`. Success continuations:
+create -> `sofer_scan_dry_run`; attach -> `sofer_meta_check`.
+
+Matching SHALL bind every non-init tool to the active root `R`; configuration
+tools additionally require canonical `config == C`. An omitted/blank `root`
+SHALL keep the registration-root semantics and SHALL NOT inherit the root of
+the last init. Standalone path tools SHALL be bound only by `R`. Content
+resources SHALL be blocked before init, SHALL satisfy the existing
+registration-root containment AND live inside `R`, and `sofer://dataset/...`
+SHALL additionally require `C`; `sofer://status`, capability/resource
+listing, and the three static prompts SHALL remain available without init and
+SHALL never grant readiness.
+
+Refusals SHALL use `ok:false`, `exit_code:1`, `output`, `error_code`,
+`message`, `next`, and an EMPTY `config_errors`; `CONFIG_ERROR` keeps the
+envelope with real diagnostics. Resource refusals SHALL be MCP resource errors
+whose message is the JSON-encoded envelope, with `next.action =
+"resources/read"` and `next.uri`. `INITIALIZATION_REQUIRED` SHALL suggest an
+executable attach when the target config is known (otherwise
+`input_required: ["config"]`), and `SESSION_UNAVAILABLE` SHALL carry
+`next: {}`.
+
+#### Scenario: Every registered non-init tool is refused before its handler
+
+- GIVEN a fresh session and a valid dataset tree
+- WHEN any registered non-init tool is called, with valid or invalid business args
+- THEN it SHALL return `INITIALIZATION_REQUIRED` before argument validation or handler entry
+- AND the tree SHALL be byte-identical afterwards
+- AND an unknown tool SHALL keep the framework's standard error
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestDefaultDeny`
+
+#### Scenario: Discovery stays available without init
+
+- GIVEN a fresh session
+- WHEN tools/resources/prompts are listed, a static prompt is retrieved, or `sofer://status` is read
+- THEN all SHALL succeed
+- AND a subsequent protected call SHALL still be refused
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestDefaultDeny::test_discovery_is_available_without_init`
+
+#### Scenario: Attach binds the session read-only to the actual config path
+
+- GIVEN an existing model-valid TOML whose filename is not `<name>.toml`
+- WHEN `sofer_init(config=...)` runs without name/user
+- THEN it SHALL return `session_ready: true`, `initialization_mode: "attach"`, the actual `config_path`, and `dataset_root`
+- AND the tree SHALL be byte-identical afterwards
+- AND the next protected call for that config SHALL be admitted
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestModeContract::test_attach_without_identity_and_nonstandard_filename`, `test: tests/test_mcp_admission.py::TestModeContract::test_attach_writes_nothing`
+
+#### Scenario: Attach refuses incompatible options and never falls back to create
+
+- GIVEN `config` supplied with any of `cwd`, `force`, or `move_existing`, or an empty/whitespace `config`, or a missing config
+- WHEN init runs
+- THEN it SHALL fail with `CONFIG_ERROR` (empty/incompatible) or the existing not-found error (missing)
+- AND no dataset TOML SHALL be created
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestModeContract::test_attach_rejects_create_only_options`, `test: tests/test_mcp_admission.py::TestModeContract::test_empty_config_is_not_create_mode`, `test: tests/test_mcp_admission.py::TestModeContract::test_missing_config_never_falls_back_to_create`
+
+#### Scenario: Attach validation is minimal and repairable
+
+- GIVEN an empty `[[file]]`, `[meta]` placeholders, a missing source file, or a malformed TOML
+- WHEN attach runs
+- THEN the repairable conditions SHALL attach successfully
+- AND the malformed TOML SHALL be refused with `Failed to read TOML`
+- AND no full data/quality check SHALL run
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestModeContract::test_repairable_conditions_do_not_block_attach`, `test: tests/test_mcp_admission.py::TestModeContract::test_malformed_toml_is_an_attach_refusal`
+
+#### Scenario: A preview never grants readiness
+
+- GIVEN create or attach with `dry_run=true`
+- WHEN it succeeds
+- THEN `session_ready` SHALL be false and `next` SHALL point to the same init with `dry_run=false`
+- AND a protected call SHALL still be refused
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestModeContract::test_preview_never_grants_readiness`
+
+#### Scenario: State transitions preserve or discard the active context correctly
+
+- GIVEN `R(A)`, then a preview, a failed attach, an ordinary mismatch, or an A->B switch
+- WHEN the following calls run
+- THEN a preview/failure SHALL settle in `U` (A is not restored)
+- AND an ordinary mismatch SHALL leave A ready
+- AND returning to A SHALL require an explicit init
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestStateTransitions`
+
+#### Scenario: Matching binds root and config exactly
+
+- GIVEN two TOMLs under one root, a foreign init root, or a standalone path tool
+- WHEN a call omits `root`, names another TOML, or targets another tree
+- THEN a mismatched root/config SHALL return `INITIALIZATION_CONTEXT_MISMATCH`
+- AND an explicit matching root SHALL be admitted
+- AND standalone tools SHALL be allowed anywhere inside the active root
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestMatchingAndResources`
+
+#### Scenario: Resources follow the same gate and intersection rules
+
+- GIVEN a fresh session, then a ready session with the active root/config
+- WHEN a content resource is read
+- THEN it SHALL be blocked with the JSON envelope before init
+- AND after init it SHALL satisfy both containment scopes, with `sofer://dataset/...` requiring the active config
+- AND `sofer://status` SHALL remain available
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestMatchingAndResources::test_status_resource_is_available_before_init`, `test: tests/test_mcp_admission.py::TestMatchingAndResources::test_content_resources_are_blocked_before_init`, `test: tests/test_mcp_admission.py::TestMatchingAndResources::test_dataset_resource_requires_the_active_config`, `test: tests/test_mcp_admission.py::TestMatchingAndResources::test_codebook_resource_is_contained_in_the_active_root`
+
+#### Scenario: Refusal envelopes are machine-readable and executable
+
+- GIVEN a refused tool or resource
+- WHEN the envelope is inspected
+- THEN it SHALL carry `ok:false`, `exit_code:1`, `output`, `error_code`, `message`, `next`, and an empty `config_errors`
+- AND `INITIALIZATION_REQUIRED` SHALL use the known config or ask for `config`
+- AND a resource retry SHALL be `next.action = "resources/read"` with `next.uri`
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestEnvelopes`, `test: tests/test_mcp_admission.py::TestMatchingAndResources::test_content_resources_are_blocked_before_init`
+
+#### Scenario: Concurrency is deterministic and never queues a second init
+
+- GIVEN an init in progress, or an admitted protected request still executing
+- WHEN another init or protected call arrives
+- THEN it SHALL return `INITIALIZATION_IN_PROGRESS` or `INITIALIZATION_CONTEXT_BUSY` respectively
+- AND no second handler SHALL start
+- AND the active context SHALL survive a busy refusal
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestConcurrency`, `test: tests/test_mcp_admission.py::TestAdmissionStateMachine`
+
+#### Scenario: A real stdio session keeps the binding and a new session starts clean
+
+- GIVEN one stdio client session and a second fresh one
+- WHEN the first refuses, attaches, then calls a protected tool, and the second calls it directly
+- THEN the first SHALL succeed after attach
+- AND the second SHALL be refused
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestStdioSession`
+
+#### Scenario: The framework lifecycle proof is part of the suite
+
+- GIVEN the installed fastmcp version
+- WHEN the session holder is observed across two calls in one client and across two clients
+- THEN the outbound channel SHALL be identical within a session and different across sessions
+
+**Evidence:** `test: tests/test_mcp_admission.py::TestFrameworkLifecycle::test_outbound_channel_is_session_scoped`

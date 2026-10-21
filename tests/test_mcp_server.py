@@ -26,6 +26,7 @@ from conftest import (
     PROCESS_TIMEOUT_SECONDS,
     _make_dataset,
     call_tool,
+    initialize_session,
     mcp_payload,
     repo_info_private,
     repo_info_public,
@@ -494,9 +495,15 @@ class TestToolRoster:
 
         assert _run(_go()) == self._EXPECTED
         schema = _tool_schema(server, "sofer_init")
-        assert "name" in schema.get("required", [])
+        # Issue #360 D3: name/user are CREATE-mode requirements, not schema-
+        # required arguments — attach mode (config) needs neither. Their
+        # presence is enforced by the selected mode, never by the JSON schema.
+        assert "name" not in schema.get("required", [])
+        assert "user" not in schema.get("required", [])
         props = schema.get("properties", {})
-        assert props.get("name", {}).get("type") == "string"
+        assert props.get("name", {}).get("anyOf")
+        assert props.get("user", {}).get("anyOf")
+        assert props["config"]["anyOf"]
         for flag in ("move_existing", "dry_run", "force"):
             assert flag in props
             assert props[flag].get("type") == "boolean"
@@ -559,8 +566,12 @@ class TestAuthStatusValidity:
         assert any("csv_delimiter" in e for e in envelope["config_errors"]), envelope
 
     def test_placeholder_user_ok_false(self, tmp_path: Path, restore_tool_config: Any) -> None:
-        """A config failing validation (placeholder repo user) reports
-        ok:False, exit_code 1, and non-empty config_errors."""
+        """Issue #360 D3: a placeholder-identity config cannot be attached.
+
+        Attach validates the dataset identity before binding the session, so the
+        refusal is ``CONFIG_ERROR`` with the identity diagnostic and no session
+        becomes ready; every protected tool stays refused.
+        """
         _make_dataset(tmp_path)
         toml = tmp_path / "dataset.toml"
         text = toml.read_text(encoding="utf-8")
@@ -570,11 +581,12 @@ class TestAuthStatusValidity:
         )
         server = build_server(root=tmp_path)
 
-        envelope = _call(server, "sofer_auth_status", {"config": str(toml)}).data
+        envelope = _call(server, "sofer_init", {"config": str(toml)}).data
         assert envelope["ok"] is False, envelope
         assert envelope["exit_code"] == 1, envelope
-        assert envelope["config_errors"], envelope
+        assert envelope["error_code"] == "CONFIG_ERROR", envelope
         assert any("placeholder" in e for e in envelope["config_errors"]), envelope
+        assert envelope["session_ready"] is False, envelope
 
     def test_containment_violation_ok_false(self, tmp_path: Path, restore_tool_config: Any) -> None:
         """A ``[[file]]`` local escaping the server root is refused ok:False."""
@@ -963,6 +975,11 @@ class TestStdioSmoke:
                     assert init is not None
                     tools = await session.list_tools()
                     assert len(tools.tools) == 19
+                    # Issue #360: the first domain tool of a new session is init.
+                    attached = await session.call_tool(
+                        "sofer_init", {"config": str(tmp_path / "dataset.toml")}
+                    )
+                    assert not attached.isError
                     result = await session.call_tool(
                         "sofer_validate", {"config": str(tmp_path / "dataset.toml")}
                     )
@@ -1616,6 +1633,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 contents = await client.read_resource("sofer://dataset/dataset.toml")
                 return contents[0].text
 
@@ -1629,6 +1647,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 contents = await client.read_resource("sofer://codebook/data.csv")
                 return contents[0].text
 
@@ -1644,6 +1663,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 contents = await client.read_resource("sofer://metadata/metadata.yaml")
                 return contents[0].text
 
@@ -1655,6 +1675,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 await client.read_resource("sofer://metadata/absent.yaml")
 
         from mcp import MCPError
@@ -1675,6 +1696,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 await client.read_resource(f"sofer://dataset/{outside / 'evil.toml'}")
 
         from mcp import MCPError
@@ -1689,6 +1711,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 await client.read_resource("sofer://dataset/notes.txt")
 
         from mcp import MCPError
@@ -1698,11 +1721,15 @@ class TestResources:
 
     def test_resource_size_guard(self, tmp_path, monkeypatch, restore_tool_config):
         _make_dataset(tmp_path)
-        monkeypatch.setattr(config, "AGENT_RESOURCE_MAX_BYTES", 10)
         server = build_server(root=tmp_path)
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
+                # Attach parses the TOML and re-anchors [tool.sofer] discovery,
+                # which restores the config defaults; apply the test limit after
+                # the session is ready, immediately before the read.
+                monkeypatch.setattr(config, "AGENT_RESOURCE_MAX_BYTES", 10)
                 await client.read_resource("sofer://dataset/dataset.toml")
 
         from mcp import MCPError
@@ -1733,6 +1760,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 contents = await client.read_resource(uri)
                 return contents[0].text
 
@@ -1759,6 +1787,7 @@ class TestResources:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client)
                 await client.read_resource(uri)
 
         from mcp import MCPError
@@ -2577,6 +2606,7 @@ class TestVerifyAndProtected:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client, {"config": str(tmp_path / "dataset.toml")})
                 return await client.call_tool(
                     "sofer_prepare",
                     {"config": str(tmp_path / "dataset.toml"), "verify": True},
@@ -3974,6 +4004,7 @@ class TestAdvisoryHardening:
 
         async def _go():
             async with Client(server) as client:
+                await initialize_session(client, {"config": str(tmp_path / "dataset.toml")})
                 results = await asyncio.gather(
                     client.call_tool("sofer_validate", {"config": str(tmp_path / "dataset.toml")}),
                     client.call_tool("sofer_validate", {"config": str(tmp_path / "dataset.toml")}),
@@ -4290,11 +4321,14 @@ class TestInitUserFlag:
         assert cfg.repo_id == "bob/my-ds"
 
     def test_missing_user_refused_before_write(self, tmp_path, restore_tool_config):
-        """INIT-05: user is REQUIRED — an absent user is rejected at input
-        validation (ToolError), before any write. No TOML, NO raw/."""
+        """INIT-05 + #360 D3: user is REQUIRED in create mode — an absent user is
+        rejected with a CONFIG_ERROR envelope, before any write. No TOML, NO raw/."""
         server = build_server(root=tmp_path)
-        with pytest.raises(ToolError):
-            _call(server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)})
+        envelope = _call(server, "sofer_init", {"name": "my-ds", "cwd": str(tmp_path)}).data
+        assert envelope["ok"] is False
+        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert any("user" in e for e in envelope["config_errors"]), envelope
+        assert envelope["session_ready"] is False
         assert not (tmp_path / "my-ds.toml").exists()
         assert not (tmp_path / "raw").exists()
 
@@ -5848,13 +5882,18 @@ class TestMetaTools:
         assert envelope["next"]["arguments"]["config"] == "dataset.toml"
 
     def test_check_refuses_an_unreadable_config(self, tmp_path: Path) -> None:
+        """Issue #360 D3: an unparseable TOML is refused at attach, not later.
+
+        ``sofer_init`` is the only entry point, and attach must parse the model;
+        a malformed TOML therefore never becomes the active context, so the
+        refusal carries the parse diagnostic and grants no readiness.
+        """
         (tmp_path / "dataset.toml").write_text("[meta\ndescription = 1\n", encoding="utf-8")
-        envelope = _call(
-            build_server(root=tmp_path), "sofer_meta_check", {"config": "dataset.toml"}
-        ).data
+        envelope = _call(build_server(root=tmp_path), "sofer_init", {"config": "dataset.toml"}).data
         assert envelope["ok"] is False
         assert envelope["error_code"] == "CONFIG_ERROR"
         assert "Failed to read TOML" in envelope["config_errors"][0]
+        assert envelope["session_ready"] is False
 
     def test_check_refuses_a_path_outside_the_root(self, tmp_path: Path) -> None:
         outside = tmp_path / "outside"

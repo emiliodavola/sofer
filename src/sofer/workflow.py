@@ -301,7 +301,7 @@ _WORKFLOW_METADATA = {
     "sofer_init": WorkflowMetadata(
         "sofer_init",
         PHASE_BOOTSTRAP,
-        ("valid name", "valid user"),
+        ("create: name, user, cwd", "attach: existing config"),
         "greenfield",
         WorkflowTemplate("sofer_scan_dry_run", {"config": "<config_path>"}),
     ),
@@ -439,13 +439,14 @@ WORKFLOW_METADATA: Mapping[str, WorkflowMetadata] = MappingProxyType(_WORKFLOW_M
 WORKFLOW_BRANCHES: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "greenfield": (
-            "sofer_init",
+            "sofer_init (create)",
             "sofer_scan_dry_run",
             "sofer_scan_apply",
             "sofer_meta_set",
             "sofer_validate",
         ),
         "existing_config": (
+            "sofer_init (attach)",
             "sofer_validate",
             "sofer_file_set",
             "sofer_prepare",
@@ -453,8 +454,14 @@ WORKFLOW_BRANCHES: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "sofer_profile_all",
             "sofer_render_all",
         ),
-        "triage": ("sofer_codebook", "sofer_profile", "sofer_render"),
+        "triage": (
+            "sofer_init (attach or create)",
+            "sofer_codebook",
+            "sofer_profile",
+            "sofer_render",
+        ),
         "delivery": (
+            "sofer_init (attach)",
             "sofer_auth_status",
             "sofer_repo_settings",
             "sofer_publish(dry_run=true)",
