@@ -202,12 +202,17 @@ Single-file `sofer profile <dataset>` MUST check `dest.exists()` before write; w
 
 `sofer profile DATASET` and `sofer profile --all-files` SHALL accept optional
 `--delimiter` / `--encoding`. The resolution order SHALL be **explicit flag →
-resolved config (tool-wide `config.CSV_DELIMITER` / `config.CSV_ENCODING` for the
-single-file tier; the batch tier resolves the tool-wide values too) → the existing
-`stream_csv` encoding fallback chain**. The explicit value SHALL win.
+the dataset's own `[meta] csv_delimiter` / `csv_encoding` (batch tier; issue
+#394) → the tool-wide `config.CSV_DELIMITER` / `config.CSV_ENCODING` → the
+existing `stream_csv` encoding fallback chain**. The single-file tier has no
+TOML, so it resolves the tool-wide values directly. The explicit value SHALL
+always win, over the dataset value as well as over the tool-wide one.
 
-`None` SHALL be the only "not supplied" signal; the omitted path SHALL be
-byte-identical to the pre-change behaviour. `.tsv` files SHALL remain
+`None` SHALL be the only "not supplied" signal. The omitted batch path SHALL be
+byte-identical to a run that supplies the resolved dataset values explicitly;
+when the dataset declares no dialect of its own, its `[meta]` defaults equal the
+tool-wide values and the omitted path is therefore byte-identical to the
+pre-change behaviour. `.tsv` files SHALL remain
 tab-delimited by format (the explicit delimiter SHALL apply to `.csv`; the explicit
 encoding SHALL apply to `.csv` and `.tsv`). Non-streamed formats
 (`.parquet`/`.xlsx`/`.jsonl`) SHALL ignore the explicit pair exactly as they do
@@ -235,6 +240,20 @@ echo it on stderr.
 - WHEN `sofer profile DATASET` runs without the new flags
 - THEN the emitted `metadata.yaml` SHALL be byte-identical to the pre-change run
 - AND no explicit-dialect line SHALL be printed to stderr
+
+#### Scenario: Batch tier inherits the dataset dialect when the flags are omitted
+
+- GIVEN a dataset whose TOML declares `csv_delimiter = ","` and `csv_encoding = "utf-8"` on a comma CSV, and a tool-wide `csv_delimiter = ";"`
+- WHEN `sofer profile --all-files` runs without `--delimiter` / `--encoding`
+- THEN the recorded schema SHALL reflect the `,`-split columns
+- AND `metadata.yaml` `file.delimiter` SHALL equal `,` and `file.encoding` SHALL equal `utf-8`
+
+#### Scenario: Batch tier explicit override beats the dataset value
+
+- GIVEN a dataset whose TOML declares `csv_delimiter = ","` on a comma CSV
+- WHEN `sofer profile --all-files --delimiter ;` runs
+- THEN the recorded schema SHALL reflect the `;`-split (single) column
+- AND `metadata.yaml` `file.delimiter` SHALL equal `;`
 
 #### Scenario: .tsv stays tab-delimited
 
