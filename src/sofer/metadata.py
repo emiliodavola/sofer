@@ -60,6 +60,11 @@ class FileMetadata:
         delimiter: Field delimiter when the format has one.
         rows:      Number of data rows read.
         columns:   Number of columns detected.
+        ragged_padded: Rows with fewer fields than the header, padded with an
+            empty value. Recorded so the artifact states how a short row was
+            treated instead of hiding it in the percentages (issue #395).
+        ragged_truncated: Rows with more fields than the header, truncated.
+        extra_fields_dropped: Total fields discarded by that truncation.
     """
 
     path: str = ""
@@ -68,6 +73,9 @@ class FileMetadata:
     delimiter: str = ""
     rows: int = 0
     columns: int = 0
+    ragged_padded: int = 0
+    ragged_truncated: int = 0
+    extra_fields_dropped: int = 0
 
 
 @dataclass

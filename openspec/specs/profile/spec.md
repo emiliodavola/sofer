@@ -295,3 +295,30 @@ echo it on stderr.
 - GIVEN an explicit `--delimiter` and/or `--encoding` is supplied
 - WHEN the command runs
 - THEN the supplied override SHALL be echoed on stderr
+
+---
+
+### Requirement: Ragged CSV rows share one policy with the codebook (issue #395)
+
+`profile` SHALL read CSV/TSV through `sofer._csv_reader.read_columns`, the same reader the codebook uses, so both artifacts report the same denominators for the same file. The policy SHALL keep every data row: a row with fewer fields than the header is padded with an empty value, a row with more fields is truncated, and both are counted. `metadata.yaml` SHALL record the outcome in the `file` section as `ragged_padded` (short rows padded), `ragged_truncated` (long rows truncated) and `extra_fields_dropped` (total fields discarded); a clean file SHALL report zero for all three. Those are the same counts the codebook page states, so a consumer never has to guess how a malformed width was handled.
+
+#### Scenario: A short row is padded, not skipped
+
+- GIVEN a CSV with header `id;valor` and rows `A;10`, `B`, `C;30;EXTRA`
+- WHEN the file is profiled
+- THEN `file.rows` SHALL be 3
+- AND `valor` SHALL report `missing_pct: 33.3` (one padded empty value out of three)
+- AND `file.ragged_padded` SHALL be 1, `file.ragged_truncated` 1 and `file.extra_fields_dropped` 1
+
+#### Scenario: The codebook agrees with the profile
+
+- GIVEN the same ragged file
+- WHEN both the profile and the codebook are generated
+- THEN both SHALL report 3 rows
+- AND both SHALL report 33.3% missing for `valor`
+
+#### Scenario: A clean file keeps zero counters
+
+- GIVEN a CSV whose every row matches the header width
+- WHEN it is profiled
+- THEN all three counters SHALL be 0

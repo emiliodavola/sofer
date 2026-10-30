@@ -489,3 +489,23 @@ and no literal default exists to inherit.
 - WHEN the codebook is generated
 - THEN the file SHALL still be read tab-delimited
 - AND the explicit delimiter SHALL NOT change the `.tsv` column split
+
+---
+
+### Requirement: Ragged rows are counted, never silently absorbed (issue #395)
+
+CSV/TSV codebooks SHALL be built from `sofer._csv_reader.read_columns`, the same reader `profile` uses, so the row count and every `Missing (%)` denominator match the profile for the same file. A row with fewer fields than the header SHALL be padded with an empty value and a row with more fields SHALL be truncated; the page SHALL state both outcomes in a `**Ragged rows:**` line (how many short rows were padded, how many long rows were truncated and how many extra fields were dropped). A file whose rows all match the header width SHALL carry no such line. The `Rows:` count SHALL remain the number of data rows read, padded or truncated included.
+
+#### Scenario: Ragged file states its treatment
+
+- GIVEN a CSV with header `id;valor` and rows `A;10`, `B`, `C;30;EXTRA`
+- WHEN its codebook is generated
+- THEN the page SHALL report `**Rows:** 3`
+- AND `valor` SHALL report `33.3%` missing
+- AND the `**Ragged rows:**` line SHALL report one padded short row and one truncated long row with one extra field dropped
+
+#### Scenario: Clean file has no ragged note
+
+- GIVEN a CSV whose every row matches the header width
+- WHEN its codebook is generated
+- THEN the page SHALL NOT contain a `Ragged rows` line

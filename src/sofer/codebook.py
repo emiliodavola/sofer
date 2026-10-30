@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from . import config
 from ._converters import sanitize_sheet_name
-from ._csv_reader import stream_csv
+from ._csv_reader import ColumnarRead, read_columns
 from ._formats import SUPPORTED_FORMATS
 from ._layout import rel_stem as _rel_stem
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
@@ -81,41 +81,21 @@ def _read_csv(
     #260). Every call site passes the configured ``csv_delimiter`` /
     ``csv_encoding`` for its tier.
 
-    Reading is delegated to :func:`sofer._csv_reader.stream_csv`, the
-    repository's single CSV reader (AGENTS.md rule 4), so this path shares its
-    encoding policy: *encoding* is honoured first, then the fallback chain
-    ``utf-8-sig`` and ``utf-8`` (never ``latin-1``/``cp1252``). Exhausting the
-    chain raises the reader's ``ValueError`` and an unknown codec name raises
-    ``LookupError``; both propagate unchanged so the CLI can render its
-    ``Error: ...`` diagnostic (CB-R11).
+    Reading is delegated to :func:`sofer._csv_reader.read_columns`, the one
+    home of the CSV row-width policy shared with ``profile`` (issue #395): a
+    short row is padded with ``""``, a long row is truncated, and both are
+    counted. That reader also owns the encoding policy — *encoding* first, then
+    the ``utf-8-sig`` / ``utf-8`` chain — so an exhausted chain raises its
+    ``ValueError`` and an unknown codec name raises ``LookupError``; both
+    propagate unchanged so the CLI can render ``Error: ...`` (CB-R11).
 
     ``max_sample`` is passed as an explicit ``None`` so the reader's
     ``codebook_max_sample`` config default never applies: row capping belongs
     to :func:`_build_markdown` (via :func:`generate`), and a silent cap here
     would sample the file twice.
-
-    The reader's ``(header, row)`` stream is transposed into the columnar shape
-    this module's callers expect. A fully empty file arrives as a
-    ``([], None)`` header yield, so it renders the "no data rows" placeholder
-    instead of raising. A second header yield (``row is None``) marks a
-    fallback-encoding restart, so the partial pass is discarded rather than
-    accumulating duplicated rows.
     """
-    reader = stream_csv(Path(path), delimiter=delimiter, encoding=encoding, max_sample=None)
-    headers, _ = next(reader)
-
-    n_cols = len(headers)
-    columns: list[list[str]] = [[] for _ in range(n_cols)]
-    for _header, row in reader:
-        if row is None:
-            # A fallback encoding restarted the stream: drop whatever the
-            # failed attempt had already produced before this header re-yield.
-            columns = [[] for _ in range(n_cols)]
-            continue
-        for i in range(n_cols):
-            columns[i].append(row[i] if i < len(row) else "")
-
-    return headers, columns, None
+    record = read_columns(Path(path), delimiter=delimiter, encoding=encoding, max_sample=None)
+    return record.headers, record.columns, None
 
 
 def _read_tsv(
@@ -288,6 +268,43 @@ def _read_jsonl(path: str) -> tuple[list[str], list[list[str]], None]:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def _read_file_with_shape(
+    path: str,
+    *,
+    delimiter: str,
+    encoding: str,
+) -> tuple[list[str], list[list[str]], dict[str, str] | None, ColumnarRead | None]:
+    """Read *path* for a codebook, also reporting how ragged rows were treated.
+
+    CSV/TSV go through :func:`sofer._csv_reader.read_columns` so the width
+    policy and its counters are the same ones ``profile`` applies (issue #395);
+    the other formats have a fixed width and report ``None``.
+
+    Args:
+        path: Path to the data file.
+        delimiter: CSV delimiter (CSV only; TSV stays tab-delimited).
+        encoding: CSV/TSV encoding.
+
+    Returns:
+        ``(headers, columns, dtypes, shape)`` — ``shape`` is the CSV row-width
+        report, or ``None`` for the fixed-width formats.
+
+    Raises:
+        ValueError: for unsupported formats.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix in {".csv", ".tsv"}:
+        record = read_columns(
+            Path(path),
+            delimiter="\t" if suffix == ".tsv" else delimiter,
+            encoding=encoding,
+            max_sample=None,
+        )
+        return record.headers, record.columns, None, record
+    headers, columns, dtypes = _read_file(path, delimiter=delimiter, encoding=encoding)
+    return headers, columns, dtypes, None
+
+
 def _read_file(
     path: str,
     *,
@@ -336,6 +353,7 @@ def _build_markdown(
     dtypes: dict[str, str] | None,
     file_path: str,
     max_sample: int | None = None,
+    shape: ColumnarRead | None = None,
 ) -> str:
     """Build a markdown codebook from columnar data.
 
@@ -351,6 +369,10 @@ def _build_markdown(
         file_path: Source file path shown in the header.
         max_sample: Maximum rows to analyse; ``None`` resolves to the
             ``codebook_max_sample`` value from ``[tool.sofer]`` at call time.
+        shape: Optional CSV row-width report. When it records ragged rows, the
+            page states how they were treated — padded short rows and truncated
+            long rows — so the percentages never hide that decision (issue
+            #395). Fixed-width formats pass ``None``.
 
     Returns:
         The rendered markdown document.
@@ -381,6 +403,21 @@ def _build_markdown(
         f"({'full scan' if total_rows <= max_sample else 'sample'})",
         "",
     ]
+
+    if shape is not None and shape.is_ragged:
+        # Issue #395: the same file read by `profile` must report the same
+        # denominators, so the treatment of a short/long row is stated here
+        # instead of being silently absorbed.
+        notes: list[str] = []
+        if shape.ragged_padded:
+            notes.append(f"{shape.ragged_padded} short row(s) padded with an empty value")
+        if shape.ragged_truncated:
+            notes.append(
+                f"{shape.ragged_truncated} long row(s) truncated "
+                f"({shape.extra_fields_dropped} extra field(s) dropped)"
+            )
+        lines.append(f"**Ragged rows:** {'; '.join(notes)}")
+        lines.append("")
 
     if dtypes is not None:
         lines.append("| # | Column | Type | Actual Type | Unique | Missing (%) | Example |")
@@ -461,8 +498,10 @@ def generate(
     """
     if max_sample is None:
         max_sample = config.CODEBOOK_MAX_SAMPLE
-    headers, columns, dtypes = _read_file(csv_path, delimiter=delimiter, encoding=encoding)
-    codebook = _build_markdown(headers, columns, dtypes, csv_path, max_sample)
+    headers, columns, dtypes, shape = _read_file_with_shape(
+        csv_path, delimiter=delimiter, encoding=encoding
+    )
+    codebook = _build_markdown(headers, columns, dtypes, csv_path, max_sample, shape)
 
     if output_path:
         Path(output_path).write_text(codebook, encoding=config.OUTPUT_ENCODING)
@@ -722,14 +761,14 @@ def generate_all_result(
             if out_path is None:
                 continue
             try:
-                headers, columns, dtypes = _read_file(
+                headers, columns, dtypes, shape = _read_file_with_shape(
                     str(local), delimiter=delimiter, encoding=encoding
                 )
             except Exception as exc:
                 print(f"  ⚠  Error reading {local}: {exc}", file=sys.stderr)
                 failures.append((str(local), str(exc)))
                 continue
-            codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample)
+            codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample, shape)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(codebook, encoding=config.OUTPUT_ENCODING)
             generated.append(str(out_path))
