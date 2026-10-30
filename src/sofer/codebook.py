@@ -23,6 +23,7 @@ from . import config
 from ._converters import sanitize_sheet_name
 from ._csv_reader import stream_csv
 from ._formats import SUPPORTED_FORMATS
+from ._layout import rel_stem as _rel_stem
 from ._sentinels import MISSING_VALUE_SENTINELS, count_unique_non_missing
 
 if TYPE_CHECKING:
@@ -657,10 +658,9 @@ def generate_all_result(
     xlsx_cache: dict[Path, dict[str, tuple[list[str], list[list[str]], dict[str, str] | None]]] = {}
 
     for local, suffix in entries:
-        if local.is_relative_to(data_dir):
-            rel_stem = local.relative_to(data_dir)
-        else:
-            rel_stem = local.relative_to(base_dir)
+        # Issue #397: a source outside both directories raises SourceLayoutError
+        # instead of a bare ValueError the adapter reported as a collision.
+        rel_stem = _rel_stem(local, base_dir=base_dir, data_dir=data_dir)
 
         if suffix == ".xlsx":
             try:

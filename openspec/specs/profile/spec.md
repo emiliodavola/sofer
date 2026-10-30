@@ -94,13 +94,21 @@ non-zero exit code when the dataset format is unsupported.
 
 ### Requirement: Batch profile via --all-files (PRF-05)
 
-When `--all-files` is set the system MUST iterate `[[file]]` entries via `DatasetConfig.from_toml`; for each entry it MUST derive `rel_stem` as `local.relative_to(data_dir)` when inside `data_dir = base_dir / config.OUTPUT_DIR`, otherwise `local.relative_to(base_dir)`. For non-`.xlsx` and single-sheet `.xlsx` entries it MUST write one `metadata.yaml` namespaced by `rel_stem` under `profile_dir` as `<write_root>/profiles/<rel_stem>.metadata.yaml`, computed as `(profile_dir / rel_stem).with_suffix(PurePath.suffixes replacement)` (only last suffix → `.metadata.yaml`). For `.xlsx` with N>1 sheets it MUST read all sheets via `_read_xlsx_sheets`, sanitize each sheet name via `sanitize_sheet_name` (lower→NFKD→ascii→space→`_`→strip; empty/whitespace-only → `sheet`) with `seen` dedup `_{n}`, and write N files `profiles/<rel>/<stem>__<sanitized>.metadata.yaml`. The system MUST pre-compute the collision map over sheet-expanded outputs normalized via `re.sub(r"__+", "_", str(path))` (so `a__ventas`≈`a_ventas`) as `output → [sources]` before any write, MUST write non-colliding outputs first, then MUST raise `ValueError` naming every colliding source as `<path>::<sheet>` and MUST NOT write colliding outputs nor a root index. `--output` anchoring MUST follow Option B: relative dirs anchor to `cfg._base_dir`, writes go to `<output>/profiles/`, never mutating `cache/`. TOML without `[[file]]` MUST fail fast.
+When `--all-files` is set the system MUST iterate `[[file]]` entries via `DatasetConfig.from_toml`; for each entry it MUST derive `rel_stem` as `local.relative_to(data_dir)` when inside `data_dir = base_dir / config.OUTPUT_DIR`, otherwise `local.relative_to(base_dir)`. For non-`.xlsx` and single-sheet `.xlsx` entries it MUST write one `metadata.yaml` namespaced by `rel_stem` under `profile_dir` as `<write_root>/profiles/<rel_stem>.metadata.yaml`, computed as `(profile_dir / rel_stem).with_suffix(PurePath.suffixes replacement)` (only last suffix → `.metadata.yaml`). For `.xlsx` with N>1 sheets it MUST read all sheets via `_read_xlsx_sheets`, sanitize each sheet name via `sanitize_sheet_name` (lower→NFKD→ascii→space→`_`→strip; empty/whitespace-only → `sheet`) with `seen` dedup `_{n}`, and write N files `profiles/<rel>/<stem>__<sanitized>.metadata.yaml`. The system MUST pre-compute the collision map over sheet-expanded outputs normalized via `re.sub(r"__+", "_", str(path))` (so `a__ventas`≈`a_ventas`) as `output → [sources]` before any write, MUST write non-colliding outputs first, then MUST raise `ValueError` naming every colliding source as `<path>::<sheet>` and MUST NOT write colliding outputs nor a root index. `--output` anchoring MUST follow Option B: relative dirs anchor to `cfg._base_dir`, writes go to `<output>/profiles/`, never mutating `cache/`. TOML without `[[file]]` MUST fail fast. A declared source that lives under neither `data_dir` nor `base_dir` cannot be named by this layout: the batch MUST raise `SourceLayoutError` (`sofer._layout`, a `ValueError` subclass) carrying the source and the config directory, MUST NOT write any artifact for it, and the adapters MUST report that cause instead of a collision diagnosis. Supporting such sources is a separate layout decision, not an implicit consequence of this rule (issue #397).
 
 #### Scenario: Batch N-files
 
 - GIVEN `dataset.toml` with `[[file]]` for `raw/a.csv` and `raw/b.csv`
 - WHEN `sofer profile dataset.toml --all-files` executes
 - THEN `<write_root>/profiles/a.metadata.yaml` and `b.metadata.yaml` SHALL exist
+
+#### Scenario: A source outside the config directory is a layout error (issue #397)
+
+- GIVEN `dataset.toml` under `root/config/` whose `[[file]] local` is `../shared/input.csv`, and `root/shared/input.csv` exists
+- WHEN `sofer profile --all-files` runs
+- THEN the batch SHALL raise `SourceLayoutError` naming the source and `root/config`
+- AND the CLI SHALL exit 1 with that message and the MCP SHALL return `ok:false` with the same cause in `config_errors`
+- AND neither SHALL report a collision
 
 #### Scenario: Nested path preserved via rel_stem
 

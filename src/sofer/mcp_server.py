@@ -99,6 +99,7 @@ from . import config as sofer_config
 from . import mcp_admission as admission
 from . import mcp_registration as registration
 from ._formats import SUPPORTED_FORMATS
+from ._layout import SourceLayoutError
 from ._version import get_version
 from .checks import (
     DatasetValidator,
@@ -2689,6 +2690,16 @@ def sofer_codebook_all(
                 encoding=encoding,
                 max_sample=max_sample,
             )
+        except SourceLayoutError as exc:
+            # Issue #397: a source the artifact layout cannot name is a layout
+            # problem, never the collision diagnosis below.
+            return _error_envelope(
+                "CONFIG_ERROR",
+                str(exc),
+                next_hint={"action": "move_source_under_config_dir"},
+                config_errors=[str(exc)],
+                extra={"output": _captured_text(out, err), "files": []},
+            )
         except ValueError as exc:
             return _error_envelope(
                 "CONFIG_ERROR",
@@ -2926,6 +2937,16 @@ def sofer_profile_all(
                 delimiter=delimiter,
                 encoding=encoding,
             )
+        except SourceLayoutError as exc:
+            # Issue #397: an unnameable source used to surface here as
+            # "Collision in profile outputs" with an empty config_errors list.
+            return _error_envelope(
+                "CONFIG_ERROR",
+                str(exc),
+                next_hint={"action": "move_source_under_config_dir"},
+                config_errors=[str(exc)],
+                extra={"output": _captured_text(out, err), "files": []},
+            )
         except ValueError:
             return {
                 "ok": False,
@@ -3089,6 +3110,15 @@ def sofer_render_all(
 
         try:
             files = _gen_all_renders(cfg, output_dir=output_path)
+        except SourceLayoutError as exc:
+            # Issue #397: same honest refusal as profile/codebook.
+            return _error_envelope(
+                "CONFIG_ERROR",
+                str(exc),
+                next_hint={"action": "move_source_under_config_dir"},
+                config_errors=[str(exc)],
+                extra={"output": _captured_text(out, err), "files": []},
+            )
         except ValueError:
             return {
                 "ok": False,

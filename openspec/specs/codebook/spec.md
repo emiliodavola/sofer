@@ -66,7 +66,7 @@ changed to `FILE` for backward compatibility.
 
 ### Requirement: Batch Generation (CB-R03)
 
-When `--all-files` is specified, the system MUST generate one codebook for every `[[file]]` entry in the TOML config that points to a supported-format file; for `.xlsx` with N sheets it MUST generate N codebooks per § CB-R09. Directories and unsupported formats MUST be skipped with a warning. Each codebook MUST be written to `codebooks/<rel-stem>.md` for single-table formats, or `codebooks/<rel>/<stem>__<sanitized>.md` per sheet for multisheet `.xlsx` (single sheet → `stem.md`). No format suffix SHALL be appended. The collision map MUST be built from sheet-expanded output paths; when two or more expanded outputs collide, the system MUST print an error naming each source file (including sheet suffix), MUST exit 1, and MUST NOT write a codebook for any colliding file; non-colliding files SHALL still be written before the error is raised.
+When `--all-files` is specified, the system MUST generate one codebook for every `[[file]]` entry in the TOML config that points to a supported-format file; for `.xlsx` with N sheets it MUST generate N codebooks per § CB-R09. Directories and unsupported formats MUST be skipped with a warning. Each codebook MUST be written to `codebooks/<rel-stem>.md` for single-table formats, or `codebooks/<rel>/<stem>__<sanitized>.md` per sheet for multisheet `.xlsx` (single sheet → `stem.md`). No format suffix SHALL be appended. The collision map MUST be built from sheet-expanded output paths; when two or more expanded outputs collide, the system MUST print an error naming each source file (including sheet suffix), MUST exit 1, and MUST NOT write a codebook for any colliding file; non-colliding files SHALL still be written before the error is raised. A source that lives under neither `data_dir` nor `base_dir` MUST raise `SourceLayoutError` (shared with PRF-05, issue #397) instead of letting `Path.relative_to` surface a bare `ValueError` that reads as a collision; the adapters MUST report that cause in `config_errors`.
 
 (Previously: single output per TOML entry; collision key ignored sheet suffixes; `.xlsx` emitted only `wb.active`.)
 
@@ -84,6 +84,13 @@ When `--all-files` is specified, the system MUST generate one codebook for every
 - WHEN `--all-files` executes
 - THEN a warning SHALL be emitted
 - AND no codebook SHALL be generated for that entry
+
+#### Scenario: A source outside the config directory is a layout error (issue #397)
+
+- GIVEN a config under `root/config/` whose only `[[file]] local` is `../shared/input.csv`
+- WHEN `sofer codebook --all-files` runs
+- THEN it SHALL fail with `SourceLayoutError` naming the source and `root/config`
+- AND it SHALL NOT suggest renaming source files to avoid a collision
 
 #### Scenario: Nested file keeps its relative path
 
