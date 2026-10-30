@@ -2249,12 +2249,40 @@ class TestProfileRenderFlagCoverage:
         def _boom(*_a, **_k):
             raise ValueError("collision detected")
 
-        monkeypatch.setattr(profile_mod, "generate_all_profiles", _boom)
+        monkeypatch.setattr(profile_mod, "generate_all_profiles_result", _boom)
         rc = cli._cmd_profile(
             Namespace(dataset=None, output=None, all_files=True, force=False, config=custom)
         )
         assert rc == 1
         assert "collision detected" in capsys.readouterr().err
+
+    def test_profile_all_files_every_input_unreadable_returns_1(self, tmp_path, capsys) -> None:
+        """#396 — a batch that produced no profile must exit 1, not 0."""
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n")
+        toml = tmp_path / "custom.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            '[[file]]\nlocal = "cache/latin.csv"\nremote = "latin.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=None,
+                output=None,
+                all_files=True,
+                force=False,
+                config=str(toml),
+                delimiter=",",
+                encoding="utf-8",
+            )
+        )
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "latin.csv" in err
+        assert "no profile" in err.lower()
 
     def test_profile_all_files_unreadable_toml_returns_1(self, tmp_path, capsys) -> None:
         """A non-existent --config path surfaces from_toml failure with rc 1."""
@@ -3164,9 +3192,9 @@ class TestExplicitCsvDialectOverride:
 
         def _spy(cfg, output_dir=None, delimiter=None, encoding=None):
             seen.update(output_dir=output_dir, delimiter=delimiter, encoding=encoding)
-            return []
+            return profile_mod.ProfileBatchResult(files=[], failures=[], eligible=0)
 
-        monkeypatch.setattr(profile_mod, "generate_all_profiles", _spy)
+        monkeypatch.setattr(profile_mod, "generate_all_profiles_result", _spy)
         rc = cli._cmd_profile(
             Namespace(
                 dataset=None,

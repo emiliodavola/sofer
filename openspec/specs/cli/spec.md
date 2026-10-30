@@ -122,6 +122,13 @@ The system SHALL register `profile` and `render` as top-level subcommands, along
 - WHEN `--all-files` executes
 - THEN exit code SHALL be non-zero mentioning `[[file]]`
 
+#### Scenario: profile --all-files with unreadable inputs exits non-zero
+
+- GIVEN `sofer profile dataset.toml --all-files` where every eligible input fails to read
+- WHEN the command executes
+- THEN exit code SHALL be 1 and stderr SHALL name the failing inputs and the count
+- AND a batch with nothing eligible SHALL still exit 0 (issue #396)
+
 ### Requirement: Help text accurate for profile and render (CLI-R04)
 
 The parser's `help=` and `description=` strings for `profile` and `render` SHALL accurately document each command, its flags `--output`, `--all-files`, `--force`, `--config`, the TOML `[[file]]` contract for `--all-files`, and the `use --force to overwrite` guard. The README SHALL be updated in the same change.

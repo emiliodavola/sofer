@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
@@ -219,12 +220,53 @@ def profile(
     return 0
 
 
+@dataclass(frozen=True)
+class ProfileBatchResult:
+    """Outcome of one batch-profile run (issue #396).
+
+    A batch used to report success whenever it raised nothing, so a run whose
+    every input failed to decode returned an empty ``files`` list that the
+    adapters rendered as ``ok:true``. This record carries the denominator the
+    adapters need to tell "nothing to do" apart from "everything failed".
+
+    Attributes:
+        files: The ``metadata.yaml`` paths actually written, in generation
+            order (the colliding ones are excluded — they raise instead).
+        failures: ``(source_path, reason)`` for every eligible file the batch
+            could not read. Empty means no eligible input failed.
+        eligible: Declared entries that resolved to an existing, supported
+            file. ``0`` means the batch had nothing to profile, which is a
+            success; ``eligible > 0`` with no ``files`` is a failure.
+    """
+
+    files: list[str]
+    failures: list[tuple[str, str]]
+    eligible: int
+
+
 def generate_all_profiles(
     cfg: DatasetConfig,
     output_dir: str | Path | None = None,
     delimiter: str | None = None,
     encoding: str | None = None,
 ) -> list[str]:
+    """Generate one ``metadata.yaml`` per ``[[file]]`` entry under ``profiles/``.
+
+    Thin view over :func:`generate_all_profiles_result` (issue #396) that keeps
+    the historical ``list[str]`` return for callers that only need the paths.
+    See that function for the full contract.
+    """
+    return generate_all_profiles_result(
+        cfg, output_dir=output_dir, delimiter=delimiter, encoding=encoding
+    ).files
+
+
+def generate_all_profiles_result(
+    cfg: DatasetConfig,
+    output_dir: str | Path | None = None,
+    delimiter: str | None = None,
+    encoding: str | None = None,
+) -> ProfileBatchResult:
     """Generate one ``metadata.yaml`` per ``[[file]]`` entry under ``profiles/``.
 
     Each profile is written to ``{PROFILE_DIR}/<rel-stem>.metadata.yaml``,
@@ -255,7 +297,8 @@ def generate_all_profiles(
             ``config.CSV_ENCODING``.
 
     Returns:
-        List of generated profile file paths.
+        A :class:`ProfileBatchResult` naming the written files, the per-file
+        read failures and the number of eligible entries.
 
     Raises:
         ValueError: When two or more files resolve to the same output path
@@ -303,8 +346,15 @@ def generate_all_profiles(
 
         entries.append((local, suffix))
 
+    # The eligible denominator and the per-file failures are what let the
+    # adapters tell "nothing to do" apart from "every input failed" (issue
+    # #396): a batch used to return the bare path list, so both looked like an
+    # empty success.
+    eligible = len(entries)
+    failures: list[tuple[str, str]] = []
+
     if not entries:
-        return []
+        return ProfileBatchResult(files=[], failures=failures, eligible=eligible)
 
     # ── Sheet-expanded output paths and normalized collision map ──────
     expanded: list[tuple[Path, str | None, Path]] = []
@@ -321,6 +371,7 @@ def generate_all_profiles(
                 sheets = _read_xlsx_sheets(str(local))
             except Exception as exc:
                 print(f"  \u26a0  Error reading {local}: {exc}", file=sys.stderr)
+                failures.append((str(local), str(exc)))
                 continue
             if not sheets:
                 out = _profile_output_for_rel(profiles_dir, rel_stem, None)
@@ -342,7 +393,7 @@ def generate_all_profiles(
             expanded.append((local, None, out))
 
     if not expanded:
-        return []
+        return ProfileBatchResult(files=[], failures=failures, eligible=eligible)
 
     collision_map: dict[str, list[tuple[Path, str | None, Path]]] = {}
     for local, sheet, out in expanded:
@@ -371,6 +422,7 @@ def generate_all_profiles(
                 )
             except Exception as exc:
                 print(f"  \u2717  Error reading {local}: {exc}", file=sys.stderr)
+                failures.append((str(local), str(exc)))
                 continue
             schema = [_build_column(name, values) for name, values in zip(headers, columns)]
             meta = Metadata(
@@ -512,7 +564,7 @@ def generate_all_profiles(
 
     refresh_manifest(cfg, write_root if output_dir is not None else None)
 
-    return generated
+    return ProfileBatchResult(files=generated, failures=failures, eligible=eligible)
 
 
 def _read_dataset_for_profile(

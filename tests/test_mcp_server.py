@@ -4253,6 +4253,61 @@ class TestMcpProfileRenderBatch:
         assert not (tmp_path / "evil").exists()
 
 
+class TestProfileAllFalseSuccess:
+    """#396 — a batch that produced no profile must not report success."""
+
+    def _root(self, tmp_path, *, with_readable: bool):
+        """Build a server root with one unreadable (cp1252) CSV, optionally a good one."""
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "cache").mkdir()
+        (root / "cache" / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n")
+        entries = ['[[file]]\nlocal = "cache/latin.csv"\nremote = "latin.csv"\n']
+        if with_readable:
+            (root / "cache" / "ok.csv").write_text("num,text\n1,ok\n", encoding="utf-8")
+            entries.insert(0, '[[file]]\nlocal = "cache/ok.csv"\nremote = "ok.csv"\n')
+        (root / "dataset.toml").write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n' + "".join(entries),
+            encoding="utf-8",
+        )
+        return root
+
+    def test_every_input_unreadable_is_not_success(self, tmp_path, restore_tool_config):
+        """Zero profiles from a readable-looking input returns ok:false."""
+        root = self._root(tmp_path, with_readable=False)
+        server = build_server(root=root)
+
+        envelope = _call(
+            server,
+            "sofer_profile_all",
+            {"config": str(root / "dataset.toml"), "delimiter": ",", "encoding": "utf-8"},
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert envelope["error_code"] == "INPUT_READ_FAILED"
+        assert envelope["files"] == []
+        assert envelope["failures"], envelope
+        assert "latin.csv" in envelope["failures"][0]["path"]
+
+    def test_partial_failure_is_flagged_and_keeps_the_profile(self, tmp_path, restore_tool_config):
+        """One readable input still writes its profile and the envelope reports partial."""
+        root = self._root(tmp_path, with_readable=True)
+        server = build_server(root=root)
+
+        envelope = _call(
+            server,
+            "sofer_profile_all",
+            {"config": str(root / "dataset.toml"), "delimiter": ",", "encoding": "utf-8"},
+        ).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["partial"] is True
+        assert len(envelope["files"]) == 1
+        assert len(envelope["failures"]) == 1
+        assert (root / "cache" / "profiles" / "ok.metadata.yaml").is_file()
+
+
 # ---------------------------------------------------------------------------
 #  feat/mcp-init-tool — sofer_init bootstrap tool (INIT-01)
 # ---------------------------------------------------------------------------
