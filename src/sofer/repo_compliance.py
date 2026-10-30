@@ -1370,6 +1370,8 @@ def schema_config_plan(
     schema: list[ColumnSchema],
     keep_csv: bool = False,
     staging_dir: Path | None = None,
+    *,
+    remotes: list[str] | None = None,
 ) -> list[tuple[str, list[str]]] | None:
     """Compute the ``(config_name, remotes)`` plan the card will emit.
 
@@ -1383,15 +1385,20 @@ def schema_config_plan(
         keep_csv:    Whether converted CSVs are also delivered at their remote.
         staging_dir: Mirror layout root for XLSX expansion (see
                      :func:`sofer._mirror.expanded_planned_remotes`).
+        remotes: Already-resolved delivered remotes. When given, they replace
+            the plan entirely — ``prepare`` passes what it actually staged so a
+            CSV fallback advertises the CSV instead of a Parquet that was never
+            produced (issue #393).
 
     Returns:
         One ``(config_name, remotes)`` pair per schema group, or ``None`` when
         the corpus is ungroupable (see :func:`group_remotes_by_schema`).
     """
-    if staging_dir is not None and staging_dir.is_dir():
-        remotes = expanded_planned_remotes(cfg, keep_csv, staging_dir)
-    else:
-        remotes = planned_remotes(cfg, keep_csv)
+    if remotes is None:
+        if staging_dir is not None and staging_dir.is_dir():
+            remotes = expanded_planned_remotes(cfg, keep_csv, staging_dir)
+        else:
+            remotes = planned_remotes(cfg, keep_csv)
     aliases = _remote_origin_aliases(cfg, remotes)
     groups = group_remotes_by_schema(
         remotes, schema, aliases, _schema_eligible_remotes(cfg, remotes, aliases)
@@ -1586,6 +1593,7 @@ def build_dataset_card(
     row_counts: dict[str, int] | None = None,
     keep_csv: bool = False,
     staging_dir: Path | None = None,
+    delivered_remotes: list[str] | None = None,
 ) -> str:
     """Generate a HF-standard Dataset Card (``README.md`` with YAML frontmatter).
 
@@ -1620,6 +1628,11 @@ def build_dataset_card(
                                or not a directory falls back to the logical
                                placeholder; when it exists each eligible XLSX
                                expands to N ``stem__sheet.parquet`` entries.
+        delivered_remotes:     Remotes the caller actually staged, when it knows
+                               them (``prepare`` does). They replace the plan for
+                               ``configs.data_files`` and the Dataset Structure
+                               listing, so a CSV fallback names the CSV instead
+                               of the missing Parquet (issue #393).
 
     Returns:
         Complete ``README.md`` content as a single string.
@@ -1672,7 +1685,11 @@ def build_dataset_card(
     # `configs` entry plus its own `dataset_info` per group.  A corpus whose
     # remotes carry no schema at all is ungroupable: it emits neither block
     # and lets the Hub infer per-file (S2/D1).
-    plan = schema_config_plan(cfg, schema, keep_csv, staging_dir) if cfg.files else None
+    plan = (
+        schema_config_plan(cfg, schema, keep_csv, staging_dir, remotes=delivered_remotes)
+        if cfg.files
+        else None
+    )
     if plan is not None and cfg.files:
         configs: list[dict[str, object]] = []
         for config_name, group_remotes in plan:
@@ -1820,7 +1837,9 @@ def build_dataset_card(
         # Delivered repo-relative paths — same mapping the upload pipeline
         # uses (conversion, upload_as_csv, recursive, keep_csv), RC-R08.
         # Expanded when the mirror exists (RC-Universal-Card).
-        if staging_dir is not None and staging_dir.is_dir():
+        if delivered_remotes is not None:
+            delivered = delivered_remotes
+        elif staging_dir is not None and staging_dir.is_dir():
             delivered = expanded_planned_remotes(cfg, keep_csv, staging_dir)
         else:
             delivered = planned_remotes(cfg, keep_csv)

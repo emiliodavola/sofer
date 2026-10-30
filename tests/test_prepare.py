@@ -1901,3 +1901,84 @@ class TestPrepareValueParity:
         assert prepare(cfg, out) == 0
         table = pq.read_table(out / "plain.parquet")
         assert table.schema.field("a").type == pa.int64()
+
+
+class TestPrepareFallbackIsDeclared:
+    """#393 - a CSV fallback must not leave the card pointing at a missing Parquet."""
+
+    def _ragged(self, tmp_path: Path) -> FileEntry:
+        """The issue's fixture: one short row and one long row."""
+        csv = tmp_path / "input.csv"
+        csv.write_text("id;valor\nA;10\nB\nC;30;EXTRA\n", encoding="utf-8")
+        return FileEntry(local=csv, remote="input.csv", convert_to_parquet=True)
+
+    def test_card_references_the_delivered_csv(self, tmp_path: Path) -> None:
+        """README data_files and the structure listing name the CSV that exists."""
+        entry = self._ragged(tmp_path)
+        cfg = _cfg(tmp_path, [entry])
+        out = tmp_path / "build"
+
+        rc = prepare(cfg, out)
+
+        assert rc == 0
+        readme = (out / "README.md").read_text(encoding="utf-8")
+        assert "input.parquet" not in readme
+        assert "  - path: input.csv" in readme
+        assert "  - `input.csv`" in readme
+        assert (out / "input.csv").is_file()
+        assert not (out / "input.parquet").exists()
+        # The original is staged byte-for-byte.
+        assert (out / "input.csv").read_bytes() == entry.local.read_bytes()
+
+    def test_valid_conversion_still_references_the_parquet(self, tmp_path: Path) -> None:
+        """Control: a successful conversion keeps the Parquet reference."""
+        csv = tmp_path / "ok.csv"
+        csv.write_text("a;b\n1;2\n", encoding="utf-8")
+        cfg = _cfg(tmp_path, [FileEntry(local=csv, remote="ok.csv")])
+        out = tmp_path / "build"
+
+        assert prepare(cfg, out) == 0
+
+        readme = (out / "README.md").read_text(encoding="utf-8")
+        assert "  - path: ok.parquet" in readme
+        assert (out / "ok.parquet").is_file()
+
+    def test_result_reports_the_fallback_and_keeps_exit_zero(self, tmp_path: Path) -> None:
+        """The structured result names the fallback; the fallback is not fatal."""
+        from sofer.prepare import prepare_result
+
+        entry = self._ragged(tmp_path)
+        cfg = _cfg(tmp_path, [entry])
+
+        result = prepare_result(cfg, tmp_path / "build")
+
+        assert result.exit_code == 0
+        assert len(result.fallbacks) == 1
+        remote, reason = result.fallbacks[0]
+        assert remote == "input.csv"
+        # The structured reason is stable; the parser's detail stays in the
+        # captured output (asserted by the warning test below).
+        assert reason == "conversion failed; original staged"
+
+    def test_failed_conversion_warns_once(self, tmp_path: Path, capsys) -> None:
+        """A single failure prints one warning, not one per layer."""
+        entry = self._ragged(tmp_path)
+        cfg = _cfg(tmp_path, [entry])
+
+        prepare(cfg, tmp_path / "build")
+
+        captured = capsys.readouterr().out.lower()
+        assert captured.count("conversion failed") == 1
+        assert "staging original" in captured
+        # The actionable cause still reaches the operator (and the MCP output).
+        assert "csv parse error" in captured
+
+    def test_result_line_names_the_degradation(self, tmp_path: Path, capsys) -> None:
+        """The final summary states how many files were staged unconverted."""
+        entry = self._ragged(tmp_path)
+        cfg = _cfg(tmp_path, [entry])
+
+        prepare(cfg, tmp_path / "build")
+
+        captured = capsys.readouterr().out
+        assert "1 file(s) staged as the original" in captured

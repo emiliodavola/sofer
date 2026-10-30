@@ -119,7 +119,7 @@ from .execution_context import (
 )
 from .metadata import load as metadata_load
 from .model import DatasetConfig, QualityResult, resolve_doc_path
-from .prepare import prepare as run_prepare
+from .prepare import prepare_result as run_prepare_result
 from .prepare import resolve_output_dir
 from .profile import profile as run_profile
 from .publish import _repo_visibility
@@ -2123,6 +2123,11 @@ def sofer_prepare(
     Side effects: writes Parquet files, Dataset Card, LICENSE into the output directory.
     Network usage: none.
 
+    A conversion that fails is not fatal: the original file is staged and the
+    card names it, so the package never advertises a Parquet it does not
+    contain. The envelope reports the degradation as `partial: true` plus one
+    `fallbacks` entry (`path`, `reason`) per affected file (issue #393).
+
     When to use: Phase 1 step 2 after sofer_validate. Standalone when you need a local package without batch docs.
     Example: sofer_prepare(config="dataset.toml", output_dir=None, run_checks=True)
     Requires: sofer_validate passed with no [meta] placeholder warnings. Next: sofer_codebook_all, then sofer_profile_all.
@@ -2139,7 +2144,7 @@ def sofer_prepare(
         resolved_output = resolve_output_dir(
             cfg, str(output_path) if output_path is not None else None
         )
-        rc = run_prepare(
+        result = run_prepare_result(
             cfg,
             resolved_output,
             all_files=False,
@@ -2147,14 +2152,23 @@ def sofer_prepare(
             force=force,
             verify=verify,
         )
-        return {
-            "ok": rc == 0,
-            "exit_code": rc,
+        envelope: dict[str, Any] = {
+            "ok": result.exit_code == 0,
+            "exit_code": result.exit_code,
             "output": _captured_text(out, err),
             "confidential": cfg.confidential,
             "config_errors": config_errors,
             "next": _workflow_next("sofer_prepare", config),
         }
+        if result.fallbacks:
+            # Issue #393: the package holds the original file, not the Parquet
+            # the config asked for. Keep the success (the documented fallback is
+            # not fatal) but state the degradation and name every affected file.
+            envelope["partial"] = True
+            envelope["fallbacks"] = [
+                {"path": remote, "reason": reason} for remote, reason in result.fallbacks
+            ]
+        return envelope
 
 
 @_with_call_root
@@ -4458,6 +4472,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "ok": {"type": "boolean"},
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
+                # Issue #393: a CSV/TSV fallback keeps the success but states
+                # the degradation and names each file it affected.
+                "partial": {"type": "boolean"},
+                "fallbacks": {"type": "array"},
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,

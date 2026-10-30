@@ -6702,3 +6702,64 @@ class TestSourceLayoutDiagnosis:
         envelope = _call(server, "sofer_render_all", {"config": "config/dataset.toml"}).data
 
         self._assert_layout_refusal(envelope)
+
+
+class TestPrepareFallbackEnvelope:
+    """#393 - a CSV fallback is reported as partial, and the card names the CSV."""
+
+    def _root(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "cache").mkdir()
+        (root / "cache" / "input.csv").write_text(
+            "id;valor\nA;10\nB\nC;30;EXTRA\n", encoding="utf-8"
+        )
+        (root / "dataset.toml").write_text(
+            '[dataset]\nname = "fallback"\nrepo_id = "u/fallback"\n\n'
+            "[meta]\n"
+            'description = "ragged fixture"\nlicense = "mit"\nsource = "synthetic"\n'
+            'confidential = false\nconfidentiality_reason = "synthetic"\n'
+            'csv_delimiter = ";"\ncsv_encoding = "utf-8"\n\n'
+            '[[file]]\nlocal = "cache/input.csv"\nremote = "input.csv"\n'
+            "convert_to_parquet = true\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_fallback_is_partial_and_card_names_the_csv(self, tmp_path, restore_tool_config):
+        root = self._root(tmp_path)
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_prepare", {"config": str(root / "dataset.toml")}).data
+
+        assert envelope["ok"] is True, envelope
+        assert envelope["exit_code"] == 0
+        assert envelope["partial"] is True
+        assert [f["path"] for f in envelope["fallbacks"]] == ["input.csv"]
+        assert envelope["fallbacks"][0]["reason"]
+
+        readme = (root / "build" / "README.md").read_text(encoding="utf-8")
+        assert "- path: input.csv" in readme
+        assert "input.parquet" not in readme
+
+    def test_successful_conversion_is_not_partial(self, tmp_path, restore_tool_config):
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "cache").mkdir()
+        (root / "cache" / "ok.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (root / "dataset.toml").write_text(
+            '[dataset]\nname = "clean"\nrepo_id = "u/clean"\n\n'
+            "[meta]\n"
+            'description = "clean fixture"\nlicense = "mit"\nsource = "synthetic"\n'
+            'confidential = false\nconfidentiality_reason = "synthetic"\n\n'
+            '[[file]]\nlocal = "cache/ok.csv"\nremote = "ok.csv"\n',
+            encoding="utf-8",
+        )
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_prepare", {"config": str(root / "dataset.toml")}).data
+
+        assert envelope["ok"] is True, envelope
+        # FastMCP materializes the declared-but-absent schema fields as None.
+        assert not envelope.get("partial")
+        assert not envelope.get("fallbacks")
