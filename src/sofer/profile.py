@@ -245,10 +245,14 @@ def generate_all_profiles(
             directory is never mutated. When ``None`` (default), profiles go
             to ``cache/profiles/``.
         delimiter: Explicit CSV field delimiter applied to every ``.csv``
-            entry (PRF-07); ``None`` resolves to ``config.CSV_DELIMITER``.
-            ``.tsv`` stays tab-delimited and non-streamed formats ignore it.
+            entry (PRF-07). ``None`` resolves to the dataset's own
+            ``[meta] csv_delimiter`` (issue #394), which in turn defaults to
+            ``config.CSV_DELIMITER``. ``.tsv`` stays tab-delimited and
+            non-streamed formats ignore it.
         encoding: Explicit encoding applied to every ``.csv``/``.tsv`` entry
-            (PRF-07); ``None`` resolves to ``config.CSV_ENCODING``.
+            (PRF-07). ``None`` resolves to the dataset's own
+            ``[meta] csv_encoding`` (issue #394), which in turn defaults to
+            ``config.CSV_ENCODING``.
 
     Returns:
         List of generated profile file paths.
@@ -259,6 +263,16 @@ def generate_all_profiles(
     """
     base_dir = cfg._base_dir.resolve()
     data_dir = base_dir / config.OUTPUT_DIR
+
+    # ── Dialect resolution (issue #394) ────────────────────────────────
+    # Precedence: explicit override > the dataset's ``[meta]`` dialect > the
+    # tool-wide default resolved by ``_read_dataset_for_profile``. Batch
+    # profiling used to skip the dataset tier, so a TOML declaring
+    # ``csv_delimiter = ","`` was read with the tool-wide ``;``. Resolving once
+    # here keeps the CLI and MCP callers on the same rule (codebook.py does
+    # the same for its own batch).
+    delimiter = cfg.csv_delimiter if delimiter is None else delimiter
+    encoding = cfg.csv_encoding if encoding is None else encoding
 
     if output_dir is None:
         write_root = data_dir
@@ -513,10 +527,14 @@ def _read_dataset_for_profile(
         path: Absolute path to the dataset file.
         suffix: Lowercased suffix (already validated against
             :data:`SUPPORTED_FORMATS`).
-        delimiter: Explicit CSV delimiter (PRF-07); ``None`` resolves to
-            ``config.CSV_DELIMITER``. ``.tsv`` stays tab-delimited.
-        encoding: Explicit encoding (PRF-07); ``None`` resolves to
-            ``config.CSV_ENCODING``.
+        delimiter: CSV delimiter (PRF-07); ``None`` falls back to
+            ``config.CSV_DELIMITER``. :func:`generate_all_profiles` resolves
+            the dataset's ``[meta] csv_delimiter`` before calling this helper
+            (issue #394), so ``None`` here is a last-resort default only.
+            ``.tsv`` stays tab-delimited.
+        encoding: Encoding (PRF-07); ``None`` falls back to
+            ``config.CSV_ENCODING``. Resolved from the dataset's
+            ``[meta] csv_encoding`` by the batch caller (issue #394).
 
     Returns:
         ``(headers, columns, rows, encoding, delimiter)`` with the dialect

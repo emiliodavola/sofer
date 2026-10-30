@@ -1115,3 +1115,145 @@ class TestProfileExplicitDialectPrf07:
         data = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert data["file"]["delimiter"] == ","
         assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+
+def _write_dialect_dataset_toml(base, entries: list[str], *, csv_delimiter: str, csv_encoding: str):
+    """Write a dataset.toml declaring ``[meta]`` dialect values for *entries*."""
+    from pathlib import Path as _Path
+
+    base_p = _Path(str(base))
+    lines = [
+        "[dataset]",
+        'name = "test-ds"',
+        'repo_id = "user/test-ds"',
+        "",
+    ]
+    for local in entries:
+        lines.extend(["[[file]]", f'local = "{local}"', f'remote = "{local}"', ""])
+    lines.extend(
+        [
+            "[meta]",
+            'description = "dialect fixture"',
+            'license = "mit"',
+            'source = "synthetic"',
+            f'csv_delimiter = "{csv_delimiter}"',
+            f'csv_encoding = "{csv_encoding}"',
+            "",
+        ]
+    )
+    toml_path = base_p / "dataset.toml"
+    toml_path.write_text("\n".join(lines), encoding="utf-8")
+    return toml_path
+
+
+class TestProfileBatchDatasetDialect:
+    """#394 — a batch profile with omitted overrides uses the dataset dialect.
+
+    Precedence is ``explicit override > [meta] csv_delimiter/csv_encoding >
+    tool-wide default``; ``.tsv`` stays tab-delimited by format.
+    """
+
+    def test_omitted_pair_inherits_dataset_delimiter(self, tmp_path, restore_tool_config):
+        """A comma CSV whose TOML declares ``,`` is read as two columns."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)  # tool-wide default delimiter is ";"
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = _write_dialect_dataset_toml(
+            tmp_path, ["cache/a.csv"], csv_delimiter=",", csv_encoding="utf-8"
+        )
+
+        generate_all_profiles(DatasetConfig.from_toml(toml))
+
+        out = tmp_path / "cache" / "profiles" / "a.metadata.yaml"
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ","
+        assert data["file"]["encoding"] == "utf-8"
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+    def test_omitted_pair_inherits_dataset_encoding(self, tmp_path, restore_tool_config):
+        """A cp1252 dataset declared in the TOML is decoded without overrides."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)  # tool-wide default encoding is utf-8-sig
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n2,Pe\xf1a\n")
+        toml = _write_dialect_dataset_toml(
+            tmp_path, ["cache/latin.csv"], csv_delimiter=",", csv_encoding="cp1252"
+        )
+
+        results = generate_all_profiles(DatasetConfig.from_toml(toml))
+
+        assert len(results) == 1
+        out = tmp_path / "cache" / "profiles" / "latin.metadata.yaml"
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["encoding"] == "cp1252"
+        assert [c["name"] for c in data["structure"]["schema"]] == ["num", "text"]
+
+    def test_dataset_value_wins_over_tool_default(self, tmp_path, restore_tool_config):
+        """A dataset delimiter different from the tool-wide one still wins."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.sofer]\ncsv_delimiter = ","\n', encoding="utf-8"
+        )
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "semi.csv").write_text("col_a;col_b\n1;2\n", encoding="utf-8")
+        toml = _write_dialect_dataset_toml(
+            tmp_path, ["cache/semi.csv"], csv_delimiter=";", csv_encoding="utf-8"
+        )
+
+        generate_all_profiles(DatasetConfig.from_toml(toml))
+
+        out = tmp_path / "cache" / "profiles" / "semi.metadata.yaml"
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ";"
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+    def test_explicit_override_wins_over_dataset_value(self, tmp_path, restore_tool_config):
+        """An explicit delimiter still beats the dataset's declared value."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        toml = _write_dialect_dataset_toml(
+            tmp_path, ["cache/a.csv"], csv_delimiter=",", csv_encoding="utf-8"
+        )
+
+        generate_all_profiles(DatasetConfig.from_toml(toml), delimiter=";")
+
+        out = tmp_path / "cache" / "profiles" / "a.metadata.yaml"
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == ";"
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a,col_b"]
+
+    def test_tsv_stays_tab_delimited_with_dataset_comma(self, tmp_path, restore_tool_config):
+        """`.tsv` keeps the tab delimiter even when the dataset declares ``,``."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "a.tsv").write_text("col_a\tcol_b\n1\t2\n", encoding="utf-8")
+        toml = _write_dialect_dataset_toml(
+            tmp_path, ["cache/a.tsv"], csv_delimiter=",", csv_encoding="utf-8"
+        )
+
+        generate_all_profiles(DatasetConfig.from_toml(toml))
+
+        out = tmp_path / "cache" / "profiles" / "a.metadata.yaml"
+        data = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert data["file"]["delimiter"] == "\t"
+        assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
