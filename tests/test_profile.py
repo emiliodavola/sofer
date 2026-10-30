@@ -1257,3 +1257,67 @@ class TestProfileBatchDatasetDialect:
         data = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert data["file"]["delimiter"] == "\t"
         assert [c["name"] for c in data["structure"]["schema"]] == ["col_a", "col_b"]
+
+
+class TestProfileBatchOutcomeReporting:
+    """#396 — a batch reports per-file failures instead of a blanket success."""
+
+    def test_every_input_unreadable_is_an_outcome_failure(self, tmp_path, restore_tool_config):
+        """An unreadable input yields zero files, one failure and eligible=1."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles_result
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n")
+        toml = _write_dataset_toml(tmp_path, ["cache/latin.csv"])
+
+        result = generate_all_profiles_result(
+            DatasetConfig.from_toml(toml), delimiter=",", encoding="utf-8"
+        )
+
+        assert result.files == []
+        assert result.eligible == 1
+        assert len(result.failures) == 1
+        failed_path, reason = result.failures[0]
+        assert failed_path.replace("\\", "/").endswith("cache/latin.csv")
+        assert "decode" in reason.lower()
+
+    def test_partial_failure_keeps_files_and_reports_causes(self, tmp_path, restore_tool_config):
+        """One readable and one unreadable input keeps the file and names the failure."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles_result
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "ok.csv").write_text("num,text\n1,ok\n", encoding="utf-8")
+        (tmp_path / "cache" / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n")
+        toml = _write_dataset_toml(tmp_path, ["cache/ok.csv", "cache/latin.csv"])
+
+        result = generate_all_profiles_result(
+            DatasetConfig.from_toml(toml), delimiter=",", encoding="utf-8"
+        )
+
+        assert result.eligible == 2
+        assert len(result.files) == 1
+        assert result.files[0].replace("\\", "/").endswith("profiles/ok.metadata.yaml")
+        assert len(result.failures) == 1
+
+    def test_no_eligible_entry_is_not_a_failure(self, tmp_path, restore_tool_config):
+        """Nothing eligible (missing/unsupported only) reports no failure."""
+        import sofer.config as cfg
+        from sofer.model import DatasetConfig
+        from sofer.profile import generate_all_profiles_result
+
+        cfg.reload(tmp_path)
+        (tmp_path / "cache").mkdir()
+        (tmp_path / "cache" / "notes.txt").write_text("x", encoding="utf-8")
+        toml = _write_dataset_toml(tmp_path, ["cache/notes.txt", "cache/missing.csv"])
+
+        result = generate_all_profiles_result(DatasetConfig.from_toml(toml))
+
+        assert result.files == []
+        assert result.failures == []
+        assert result.eligible == 0

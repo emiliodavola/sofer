@@ -336,7 +336,8 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     The source dataset is never modified (PRF-03). Returns the exit code from
     the domain function (0 on success, 1 on error). A missing destination
     guard without ``--force`` surfaces ``FileExistsError`` as exit 1 with a
-    ``use --force to overwrite`` hint.
+    ``use --force to overwrite`` hint. A batch whose eligible inputs all failed
+    to read exits 1 instead of reporting an empty success (issue #396).
 
     ``--delimiter`` / ``--encoding`` are additive overrides (issue #204): when
     supplied they win over the resolved ``config.CSV_*`` values, and when
@@ -371,11 +372,11 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         if not cfg.files:
             print("Error: No [[file]] entries found in configuration.", file=sys.stderr)
             return 1
-        from .profile import generate_all_profiles as _gen_all
+        from .profile import generate_all_profiles_result as _gen_all
 
         _echo_explicit_dialect(args)
         try:
-            _gen_all(
+            result = _gen_all(
                 cfg,
                 output_dir=args.output,
                 delimiter=getattr(args, "delimiter", None),
@@ -383,6 +384,16 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        # Issue #396: a batch with eligible inputs that produced no profile is
+        # a failure, not an empty success. The per-file reason already reached
+        # stderr from the domain function.
+        if result.eligible and not result.files:
+            print(
+                f"Error: no profile was generated — all {result.eligible} "
+                f"eligible input(s) failed to read.",
+                file=sys.stderr,
+            )
             return 1
         return 0
 

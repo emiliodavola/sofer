@@ -214,6 +214,7 @@ _ERROR_CODES: tuple[str, ...] = (
     "INITIALIZATION_SESSION_UNAVAILABLE",
     "VALIDATION_FAILED",
     "QUALITY_GATE_FAILED",
+    "INPUT_READ_FAILED",
     "PUBLISH_RISK_NOT_ACKD",
     "PUBLISH_CONFIDENTIAL_NOT_ACKD",
     "PUBLISH_APPROVAL_REQUIRED",
@@ -2850,6 +2851,13 @@ def sofer_profile_all(
     configured profile_dir, inside the artifact-cache write root.
     Network usage: none.
 
+    Success is stated only when profiles were actually produced: an eligible
+    input that cannot be read is reported in ``failures`` (``partial: true``
+    alongside the written ``files``), and a batch where every eligible input
+    failed returns ``ok:false`` with ``error_code=INPUT_READ_FAILED`` instead of
+    an empty success (issue #396). A config with nothing eligible still
+    succeeds with ``files: []``.
+
     When to use: Phase 1 step 4 batch; single-file triage use sofer_profile.
     Example: sofer_profile_all(config="dataset.toml")
     Requires: dataset TOML with [[file]] entries and valid profile_dir under root. Next: sofer_render_all.
@@ -2883,10 +2891,10 @@ def sofer_profile_all(
             if output_dir is not None
             else None
         )
-        from .profile import generate_all_profiles as _gen_all
+        from .profile import generate_all_profiles_result as _gen_all
 
         try:
-            files = _gen_all(
+            result = _gen_all(
                 cfg,
                 output_dir=output_path,
                 delimiter=delimiter,
@@ -2900,17 +2908,38 @@ def sofer_profile_all(
                 "config_errors": [],
                 "error_code": "CONFIG_ERROR",
                 "message": "Collision in profile outputs",
+                "files": [],
                 "next": {},
             }
-        return {
+        failures = [{"path": source, "reason": reason} for source, reason in result.failures]
+        if result.eligible and not result.files:
+            # Issue #396: every eligible input failed to read. Returning
+            # ok:true here let an agent continue a pipeline that produced
+            # nothing, so this is an error envelope with the causes attached.
+            return _error_envelope(
+                "INPUT_READ_FAILED",
+                f"No profile was generated: all {result.eligible} eligible "
+                f"input(s) failed to read.",
+                next_hint={"action": "check_delimiter_or_encoding"},
+                extra={
+                    "output": _captured_text(out, err),
+                    "files": [],
+                    "failures": failures,
+                },
+            )
+        envelope: dict[str, Any] = {
             "ok": True,
             "exit_code": 0,
             "output": _captured_text(out, err),
-            "files": files,
+            "files": result.files,
             "config_errors": [],
             "next": _workflow_next("sofer_profile_all", config),
             **_dialect_envelope(delimiter, encoding),
         }
+        if failures:
+            envelope["partial"] = True
+            envelope["failures"] = failures
+        return envelope
 
 
 @_with_call_root
@@ -4519,6 +4548,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "files": {"type": "array"},
+                # Issue #396: per-file read failures, present only when some
+                # eligible input failed (with ``partial`` on a successful run).
+                "failures": {"type": "array"},
+                "partial": {"type": "boolean"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,
                 **_DIALECT_ENVELOPE_SCHEMA_FIELD,

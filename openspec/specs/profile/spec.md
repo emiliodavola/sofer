@@ -168,6 +168,27 @@ When `--all-files` is set the system MUST iterate `[[file]]` entries via `Datase
 - WHEN batch executes
 - THEN outputs SHALL be under `docs/profiles/<rel_stem>.metadata.yaml`
 
+#### Scenario: Batch reports per-file read failures (issue #396)
+
+- GIVEN `dataset.toml` with two eligible `.csv` entries where only one decodes under the supplied dialect
+- WHEN batch executes
+- THEN the returned batch record SHALL name exactly one written profile and one failure carrying the unreadable source path and its reason
+- AND `generate_all_profiles` SHALL keep returning the written paths only
+
+#### Scenario: A batch with no readable input is a failure, not an empty success
+
+- GIVEN `dataset.toml` whose every eligible entry fails to decode
+- WHEN `sofer profile dataset.toml --all-files` executes
+- THEN the command SHALL exit 1 and name the number of eligible inputs that failed
+- AND the MCP `sofer_profile_all` SHALL return `ok:false` with `error_code=INPUT_READ_FAILED`
+
+#### Scenario: A batch with nothing eligible is still a success
+
+- GIVEN a config whose entries are all missing, directories or unsupported formats
+- WHEN batch executes
+- THEN it SHALL produce no profile and report zero failures
+- AND it SHALL NOT be treated as an input-read failure
+
 #### Scenario: TOML without [[file]] fails
 
 - GIVEN TOML with no `[[file]]`
