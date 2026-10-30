@@ -3800,3 +3800,61 @@ class TestInitTemplatePosture:
         # not appear is a posture error, because the template states its posture.
         assert not any("public_reason" in e for e in cfg.validate()), cfg.validate()
         assert not any("confidentiality_reason" in e for e in cfg.validate()), cfg.validate()
+
+
+class TestSourceLayoutCli:
+    """#397 - the CLI names the layout problem instead of reporting a collision."""
+
+    def _toml(self, tmp_path) -> str:
+        root = tmp_path / "root"
+        (root / "config" / "raw").mkdir(parents=True)
+        (root / "shared").mkdir()
+        (root / "shared" / "input.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (root / "config" / "raw" / "input.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        toml = root / "config" / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "sib"\nrepo_id = "u/sib"\n\n'
+            '[[file]]\nlocal = "../shared/input.csv"\nremote = "input.csv"\n',
+            encoding="utf-8",
+        )
+        return str(toml)
+
+    def _assert_refusal(self, rc: int, err: str) -> None:
+        assert rc == 1
+        assert "Source layout not supported" in err
+        assert "Collision" not in err
+
+    def test_profile_all_files_names_the_layout_problem(self, tmp_path, capsys) -> None:
+        rc = cli._cmd_profile(
+            Namespace(
+                dataset=None,
+                output=None,
+                all_files=True,
+                force=False,
+                config=self._toml(tmp_path),
+            )
+        )
+        self._assert_refusal(rc, capsys.readouterr().err)
+
+    def test_codebook_all_files_names_the_layout_problem(self, tmp_path, capsys) -> None:
+        rc = cli._cmd_codebook(
+            Namespace(
+                all_files=True,
+                config=self._toml(tmp_path),
+                csv=None,
+                output=None,
+                max_sample=None,
+            )
+        )
+        self._assert_refusal(rc, capsys.readouterr().err)
+
+    def test_render_all_files_names_the_layout_problem(self, tmp_path, capsys) -> None:
+        rc = cli._cmd_render(
+            Namespace(
+                all_files=True,
+                config=self._toml(tmp_path),
+                package=None,
+                output=None,
+            )
+        )
+        self._assert_refusal(rc, capsys.readouterr().err)

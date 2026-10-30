@@ -30,6 +30,7 @@ from ._converters import (
     sanitize_sheet_name,  # noqa: F401 — re-exported for parity, used via _read_xlsx_sheets
 )
 from ._formats import SUPPORTED_FORMATS
+from ._layout import rel_stem as _rel_stem
 from .codebook import _read_xlsx_sheets
 from .metadata import Metadata, SemanticType, load
 from .model import InferenceStatus
@@ -238,10 +239,9 @@ def generate_all_renders(
     xlsx_cache: dict[Path, dict[str, tuple[list[str], list[list[str]], dict[str, str] | None]]] = {}
 
     for local, suffix in entries:
-        if local.is_relative_to(data_dir):
-            rel_stem = local.relative_to(data_dir)
-        else:
-            rel_stem = local.relative_to(base_dir)
+        # Issue #397: same shared stem rule as profile/codebook, so a source
+        # outside both directories is a typed layout error, never a collision.
+        rel_stem = _rel_stem(local, base_dir=base_dir, data_dir=data_dir)
 
         if suffix == ".xlsx":
             try:
@@ -289,10 +289,7 @@ def generate_all_renders(
         if (local, sheet) in colliding_expanded:
             continue
 
-        if local.is_relative_to(data_dir):
-            rel_stem = local.relative_to(data_dir)
-        else:
-            rel_stem = local.relative_to(base_dir)
+        rel_stem = _rel_stem(local, base_dir=base_dir, data_dir=data_dir)
 
         cached = xlsx_cache.get(local)
         meta_sheet = None if cached is not None and len(cached) == 1 else sheet

@@ -558,6 +558,14 @@ System MUST return expected failures as `{"ok":false,"error_code":E,"message":st
 - THEN the envelope SHALL be `ok:true` with the one generated path in `files`
 - AND `partial:true` plus the failing file's `failures` entry
 
+#### Scenario: A source the artifact layout cannot name reports its own cause
+
+- GIVEN `sofer_profile_all`, `sofer_codebook_all` or `sofer_render_all` on a config whose only source lives outside the config directory but inside the server root
+- WHEN executed
+- THEN the envelope SHALL be `ok:false, exit_code:1, error_code=CONFIG_ERROR` with `config_errors` naming the source and the config directory
+- AND `hints.action` SHALL be `move_source_under_config_dir`
+- AND the message SHALL NOT describe a collision (issue #397)
+
 #### Scenario: Codebook batch with no readable input is an error, not an empty index
 
 - GIVEN `sofer_codebook_all` on a config with one eligible CSV that cannot be decoded, with or without an existing output directory

@@ -6652,3 +6652,53 @@ class TestCodebookAllReadFailure:
         assert envelope["ok"] is False, envelope
         assert envelope["error_code"] == "INPUT_READ_FAILED"
         assert envelope["failures"]
+
+
+class TestSourceLayoutDiagnosis:
+    """#397 - a source outside the config dir is a layout error, not a collision."""
+
+    def _root(self, tmp_path):
+        root = tmp_path / "root"
+        (root / "config" / "raw").mkdir(parents=True)
+        (root / "shared").mkdir()
+        (root / "shared" / "input.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (root / "config" / "raw" / "input.csv").write_text("a;b\n1;2\n", encoding="utf-8")
+        (root / "config" / "dataset.toml").write_text(
+            '[dataset]\nname = "sib"\nrepo_id = "u/sib"\n\n'
+            '[[file]]\nlocal = "../shared/input.csv"\nremote = "input.csv"\n',
+            encoding="utf-8",
+        )
+        return root
+
+    def _assert_layout_refusal(self, envelope) -> None:
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert envelope["error_code"] == "CONFIG_ERROR"
+        assert "Source layout not supported" in envelope["message"]
+        assert envelope["config_errors"]
+        assert "Collision" not in envelope["message"]
+        assert envelope["hints"] == {"action": "move_source_under_config_dir"}
+
+    def test_profile_all_names_the_layout_problem(self, tmp_path, restore_tool_config):
+        root = self._root(tmp_path)
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_profile_all", {"config": "config/dataset.toml"}).data
+
+        self._assert_layout_refusal(envelope)
+
+    def test_codebook_all_names_the_layout_problem(self, tmp_path, restore_tool_config):
+        root = self._root(tmp_path)
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_codebook_all", {"config": "config/dataset.toml"}).data
+
+        self._assert_layout_refusal(envelope)
+
+    def test_render_all_names_the_layout_problem(self, tmp_path, restore_tool_config):
+        root = self._root(tmp_path)
+        server = build_server(root=root)
+
+        envelope = _call(server, "sofer_render_all", {"config": "config/dataset.toml"}).data
+
+        self._assert_layout_refusal(envelope)
