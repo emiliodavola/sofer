@@ -1130,6 +1130,34 @@ class TestCodebookCLI:
         captured = capsys.readouterr()
         assert "Collision" in captured.err or "collision" in captured.err.lower()
 
+    def test_codebook_cli_zero_pages_exits_1(self, tmp_path, monkeypatch, capsys):
+        """#398: an index with zero pages is not a successful batch."""
+        sub = tmp_path / "cache"
+        sub.mkdir()
+        (sub / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n")
+        lines = [
+            "[dataset]",
+            'name = "test"',
+            'repo_id = "u/test"',
+            "",
+            "[meta]",
+            'csv_delimiter = ","',
+            "",
+            "[[file]]",
+            'local = "cache/latin.csv"',
+            'remote = "latin.csv"',
+            "",
+        ]
+        (tmp_path / "dataset.toml").write_text("\n".join(lines), encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        exc = self._invoke(["--all-files", "--encoding", "utf-8"], monkeypatch)
+        assert exc is not None
+        assert exc.code == 1
+        captured = capsys.readouterr()
+        assert "no codebook page" in captured.err
+        assert "latin.csv" in captured.err
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Phase 1 (sofer-mcp-server) — empty-input placeholder + dataset-driven
@@ -1385,6 +1413,81 @@ class TestCodebookMultisheet:
 
         with pytest.raises(ValueError, match="Collision"):
             generate_all(cfg)
+
+
+class TestCodebookIndexReadFailure:
+    """#398 — the index phase must not mask a read failure or fake success.
+
+    The root index is deliberately still written on a failed batch: it is the
+    durable "pages were promised" marker the manifest tracks (#354, PUB-12).
+    What must not happen is a secondary write error replacing the read cause, or
+    an adapter calling the batch complete when zero pages were produced.
+    """
+
+    def _cfg(self, tmp_path):
+        from sofer.model import DatasetConfig, FileEntry
+
+        latin = tmp_path / "latin.csv"
+        latin.write_bytes(b"num,text\n1,Jos\xe9\n")
+        cfg = DatasetConfig(
+            name="ds",
+            repo_id="u/ds",
+            files=[FileEntry(local=latin, remote="latin.csv")],
+            _base_dir=tmp_path,
+        )
+        return cfg, latin
+
+    def test_unreadable_input_keeps_the_read_cause_with_an_absent_output_dir(self, tmp_path):
+        """A missing output dir is created; the cause survives instead of FileNotFoundError."""
+        from sofer.codebook import generate_all_result
+
+        cfg, _latin = self._cfg(tmp_path)
+        out = tmp_path / "out" / "codebook_absent"
+
+        result = generate_all_result(cfg, output_dir=out, delimiter=",", encoding="utf-8")
+
+        assert result.eligible == 1
+        assert result.pages == []
+        assert len(result.failures) == 1
+        failed_path, reason = result.failures[0]
+        assert failed_path.endswith("latin.csv")
+        assert "decode" in reason.lower()
+        # The promise marker is written (mkdir happened), so #354 still holds.
+        index = out / "codebook.md"
+        assert index.is_file()
+        assert "**Tables:** 0" in index.read_text(encoding="utf-8")
+        assert str(index) in result.files
+
+    def test_precreated_output_dir_reports_no_pages(self, tmp_path):
+        """A pre-created dir yields the same record: zero pages, one failure."""
+        from sofer.codebook import generate_all_result
+
+        cfg, _latin = self._cfg(tmp_path)
+        out = tmp_path / "out" / "codebook_existing"
+        out.mkdir(parents=True)
+
+        result = generate_all_result(cfg, output_dir=out, delimiter=",", encoding="utf-8")
+
+        assert result.pages == []
+        assert result.failures
+        assert (out / "codebook.md").is_file()
+
+    def test_correct_encoding_still_writes_index_and_page(self, tmp_path):
+        """Control: a readable input creates the index (with links) and its page."""
+        from sofer.codebook import generate_all_result
+
+        cfg, _latin = self._cfg(tmp_path)
+        out = tmp_path / "out" / "codebook_correct"
+
+        result = generate_all_result(cfg, output_dir=out, delimiter=",", encoding="cp1252")
+
+        index = out / "codebook.md"
+        page = out / "codebooks" / "latin.md"
+        assert str(index) in result.files and str(page) in result.pages
+        assert page.is_file()
+        content = index.read_text(encoding="utf-8")
+        assert "**Tables:** 1" in content
+        assert "- [`codebooks/latin.md`](codebooks/latin.md)" in content
 
 
 def test_generate_all_max_sample_override(tmp_path):

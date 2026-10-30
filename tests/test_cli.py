@@ -2131,7 +2131,7 @@ class TestCodebookAllFilesErrors:
         def _boom(*_a, **_k):
             raise ValueError("boom: no codebook")
 
-        monkeypatch.setattr(cli, "generate_all_codebooks", _boom)
+        monkeypatch.setattr(cli, "generate_all_codebooks_result", _boom)
         rc = cli._cmd_codebook(
             Namespace(all_files=True, config=str(toml), csv=None, output=None, max_sample=None)
         )
@@ -3129,9 +3129,11 @@ class TestExplicitCsvDialectOverride:
 
         def _spy(cfg, **kwargs):
             seen.update(kwargs)
-            return []
+            from sofer.codebook import CodebookBatchResult
 
-        monkeypatch.setattr(cli, "generate_all_codebooks", _spy)
+            return CodebookBatchResult(files=[], pages=[], failures=[], eligible=0)
+
+        monkeypatch.setattr(cli, "generate_all_codebooks_result", _spy)
         rc = cli._cmd_codebook(
             Namespace(
                 all_files=True,

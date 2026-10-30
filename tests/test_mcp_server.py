@@ -6584,3 +6584,71 @@ class TestPublishPublicGate:
             "confidential": False,
             "public": False,
         }
+
+
+class TestCodebookAllReadFailure:
+    """#398 — a codebook batch whose every input failed must not read as success."""
+
+    def _root(self, tmp_path, *, encoding_in_toml: str):
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "cache").mkdir()
+        (root / "cache" / "latin.csv").write_bytes(b"num,text\n1,Jos\xe9\n")
+        (root / "dataset.toml").write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\n\n'
+            "[meta]\n"
+            f'csv_delimiter = ","\ncsv_encoding = "{encoding_in_toml}"\n\n'
+            '[[file]]\nlocal = "cache/latin.csv"\nremote = "latin.csv"\n',
+            encoding="utf-8",
+        )
+        return root
+
+    def test_every_input_unreadable_without_output_dir(self, tmp_path, restore_tool_config):
+        """A non-existent output dir keeps the read cause instead of a write error."""
+        root = self._root(tmp_path, encoding_in_toml="cp1252")
+        server = build_server(root=root)
+        out = root / "out" / "codebook_absent"
+
+        envelope = _call(
+            server,
+            "sofer_codebook_all",
+            {
+                "config": str(root / "dataset.toml"),
+                "output_dir": "out/codebook_absent",
+                "encoding": "utf-8",
+                "delimiter": ",",
+            },
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["exit_code"] == 1
+        assert envelope["error_code"] == "INPUT_READ_FAILED"
+        assert envelope["failures"]
+        assert "latin.csv" in envelope["failures"][0]["path"]
+        # The promise marker is still written; only the announcement is a failure.
+        assert [e.replace("\\", "/") for e in envelope["files"]][-1].endswith("codebook.md")
+        assert (out / "codebook.md").is_file()
+        assert not (out / "codebooks").is_dir()
+
+    def test_precreated_output_dir_does_not_report_a_complete_codebook(
+        self, tmp_path, restore_tool_config
+    ):
+        """A pre-created dir must not turn a read failure into a Tables: 0 success."""
+        root = self._root(tmp_path, encoding_in_toml="cp1252")
+        (root / "out" / "codebook_existing").mkdir(parents=True)
+        server = build_server(root=root)
+
+        envelope = _call(
+            server,
+            "sofer_codebook_all",
+            {
+                "config": str(root / "dataset.toml"),
+                "output_dir": "out/codebook_existing",
+                "encoding": "utf-8",
+                "delimiter": ",",
+            },
+        ).data
+
+        assert envelope["ok"] is False, envelope
+        assert envelope["error_code"] == "INPUT_READ_FAILED"
+        assert envelope["failures"]
