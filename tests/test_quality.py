@@ -2042,3 +2042,109 @@ class TestFullScanPolicy:
         cfg.quality.full_scan = "always"
         report = _run_quality(cfg)
         assert any(r.check == "corrupt_records" for r in report.quality_results)
+
+
+class TestMinUnique:
+    """#399 - ``min_unique`` counts distinct records and must be enforced.
+
+    The parameter used to be parsed, type-checked and merged into the duplicates
+    options, then never read, so `min_unique = 4` on a 3-record dataset reported
+    a clean pass. The unit here is the record: the same ``(source, row)`` hash
+    the duplicate pairs use, which keeps the repo's rule that identical rows in
+    different files are not duplicates.
+    """
+
+    def _cfg(self, tmp_path, rows, *, min_unique=4, severity="fail"):
+        check = QualityCheck(check="duplicates", min_unique=min_unique, severity=severity)
+        return _make_csv_cfg(tmp_path, ["id", "valor"], rows, quality_checks=[check])[0]
+
+    def test_below_the_threshold_fails(self, tmp_path):
+        """3 distinct records against min_unique=4 is a failure."""
+        report = _run_quality(self._cfg(tmp_path, [["A", "10"], ["B", "20"], ["C", "30"]]))
+
+        findings = [r for r in report.quality_results if r.check == "duplicates"]
+        assert len(findings) == 1
+        assert findings[0].severity == "fail"
+        assert "Distinct records: 3" in findings[0].message
+        assert "min_unique 4" in findings[0].message
+
+    def test_below_the_threshold_warns(self, tmp_path):
+        """The same shortfall under severity=warn is a warning."""
+        report = _run_quality(self._cfg(tmp_path, [["A", "10"], ["B", "20"]], severity="warn"))
+
+        findings = [r for r in report.quality_results if r.check == "duplicates"]
+        assert findings and findings[0].severity == "warn"
+
+    def test_threshold_met_is_silent(self, tmp_path):
+        """Exactly min_unique distinct records passes with no finding."""
+        report = _run_quality(
+            self._cfg(tmp_path, [["A", "10"], ["B", "20"], ["C", "30"]], min_unique=3)
+        )
+
+        assert [r for r in report.quality_results if r.check == "duplicates"] == []
+
+    def test_without_the_parameter_the_check_is_unchanged(self, tmp_path):
+        """Omitting ``min_unique`` keeps the pre-change behaviour (no finding)."""
+        check = QualityCheck(check="duplicates", severity="fail")
+        cfg = _make_csv_cfg(
+            tmp_path,
+            ["id", "valor"],
+            [["A", "10"], ["B", "20"], ["C", "30"]],
+            quality_checks=[check],
+        )[0]
+
+        report = _run_quality(cfg)
+
+        assert [r for r in report.quality_results if r.check == "duplicates"] == []
+
+    def test_duplicate_rows_and_shortfall_report_both(self, tmp_path):
+        """A repeated record is reported as a pair and reduces the distinct count."""
+        report = _run_quality(
+            self._cfg(tmp_path, [["A", "10"], ["A", "10"], ["B", "20"]], min_unique=3)
+        )
+
+        messages = [r.message for r in report.quality_results if r.check == "duplicates"]
+        assert any("Distinct records: 2" in m for m in messages)
+        assert any("Row 1 = Row 2" in m for m in messages)
+
+    def test_capped_tracking_is_marked_partial(self, tmp_path, monkeypatch):
+        """A capped hash table cannot prove the count, so the finding says so."""
+        monkeypatch.setattr(config, "QUALITY_MAX_DUP_TRACKING", 1)
+        cfg = self._cfg(tmp_path, [["A", "10"], ["B", "20"], ["C", "30"]], min_unique=4)
+
+        report = _run_quality(cfg)
+
+        findings = [r for r in report.quality_results if r.check == "duplicates"]
+        assert any(r.partial and "min_unique" in r.message for r in findings), findings
+
+
+class TestDuplicatesColumnsRejected:
+    """#399 - ``columns`` makes no sense for a whole-record comparison."""
+
+    def test_columns_on_duplicates_is_a_config_error(self, tmp_path):
+        csv_path = _make_csv(tmp_path / "data.csv", [["id"], ["1"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            quality=QualityConfig(
+                checks=[QualityCheck(check="duplicates", columns=["id"], severity="fail")]
+            ),
+        )
+
+        errors = cfg.validate()
+
+        assert any("duplicates" in e and "columns" in e for e in errors), errors
+
+    def test_columns_on_another_check_still_validates(self, tmp_path):
+        csv_path = _make_csv(tmp_path / "data.csv", [["id"], ["1"]])
+        cfg = DatasetConfig(
+            name="test",
+            repo_id="u/test",
+            files=[FileEntry(local=csv_path, remote="data.csv")],
+            quality=QualityConfig(
+                checks=[QualityCheck(check="null_profiling", columns=["id"], severity="warn")]
+            ),
+        )
+
+        assert not [e for e in cfg.validate() if "columns" in e]

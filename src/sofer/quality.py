@@ -632,12 +632,41 @@ class QualityValidator:
         the whole ``REPORT_MAX_ITEMS`` budget and hide the other affected files,
         and when the hash-tracking cap was hit the finding is marked partial and
         the cap is named (issue #290).
+
+        ``min_unique`` (issue #399) turns the check into a repetition guard: the
+        batch must hold at least that many distinct records. The unit is the
+        same ``(source, row)`` hash the pairs use, so identical rows in two
+        different files still count as two records (issue #368). A capped hash
+        table cannot prove the count, so that case is reported as partial rather
+        than guessed.
         """
         if "duplicates" not in self._checks:
             return
         if not self._had_eligible:
             return
         self._ran_checks.add("duplicates")
+        sev = self._checks["duplicates"]["severity"]
+
+        min_unique = self._checks["duplicates"].get("min_unique")
+        if min_unique is not None:
+            distinct = len(self._dup_hashes)
+            if self._dup_hashes_capped:
+                self._add_result(
+                    "duplicates",
+                    sev,
+                    f"Distinct records: at least {distinct}; tracking capped at "
+                    f"{self._dup_tracking_cap}, so min_unique {min_unique} is not verifiable",
+                    from_sample=True,
+                    partial=True,
+                )
+            elif distinct < min_unique:
+                self._add_result(
+                    "duplicates",
+                    sev,
+                    f"Distinct records: {distinct} < min_unique {min_unique}",
+                    from_sample=True,
+                )
+
         if not self._dup_findings and not self._dup_hashes_capped:
             return
         limit = config.REPORT_MAX_ITEMS
@@ -649,7 +678,6 @@ class QualityValidator:
                 if depth < len(pairs) and len(parts) < limit:
                     first, dup = pairs[depth]
                     parts.append(f"{self._display(source)}: Row {first} = Row {dup}")
-        sev = self._checks["duplicates"]["severity"]
         pairs_str = "; ".join(parts)
         if self._dup_hashes_capped:
             cap_note = f"partial — tracking capped at {self._dup_tracking_cap} distinct rows"
