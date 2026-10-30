@@ -90,6 +90,9 @@ class TestGeneratorsRejectSiblingSource:
         assert str(source) in message
         assert str((tmp_path / "config").resolve()) in message
         assert "collision" not in message.lower()
+        # The refusal comes from the first pass, before any artifact is written
+        # (the issue's evidence folder holds nothing for the sibling case).
+        assert not (tmp_path / "build").exists()
 
     @pytest.mark.parametrize(
         "generate",
