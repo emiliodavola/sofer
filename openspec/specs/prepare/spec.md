@@ -198,6 +198,34 @@ published card.
 
 ---
 
+### Requirement: A conversion fallback is declared, never advertised as Parquet (Issue #393)
+
+A CSV/TSV/JSONL/XLSX conversion failure is non-fatal: the original file is staged. Because the card is built from the delivery, `configs.data_files` and the `## Dataset Structure` listing SHALL name the file the package actually contains — the original — and SHALL NOT reference a Parquet that was never produced. The run SHALL report the degradation structurally: `prepare_result` returns the exit code plus one `(remote, reason)` pair per fallback, `prepare` keeps returning the exit code, the CLI SHALL name the fallback count in its summary, and `sofer_prepare` SHALL return `ok:true` with `partial:true` and one `fallbacks` entry per affected file. The failure cause itself SHALL stay in the captured output (one warning, not one per layer). The exit code SHALL remain `0`: the documented fallback is not a failure. Whether a requested conversion should instead block, and whether such a package may publish, remain separate decisions — the manifest keeps recording the absent Parquet as `missing`.
+
+#### Scenario: Fallback names the delivered CSV
+
+- GIVEN a ragged `.csv` declared with `convert_to_parquet = true` whose conversion fails
+- WHEN `prepare` completes
+- THEN the output SHALL contain `input.csv` byte-identical to the source and no `input.parquet`
+- AND the card SHALL list `input.csv` in `configs.data_files` and in the Dataset Structure, with no `input.parquet` reference
+- AND the exit code SHALL be `0`
+
+#### Scenario: Successful conversion is unchanged
+
+- GIVEN a well-formed `.csv` declared with `convert_to_parquet = true`
+- WHEN `prepare` completes
+- THEN the card SHALL list `ok.parquet` and the Parquet SHALL exist
+
+#### Scenario: Degradation is reported once
+
+- GIVEN the same failing conversion
+- WHEN `prepare` runs
+- THEN exactly one `conversion failed — staging original` warning SHALL be printed, followed by the parser's cause
+- AND the summary line SHALL state how many files were staged as the original
+- AND `sofer_prepare` SHALL return `ok:true, exit_code:0, partial:true` with `fallbacks[0].path == "input.csv"`
+
+---
+
 ### Requirement: Codebooks generated directly into output (PRP-04)
 
 With `--all-files`, `prepare` SHALL generate per-file codebooks and write them

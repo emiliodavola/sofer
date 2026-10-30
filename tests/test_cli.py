@@ -2116,6 +2116,35 @@ class TestNoChecksPath:
         assert (tmp_path / "build" / "data.parquet").is_file()
         assert (tmp_path / "build" / "README.md").is_file()
 
+    def test_prepare_reports_a_csv_fallback(self, tmp_path, capsys) -> None:
+        """#393: the CLI names the degradation and still exits 0."""
+        (tmp_path / "input.csv").write_text("id;valor\nA;10\nB\nC;30;EXTRA\n", encoding="utf-8")
+        toml = tmp_path / "dataset.toml"
+        toml.write_text(
+            '[dataset]\nname = "test"\nrepo_id = "u/test"\nbuild_dir = "build"\n\n'
+            '[meta]\ncsv_delimiter = ";"\n\n'
+            '[[file]]\nlocal = "input.csv"\nremote = "input.csv"\n',
+            encoding="utf-8",
+        )
+
+        rc = cli._cmd_prepare(
+            Namespace(
+                config=str(toml),
+                output=None,
+                all_files=False,
+                no_checks=True,
+                force=False,
+                verify=False,
+            )
+        )
+
+        captured = capsys.readouterr().out
+        assert rc == 0
+        assert "1 file(s) staged as the original" in captured
+        readme = (tmp_path / "build" / "README.md").read_text(encoding="utf-8")
+        assert "- path: input.csv" in readme
+        assert "input.parquet" not in readme
+
 
 class TestCodebookAllFilesErrors:
     def test_all_files_valueerror_returns_1(self, tmp_path, monkeypatch, capsys) -> None:

@@ -715,6 +715,10 @@ def _convert_csv_to_parquet(
             local, delimiter, table, encoding, alterations=alterations
         )
         if not parity_ok:
+            # The converter owns the failure and its cause: printing here keeps
+            # every fallback path announcing itself exactly once (issue #393).
+            print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")
+            print("       (conversion parity check failed)")
             return None
         if alterations:
             raise ValueAlterationError(local.name, alterations)
@@ -739,6 +743,8 @@ def _convert_tsv_to_parquet(
         table = pc.read_csv(local, parse_options=parse_opts)
         parity_ok, _ = _check_conversion_parity(local, "\t", table)
         if not parity_ok:
+            print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")
+            print("       (conversion parity check failed)")
             return None
         return _write_parquet_table(table, staging_dir, local.stem)
     except Exception as exc:

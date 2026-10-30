@@ -51,6 +51,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -78,6 +79,68 @@ from .verification import _print_verification_report, verify_load_dataset
 
 # Files that count as "generated artifacts" for the PRP-07 overwrite check.
 _GENERATED_ROOT_FILES: tuple[str, ...] = ("README.md", "LICENSE", "codebook.md")
+
+# Stable reason recorded when a requested conversion produced no Parquet and the
+# original file was staged instead. The actionable detail (the parser/renderer
+# exception) is printed per file and reaches the MCP envelope through `output`.
+_FALLBACK_REASON: str = "conversion failed; original staged"
+
+
+@dataclass(frozen=True)
+class PrepareResult:
+    """Outcome of one prepare run (issue #393).
+
+    ``prepare`` documented a CSV fallback but the package advertised the
+    Parquet it had failed to produce: the card named a missing file and the
+    adapters reported plain success. The exit code alone cannot express that
+    degradation, so the run also reports which files fell back.
+
+    Attributes:
+        exit_code: The historical return code (``0`` success, ``1`` refusal or
+            hard failure). A fallback is not fatal — it stays ``0``.
+        fallbacks: ``(remote, reason)`` for every convertible entry whose
+            conversion failed and whose original was staged instead. Empty
+            means every requested conversion produced its Parquet.
+    """
+
+    exit_code: int
+    fallbacks: list[tuple[str, str]]
+
+
+def _delivered_remotes(
+    cfg: DatasetConfig,
+    converted: dict[str, tuple[Path, Path, str]],
+) -> list[str]:
+    """Return the remotes this run actually staged, in declaration order.
+
+    :func:`sofer._mirror.planned_remotes` describes the *intent* (one
+    ``.parquet`` per converted entry). When a conversion fails the original is
+    staged instead, so a card built from the plan advertises a file the package
+    does not contain (issue #393). ``converted`` is the authoritative record of
+    what was produced, keyed by normalized remote with the originating remote
+    as the third element.
+
+    Args:
+        cfg: Dataset configuration, read in declaration order.
+        converted: Map ``normalized_remote → (parquet_path, local, original_remote)``.
+
+    Returns:
+        One remote per staged artifact: the normalized Parquet remotes for
+        entries that converted (several for a multi-sheet workbook), otherwise
+        the entry's own remote.
+    """
+    by_source: dict[str, list[str]] = {}
+    for normalized, (_parquet, _local, original_remote) in converted.items():
+        by_source.setdefault(original_remote, []).append(normalized)
+
+    delivered: list[str] = []
+    for entry in cfg.files:
+        produced = by_source.get(entry.remote)
+        if produced:
+            delivered.extend(produced)
+        else:
+            delivered.append(entry.remote.rstrip("/\\") if entry.recursive else entry.remote)
+    return delivered
 
 
 def _assert_cross_file_schema(
@@ -414,6 +477,29 @@ def prepare(
 ) -> int:
     """Generate the complete dataset package for *cfg* into *output_dir*.
 
+    Thin view over :func:`prepare_result` that keeps the historical exit-code
+    return for the CLI and for existing callers.
+    """
+    return prepare_result(
+        cfg,
+        output_dir,
+        all_files=all_files,
+        no_checks=no_checks,
+        force=force,
+        verify=verify,
+    ).exit_code
+
+
+def prepare_result(
+    cfg: DatasetConfig,
+    output_dir: Path,
+    all_files: bool = False,
+    no_checks: bool = False,
+    force: bool = False,
+    verify: bool = False,
+) -> PrepareResult:
+    """Generate the complete dataset package for *cfg* into *output_dir*.
+
     Full flow — see the module docstring for the orchestration walk-through.
 
     Args:
@@ -431,8 +517,11 @@ def prepare(
                     generated package and print PASSED/FAILED (non-blocking).
 
     Returns:
-        Exit code: ``0`` on success, ``1`` on overwrite refusal, cross-file
-        schema failure, or codebook generation failure.
+        A :class:`PrepareResult` with the exit code (``0`` on success, ``1`` on
+        overwrite refusal, cross-file schema failure, codebook failure or value
+        parity failure) and the per-file conversion fallbacks. A fallback keeps
+        the exit code at ``0`` but is reported so the adapters can state the
+        degradation (issue #393).
     """
     print(f"\n{'=' * 60}")
     print(f"  Dataset:   {cfg.name}")
@@ -445,6 +534,7 @@ def prepare(
         sys.stdout.reconfigure(encoding="utf-8")  # pyright: ignore[reportAttributeAccessIssue]
 
     base = cfg._base_dir if cfg._base_dir else Path.cwd()
+    fallbacks: list[tuple[str, str]] = []
 
     # ── 0. Overwrite protection (PRP-07) ────────────────────────────────
     if not force:
@@ -455,7 +545,7 @@ def prepare(
                 print(f"     {path}")
             print("     Re-run with --force to regenerate and overwrite.")
             print()
-            return 1
+            return PrepareResult(exit_code=1, fallbacks=fallbacks)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -494,7 +584,7 @@ def prepare(
         if collision_errors:
             for e in collision_errors:
                 print(f"  \u2717  {e}")
-            return 1
+            return PrepareResult(exit_code=1, fallbacks=fallbacks)
 
         for idx, entry in enumerate(cfg.files):
             if entry.recursive:
@@ -529,8 +619,10 @@ def prepare(
                     print(f"       column '{column}': e.g. {sample!r} is not preserved")
                 continue
             if not dispatch_result:
-                # Conversion failed — warn already printed; fallback to original
-                print(f"  \u26a0  {local.name}: conversion failed \u2014 staging original")
+                # Conversion failed. The converter already printed the cause, so
+                # this layer only records the fallback (no second warning): the
+                # original is staged below and the card must name it (#393).
+                fallbacks.append((entry.remote, _FALLBACK_REASON))
                 continue
             # Single-sheet / single-file converters return {stem: path}
             # XLSX returns {stem__sheet: path} per sheet
@@ -560,7 +652,7 @@ def prepare(
             for e in schema_errors:
                 print(f"     {e}")
             print()
-            return 1
+            return PrepareResult(exit_code=1, fallbacks=fallbacks)
 
         # ── 4. Large-value check on converted Parquet files ────────────
         for _stem, (parquet_path, _csv_path, _orig_remote) in converted.items():
@@ -594,6 +686,11 @@ def prepare(
             else:
                 print(f"  \u26a0  study_design declared but not found: {cfg.study_design}")
 
+        # What the package actually contains: a failed conversion leaves the
+        # original in place, so the card must name that file instead of the
+        # Parquet that was never produced (issue #393).
+        delivered_remotes = _delivered_remotes(cfg, converted)
+
         # Readme override — if cfg.readme is set, use that file instead of generating.
         if cfg.readme:
             readme_path = resolve_doc_path(cfg.readme, base)
@@ -609,6 +706,7 @@ def prepare(
                     study_design_content=study_design_content,
                     row_counts=row_counts,
                     staging_dir=output_dir,
+                    delivered_remotes=delivered_remotes,
                 )
         else:
             print("  [i] Generating Dataset Card \u2026")
@@ -619,6 +717,7 @@ def prepare(
                 study_design_content=study_design_content,
                 row_counts=row_counts,
                 staging_dir=output_dir,
+                delivered_remotes=delivered_remotes,
             )
 
         print("  [i] Generating LICENSE \u2026")
@@ -659,7 +758,7 @@ def prepare(
                 generate_all_codebooks(cfg, output_dir=str(output_dir))
             except ValueError as exc:
                 print(f"  \u2717  Codebook generation failed: {exc}", file=sys.stderr)
-                return 1
+                return PrepareResult(exit_code=1, fallbacks=fallbacks)
         else:
             print(
                 "  i  Re-run with --all-files to generate codebooks into the output directory.",
@@ -717,9 +816,14 @@ def prepare(
             print(f"     {remote}: {len(failure.columns)} column(s) altered by type inference")
             print(f"       Fix: add column_types = {{ {mapping} }} to its [[file]] entry")
         print(f"{'=' * 60}\n")
-        return 1
+        return PrepareResult(exit_code=1, fallbacks=fallbacks)
 
+    fallback_note = (
+        f" ({len(fallbacks)} file(s) staged as the original after a failed conversion)"
+        if fallbacks
+        else ""
+    )
     print(f"\n{'=' * 60}")
-    print(f"  Result: {len(converted)} parquet(s) generated in {output_dir}")
+    print(f"  Result: {len(converted)} parquet(s) generated in {output_dir}{fallback_note}")
     print(f"{'=' * 60}\n")
-    return 0
+    return PrepareResult(exit_code=0, fallbacks=fallbacks)

@@ -1263,7 +1263,7 @@ single entry triggers at most one of the two.
 
 ### 4.20 Card data_files reflect universal normalized remotes (RC-Universal-Card) — Modified 2026-08-29, fix-multisheet-parquet-publish; Modified 2026-10-13, fix-mixed-schema-configs
 
-`build_dataset_card` MUST list `configs.data_files` and `Dataset Structure` via `expanded_planned_remotes` when staging directory is available, otherwise via `planned_remotes` fallback. TSV/XLSX/JSONL SHALL appear as normalized `.parquet` remotes; `report.xlsx` with N sheets SHALL appear as N `stem__sheet.parquet` entries. No local-disk paths SHALL leak. `num_examples` row-count dict SHALL remain keyed by verbatim `entry.remote`; `configs.data_files` SHALL be keyed by normalized remotes.
+`build_dataset_card` MUST list `configs.data_files` and `Dataset Structure` via `expanded_planned_remotes` when staging directory is available, otherwise via `planned_remotes` fallback. TSV/XLSX/JSONL SHALL appear as normalized `.parquet` remotes; `report.xlsx` with N sheets SHALL appear as N `stem__sheet.parquet` entries. No local-disk paths SHALL leak. `num_examples` row-count dict SHALL remain keyed by verbatim `entry.remote`; `configs.data_files` SHALL be keyed by normalized remotes. When the caller already knows what it staged, it MAY pass `delivered_remotes` to replace both derivations; on that path the card names exactly those remotes, which is how `prepare` reports a CSV fallback instead of advertising a Parquet that was never produced (issue #393).
 
 (Previously: `build_dataset_card` called `planned_remotes` directly, emitting single `report.parquet` phantom for multi-sheet xlsx.)
 
