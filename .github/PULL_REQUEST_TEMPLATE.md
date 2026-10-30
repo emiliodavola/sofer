@@ -34,9 +34,16 @@ $ uv run pyright
 
 ## Artifacts and evidence
 
-<!-- Optional: link the issue and any evidence that exists. -->
+<!-- Replace N with the issue number this PR delivers. Keep the keyword on its
+     own line and as PLAIN TEXT — never inside backticks or a code block. A
+     backticked keyword does not close anything, which is how earlier merged
+     PRs left their issues open. The keyword only acts when this PR targets the
+     default branch. When the PR does not deliver the whole issue, write Refs
+     instead of a closing keyword. -->
 
-Issue: #N
+Closes #N
+
+<!-- Optional: link any evidence that exists (fixtures, logs, related issues). -->
 
 <!-- Only when the change uses OpenSpec: name the specs touched and the archive path. -->
 
@@ -55,4 +62,4 @@ Specs updated: `openspec/specs/<domain>/spec.md`
 - [ ] Coverage gate met — `uv run coverage report -m` ≥ 90% (CI enforces `fail_under = 90`)
 - [ ] README updated if CLI surface changed
 - [ ] README_ES.md updated in the same commit whenever README.md changed
-- [ ] Related issues linked (`Closes #N`)
+- [ ] Closing keyword for the delivered issue is present as plain text, outside backticks and code blocks
