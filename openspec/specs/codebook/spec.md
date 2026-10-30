@@ -114,6 +114,29 @@ When `--all-files` is used, the system MUST generate the root `codebook.md` at `
 
 (Previously: Tables counted TOML entries, not sheets; only `stem.md` links. `codebook --all-files` wrote to `cache/codebook.md` instead of the package `build_dir`.)
 
+The index write SHALL create its parent directory, so an absent `output_dir` can never surface a secondary write error that replaces the read cause (issue #398). A batch SHALL expose its per-file read failures and its eligible-entry count through `generate_all_result` (`CodebookBatchResult`); `generate_all` SHALL remain a thin `list[str]` view for its existing callers. The index itself SHALL still be written when zero pages were produced — it is the durable "pages were promised" marker the manifest records as `missing` (#354, PUB-12) — so the adapters, not the writer, SHALL decide what to announce: with `eligible > 0` and no page produced, the CLI SHALL exit non-zero and the MCP SHALL return `ok:false, error_code=INPUT_READ_FAILED` with the per-file causes. A `**Tables:** 0` index SHALL never be presented as a completed codebook.
+
+#### Scenario: An unreadable batch preserves the read cause
+
+- GIVEN one eligible `.csv` that cannot be decoded under the supplied encoding and an `output_dir` that does not exist
+- WHEN `generate_all_result` runs
+- THEN it SHALL report `eligible: 1`, zero pages and one failure naming the source and the decode reason
+- AND it SHALL create the parent and write the promise index instead of raising `FileNotFoundError`
+
+#### Scenario: A pre-created output directory reports no pages
+
+- GIVEN the same unreadable input and an `output_dir` that already exists
+- WHEN `generate_all_result` runs
+- THEN it SHALL report the same zero pages and one failure
+- AND `sofer_codebook_all` SHALL return `ok:false` with `error_code=INPUT_READ_FAILED`
+
+#### Scenario: A readable batch still writes index and page
+
+- GIVEN one input readable under the supplied encoding and an `output_dir` that does not exist
+- WHEN `generate_all_result` runs
+- THEN `codebook.md` SHALL exist with `**Tables:** 1` and a relative link to `codebooks/<stem>.md`
+- AND that page SHALL exist and be reported in the result's pages
+
 #### Scenario: Standalone batch writes to build_dir
 
 - GIVEN `dataset.toml` in `/proj/` with `raw/a.csv` and `raw/b.parquet`

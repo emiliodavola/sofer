@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -505,6 +506,34 @@ def _normalize_codebook_collision_key(path: Path) -> str:
     return re.sub(r"__+", "_", path.as_posix())
 
 
+@dataclass(frozen=True)
+class CodebookBatchResult:
+    """Outcome of one batch-codebook run (issue #398).
+
+    The batch used to return only the written paths, so a run whose every input
+    failed to read was indistinguishable from a complete one: the root index
+    still carried ``**Tables:** 0`` and the adapters reported success. The index
+    is deliberately still written — it is the durable "pages were promised"
+    marker the manifest tracks (#354, PUB-12) — so this record is what tells the
+    adapters the truth.
+
+    Attributes:
+        files: Every artifact written, root index included (the historical
+            ``generate_all`` return value, in the same order).
+        pages: Only the per-file/per-sheet codebooks. Empty ``pages`` with
+            ``eligible > 0`` means no input could be read.
+        failures: ``(source_path, reason)`` for every file that could not be
+            read or rendered.
+        eligible: Declared entries that resolved to an existing, supported
+            file.
+    """
+
+    files: list[str]
+    pages: list[str]
+    failures: list[tuple[str, str]]
+    eligible: int
+
+
 def generate_all(
     cfg: DatasetConfig,
     output_dir: str | Path | None = None,
@@ -512,6 +541,27 @@ def generate_all(
     encoding: str | None = None,
     max_sample: int | None = None,
 ) -> list[str]:
+    """Generate one codebook per ``[[file]]`` entry under ``output_dir``.
+
+    Thin view over :func:`generate_all_result` that keeps the historical
+    ``list[str]`` return (root index included) for its existing callers.
+    """
+    return generate_all_result(
+        cfg,
+        output_dir=output_dir,
+        delimiter=delimiter,
+        encoding=encoding,
+        max_sample=max_sample,
+    ).files
+
+
+def generate_all_result(
+    cfg: DatasetConfig,
+    output_dir: str | Path | None = None,
+    delimiter: str | None = None,
+    encoding: str | None = None,
+    max_sample: int | None = None,
+) -> CodebookBatchResult:
     """Generate one codebook per ``[[file]]`` entry under ``output_dir``.
 
     For ``.xlsx`` with N sheets, N codebooks are emitted as
@@ -539,8 +589,9 @@ def generate_all(
             ``cfg.csv_encoding`` (``[meta] csv_encoding``).
 
     Returns:
-        List of generated codebook file paths (including the root index
-        when there are no collisions).
+        A :class:`CodebookBatchResult` naming every written artifact (root
+        index included), the per-file pages, the per-file read failures and
+        the eligible-entry count.
 
     Raises:
         ValueError: When two or more files resolve to the same output path
@@ -589,8 +640,13 @@ def generate_all(
 
         entries.append((local, suffix))
 
+    # Per-file read failures and the eligible denominator are what let the
+    # adapters tell "nothing to do" apart from "every input failed" (#398).
+    eligible = len(entries)
+    failures: list[tuple[str, str]] = []
+
     if not entries:
-        return []
+        return CodebookBatchResult(files=[], pages=[], failures=failures, eligible=eligible)
 
     # ── Sheet-expanded output paths and normalized collision map ──────
     # expanded: list of (local, sheet_sanitized|None, output_path)
@@ -611,6 +667,7 @@ def generate_all(
                 sheets = _read_xlsx_sheets(str(local))
             except Exception as exc:
                 print(f"  ⚠  Error reading {local}: {exc}", file=sys.stderr)
+                failures.append((str(local), str(exc)))
                 continue
             if not sheets:
                 # No sheets (empty workbook) — treat as placeholder single
@@ -635,7 +692,7 @@ def generate_all(
             expanded.append((local, None, out))
 
     if not expanded:
-        return []
+        return CodebookBatchResult(files=[], pages=[], failures=failures, eligible=eligible)
 
     # Build normalized collision map: normalized_key -> list of (local, sheet, out)
     collision_map: dict[str, list[tuple[Path, str | None, Path]]] = {}
@@ -670,6 +727,7 @@ def generate_all(
                 )
             except Exception as exc:
                 print(f"  ⚠  Error reading {local}: {exc}", file=sys.stderr)
+                failures.append((str(local), str(exc)))
                 continue
             codebook = _build_markdown(headers, columns, dtypes, str(local), max_sample)
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -732,6 +790,7 @@ def generate_all(
                         print(
                             f"  ⚠  Error building {local} sheet {sanitized}: {exc}", file=sys.stderr
                         )
+                        failures.append((str(local), str(exc)))
                         continue
                     out_path4.parent.mkdir(parents=True, exist_ok=True)
                     out_path4.write_text(codebook, encoding=config.OUTPUT_ENCODING)
@@ -789,6 +848,11 @@ def generate_all(
         index_lines.append(f"- [`{rel}`]({rel}) — {n_cols} columns")
 
     index_lines.extend(["", "", "_Generated by sofer_"])
+    # Create the parent first: without it, an absent output directory made this
+    # write raise FileNotFoundError, which replaced the read cause the caller
+    # needed (issue #398). The index is still written with zero pages — it is
+    # the durable "pages were promised" marker the manifest tracks (#354).
+    write_root.mkdir(parents=True, exist_ok=True)
     root_path.write_text("\n".join(index_lines), encoding=config.OUTPUT_ENCODING)
     generated.append(str(root_path))
 
@@ -798,4 +862,9 @@ def generate_all(
 
     refresh_manifest(cfg, write_root if output_dir is not None else None)
 
-    return generated
+    return CodebookBatchResult(
+        files=generated,
+        pages=[str(out_path) for out_path, _n_cols in outputs],
+        failures=failures,
+        eligible=eligible,
+    )

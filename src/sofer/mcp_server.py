@@ -108,7 +108,7 @@ from .checks import (
 )
 from .cli import _INIT_TEMPLATE
 from .codebook import generate as generate_codebook
-from .codebook import generate_all as generate_all_codebooks
+from .codebook import generate_all_result as generate_all_codebooks_result
 from .execution_context import (
     DatasetIdentity,
     IdentityResolutionError,
@@ -2658,6 +2658,11 @@ def sofer_codebook_all(
     Side effects: writes per-file codebooks plus a root codebook.md index into output_dir or the package build_dir/ (where publish collects them).
     Network usage: none.
 
+    The root index is written only when at least one page was produced: a batch
+    whose every eligible input fails to read returns `ok:false` with
+    `error_code=INPUT_READ_FAILED` and the per-file `failures`, instead of a
+    `Tables: 0` index reported as success (issue #398).
+
     When to use: Phase 1 step 3 after sofer_prepare; batch alternative to sofer_codebook.
     Example: sofer_codebook_all(config="dataset.toml")
     Requires: dataset TOML with [[file]] entries. Next: sofer_profile_all.
@@ -2677,7 +2682,7 @@ def sofer_codebook_all(
             # cache/codebooks/ directory.
             output_path = resolve_output_dir(cfg, None)
         try:
-            generated = generate_all_codebooks(
+            result = generate_all_codebooks_result(
                 cfg,
                 output_dir=output_path,
                 delimiter=delimiter,
@@ -2695,16 +2700,37 @@ def sofer_codebook_all(
                     "confidential": cfg.confidential,
                 },
             )
-        return {
+        failures = [{"path": source, "reason": reason} for source, reason in result.failures]
+        if result.eligible and not result.pages:
+            # Issue #398: the root index exists (it is the durable promise the
+            # manifest tracks), but zero pages means nothing was read. That is
+            # not a success, and it is not the collision diagnosis either.
+            return _error_envelope(
+                "INPUT_READ_FAILED",
+                f"No codebook page was generated: all {result.eligible} eligible "
+                f"input(s) failed to read.",
+                next_hint={"action": "check_delimiter_or_encoding"},
+                extra={
+                    "output": _captured_text(out, err),
+                    "files": result.files,
+                    "failures": failures,
+                    "confidential": cfg.confidential,
+                },
+            )
+        envelope: dict[str, Any] = {
             "ok": True,
             "exit_code": 0,
             "output": _captured_text(out, err),
-            "files": generated,
+            "files": result.files,
             "confidential": cfg.confidential,
             "config_errors": config_errors,
             "next": _workflow_next("sofer_codebook_all", config),
             **_dialect_envelope(delimiter, encoding),
         }
+        if failures:
+            envelope["partial"] = True
+            envelope["failures"] = failures
+        return envelope
 
 
 @_with_call_root
@@ -4502,6 +4528,10 @@ def _register_tools(server: _FastMCP) -> None:
                 "exit_code": {"type": "integer"},
                 "output": {"type": "string", "description": _OUTPUT_FIELD_DESCRIPTION},
                 "files": {"type": "array"},
+                # Issue #398: per-file read causes on an all-failed batch, and
+                # the partial flag when only some inputs could be read.
+                "failures": {"type": "array"},
+                "partial": {"type": "boolean"},
                 "confidential": {"type": "boolean"},
                 "config_errors": {"type": "array"},
                 **_ERROR_ENVELOPE_SCHEMA_FIELDS,

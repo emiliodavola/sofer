@@ -530,7 +530,7 @@ The MCP server SHALL be fully testable offline with no LLM: unit tests on tool f
 
 System MUST return expected failures as `{"ok":false,"error_code":E,"message":str,"next":obj,"config_errors":[...]}` and MUST NOT throw `McpError` for them; only transport/containment MAY throw typed `PathOutsideRootError`/`PublishRefusedError`. `error_code` MUST be `CONFIG_ERROR|VALIDATION_FAILED|QUALITY_GATE_FAILED|INPUT_READ_FAILED|PUBLISH_RISK_NOT_ACKD|PUBLISH_CONFIDENTIAL_NOT_ACKD|PUBLISH_APPROVAL_REQUIRED|PUBLISH_APPROVAL_NOT_CONFIGURED|TARGET_INVALID` — `PATH_OUTSIDE_ROOT` is NOT an envelope code: path escapes are raised as `PathOutsideRootError` (transport-mapped to `isError`), never emitted through `_error_envelope`.
 
-`INPUT_READ_FAILED` (issue #396) is the code for a batch whose every eligible input failed to be read. A batch tool SHALL NOT return `ok:true` for that state: the envelope SHALL name the per-file causes, and a partially successful batch SHALL return `ok:true` with `partial:true` plus the same `failures` list.
+`INPUT_READ_FAILED` (issues #396, #398) is the code for a batch whose every eligible input failed to be read. A batch tool SHALL NOT return `ok:true` for that state: the envelope SHALL name the per-file causes, and a partially successful batch SHALL return `ok:true` with `partial:true` plus the same `failures` list. What counts as "produced" is the tool's own material artifact — a written profile for `sofer_profile_all`, a written page for `sofer_codebook_all`; a codebook root index alone is never evidence that the data was read.
 
 #### Scenario: Refusal returns envelope with next
 
@@ -544,19 +544,28 @@ System MUST return expected failures as `{"ok":false,"error_code":E,"message":st
 - WHEN any tool/resource called
 - THEN raise `PathOutsideRootError` (transport maps to isError)
 
-#### Scenario: A batch with no readable input is an error, not an empty success
+#### Scenario: A profile batch with no readable input is an error, not an empty success
 
 - GIVEN `sofer_profile_all` on a config with one eligible CSV that cannot be decoded under the supplied dialect
 - WHEN executed
 - THEN the envelope SHALL be `ok:false, exit_code:1, error_code=INPUT_READ_FAILED` with `files:[]`
 - AND it SHALL carry one `failures` entry naming the source path and the read reason
 
-#### Scenario: A partially successful batch reports partiality
+#### Scenario: A partially successful profile batch reports partiality
 
 - GIVEN two eligible CSVs where only one decodes
 - WHEN `sofer_profile_all` runs
 - THEN the envelope SHALL be `ok:true` with the one generated path in `files`
 - AND `partial:true` plus the failing file's `failures` entry
+
+#### Scenario: Codebook batch with no readable input is an error, not an empty index
+
+- GIVEN `sofer_codebook_all` on a config with one eligible CSV that cannot be decoded, with or without an existing output directory
+- WHEN executed
+- THEN the envelope SHALL be `ok:false, exit_code:1, error_code=INPUT_READ_FAILED`
+- AND it SHALL carry one `failures` entry naming the source path and the read reason
+- AND the root `codebook.md` SHALL still be written as the durable "pages were promised" marker the manifest records missing (#354), so no write error can replace the read cause
+- AND the zero-page index SHALL never be presented as a completed codebook
 
 ---
 

@@ -20,7 +20,7 @@ from ._formats import SUPPORTED_FORMATS
 from ._version import get_version
 from .checks import DatasetValidator, ValidationReport, meta_placeholder_warnings
 from .codebook import generate as generate_codebook
-from .codebook import generate_all as generate_all_codebooks
+from .codebook import generate_all_result as generate_all_codebooks_result
 from .execution_context import resolve_dataset_root, validate_identity
 from .model import DatasetConfig
 from .prepare import prepare as run_prepare
@@ -248,7 +248,7 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
             return 1
         _echo_explicit_dialect(args)
         try:
-            generate_all_codebooks(
+            result = generate_all_codebooks_result(
                 cfg,
                 output_dir=resolve_output_dir(cfg, args.output),
                 delimiter=getattr(args, "delimiter", None),
@@ -257,6 +257,15 @@ def _cmd_codebook(args: argparse.Namespace) -> int:
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        # Issue #398: the root index is always written, but zero pages means no
+        # input could be read — that is a failure, not a complete codebook.
+        if result.eligible and not result.pages:
+            print(
+                f"Error: no codebook page was generated — all {result.eligible} "
+                f"eligible input(s) failed to read.",
+                file=sys.stderr,
+            )
             return 1
         return 0
 
