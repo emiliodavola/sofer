@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 from collections.abc import Generator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,99 @@ def stream_csv(
 
     msg = f"Cannot decode '{path.name}' — all encodings exhausted."
     raise ValueError(msg) from last_error
+
+
+@dataclass(frozen=True)
+class ColumnarRead:
+    """One CSV/TSV read transposed into columns, with its row-width report.
+
+    ``profile`` and ``codebook`` document the same file and used to disagree
+    about ragged rows: the codebook padded a short row with ``""`` while the
+    profile simply skipped the missing field, so the same column reported
+    33.3% and 0.0% missing (issue #395). Both now go through
+    :func:`read_columns`, so the numbers cannot drift apart.
+
+    Attributes:
+        headers: Header row, in file order.
+        columns: One value list per header, all of length ``rows`` (a short
+            row contributes ``""``, a long row is truncated).
+        rows: Data rows read (bounded by *max_sample* when given).
+        ragged_padded: Rows with fewer fields than the header, padded with ``""``.
+        ragged_truncated: Rows with more fields than the header, truncated.
+        extra_fields_dropped: Total fields discarded by that truncation.
+    """
+
+    headers: list[str]
+    columns: list[list[str]]
+    rows: int
+    ragged_padded: int
+    ragged_truncated: int
+    extra_fields_dropped: int
+
+    @property
+    def is_ragged(self) -> bool:
+        """Whether any row did not match the header width."""
+        return bool(self.ragged_padded or self.ragged_truncated)
+
+
+def read_columns(
+    path: Path,
+    *,
+    delimiter: str | Any = _UNSET,
+    encoding: str | Any = _UNSET,
+    max_sample: int | Any | None = _UNSET,
+) -> ColumnarRead:
+    """Read *path* into columns under one explicit row-width policy.
+
+    The policy every documentation consumer shares (issue #395): keep every
+    data row, pad a short row with ``""`` and truncate a long one, and count
+    both so the artifact can say what happened. A fallback-encoding restart
+    (the reader re-yields the header) resets the accumulators instead of
+    doubling the rows.
+
+    Args:
+        path: Path to the CSV/TSV file.
+        delimiter: Field delimiter (default resolved from ``[tool.sofer]``).
+        encoding: First encoding tried (default resolved from ``[tool.sofer]``).
+        max_sample: Maximum data rows to read; ``None`` scans the whole file.
+
+    Returns:
+        A :class:`ColumnarRead`. An empty or headerless file yields empty
+        headers and zero rows.
+
+    Raises:
+        ValueError: When none of the encoding fallbacks succeed.
+    """
+    headers: list[str] = []
+    columns: list[list[str]] = []
+    rows = ragged_padded = ragged_truncated = extra_fields_dropped = 0
+
+    for header, row in stream_csv(
+        path, delimiter=delimiter, encoding=encoding, max_sample=max_sample
+    ):
+        if row is None:
+            headers = list(header)
+            columns = [[] for _ in headers]
+            rows = ragged_padded = ragged_truncated = extra_fields_dropped = 0
+            continue
+        width = len(columns)
+        rows += 1
+        if len(row) < width:
+            ragged_padded += 1
+        elif len(row) > width:
+            ragged_truncated += 1
+            extra_fields_dropped += len(row) - width
+        for index in range(width):
+            columns[index].append(row[index] if index < len(row) else "")
+
+    return ColumnarRead(
+        headers=headers,
+        columns=columns,
+        rows=rows,
+        ragged_padded=ragged_padded,
+        ragged_truncated=ragged_truncated,
+        extra_fields_dropped=extra_fields_dropped,
+    )
 
 
 def _build_fallback_chain(start_encoding: str) -> list[str]:

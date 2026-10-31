@@ -25,7 +25,7 @@ from . import config
 from ._converters import (
     sanitize_sheet_name,  # noqa: F401 — re-exported for parity, used via _read_xlsx_sheets
 )
-from ._csv_reader import stream_csv
+from ._csv_reader import ColumnarRead, read_columns
 from ._formats import SUPPORTED_FORMATS
 from ._layout import rel_stem as _rel_stem
 from ._sentinels import count_unique_non_missing
@@ -168,6 +168,7 @@ def profile(
         print(f"Error: Dataset not found: {dataset_path}", file=sys.stderr)
         return 1
 
+    shape: ColumnarRead | None
     if suffix in _STREAMED_FORMATS:
         resolved_delimiter = (
             "\t"
@@ -175,9 +176,8 @@ def profile(
             else (delimiter if delimiter is not None else config.CSV_DELIMITER)
         )
         resolved_encoding = encoding if encoding is not None else config.CSV_ENCODING
-        headers, columns, rows = _stream_columns(
-            dataset_path, resolved_delimiter, resolved_encoding
-        )
+        shape = _stream_columns(dataset_path, resolved_delimiter, resolved_encoding)
+        headers, columns, rows = shape.headers, shape.columns, shape.rows
     else:
         # Non-CSV/TSV formats (parquet/xlsx/jsonl) ignore the dialect, but
         # ``codebook._read_file`` now requires it (issue #260, rule 3): pass the
@@ -190,6 +190,7 @@ def profile(
         rows = len(columns[0]) if columns else 0
         resolved_encoding = ""
         resolved_delimiter = ""
+        shape = None
 
     schema = [_build_column(name, values) for name, values in zip(headers, columns)]
 
@@ -201,6 +202,9 @@ def profile(
             delimiter=resolved_delimiter,
             rows=rows,
             columns=len(headers),
+            ragged_padded=shape.ragged_padded if shape else 0,
+            ragged_truncated=shape.ragged_truncated if shape else 0,
+            extra_fields_dropped=shape.extra_fields_dropped if shape else 0,
         ),
         structure=StructureMetadata(schema=schema),
         generated=GeneratedMetadata(timestamp=_now_iso()),
@@ -418,9 +422,14 @@ def generate_all_profiles_result(
             if out_path is None:
                 continue
             try:
-                headers, columns, rows, used_encoding, used_delimiter = _read_dataset_for_profile(
-                    local, suffix, delimiter=delimiter, encoding=encoding
-                )
+                (
+                    headers,
+                    columns,
+                    rows,
+                    used_encoding,
+                    used_delimiter,
+                    shape,
+                ) = _read_dataset_for_profile(local, suffix, delimiter=delimiter, encoding=encoding)
             except Exception as exc:
                 print(f"  \u2717  Error reading {local}: {exc}", file=sys.stderr)
                 failures.append((str(local), str(exc)))
@@ -434,6 +443,9 @@ def generate_all_profiles_result(
                     delimiter=used_delimiter,
                     rows=rows,
                     columns=len(headers),
+                    ragged_padded=shape.ragged_padded if shape else 0,
+                    ragged_truncated=shape.ragged_truncated if shape else 0,
+                    extra_fields_dropped=shape.extra_fields_dropped if shape else 0,
                 ),
                 structure=StructureMetadata(schema=schema),
                 generated=GeneratedMetadata(timestamp=_now_iso()),
@@ -573,7 +585,7 @@ def _read_dataset_for_profile(
     suffix: str,
     delimiter: str | None = None,
     encoding: str | None = None,
-) -> tuple[list[str], list[list[str]], int, str, str]:
+) -> tuple[list[str], list[list[str]], int, str, str, ColumnarRead | None]:
     """Read *path* for profile batch, returning columnar data plus meta.
 
     Args:
@@ -600,59 +612,53 @@ def _read_dataset_for_profile(
             else (delimiter if delimiter is not None else config.CSV_DELIMITER)
         )
         used_encoding = encoding if encoding is not None else config.CSV_ENCODING
-        headers, columns, rows = _stream_columns(path, used_delimiter, used_encoding)
-        return headers, columns, rows, used_encoding, used_delimiter
+        record = _stream_columns(path, used_delimiter, used_encoding)
+        return (
+            record.headers,
+            record.columns,
+            record.rows,
+            used_encoding,
+            used_delimiter,
+            record,
+        )
     headers, columns, _dtypes = _read_file(
         str(path),
         delimiter=config.CSV_DELIMITER,
         encoding=config.CSV_ENCODING,
     )
     rows = len(columns[0]) if columns else 0
-    return headers, columns, rows, "", ""
+    return headers, columns, rows, "", "", None
 
 
 def _stream_columns(
     path: Path,
     delimiter: str,
     encoding: str | None = None,
-) -> tuple[list[str], list[list[str]], int]:
-    """Read a CSV/TSV via :func:`stream_csv`, returning columnar data.
+) -> ColumnarRead:
+    """Read a CSV/TSV into columns under the shared row-width policy.
 
-    The first ``(header, None)`` yield sets the header and column buckets;
-    subsequent ``(header, row)`` yields append each field to its column.
-    Rows with more fields than the header are truncated to the header width.
+    Delegates to :func:`sofer._csv_reader.read_columns` — the same reader the
+    codebook uses — so both documentation artifacts report the same denominators
+    and the same treatment of a short or a long row (issue #395).
 
     Args:
         path:      Path to the CSV/TSV file.
-        delimiter: Field delimiter (``CSV_DELIMITER`` for CSV, ``\\t`` for TSV).
+        delimiter: Field delimiter (``CSV_DELIMITER`` for CSV, tab for TSV).
         encoding:  Initial encoding; ``None`` resolves to
             ``config.CSV_ENCODING`` at call time.
 
     Returns:
-        ``(headers, columns, rows)`` — *columns* is one ``list[str]`` per
-        column (column-major, matching ``codebook._read_file``'s shape) and
-        *rows* is the number of data rows read (bounded by
-        ``PROFILE_MAX_SAMPLE``).
+        A :class:`sofer._csv_reader.ColumnarRead`: column-major values plus the
+        row count (bounded by ``PROFILE_MAX_SAMPLE``) and the ragged-row
+        counters.
     """
     resolved_encoding = encoding if encoding is not None else config.CSV_ENCODING
-    headers: list[str] = []
-    columns: list[list[str]] = []
-    rows = 0
-    for header, row in stream_csv(
+    return read_columns(
         path,
         delimiter=delimiter,
         encoding=resolved_encoding,
         max_sample=config.PROFILE_MAX_SAMPLE,
-    ):
-        if row is None:
-            headers = list(header)
-            columns = [[] for _ in headers]
-            continue
-        rows += 1
-        for index, value in enumerate(row):
-            if index < len(columns):
-                columns[index].append(value)
-    return headers, columns, rows
+    )
 
 
 def _build_column(name: str, values: list[str]) -> ColumnMetadata:
