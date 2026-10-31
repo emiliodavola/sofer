@@ -1,6 +1,6 @@
 # Contributors
 
-`sofer` is maintained by [Emilio Dávila](https://github.com/emiliodavola).
+`sofer` is maintained by [Emilio Dávola](https://github.com/emiliodavola).
 
 This file records credit by the kind of work contributed. It is not a claim of
 authorship: see [`CITATION.cff`](CITATION.cff) for how to cite the software.
