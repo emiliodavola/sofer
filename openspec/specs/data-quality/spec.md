@@ -142,7 +142,7 @@ Added to `src/sofer/model.py`:
 | `max_null_pct` | `float \| None` | `None` | Threshold for `null_profiling` (0.0–100.0). |
 | `min` | `float \| None` | `None` | Minimum acceptable value for `value_range`. |
 | `max` | `float \| None` | `None` | Maximum acceptable value for `value_range`. |
-| `min_unique` | `int \| None` | `None` | Minimum distinct values for `duplicates`. |
+| `min_unique` | `int \| None` | `None` | Minimum number of distinct records for `duplicates` (see DQ-14). |
 | `ignore_values` | `list[str] \| None` | `None` | Values to treat as non-missing / ignore during type inference. |
 
 ### 2.2 `QualityConfig` dataclass
@@ -426,6 +426,47 @@ THEN the hash table SHALL hold at most quality_max_dup_tracking entries
 ```
 
 **Evidence:** `test: tests/test_quality.py::TestDuplicateTrackingCap::test_tracking_dict_never_exceeds_the_cap`, `test: tests/test_quality.py::TestDuplicateTrackingCap::test_cap_marks_partial_and_names_the_cap`, `test: tests/test_quality.py::TestDuplicateTrackingCap::test_cap_without_duplicates_reports_partial`
+
+**`min_unique` enforces a distinct-record floor (issue #399)**
+
+```
+GIVEN [[quality]] check = "duplicates" with min_unique = 4
+  AND a dataset holding 3 distinct records
+WHEN QualityValidator.run() executes
+THEN the `duplicates` check SHALL emit a finding with the configured severity
+  AND its message SHALL name both the observed count and the threshold
+```
+
+**Evidence:** `test: tests/test_quality.py::TestMinUnique::test_below_the_threshold_fails`, `test: tests/test_quality.py::TestMinUnique::test_below_the_threshold_warns`
+
+```
+GIVEN [[quality]] check = "duplicates" with min_unique = 3
+  AND a dataset holding exactly 3 distinct records
+WHEN QualityValidator.run() executes
+THEN no `duplicates` finding SHALL be produced for the threshold
+```
+
+**Evidence:** `test: tests/test_quality.py::TestMinUnique::test_threshold_met_is_silent`
+
+```
+GIVEN [[quality]] check = "duplicates" without min_unique
+WHEN QualityValidator.run() executes
+THEN the check SHALL behave exactly as before this rule
+```
+
+**Evidence:** `test: tests/test_quality.py::TestMinUnique::test_without_the_parameter_the_check_is_unchanged`
+
+```
+GIVEN min_unique set and the duplicate hash table capped at quality_max_dup_tracking
+WHEN QualityValidator.run() executes
+THEN the finding SHALL be marked partial and SHALL name min_unique as unverifiable
+```
+
+**Evidence:** `test: tests/test_quality.py::TestMinUnique::test_capped_tracking_is_marked_partial`
+
+The unit is the record: the distinct count is the number of distinct `(source, row)` hashes, so identical rows in two different files still count as two records (issue #368). `duplicates` SHALL refuse a `columns` subset with a configuration error, because a whole-record comparison cannot honour one (issue #399).
+
+**Evidence:** `test: tests/test_quality.py::TestDuplicatesColumnsRejected::test_columns_on_duplicates_is_a_config_error`, `test: tests/test_quality.py::TestDuplicatesColumnsRejected::test_columns_on_another_check_still_validates`
 
 ### 4.2 Empty rows — all fields empty/NA/null
 

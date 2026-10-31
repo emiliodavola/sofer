@@ -183,18 +183,22 @@ Per-check overrides:
 [[quality]]
 check = "duplicates"
 severity = "fail"
-columns = ["person_id"]
 min_unique = 100
+
+[[quality]]
+check = "null_profiling"
+columns = ["person_id"]
+max_null_pct = 5
 ```
 
 | Key | Meaning |
 | --- | --- |
 | `check` | Check name: `duplicates`, `empty_rows`, `empty_columns`, `null_profiling`, `format_consistency`, `corrupt_records`, `value_range`, `cross_file_types`, or `encoding_validation`. |
 | `severity` | `warn` or `fail`. |
-| `columns` | Column subset; omitted means all columns. |
+| `columns` | Column subset; omitted means all columns. Not accepted by `duplicates`, which compares whole records — declaring it there is a configuration error. |
 | `max_null_pct` | Threshold for `null_profiling` (0-100). |
 | `min` / `max` | Bounds for `value_range`. |
-| `min_unique` | Minimum distinct values for `duplicates`. |
+| `min_unique` | Minimum number of distinct records for `duplicates`. Records are counted per file, so identical rows in two different files count separately. |
 | `ignore_values` | Values treated as non-missing during type inference. |
 
 Dataset-level scan policy:

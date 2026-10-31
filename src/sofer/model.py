@@ -844,6 +844,15 @@ def _validate_config_types(cfg: DatasetConfig) -> list[str]:
             value = getattr(check, field_name)
             if value is not None and not _is_number(value):
                 _add(f"quality check '{check.check}' {field_name}", "a number", value)
+        # Issue #399: `min_unique` counts whole records, so a column subset
+        # cannot be honoured. Refusing it is the honest option — accepting and
+        # ignoring it is exactly the defect this rule removes.
+        if check.check == "duplicates" and check.columns is not None:
+            errors.append(
+                "quality check 'duplicates' does not accept 'columns': it compares "
+                "whole records; remove the key or declare the subset on the check "
+                "that needs it."
+            )
 
     # -- column checks: expected must be a list of strings -----------------
     for col_check in cfg.column_checks:
